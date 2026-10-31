@@ -1,0 +1,418 @@
+/**
+ * row-flyout — 侧栏「工作台」行的二级导航：hover 浮层 + 滚轮直切。
+ *
+ * 为什么把分类导航从页面顶部搬到侧栏行上（2026-10 用户要求）：
+ * 四个页面原先共用一条顶部 tab 栏，每进一页先看到一排切换器，页面本体
+ * 反而像「某个 tab 的内容」而不是一个独立板块。现在侧栏那一行「工作台」
+ * 承担全部导航语义：
+ *
+ *  - hover 行 → 右侧滑出小卡列出各分类（图标 + 名字 + 一句说明），点谁进谁；
+ *  - 停留在行上滚轮 → 不弹浮层，直接把当前分类滚到下一个/上一个（页面原地换）；
+ *  - 单击行 → 进工作台，落在「上次看过的分类」（localStorage 回填）。
+ *
+ * 页面顶部因此不再需要 tab 栏，只留一行面包屑（工作台 / 当前分类）说明身在何处。
+ *
+ * ── 这张表是侧栏的**唯一真相**（2026-10-27 补记）─────────────────────
+ * hub/nav-sections.tsx 的 registerDefaultEntries() 直接遍历 WORKBENCH_TABS，
+ * 逐条调 navMenuItem（id = workbench-<tab>、order = 10 + index * 10）生成
+ * 「操作间」里的菜单行。所以**加一个分类 = 在这张表里加一行**，侧栏那一行会
+ * 自动出现、滚轮顺序与 ⌘N 直切自动跟上。
+ * ⚠ 千万不要为了加菜单另外手动 navMenuItem 一次 —— 那会出现两行同名菜单。
+ *
+ * 邮件分类（原第 6 格）已于 2026-10 摘除：入口搬到 Seeker 顶栏齿轮右侧的邮件
+ * 按钮 + 居中只读卡片（src/client/kr-chat/mail-drawer.tsx）。
+ *
+ * 实现取舍：
+ *  - **不碰官方行 DOM**：官方 SidebarRoot 渲染 button.panelRow，我们在 document
+ *    上挂捕获期委托监听（mouseenter 不冒泡，必须捕获），按「行内含
+ *    [data-workbench-row] 标记」识别本行。标记由本插件的 panellist 图标组件
+ *    渲染（官方只把它当图标槽，span 里放什么都行）。
+ *  - 浮层 portal 到 body、fixed 定位贴行右缘；鼠标在「行 ↔ 浮层」之间移动有
+ *    140ms 宽限期，斜着划过去不会闪断。
+ *  - 滚轮只在指针真的停在本行上时接管（且 preventDefault 吃掉页面滚动）；
+ *    300ms 节流，一格滚轮 = 一个分类，不连跳。
+ *  - 分类切换经 window 自定义事件 dsh-workbench-tab 广播：页面已打开时
+ *    WorkbenchPanel 监听它原地换页；页面没打开时只写 localStorage，
+ *    下次点行进工作台就是滚轮停下的那一页。
+ */
+
+import { useEffect, useRef, useState } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import type { WorkbenchTab } from './WorkbenchPanel.js'
+import { readRail } from '../sidebar-nav.js'
+import { getService } from '../../client-ctx.js'
+import { featureEnabledNow, useFeature } from '../../features/gate.tsx'
+
+/** 侧栏行内的标记属性（图标组件渲染，委托监听据此认行）。 */
+export const WORKBENCH_ROW_MARK = 'data-workbench-row'
+
+/** 分类切换广播事件名（页面与侧栏行之间的唯一通道）。 */
+export const WORKBENCH_TAB_EVENT = 'dsh-workbench-tab'
+
+/** localStorage 键：与 WorkbenchPanel 的回填键同一把，两边读写同一份真相。 */
+export const WORKBENCH_TAB_STORE = 'dsh-workbench-active-tab'
+
+/** 工作台在官方 main 槽位 / sidebar.panellist 的座位 id（与 hub/seat.ts 同名）。 */
+export const WORKBENCH_PANEL_ID = 'workbench'
+
+/** 分类元数据：浮层列表与面包屑共用（顺序 = 滚轮切换顺序）。 */
+export interface WorkbenchTabMeta {
+  id: WorkbenchTab
+  label: string
+  desc: string
+}
+
+export const WORKBENCH_TABS: readonly WorkbenchTabMeta[] = [
+  // order 由本表下标推导（10 + index * 10），顺序即侧栏顺序。
+  { id: 'memory', label: '记忆', desc: '条目 · 变更 · 修订' },
+  { id: 'skills', label: 'SKILL', desc: '技能包与技能开关' },
+  { id: 'usage', label: '用量', desc: 'Token 消耗与活动热力' },
+  { id: 'gallery', label: '画廊', desc: '图片 · 网页 · 文档产出' },
+  { id: 'vault', label: '档案', desc: '账号 · 支付 · 证件' },
+  { id: 'prompt', label: '系统提示词', desc: '发送时带上的那段提示' },
+  { id: 'sync', label: '同步设置', desc: '工作台资产云端双向同步' },
+] as const
+
+/**
+ * 分类 → 功能开关 id（work.* 七项）。
+ *
+ * 这张映射是「分类可见性」的唯一真相：侧栏条目、hover 浮层、页面回落
+ * 都从这里查。七个 work.* 前缀相同、后缀与 WorkbenchTab 一一对应，
+ * 所以不需要在别处再写第二份 if/else——多一处就会多一次「某个入口忘关」。
+ */
+export const WORKBENCH_TAB_FEATURE: Readonly<Record<WorkbenchTab, string>> = {
+  memory: 'work.memory',
+  skills: 'work.skills',
+  usage: 'work.usage',
+  gallery: 'work.gallery',
+  vault: 'work.vault',
+  prompt: 'work.prompt',
+  sync: 'work.sync',
+}
+
+/** 同步判断某个分类当前是否开启（事件回调 / 非渲染路径用）。 */
+export function workbenchTabEnabled(tab: WorkbenchTab): boolean {
+  return featureEnabledNow(WORKBENCH_TAB_FEATURE[tab])
+}
+
+/**
+ * React 渲染期订阅：返回当前仍开启的分类（顺序沿用 WORKBENCH_TABS）。
+ *
+ * 必须是固定 7 次 useFeature 调用，不能 map 循环——hooks 数量要在任何两次
+ * 渲染之间保持一致。关掉某个分类后，侧栏行与 hover 浮层同一拍消失；
+ * 重新打开也同一拍回来，不需要刷新页面。
+ */
+export function useVisibleWorkbenchTabs(): readonly WorkbenchTabMeta[] {
+  const memory = useFeature(WORKBENCH_TAB_FEATURE.memory)
+  const skills = useFeature(WORKBENCH_TAB_FEATURE.skills)
+  const usage = useFeature(WORKBENCH_TAB_FEATURE.usage)
+  const gallery = useFeature(WORKBENCH_TAB_FEATURE.gallery)
+  const vault = useFeature(WORKBENCH_TAB_FEATURE.vault)
+  const prompt = useFeature(WORKBENCH_TAB_FEATURE.prompt)
+  const sync = useFeature(WORKBENCH_TAB_FEATURE.sync)
+  const enabled: Record<WorkbenchTab, boolean> = { memory, skills, usage, gallery, vault, prompt, sync }
+  return WORKBENCH_TABS.filter(tab => enabled[tab.id])
+}
+
+/** 读当前分类（localStorage 回填，非法值回落记忆页）。 */
+export function readWorkbenchTab(): WorkbenchTab {
+  try {
+    const saved = localStorage.getItem(WORKBENCH_TAB_STORE) as WorkbenchTab | null
+    if (saved !== null && WORKBENCH_TABS.some((t) => t.id === saved)) return saved
+  } catch { /* 隐私模式等读取失败：回落默认 */ }
+  return 'memory'
+}
+
+/** 写当前分类并广播（页面在听就原地换页）。 */
+export function writeWorkbenchTab(tab: WorkbenchTab): void {
+  try { localStorage.setItem(WORKBENCH_TAB_STORE, tab) } catch { /* 忽略写入失败 */ }
+  window.dispatchEvent(new CustomEvent<WorkbenchTab>(WORKBENCH_TAB_EVENT, { detail: tab }))
+}
+
+/** 打开工作台并切换到指定分类（若已在工作台则原地切页）。 */
+export function openWorkbench(tab?: WorkbenchTab): void {
+  if (tab !== undefined) {
+    writeWorkbenchTab(tab)
+  }
+  try {
+    const layout = getService<{ selectPanel?: (id: string | null) => void }>('layout')
+    if (layout !== undefined && typeof layout.selectPanel === 'function') {
+      layout.selectPanel(WORKBENCH_PANEL_ID)
+      return
+    }
+  } catch { /* 忽略读取错误 */ }
+  try {
+    const btn = document.querySelector(`[${WORKBENCH_ROW_MARK}]`)?.closest('button') as HTMLButtonElement | null
+    if (btn !== null) {
+      btn.click()
+    }
+  } catch { /* 忽略点击错误 */ }
+}
+
+/** 滚轮步进：只在仍开启的分类之间循环（关掉的页面不能被滚轮转出来）。 */
+function stepTab(current: WorkbenchTab, delta: number): WorkbenchTab {
+  // 用 featureEnabledNow 而不是渲染期的 hook：监听器挂在 window 上，
+  // 每滚一格现读一次，用户刚拨的开关立刻算数。
+  const tabs = WORKBENCH_TABS.filter((t) => workbenchTabEnabled(t.id))
+  if (tabs.length === 0) return current
+  const index = tabs.findIndex((t) => t.id === current)
+  const base = index < 0 ? 0 : index
+  const next = (base + delta + tabs.length) % tabs.length
+  return tabs[next].id
+}
+
+const STYLE_ID = 'dsh-workbench-row-flyout-styles'
+
+/**
+ * 浮层样式：中性灰阶，与工作台页内同一套色阶（不引入第二个强调色）。
+ * 选中行 = 中性灰底 + 主文字色，与官方侧栏行的 hover/选中语言一致。
+ */
+const SHEET = `
+/* 浮层底色走 static token 的实底（与 popover-shell solid 模式同法）：
+   半透明 menu token 依赖 backdrop-filter，而无头/降级环境不保证模糊生效，
+   实底在任何环境都不会透出底下页面文字。 */
+.wbf-fly{position:fixed;z-index:1100;width:216px;box-sizing:border-box;padding:6px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));border-radius:12px;background:var(--dsw-static-neutral-bluish-00,#fff);box-shadow:var(--dsw-shadow-lv3,0 10px 34px rgba(0,0,0,.34));transform-origin:left center;animation:wbf-in 150ms cubic-bezier(.2,.8,.2,1)}
+body[data-ds-dark-theme] .wbf-fly{background:var(--dsw-static-neutral-bluish-850,#2c2c2e)}
+@keyframes wbf-in{from{opacity:0;transform:translateX(-6px) scale(.97)}to{opacity:1;transform:none}}
+.wbf-title{padding:4px 8px 6px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#888);user-select:none}
+.wbf-item{display:flex;align-items:center;gap:9px;width:100%;box-sizing:border-box;padding:7px 8px;border:none;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary,#aaa);font-family:inherit;font-size:13px;line-height:19px;text-align:left;cursor:pointer;transition:background 130ms ease,color 130ms ease}
+.wbf-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));color:var(--dsw-alias-label-primary,#eee)}
+.wbf-item:active{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.16))}
+.wbf-item[data-active]{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.14));color:var(--dsw-alias-label-primary,#eee);font-weight:600}
+.wbf-item svg{flex:none;color:inherit;opacity:.85}
+.wbf-item-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.wbf-item-desc{font-size:11px;line-height:15px;font-weight:400;color:var(--dsw-alias-label-tertiary,#888);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wbf-item[data-active] .wbf-item-desc{color:var(--dsw-alias-label-secondary,#aaa)}
+.wbf-hint{margin-top:4px;padding:5px 8px 3px;border-top:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.14));font-size:10.5px;line-height:15px;color:var(--dsw-alias-label-tertiary,#777);user-select:none}
+@media (prefers-reduced-motion:reduce){.wbf-fly{animation:none}}
+`
+
+function ensureFlyStyles(): void {
+  if (typeof document === 'undefined') return
+  const existing = document.getElementById(STYLE_ID)
+  if (existing !== null) {
+    if (existing.textContent !== SHEET) existing.textContent = SHEET
+    return
+  }
+  const tag = document.createElement('style')
+  tag.id = STYLE_ID
+  tag.dataset.plugin = 'dsh-seeker-bot'
+  tag.textContent = SHEET
+  document.head.appendChild(tag)
+}
+
+/** 分类图标：与页面面包屑、浮层列表共用同一组线性图标（13px）。 */
+export function WorkbenchTabIcon({ tab, size = 14 }: { tab: WorkbenchTab; size?: number }): JSX.Element {
+  const common = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const, 'aria-hidden': true }
+  switch (tab) {
+    case 'memory':
+      return (<svg {...common}><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" /><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" /></svg>)
+    case 'skills':
+      return (<svg {...common}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" /></svg>)
+    case 'usage':
+      return (<svg {...common}><path d="M18 20V10" /><path d="M12 20V4" /><path d="M6 20v-6" /></svg>)
+    case 'gallery':
+      return (<svg {...common}><rect width="18" height="18" x="3" y="3" rx="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" /></svg>)
+    case 'vault':
+      // 档案 = 带锁的卡片：钱包与密码管理器的共同意象，同时区别于「记忆」的
+      // 大脑（档案是实体 + 字段，不是陈述句）。
+      return (<svg {...common}><rect x="3" y="6" width="18" height="14" rx="2.5" /><path d="M3 10h18" /><path d="M8 15.5h2.5" /><path d="M15.5 4v4" /><circle cx="15.5" cy="2.5" r="1" /></svg>)
+    case 'prompt':
+      // 系统提示词 = 一份带横线的文档：语义是「模型开工前被交代的那张纸」。
+      return (<svg {...common}><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" /><path d="M14 3v5h5" /><path d="M9 13h4M9 17h6" /></svg>)
+    case 'sync':
+      // 同步设置 = 云 + 向上箭头（与 nav-sections 的 tabIcon 同一枚，见那里的说明）。
+      // ⚠ 本 switch 没有 default、返回类型不含 undefined，漏一个 case 就会报
+      // 「Function lacks ending return statement」—— 新增分类时必须在这里补图标。
+      return (<svg {...common}><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" /><path d="m11 13 2-2 2 2" /><path d="M13 11v6" /></svg>)
+  }
+}
+
+interface FlyoutState {
+  top: number
+  left: number
+}
+
+/**
+ * 侧栏行行为挂载：hover 浮层 + 滚轮切分类。
+ *
+ * 全局只挂一次（模块级单例 ref 计数），返回清理函数交给 ctx.effect。
+ * 委托监听挂在 document 上：官方侧栏任何一次重渲染都不会丢监听。
+ */
+export function attachWorkbenchRowFlyout(): () => void {
+  if (typeof document === 'undefined') return () => {}
+  ensureFlyStyles()
+
+  /** 浮层宿主（游离 div，React root 后入树）。 */
+  const holder = document.createElement('div')
+  holder.dataset.workbenchFlyoutHost = 'true'
+  document.body.appendChild(holder)
+
+  let flyRoot: Root | null = null
+  let flyState: FlyoutState | null = null
+  let hoverRow: HTMLElement | null = null
+  let hoverFly = false
+  let closeTimer = 0
+  let lastWheelAt = 0
+
+  /** 浮层渲染进 holder 本体（fixed 定位）：holder 已在 body 上，无需再 portal。 */
+  const renderFly = (): void => {
+    if (flyState === null) return
+    const current = readWorkbenchTab()
+    if (flyRoot === null) flyRoot = createRoot(holder)
+    flyRoot.render(
+      <Flyout
+        top={flyState.top}
+        left={flyState.left}
+        current={current}
+        onEnter={() => { hoverFly = true; cancelClose() }}
+        onLeave={() => { hoverFly = false; scheduleClose() }}
+      />,
+    )
+  }
+
+  const openFly = (row: HTMLElement): void => {
+    const rect = row.getBoundingClientRect()
+    flyState = { top: Math.max(8, rect.top - 6), left: rect.right + 8 }
+    renderFly()
+  }
+
+  const closeFly = (): void => {
+    flyState = null
+    if (flyRoot !== null) flyRoot.render(null)
+  }
+
+  const cancelClose = (): void => {
+    if (closeTimer !== 0) { window.clearTimeout(closeTimer); closeTimer = 0 }
+  }
+
+  const scheduleClose = (): void => {
+    cancelClose()
+    closeTimer = window.setTimeout(() => {
+      closeTimer = 0
+      if (hoverFly === false && hoverRow === null) closeFly()
+    }, 140)
+  }
+
+  /** 认行：事件目标向上找 button，行内含本插件标记才算。 */
+  const rowFrom = (target: EventTarget | null): HTMLElement | null => {
+    if (!(target instanceof Element)) return null
+    const btn = target.closest('button')
+    if (btn === null) return null
+    return btn.querySelector(`[${WORKBENCH_ROW_MARK}]`) !== null ? btn : null
+  }
+
+  const onEnter = (event: MouseEvent): void => {
+    const row = rowFrom(event.target)
+    if (row === null) return
+    // 启动窗口闸门（2026-10 用户反馈「刚启动会闪出旧的『工作台』菜单」）：
+    // 横滑条首次挂载要等官方侧栏渲染完，那 1.5–2s 里官方行照常可见，
+    // hover 就会弹出用户已经不要的那套二级菜单。这里给浮层加一道闸门——
+    // **只在侧栏折叠成 rail 时**才放行（那才是浮层真正要兜底的场景：
+    // 条让位、官方行只剩图标）。
+    //
+    // 为什么不拿「条是否就位」当判据：宽栏稳态下官方行已被隐藏、根本 hover
+    // 不到，闸门在那种形态下是冗余的；而 rail 判据是单一真相（与 sidebar-nav
+    // 的 useRail 共用同一个 readRail），不需要在两个模块间同步状态。
+    if (!readRail()) return
+    hoverRow = row
+    cancelClose()
+    openFly(row)
+  }
+
+  const onLeave = (event: MouseEvent): void => {
+    const row = rowFrom(event.target)
+    if (row === null || row !== hoverRow) return
+    hoverRow = null
+    scheduleClose()
+  }
+
+  /** 滚轮：停在行上滚动 = 直接切分类（不弹浮层、吃掉页面滚动）。 */
+  const onWheel = (event: WheelEvent): void => {
+    const row = rowFrom(event.target)
+    if (row === null) return
+    const now = Date.now()
+    if (now - lastWheelAt < 300) { event.preventDefault(); return }
+    if (Math.abs(event.deltaY) < 2) return
+    lastWheelAt = now
+    event.preventDefault()
+    // 滚轮时收起浮层：切页反馈在 main 区，浮层留着反而挡视线。
+    hoverRow = null
+    closeFly()
+    writeWorkbenchTab(stepTab(readWorkbenchTab(), event.deltaY > 0 ? 1 : -1))
+  }
+
+  /** 浮层本体鼠标进出（经 React 回调回传）。 */
+  holder.addEventListener('mouseenter', () => { hoverFly = true; cancelClose() }, true)
+  holder.addEventListener('mouseleave', () => { hoverFly = false; scheduleClose() }, true)
+
+  document.addEventListener('mouseenter', onEnter, true)
+  document.addEventListener('mouseleave', onLeave, true)
+  document.addEventListener('wheel', onWheel, { capture: true, passive: false })
+
+  return () => {
+    document.removeEventListener('mouseenter', onEnter, true)
+    document.removeEventListener('mouseleave', onLeave, true)
+    document.removeEventListener('wheel', onWheel, { capture: true } as EventListenerOptions)
+    cancelClose()
+    if (flyRoot !== null) flyRoot.unmount()
+    holder.remove()
+  }
+}
+
+/** 浮层本体：分类行 + 一句滚轮提示。 */
+function Flyout({ top, left, current, onEnter, onLeave }: {
+  top: number
+  left: number
+  current: WorkbenchTab
+  onEnter: () => void
+  onLeave: () => void
+}): JSX.Element {
+  // 订阅 work.* 七个开关：被关掉的分类不出现在浮层里（入口与页面同时消失，
+  // 不会出现「浮层还在、点进去一片空白」）。hook 必须在下面所有 hooks 之前
+  // 无条件调用，保证关闭/打开切换时 hooks 数量不变。
+  const visibleTabs = useVisibleWorkbenchTabs()
+  // 视口夹紧：行贴屏幕下缘时浮层不能伸出视口。
+  const [clamp, setClamp] = useState(0)
+  const ref = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const el = ref.current
+    if (el === null) return
+    const h = el.getBoundingClientRect().height
+    const overflow = top + h + 8 - window.innerHeight
+    setClamp(overflow > 0 ? overflow : 0)
+  }, [top])
+  return (
+    <div
+      ref={ref}
+      className="wbf-fly"
+      style={{ top: top - clamp, left }}
+      role="menu"
+      aria-label="工作台分类"
+      onMouseEnter={onEnter}
+      onMouseLeave={onLeave}
+    >
+      <div className="wbf-title">工作台</div>
+      {visibleTabs.map((meta) => (
+        <button
+          key={meta.id}
+          type="button"
+          role="menuitem"
+          className="wbf-item"
+          data-active={meta.id === current || undefined}
+          onClick={() => {
+            onLeave()
+            openWorkbench(meta.id)
+          }}
+        >
+          <WorkbenchTabIcon tab={meta.id} />
+          <span className="wbf-item-main">
+            <span>{meta.label}</span>
+            <span className="wbf-item-desc">{meta.desc}</span>
+          </span>
+        </button>
+      ))}
+      <div className="wbf-hint">停在「工作台」行滚轮可直接切换</div>
+    </div>
+  )
+}

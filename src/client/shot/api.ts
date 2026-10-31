@@ -1,0 +1,99 @@
+/**
+ * dsh-seeker-bot — 对话截图 API 客户端（client 端，自 dsh-webui 移植）。
+ *
+ * 三个接口：/render（渲染进内存预览）、/save（落盘）、/reveal（打开目录）。
+ */
+import type { ShotMessage } from './collect.ts'
+// 设备/画质/画幅档与 host 端 presets.ts 共用同一份类型（type-only，运行时零依赖）。
+import type { ShotAspect, ShotDevice, ShotQuality } from '../../shot/presets.ts'
+
+const ROUTE = '/api/chat-flow/screenshot'
+
+/** 截图主题（与 host 端 ShotTheme 对齐）。 */
+export type ShotTheme = 'light' | 'dark' | 'glass' | 'glass-dark' | 'reader'
+
+/** 渲染结果。 */
+export interface RenderResult {
+  id: string
+  imageUrl: string
+  width: number
+  height: number
+  bytes: number
+  /** 固定画幅是否精确命中（false = 内容超出比例，已保留完整长图）。 */
+  aspectLocked?: boolean
+  /**
+   * 长图是否被输出像素预算截断（底部内容缺失）。
+   *
+   * 与 aspectLocked 不同：后者只在**固定画幅**模式下有意义（自适应长图恒为 true），
+   * 而预算截断在任何模式下都会发生——desktop 4K 档约 5208 CSS px 就触发。
+   * 面板据此给出提示，否则用户拿到一张少了尾巴的图却毫无察觉。
+   */
+  truncated?: boolean
+  /** 截断前的原始内容高度（CSS px），用于提示文案说明「本来有多长」。 */
+  contentHeight?: number
+  /** 本次渲染使用的完整 HTML 文档（面板「元素删除」编辑模式取页面用）。 */
+  html?: string
+}
+
+/** 渲染请求参数。 */
+export interface RenderRequest {
+  messages: readonly ShotMessage[]
+  theme: ShotTheme
+  /** 输出宽度（CSS px，支持 540/720/960/1200/1440 等预设或自定义数值 360~2560）。 */
+  width?: number
+  /** 设备版式（兼容旧字段，推荐传 width）。 */
+  device?: ShotDevice
+  /** 输出画质档（决定输出像素宽度）。 */
+  quality: ShotQuality
+  /** 画幅比例；缺省自适应内容长度。 */
+  aspect?: ShotAspect
+  /** 卡片大标题（一般是会话标题，可在面板里改）。 */
+  title?: string
+  /** 页头徽章文案（截图范围，可编辑）。 */
+  label?: string
+  /** 编辑后的完整 HTML 文档（存在时 host 跳过卡片组装，直接渲染该页面）。 */
+  html?: string
+  /** 会话工作目录：host 用它解析正文里的相对 HTML 路径做内嵌预览。 */
+  cwd?: string
+  /**
+   * 内容缩放档位（与对话流里的持久化缩放同源）。
+   *
+   * 截图必须跟着用户在对话流里选的缩放走，否则「所见」与「所得」不一致：
+   * 用户在 150% 下看着正好，截出来却是 100% 的小字。
+   */
+  zoom?: number
+}
+
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${ROUTE}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json() as { ok?: boolean; error?: string } & Record<string, unknown>
+  if (data.ok !== true) throw new Error(typeof data.error === 'string' ? data.error : `请求失败（HTTP ${res.status}）`)
+  return data as unknown as T
+}
+
+/**
+ * 渲染截图（结果留在 host 内存，未落盘）。
+ * @param request - 消息、主题、宽度与文案。
+ * @returns 预览地址与像素尺寸。
+ */
+export async function render(request: RenderRequest): Promise<RenderResult> {
+  return await post<RenderResult>('/render', request)
+}
+
+/**
+ * 保存已渲染的预览到本地截图目录。
+ * @param id - 渲染返回的预览 id。
+ * @returns 落盘路径与所在目录。
+ */
+export async function save(id: string): Promise<{ path: string; dir: string }> {
+  return await post<{ path: string; dir: string }>('/save', { id })
+}
+
+/** 在系统文件管理器里打开截图目录。 */
+export async function reveal(): Promise<void> {
+  await post<{ dir: string }>('/reveal', {})
+}

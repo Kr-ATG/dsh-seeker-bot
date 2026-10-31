@@ -1,0 +1,1064 @@
+/**
+ * dsh-seeker-bot — 回合级思考 chip + 对话流卡片（assistant-step 槽位替换）。
+ *
+ * 移植自 dsh-webui 的 BETTER assistant 渲染（_tmp-webui/src/client/markdown/
+ * renderer.tsx 的 ReasoningEntry + BetterAssistantNodeView），关键差异：
+ *
+ *  1. **正文链路保持官方**：text 块用官方 `MarkdownText`（ui-primitives）、
+ *     image 块走官方 `renderMessageImages` 槽——不引入 markstream/shiki/katex，
+ *     流式输出与官方渲染完全一致（「流式输出就没了」是本次移植的第一约束）。
+ *  2. **KR 过程是一张瞬态活动卡**：由 turn-process 的 per-turn 座位聚合
+ *     分析、思考与工具调用到有界时间线，自动跟随滚动；最终回答出现后整卡
+ *     上移淡出。回合正文仍保持官方链路，结束后才包步骤 / 总结卡。
+ *  3. **思考过程卡贴在 KR 对话流里**：挂在本回合第一条助手节点上（isFirstStep
+ *     门控，一个回合一张），回合进行中展开跟随，收口自动折叠让位给正式回答。
+ *     右栏大盘里原先那张思考卡已随之移除——思考与回答是同一件事的两半，分两栏
+ *     摆就得来回对照才读得完整。普通「对话」视图不受影响：那边由官方
+ *     ReasoningRow 自己渲染，本组件整体委托回官方 AssistantNodeView。
+ *
+ *     挂载点还有几个硬约束（缺一个卡片就不显示，别再改回去）：
+ *       · **进行中挂首步、收口后挂答案行**：官方的过程投影只存在于回合进行中，
+ *         历史轮次的 group part 全是 response；死守首步就会在收口那一刻失去
+ *         唯一的落点。两段各自只有一个合法投影（reasoning / response），
+ *         同一时刻只认一份，避免同一张卡出现两遍。
+ *
+ * 总结卡门控不变：turn.status === 'closed'（或中断）后，中间片段变轻量步骤
+ * 卡，最终回复变总结卡（纯正文外壳，头部统计行已移除）。
+ */
+import { memo, useCallback, useEffect, useMemo, useSyncExternalStore } from 'react'
+import type { ReactNode } from 'react'
+import { JsonBlock, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { MarkdownFileMentions, MarkdownLabels, MarkdownPathImages } from '@deepseek-ai/dsh-client-ui-primitives'
+import type {
+  AssistantChatData, ChatNode, ChatNodeViewProps, ChatViewSlotProps, TurnTailOwnerProps,
+} from '@deepseek-ai/dsh-client-ui-chat/client'
+import type { AssistantBlock, RenderMessageImages } from '@deepseek-ai/dsh-client-ui-conversation/client'
+// Type-only: activates the ui-chat SlotMap augmentation ('assistant-step' keyed
+// Seat props) so ChatNodeViewProps resolves its owner / hooks / session share.
+import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
+import type {} from '@deepseek-ai/dsh-client-ui-tool/client'
+import { activityStore } from '../tool-summary/activity-drawer.tsx'
+import { LiveThinkingCard as StackLiveCard, type LiveThinkingItem } from './live-stack.tsx'
+import { FlowCard } from '../flow-card.tsx'
+import { splitDiagram } from '../diagram/parse.ts'
+import { DiagramCard } from '../diagram/DiagramCard.tsx'
+import { splitHtml, looksLikeHtmlFence } from '../html-embed/parse.ts'
+import { HtmlCard } from '../html-embed/HtmlCard.tsx'
+import { splitIu, looksLikeIuFence } from '../iu/parse.ts'
+import { IuCard } from '../iu/IuCard.tsx'
+import { splitProtoTabs } from '../proto/parse.ts'
+import { ProtoTabsCard } from '../proto/ProtoTabsCard.tsx'
+import { isRunning } from '../tool-summary/tool-stats.ts'
+import { GeneratedImageStrip } from '../generated-images/GeneratedImageStrip.tsx'
+import { textHasMarkdownImage } from '../generated-images/layout.ts'
+import { useGeneratedImages } from '../generated-images/use-generated-images.ts'
+import { getKrChatStore } from '../kr-chat/kr-chat-store.ts'
+import { KR_CHAT_ENABLED } from '../kr-chat/enabled.ts'
+import { KrReasoningCard } from '../kr-chat/KrReasoningCard.tsx'
+import { collectAsks, KrAskCard } from '../kr-chat/KrAskCard.tsx'
+import { KR_ASK_CARD_VISIBLE } from '../kr-chat/enabled.ts'
+import { getOfficialAssistantNodeView } from '../index.ts'
+import { latestChatSnapshot, setLatestChatSnapshot } from '../tool-summary/TurnProcessShadowView.tsx'
+import { workspaceCwdOf } from '../client-ctx.ts'
+import { looksLikeFilePath, localFileMediaUrl, resolveWorkspacePath, tryOpenInSidebar } from '../open-preview.ts'
+import { linkifyFilePaths, promoteStandaloneImagePath } from '../path-linkify.ts'
+import { useFeature } from '../features/gate.tsx'
+
+const EMPTY_STEPS: readonly ChatNode<'assistant-step'>[] = []
+const EMPTY_TOOLS: readonly ChatNode<'tool-call'>[] = []
+const EMPTY_REASONING: readonly ReasoningItem[] = []
+
+/**
+ * 已定稿正文的「裸路径 → 链接」改写缓存。
+ *
+ * 模块级而不是组件级：同一个会话里多条消息共用（消息内容不变时命中率很高），
+ * 且组件重挂载不会丢。只留最近 DECORATE_CACHE_MAX 条，长会话不会无限增长。
+ */
+const decorateCache = new Map<string, string>()
+const DECORATE_CACHE_MAX = 40
+
+/** Localized copy adapters for Cordis-free Markdown primitives（官方同款）。 */
+function markdownLabelsFrom(t: ChatViewSlotProps['t']): MarkdownLabels {
+  return {
+    code: { copyLabel: t('copy'), copiedLabel: t('copied') },
+    footnotes: t('markdown.footnotes'),
+  }
+}
+
+/** One reasoning entry inside the turn-level group. */
+interface ReasoningItem {
+  readonly text: string
+  /** Whether its owning step is still streaming. */
+  readonly running: boolean
+  /** The owning assistant step number (for the live card heading). */
+  readonly step: number
+}
+
+/**
+ * 旧版普通对话思考 chip 已移除；KR 思考由 turn-process 活动卡与右栏大盘承接。
+ * 保留本文件的 LiveThinkingCard re-export，避免历史内部引用断裂。
+ */
+/**
+ * 兼容 re-export：工具行仍 `import { LiveThinkingCard } from
+ * '../thinking/ThinkingStepNodeView.tsx'`，新实现在 live-stack.tsx。
+ */
+export { StackLiveCard as LiveThinkingCard }
+export type { LiveThinkingItem }
+
+/**
+ * 旧单卡实现已迁移到 live-stack.tsx（堆叠 + 淡入/消散/回收）。
+ * 此处保留注释占位，避免外部按行号引用的文档失效。
+ */
+
+type AssistantBlockLike = AssistantBlock
+
+/**
+ * 新挂载内容在流式期柔和显现（上游 better-display word-motion 的块级近似：
+ * 上游逐字形做 opacity/blur，这里官方 MarkdownText 整块渲染，只能做到
+ * 新挂载块级节点淡入——已显示的旧节点绝不动）。
+ */
+function Fresh({ live, freshKey, children }: { live: boolean; freshKey: string; children: ReactNode }): ReactNode {
+  if (!live) return <>{children}</>
+  return <span className="dtt__fresh" data-fresh key={freshKey}>{children}</span>
+}
+
+/**
+ * 助手正文的渲染环境（由 ThinkingStepNodeView 备好，纯函数直接消费）。
+ *
+ * 只为一件事服务：**产出的文件与截图要能看见、能点开**。官方链路本身是通的
+ * （MarkdownFileLink → MarkdownDelegate.openFile → sidebarRight.openResource
+ * → 右侧工作区预览），缺的是三处词表：
+ *   · `fileMentions` —— 行内代码里的文件路径（官方只认本回合写过的文件，
+ *     这里放宽到任何带扩展名的产出物路径，运行中也能点）；
+ *   · `pathImages` —— `![](shot.png)` 这类**相对路径**图片（官方的 resolver
+ *     只认绝对路径，相对的一律只剩 alt 文本，用户就是"看不到图"）；
+ *   · 裸路径改写 —— 见 path-linkify，交给官方 renderAnchor 走同一条链路。
+ */
+interface AssistantBodyEnv {
+  /** 行内代码的文件提及（官方 MarkdownFileMentions 契约）。 */
+  readonly fileMentions?: MarkdownFileMentions | undefined
+  /**
+   * 已经合流好的文件提及（官方优先 + 自建兜底）。
+   *
+   * **必须在这里合流**，不能在 AssistantBody 里现拼：MarkdownText 的 memo 把
+   * fileMentions 的 identity 当依赖，每次渲染新建对象会让流式渲染缓存整段失效
+   * （每个 delta 都重排整篇正文）。env 由 useMemo 备好，identity 稳定。
+   */
+  readonly mergedMentions?: MarkdownFileMentions | undefined
+  /** 本地路径图片的显示地址解析（官方 MarkdownPathImages 契约）。 */
+  readonly pathImages?: MarkdownPathImages | undefined
+  /**
+   * 卡片「填入输入框」写回（iu 与 html 共用）。
+   *
+   * 由 ThinkingStepNodeView 用 session 标准套件的 inputActions.setDraft 实现；
+   * 拿不到时回退剪贴板。纯函数直接消费 env 里的这一支，避免每次渲染新建闭包
+   * 打穿 MarkdownText 的 memo（与 mergedMentions 同一理由）。
+   */
+  readonly onFill?: ((text: string) => boolean) | undefined
+}
+
+/**
+ * 正文围栏卡片的功能开关（关闭时保持官方 Markdown 原样）。
+ *
+ * 由 ThinkingStepNodeView 顶层 useFeature 读出后逐层传下来：AssistantBody 是
+ * 普通函数（不是组件），在里面调 hook 会破坏父组件的 hook 顺序。
+ */
+interface CardFeatureFlags {
+  readonly html: boolean
+  readonly iu: boolean
+  readonly diagram: boolean
+  readonly protoTabs: boolean
+  readonly pathLinkify: boolean
+}
+
+/** 助手正文：text 走官方 MarkdownText、image 走官方槽、未知块 JsonBlock。 */
+function AssistantBody({ blocks, streaming, interrupted, renderMessageImages, mentions, labels, t, env, cards }: {
+  blocks: readonly AssistantBlockLike[]
+  streaming: boolean
+  interrupted?: boolean | undefined
+  renderMessageImages: RenderMessageImages
+  mentions?: MarkdownFileMentions | undefined
+  labels: MarkdownLabels
+  t: ChatViewSlotProps['t']
+  env?: AssistantBodyEnv | undefined
+  /** 围栏卡片开关：关掉的层整段跳过切分（见 CardFeatureFlags）。 */
+  cards: CardFeatureFlags
+}): { hasVisible: boolean; rendered: ReactNode[] } {
+  const hasVisible = streaming
+    || interrupted === true
+    || blocks.some(block => block.kind !== 'tool-call')
+  const rendered: ReactNode[] = []
+  if (!hasVisible) return { hasVisible, rendered }
+  /*
+   * 文件提及直接用 env 里合流好的那一个（identity 稳定，见 AssistantBodyEnv）。
+   * 没有自建那条时退回官方原对象，同样稳定。
+   */
+  const mentionResolver: MarkdownFileMentions | undefined = env?.mergedMentions ?? mentions
+  /*
+   * 裸路径链接化：只在**已定稿**的文本上做。
+   *
+   * 流式期正文是半截的，路径随时可能被后续字符续写（`D:\a\b.p` → `D:\a\b.png`），
+   * 此刻改写会产出死链，而且每次 delta 都要重扫一遍。定稿后一次改写即可。
+   *
+   * 改写结果按源文本缓存：一条已定稿的消息在后续重渲染里文本不变，不该每次
+   * 都重跑一遍正则（长正文 + 几十条路径时那是实打实的开销）。缓存只留最近
+   * 若干条，避免长会话把整篇历史都攥在内存里。
+   */
+  const decorate = (source: string): string => {
+    if (streaming) return source
+    /*
+     * card.path-linkify 关闭：既不把裸路径改写成链接，也不把「单独一张图片路径」
+     * 提升成图片。**必须在读 decorateCache 之前返回** —— 缓存里存的是改写后的
+     * 文本，先读缓存会让开关关闭后仍拿到上次开着时的链接版本（甚至路径指向
+     * 一个已经不存在的目标）。官方 Markdown 原样渲染即可。
+     */
+    if (!cards.pathLinkify) return source
+    const cached = decorateCache.get(source)
+    if (cached !== undefined) return cached
+    let result = source
+    try {
+      result = linkifyFilePaths(promoteStandaloneImagePath(source))
+    } catch {
+      result = source
+    }
+    if (decorateCache.size >= DECORATE_CACHE_MAX) {
+      const oldest = decorateCache.keys().next()
+      if (!oldest.done) decorateCache.delete(oldest.value)
+    }
+    decorateCache.set(source, result)
+    return result
+  }
+  // 连续 text 块先拼成整段：长围栏（proto-tabs 单行 JSON 很长）会被流式
+  // 切成多个块，单块正则永远匹配不上，只能原样显示代码块。用空串拼接
+  // 精确还原（JSON 字符串内不能插入换行，只能无缝拼）。
+  const coalesced: AssistantBlockLike[] = []
+  for (const source of blocks) {
+    const prev = coalesced[coalesced.length - 1]
+    if (source.kind === 'text' && prev !== undefined && prev.kind === 'text') {
+      coalesced[coalesced.length - 1] = { ...prev, text: prev.text + source.text }
+    } else {
+      coalesced.push(source)
+    }
+  }
+  for (let index = 0; index < coalesced.length; index += 1) {
+    const block = coalesced[index]
+    if (block === undefined) continue
+    switch (block.kind) {
+      case 'text': {
+        // proto-tabs / diagram / html / iu 围栏 → 卡片组件，其余仍走官方 MarkdownText。
+        //
+        // 切分是有序的：html 最先（它的围栏正文里可能整段包含 ```diagram / ```iu
+        // 之类的示例文本，先切 html 才不会把示例误当成真卡片）；iu 其次（它的
+        // JSON 正文里也可能含示例围栏）；剩下的 markdown 片段再走 diagram。
+        // 顺序反过来会让外层示例里的围栏被吃掉。
+        /*
+         * 围栏切分链（card.html / card.iu / card.diagram / card.proto-tabs）：
+         *
+         * 每个开关关闭时**只跳过这一层切分**，文本继续往下交给更内层的切分器、
+         * 最后回到官方 MarkdownText。绝不把整段文本丢掉 —— 关掉一张卡片最坏的
+         * 结果只能是「围栏当普通代码块显示」，不能是白屏（「关个开关整段正文
+         * 消失」是这类 feature gate 最容易踩的坑）。
+         */
+        const pushMarkdown = (key: string, text: string): void => {
+          if (text === '') return
+          rendered.push(
+            <Fresh live={streaming} freshKey={`${key}-md`}><MarkdownText text={decorate(text)} streaming={streaming} labels={labels} fileMentions={mentionResolver} pathImages={env?.pathImages} /></Fresh>,
+          )
+        }
+        const pushDiagram = (key: string, text: string): void => {
+          if (text === '') return
+          // card.diagram 关闭：diagram 围栏不再变成卡片，按官方 Markdown 原样显示。
+          if (!cards.diagram) { pushMarkdown(key, text); return }
+          // streaming 透传：流式期未闭合的 ```diagram 要变成占位卡，而不是
+          // 把半截 JSON 逐字往外冒（此前这条通道完全没有流式态）。
+          splitDiagram(text, streaming).forEach((sub, subIndex) => {
+            if (sub.kind === 'diagram') {
+              rendered.push(<Fresh live={streaming} freshKey={`${key}-dg${subIndex}`}><DiagramCard spec={sub.spec} pending={sub.pending} bytes={sub.bytes} /></Fresh>)
+            } else if (sub.text !== '') {
+              pushMarkdown(`${key}-md${subIndex}`, sub.text)
+            }
+          })
+        }
+        const pushMd = (key: string, text: string): void => {
+          if (text === '') return
+          // card.iu 关闭：iu 围栏交给下层（diagram / 官方 Markdown），保持原文。
+          if (!cards.iu) { pushDiagram(key, text); return }
+          splitIu(text, streaming).forEach((iuSub, iuIndex) => {
+            if (iuSub.kind === 'iu') {
+              // key 里不能带 pending：闭合那一刻 key 必须保持不变，React 才会
+              // 复用同一个 IuCard 实例（与 HtmlCard 同一理由）。
+              rendered.push(
+                <Fresh live={streaming} freshKey={`${key}-iu${iuIndex}`}>
+                  {iuSub.pending
+                    ? <IuCard pending bytes={iuSub.bytes} onFill={env?.onFill} />
+                    : <IuCard spec={iuSub.spec} onFill={env?.onFill} />}
+                </Fresh>,
+              )
+            } else if (iuSub.text !== '') {
+              pushDiagram(`${key}-iu${iuIndex}`, iuSub.text)
+            }
+          })
+        }
+        const pushHtml = (key: string, text: string): void => {
+          if (text === '') return
+          // card.html 关闭：html 围栏不变成沙箱卡片，继续按 iu / diagram / 官方
+          // Markdown 原样渲染（流式期也不会出现「预渲染中」占位卡）。
+          if (!cards.html) { pushMd(key, text); return }
+          // streaming 必须透传：流式期未闭合的 ```html 要变成「预渲染中」占位卡，
+          // 而不是把几百行代码逐字往外冒。定稿后同一条围栏若仍未闭合（模型输出
+          // 被截断），回退成代码块显示真实内容。
+          splitHtml(text, streaming).forEach((sub, subIndex) => {
+            if (sub.kind === 'html') {
+              // key 里**不能**带 pending：闭合那一刻 key 必须保持不变，React 才会
+              // 复用同一个 HtmlCard 实例，让卡片从占位平滑变成真身而不是闪一下。
+              rendered.push(
+                <Fresh live={streaming} freshKey={`${key}-he${subIndex}`}>
+                  <HtmlCard spec={sub.spec} pending={sub.pending} onFill={env?.onFill} />
+                </Fresh>,
+              )
+            } else {
+              pushMd(`${key}-h${subIndex}`, sub.text)
+            }
+          })
+        }
+        // card.proto-tabs 关闭：不做 proto 切分，整段按普通 Markdown 往下走。
+        const parts = cards.protoTabs
+          ? splitProtoTabs(block.text, streaming)
+          : [{ kind: 'md' as const, text: block.text }]
+        // 快路径判据必须是「真的有个围栏」，不能只测正文里出现过 html 三个字母
+        // ——「HTML 卡片」这种普通措辞会让每段正文都白跑一遍切分。
+        if (parts.length === 1 && parts[0]?.kind === 'md' && parts[0].text.indexOf('diagram') < 0 && !looksLikeHtmlFence(parts[0].text) && !looksLikeIuFence(parts[0].text)) {
+          rendered.push(
+            <Fresh live={streaming} freshKey={`md${index}`}><MarkdownText text={decorate(block.text)} streaming={streaming} labels={labels} fileMentions={mentionResolver} pathImages={env?.pathImages} /></Fresh>,
+          )
+        } else {
+          parts.forEach((part, partIndex) => {
+            if (part.kind === 'card') {
+              rendered.push(<Fresh live={streaming} freshKey={`proto${index}-${partIndex}`}><ProtoTabsCard spec={part.spec} pending={part.pending} bytes={part.bytes} /></Fresh>)
+            } else {
+              pushHtml(`${index}-${partIndex}`, part.text)
+            }
+          })
+        }
+        break
+      }
+      case 'reasoning':
+        // 回合级聚合进 chip；此处不渲染任何内联思考。
+        break
+      case 'image': {
+        const start = index
+        const group = [block]
+        while (index + 1 < coalesced.length) {
+          const next = coalesced[index + 1]
+          if (next === undefined || next.kind !== 'image') break
+          group.push(next)
+          index += 1
+        }
+        rendered.push(
+          <Fresh live={streaming} freshKey={`img${start}`}>
+            {renderMessageImages({
+              images: group.map(({ attachment }) => ({ attachment })),
+              align: 'start',
+            })}
+          </Fresh>,
+        )
+        break
+      }
+      // 聚合进工具 chip（tool-call 槽位）；此处跳过。
+      case 'tool-call':
+        break
+      default:
+        rendered.push(
+          <Fresh live={streaming} freshKey={`unknown${index}`}>
+            <JsonBlock
+              label={t('message.unknownBlock')}
+              payload={block.block}
+              truncatedLabel={total => t('json.truncated', { total })}
+            />
+          </Fresh>,
+        )
+    }
+  }
+  return { hasVisible, rendered }
+}
+
+/**
+ * Turn-level reasoning chip + 卡片门控：第一个 assistant-step 渲染 chip
+ * （思考材料进共享活动抽屉）；片段正文按「回合是否结束」决定包卡形态。
+ */
+export const ThinkingStepNodeView = memo(function ThinkingStepNodeView(
+  props: ChatNodeViewProps<'assistant-step'>,
+) {
+  const { node, useTurnData, useChat, openFile, renderMessageImages, fileMentions, t } = props
+  /*
+   * 功能开关（live）——对话流里的思考卡 / 问答卡 / 各类围栏卡片。
+   *
+   * ⚠ 一律在组件顶部无条件调用，不能写进下面的 JSX 条件或 `if (!pluginRenders)`
+   * 之后：本组件同一个节点会在 reasoning / response 两份投影里各渲染一次，
+   * 条件调 hook 会让 hook 数量随投影与开关变化，React 直接崩（表现是整段正文
+   * 消失，比「开关没生效」严重得多）。
+   */
+  const thinkingOn = useFeature('view.thinking')
+  const askOn = useFeature('view.panel-ask')
+  const htmlCardOn = useFeature('card.html')
+  const iuCardOn = useFeature('card.iu')
+  const diagramCardOn = useFeature('card.diagram')
+  const protoTabsOn = useFeature('card.proto-tabs')
+  const pathLinkifyOn = useFeature('card.path-linkify')
+  const generatedImagesOn = useFeature('card.generated-images')
+  /**
+   * 本次渲染属于官方的哪一份投影（owner 分组的 groupPart）。
+   *
+   * 官方把同一个 assistant-step 节点渲染两次：过程投影 `reasoning`、答案投影
+   * `response`（见 kr-chat/styles.ts 顶部那张对照）。两段各只有一个合法落点：
+   * 进行中卡片在过程投影里（官方那时还没有答案投影），收口后官方只剩答案投影。
+   * 同一时刻只认一份，避免同一张卡出现两遍。
+   */
+  const groupPart = (props as { readonly groupPart?: string }).groupPart
+  const krStore = getKrChatStore()
+  const krState = useSyncExternalStore(
+    (cb) => krStore.subscribe(cb),
+    () => krStore.snapshot,
+  )
+  const isKrMode = krState.activeTab === 'kr'
+  /**
+   * 本视图是否由插件自己渲染。
+   *
+   * KR 开启时（历史设计）：只有 KR 视图走插件渲染，「对话」委托回官方
+   * AssistantNodeView 原生渲染 —— 增强呈现只属于 KR 那一栏。
+   * KR 关闭后（KR_CHAT_ENABLED = false）：没有 KR 视图可去，「对话」本身就是
+   * 插件渲染，回到 KR 之前的形态（思考 chip / 步骤卡 / proto-tabs / diagram）。
+   */
+  const pluginRenders = !KR_CHAT_ENABLED || isKrMode
+  const data = node.data
+  const locationTurn = node.location.kind === 'turn' || node.location.kind === 'step'
+    ? node.location.turn
+    : undefined
+  const tail = useTurnData('turn-tail')
+  const owner = useMemo<TurnTailOwnerProps | undefined>(() => {
+    if (locationTurn?.status !== 'closed' || data.finalNode === undefined) return undefined
+    if (tail?.closing?.finalNode.seq !== data.finalNode.seq) return undefined
+    return { turn: locationTurn, seq: data.finalNode.seq, openFile }
+  }, [data.finalNode, openFile, tail, locationTurn])
+  const mentions = useMemo(
+    () => owner === undefined ? undefined : fileMentions(owner),
+    [fileMentions, owner],
+  )
+  /**
+   * 会话身份与工作区根目录：自建文件提及要用它构造 `dsh-resource://file/…` 地址。
+   *
+   * `sessionId` 是官方 session 作用域座位给的标准 prop（见 ui-session 的
+   * SessionStandardProps 合并声明），不需要额外 inject。cwd 走 sessions 服务
+   * 现读，读不到就只做绝对路径（相对路径的链接点开时会由右栏按会话根解析）。
+   */
+  const sessionIdProp = (props as { readonly sessionId?: unknown }).sessionId
+  const bodySessionId = typeof sessionIdProp === 'string' ? sessionIdProp : null
+  /**
+   * 卡片「填入输入框」写回（iu 与 html 共用）。
+   *
+   * 官方 session 标准套件的 inputActions.setDraft 是唯一公开写入路径
+   * （见 PromptOptimizeButton.apply）。assistant-step 是 session 作用域座位，
+   * props 上直接带 inputActions。依赖只取 inputActions 本体（它引用稳定），
+   * 不能依赖整个 props——props 每次渲染都是新对象，会让 onFill 与 bodyEnv
+   * 跟着每帧重建，打穿 MarkdownText 的 memo。
+   * 拿不到时回退剪贴板——至少用户能粘过去，不静默丢字。
+   */
+  const inputActionsOf = (props as { readonly inputActions?: { setDraft?: (t: string) => void } }).inputActions
+  const onFill = useCallback((text: string): boolean => {
+    const clean = text.trim()
+    if (clean === '') return false
+    try {
+      if (inputActionsOf !== undefined && typeof inputActionsOf.setDraft === 'function') {
+        inputActionsOf.setDraft(clean)
+        return true
+      }
+    } catch { /* 走剪贴板兜底 */ }
+    try {
+      void navigator.clipboard.writeText(clean)
+      return true
+    } catch {
+      return false
+    }
+  }, [inputActionsOf])
+  /**
+   * 自建文件提及：行内代码里的路径 → 可点开右侧工作区预览。
+   *
+   * 与官方那条的差别只有一个：**不要求「本回合写过」**。官方只为回合收口时
+   * 本回合产出的文件做提及；模型在正文里随手写个路径（比如把上一步生成的截图
+   * 再引一次、或指向一个之前就存在的文件）时官方不认，用户就点不动。
+   * 这里按「带扩展名、像文件」这个保守判据补上，认不出时返回 undefined，
+   * 官方渲染器会把它保持成惰性的行内代码（不会制造死链按钮）。
+   *
+   * 引用必须稳定：MarkdownText 的 memo 依赖 fileMentions 的 identity，每次渲染
+   * 新建对象会让流式缓存整段失效。
+   */
+  const bodyEnv = useMemo<AssistantBodyEnv>(() => {
+    const sid = bodySessionId
+    const cwd = sid === null ? undefined : workspaceCwdOf(sid)
+    const selfMentions: MarkdownFileMentions | undefined = sid === null
+      ? undefined
+      : {
+        resolve(value: string) {
+          if (!looksLikeFilePath(value)) return undefined
+          return {
+            open: () => { tryOpenInSidebar(value, { sessionId: sid, cwd }) },
+            label: `打开 ${value}`,
+            title: value,
+          }
+        },
+      }
+    /*
+     * 相对路径图片的补全：官方 resolver 只认绝对路径，这里先把相对路径按会话
+     * 工作区根拼成绝对路径，再交给同一条 /api/file 路由。拿不到 cwd 时退回
+     * 官方行为（相对路径仍不显示），不做任何猜测。
+     */
+    const pathImages: MarkdownPathImages | undefined = cwd === undefined
+      ? undefined
+      : { resolve: (value: string) => localFileMediaUrl(resolveWorkspacePath(cwd, value)) }
+    /*
+     * 提及合流：**官方优先、自建兜底**。
+     *
+     * 官方那条（chatFileMentions）只在回合收口后、且只认本回合「写过/交付过」的
+     * 文件——语义最准。自建那条认得更宽：任何带扩展名的产出物路径都做成可点预览，
+     * 运行中也能点。合流放在这个 useMemo 里，identity 才稳定（MarkdownText 拿它
+     * 当依赖，每次新建对象会把流式渲染缓存打穿）。
+     */
+    const mergedMentions: MarkdownFileMentions | undefined = selfMentions === undefined
+      ? mentions
+      : mentions === undefined
+        ? selfMentions
+        : { resolve: (value: string) => mentions.resolve(value) ?? selfMentions.resolve(value) }
+    return {
+      ...(mergedMentions === undefined ? {} : { mergedMentions }),
+      ...(pathImages === undefined ? {} : { pathImages }),
+      onFill,
+    }
+  }, [bodySessionId, mentions, onFill])
+
+  // Aggregate reasoning across every assistant step of this turn.
+  /*
+   * 轮次号取数必须与右栏 collectTurnNodes 同一口径：`data.turn` 优先，其次
+   * location.turn（它在不同状态下是数字或 `{turn,status}` 对象两种形状）。
+   *
+   * 原来只写 `locationTurn?.turn` 一路。已收口的历史轮次上 location 对象可能
+   * 不带 turn 字段，取出来是 undefined，于是后面所有按轮次号的取数（locations
+   * 快路径 + 全量兜底）全部短路——卡连落脚点都没有，正是「总结完了怎么查看」
+   * 看不到的原因。右栏一直好好的，正是因为它有 data.turn 那一路兜底。
+   */
+  const turnNumber = (data as { turn?: number }).turn
+    ?? (typeof locationTurn === 'number' ? locationTurn : locationTurn?.turn)
+  const steps = useChat(snapshot => {
+    setLatestChatSnapshot(snapshot)
+    if (turnNumber === undefined) return EMPTY_STEPS
+    return snapshot.locations.getTurn(turnNumber)
+      .map(key => snapshot.nodes.get(key))
+      .filter((candidate): candidate is ChatNode<'assistant-step'> => (
+        candidate !== undefined && candidate.kind === 'assistant-step'
+      ))
+  })
+  /*
+   * 本轮工具节点：与 reasoningItems / firstReasoningStepKey **同一套两级取数**
+   * （locations 优先，拿不到就扫全量节点）。
+   *
+   * 原来只读 locations.getTurn：工具间隙与紧凑模式下官方会把节点从 locations
+   * 摘掉，于是 ask_user_question 那条调用读不到，审核轮次的「提问与回答」卡整块
+   * 消失 —— 这正是用户反馈"超时的提问没有办法显示出来"的一半成因（另一半是
+   * 状态机把超时判成了 waiting，见 ask-parse 的状态注释）。
+   *
+   * 全量那路必须按 data.turn 过滤：nodes 是整场会话的节点池，不过滤会把上几轮
+   * 的提问一起捞进来。
+   */
+  const toolNodes = useChat(snapshot => {
+    if (turnNumber === undefined) return EMPTY_TOOLS
+    try {
+      const fromLocations = snapshot.locations.getTurn(turnNumber)
+        .map(key => snapshot.nodes.get(key))
+        .filter((candidate): candidate is ChatNode<'tool-call'> => (
+          candidate !== undefined && candidate.kind === 'tool-call'
+        ))
+      if (fromLocations.length > 0) return fromLocations
+      const collected: ChatNode<'tool-call'>[] = []
+      const nodes = snapshot?.nodes
+      if (nodes === undefined || nodes === null || typeof nodes.values !== 'function') return EMPTY_TOOLS
+      for (const node of nodes.values()) {
+        if (node?.kind !== 'tool-call') continue
+        const loc = node.location
+        const locTurn = node.data?.turn ?? (typeof loc?.turn === 'number' ? loc.turn : loc?.turn?.turn)
+        if (locTurn !== turnNumber) continue
+        collected.push(node)
+      }
+      return collected.length > 0 ? collected : EMPTY_TOOLS
+    } catch {
+      return EMPTY_TOOLS
+    }
+  })
+  const localReasoning = useMemo<readonly ReasoningItem[]>(() => steps.flatMap(step => {
+    const stepRunning = step.data.status === 'running'
+    return step.data.blocks
+      .filter((block): block is Extract<AssistantBlockLike, { kind: 'reasoning' }> => block.kind === 'reasoning')
+      .map(block => ({ text: block.text, running: stepRunning, step: step.data.step }))
+  }), [steps])
+  /*
+   * locations 拿不全时**兜底扫全量节点**。
+   *
+   * locations.getTurn 在工具间隙 / 紧凑模式下会把某些 assistant-step 摘掉，
+   * 只靠它会整段漏掉思考——右栏大盘早就为同一个坑做过全量兜底
+   * （TurnProcessShadowView.collectTurnNodes 第 2 步），这里必须同一口径，
+   * 否则会出现「右栏能抽出思考里的预告、对话流里却没有思考卡」这种自相矛盾。
+   */
+  const reasoningItems = useChat((snapshot) => {
+    if (turnNumber === undefined) return EMPTY_REASONING
+    if (localReasoning.length > 0) return localReasoning
+    try {
+      const collected: ReasoningItem[] = []
+      const nodes = snapshot?.nodes
+      if (nodes !== undefined && nodes !== null && typeof nodes.values === 'function') {
+        for (const node of nodes.values()) {
+          if (node?.kind !== 'assistant-step') continue
+          const loc = node.location
+          const locTurn = node.data?.turn ?? (typeof loc?.turn === 'number' ? loc.turn : loc?.turn?.turn)
+          if (locTurn !== turnNumber) continue
+          const running = node.data?.status === 'running'
+          for (const block of node.data.blocks ?? []) {
+            if (block?.kind !== 'reasoning') continue
+            const text = typeof block.text === 'string' ? block.text : ''
+            if (text.trim() === '') continue
+            collected.push({ text, running, step: node.data.step })
+          }
+        }
+      }
+      return collected.length > 0 ? collected : EMPTY_REASONING
+    } catch {
+      return EMPTY_REASONING
+    }
+  })
+  /*
+   * 喂给思考卡的文本数组必须**引用稳定**，否则那张卡的一切 memo 全部失效。
+   *
+   * 直接 `map(...)` 每次渲染都产出新数组：KrReasoningCard 的 memo 被打穿 →
+   * 内部 points 的 useMemo 被打穿 → 每帧把整轮思考 join + split + trim +
+   * filter 重跑一遍，几千字时这一下就是几毫秒，外加 probe 再把全文 join 成
+   * 一个大字符串。流式期每来一个 delta 就重来一轮，思考越长越卡——这正是
+   * 「思考过程有点多的时候就会很卡」的成因之一。
+   *
+   * 这里用**长度序列指纹**做依赖（同仓库 KrAgentPanel 的 fingerprintTurnData
+   * 同一手法）：思考是纯追加流式（KrFreshText 的注释也这么认定），长度序列
+   * 单调增长，指纹不变即内容不变，于是数组引用也跟着不变。
+   */
+  const reasoningSignature = useMemo(
+    () => reasoningItems.map((item) => item.text.length).join(','),
+    [reasoningItems],
+  )
+  const stableReasoningTexts = useMemo<readonly string[]>(
+    () => reasoningItems.map((item) => item.text),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [reasoningSignature],
+  )
+  /*
+   * 思考卡在**回合进行中**挂在「回合内第一个带思考的 step」上。
+   *
+   * 用 steps[0] 会漏：工具间隙里官方会把前面的 step 从 locations 摘掉，
+   * steps[0] 变成当前那个，而卡所在的节点不是它——于是整张卡挂不上。
+   *
+   * 这里必须与上面的 reasoningItems **同一套兜底口径**：只把 reasoningTexts
+   * 兜底、挂载判定仍只看 locations 的话，收口后的历史轮次会出现「思考文本取得到
+   * 却没人认领」——卡整块不渲染，正好是用户要问的「总结完了怎么查看」。
+   *
+   * 为什么进行中挂首步：官方的过程投影（groupPart=reasoning）**只存在于回合
+   * 进行中**，一步一行、位置稳定；挂首步卡片就钉在回合开头，不会每来一个 step
+   * 就换一次父节点。
+   */
+  const firstReasoningStepKey = useChat((snapshot): string | undefined => {
+    if (turnNumber === undefined) return undefined
+    try {
+      for (const key of snapshot?.locations?.getTurn?.(turnNumber) ?? []) {
+        const candidate = snapshot?.nodes?.get?.(key)
+        if (candidate?.kind !== 'assistant-step') continue
+        if (candidate.data?.blocks?.some((block) => block.kind === 'reasoning' && block.text.trim() !== '')) {
+          return key
+        }
+      }
+      // locations 拿不到（收口/紧凑模式会摘掉）时扫全量节点。
+      for (const candidate of snapshot?.nodes?.values?.() ?? []) {
+        if (candidate?.kind !== 'assistant-step') continue
+        const loc = candidate.location
+        const locTurn = candidate.data?.turn
+          ?? (typeof loc?.turn === 'number' ? loc.turn : loc?.turn?.turn)
+        if (locTurn !== turnNumber) continue
+        if (candidate.data?.blocks?.some((block) => block.kind === 'reasoning' && block.text.trim() !== '')) {
+          return candidate.key ?? undefined
+        }
+      }
+      return undefined
+    } catch {
+      return undefined
+    }
+  })
+  /*
+   * 回合**收口后**的挂载点：本回合最后一个 assistant-step —— 也就是官方的答案行。
+   *
+   * 历史轮次实测（已收口会话）：`[data-chat-group-part]` 全是 response，
+   * reasoning 一条都没有——官方只在回合进行中渲染过程投影。卡片若仍死守首步，
+   * 收口那一刻就再也没有节点认领它，正是「总结完了怎么查看」看不到的原因。
+   *
+   * 与 firstReasoningStepKey 同一套两级取数（locations 优先、收口后扫全量），
+   * 全量那路按 data.step 排序：Map 的插入顺序不保证等于步骤顺序。
+   */
+  const lastStepKey = useChat((snapshot): string | undefined => {
+    if (turnNumber === undefined) return undefined
+    const pickLast = (candidates: readonly ChatNode<'assistant-step'>[]): string | undefined => {
+      for (let index = candidates.length - 1; index >= 0; index -= 1) {
+        const key = candidates[index]?.key
+        if (key !== undefined && key !== '') return key
+      }
+      return undefined
+    }
+    try {
+      const fromLocations: ChatNode<'assistant-step'>[] = []
+      for (const key of snapshot?.locations?.getTurn?.(turnNumber) ?? []) {
+        const candidate = snapshot?.nodes?.get?.(key)
+        if (candidate?.kind === 'assistant-step') fromLocations.push(candidate)
+      }
+      const picked = pickLast(fromLocations)
+      if (picked !== undefined) return picked
+      const all: ChatNode<'assistant-step'>[] = []
+      for (const candidate of snapshot?.nodes?.values?.() ?? []) {
+        if (candidate?.kind !== 'assistant-step') continue
+        const loc = candidate.location
+        const locTurn = candidate.data?.turn
+          ?? (typeof loc?.turn === 'number' ? loc.turn : loc?.turn?.turn)
+        if (locTurn !== turnNumber) continue
+        all.push(candidate)
+      }
+      all.sort((a, b) => (a.data?.step ?? 0) - (b.data?.step ?? 0))
+      return pickLast(all)
+    } catch {
+      return undefined
+    }
+  })
+  const isFirstStep = steps.length > 0 && node.key === steps[0]?.key
+  const toolsRunning = toolNodes.some((toolNode) => {
+    try { return isRunning(toolNode.data.root) } catch { return false }
+  })
+  // 工具执行期通常没有 assistant-step 处于 running；两段任一仍在推进都算整轮活跃。
+  const turnRunning = steps.some(step => step.data.status === 'running') || toolsRunning
+
+  /*
+   * 本次渲染是否属于官方的**过程投影**（groupPart=reasoning）。
+   *
+   * 官方对同一个 assistant-step 最多投影两份 DOM：reasoning（过程组里的思考
+   * 材料）与 response（答案正文）。官方自己的 AssistantMarkdown 在 reasoning
+   * 投影里**只渲染 reasoning 块**（`groupPart === "reasoning" && block.kind !==
+   * "reasoning" → continue`），正文永远由 response 投影负责。本组件接管
+   * assistant-step 座位后丢掉了这条过滤：reasoning 投影里也把 text 块全量渲染。
+   *
+   * 平时看不出问题——KR 样式把 [data-turn-process-member] 整类压掉，reasoning
+   * 投影不可见。但**总结期**（最终答案流式）恰好踩中放行例外：模型常常在最后
+   * 一步「思考 → 写答案」，思考卡锚点（firstReasoningStepKey）就落在答案 step
+   * 上，它的 reasoning 投影因 :has(.kr-card--reasoning) 被整行放行，正文跟着
+   * 露出来，与 response 投影的正文同屏两份——用户报的「总结时出现两段一模一样
+   * 的结果」。回合完成后卡片迁到 response 投影、reasoning 投影重新被 member
+   * 规则压回，重复才消失。
+   *
+   * 修法与官方对齐：reasoning 投影只承载卡片（思考卡 / 问答卡），不渲染正文与
+   * 画廊；正文一律由 response 投影（或无投影时的普通行）负责。
+   *
+   * ⚠ 声明位置必须早于**所有**使用点（gallery / showBody）：曾因声明晚于
+   * gallery 的求值触发 TDZ ReferenceError，整个座位渲染崩溃——思考卡、问答卡、
+   * 正文一夜之间全部消失。smoke 的形状断言不执行组件，拦不住这类错误，
+   * smoke-client.mjs 里有一条声明顺序断言专门钉它。
+   */
+  const isReasoningProjection = groupPart === 'reasoning'
+
+  // ── 本回合生图结果（generate_image）→ 画廊条 ──────────────────────────
+  // 数据源是工具结果：小结果内联 JSON（b64_json → data URL），大结果被
+  // DSH spill 成「preview + locator」，由 host 路由读回完整图片（见
+  // use-generated-images.ts）。不依赖正文 markdown，因此模型只写路径
+  // 文字时图片也会直接显示。
+  /*
+   * card.generated-images 关闭：**不请求 spill、不渲染画廊条**。
+   *
+   * useGeneratedImages 内部是 useState/useEffect，必须无条件调用（条件调用会
+   * 让 hook 顺序随开关变化）。这里用「开关关 → 传空工具列表」的方式让它自然
+   * 得到 EMPTY：scan 为空 → 没有 locator → effect 直接 setSpill(EMPTY)，一次
+   * /api/chat-flow/generated-images 都不会发。
+   */
+  const generated = useGeneratedImages(generatedImagesOn ? toolNodes : EMPTY_TOOLS)
+  // 画廊挂在回合内「最后一个 assistant-step」：回合进行中 = 生图后最新的
+  // 步骤（图即时可见），回合收口后即最终回复总结卡（用户期望的位置）。
+  const galleryStepKey = useChat(snapshot => {
+    if (turnNumber === undefined || generated.urls.length === 0) return undefined
+    let lastStep: string | undefined
+    for (const key of snapshot.locations.getTurn(turnNumber)) {
+      const candidate = snapshot.nodes.get(key)
+      if (candidate === undefined) continue
+      if (candidate.kind === 'assistant-step') lastStep = key
+    }
+    return lastStep
+  })
+  /*
+   * 实时卡与总结卡画廊的分工（2026-10-30 审查修复）：
+   *  · 回合进行中（KR）→ 只由 turn-process 座位上的 ImageGenerationCard 显示，
+   *    gallery 必须让位，否则最终答案流式期会同一屏出现两份图；
+   *  · 回合收口 / 中断 → 实时卡退场，gallery 接回最终总结卡。
+   * 普通「对话」视图没有实时卡，保持原行为（进行中也由 gallery 显示）。
+   *
+   * 另外补 lastStepKey 兜底：galleryStepKey 只扫 locations，长会话 compact 后
+   * 可能扫不到最后一个 step —— 那种情况下收口就没有画廊。lastStepKey 本身带
+   * 全量 nodes 兜底，两者取先命中者即可。
+   */
+  const galleryAllowedInView = !KR_CHAT_ENABLED || !isKrMode || locationTurn?.status !== 'open'
+  const galleryAnchorMatched = node.key === galleryStepKey
+    || (galleryStepKey === undefined && node.key === lastStepKey)
+  /*
+   * 正文自己已经贴过图就不再补画廊条（2026-10-30 用户报「对话流卡里重复了」）。
+   * 模型生图后通常会在最终回答里写 `![图](...)`；插件再补一条 GeneratedImageStrip
+   * 就是同一张图显示两遍。只有正文完全没图（只写文字 / 只给文件路径）时，
+   * 画廊条才是必要的兜底出口。
+   */
+  const bodyHasInlineImages = useMemo(() => {
+    for (const block of data.blocks) {
+      if (block.kind !== 'text') continue
+      const text = (block as { readonly text?: unknown }).text
+      if (typeof text === 'string' && textHasMarkdownImage(text)) return true
+    }
+    return false
+  }, [data.blocks])
+  const gallery = !isReasoningProjection && generatedImagesOn && generated.urls.length > 0
+    && galleryAllowedInView && galleryAnchorMatched && !bodyHasInlineImages
+    ? <GeneratedImageStrip images={generated.urls} model={generated.model} />
+    : undefined
+
+  // "当前思考"起点仅供历史兼容注释使用；普通对话不渲染思考 chip，KR 活动卡
+  // 直接从 turn-process 投影读取实时状态。
+  const visibleBlocks = useMemo(
+    () => data.blocks.filter(block => block.kind !== 'reasoning'),
+    [data.blocks],
+  )
+  // 思考材料登记（首步负责）：本轮有工具调用时思考行并入工具行（与官方
+  // turn-process 一致，推理折叠不单独占行），chip 不挂载也得登记，抽屉里
+  // 才有思考分区。
+  useEffect(() => {
+    if (isKrMode && isFirstStep && reasoningItems.length > 0 && turnNumber !== undefined) {
+      activityStore().setReasoning(turnNumber, reasoningItems)
+    }
+  }, [isKrMode, isFirstStep, reasoningItems, turnNumber])
+
+  // 普通「对话」不展示思考 chip；KR 过程由 turn-process 座位上的实时活动卡承接。
+  // 即使官方 assistant-step 捕获失败而落到本组件的自有 renderer，也不能恢复旧折叠。
+  const streaming = data.status === 'running'
+  const interrupted = data.status === 'interrupted'
+  // 卡片只在「回合已结束」时出现（含中断）：流式期不包卡，保住流式输出；
+  // 中间步骤要等整轮收口才变轻量步骤卡，最终回复变总结卡。
+  //
+  // 状态同样做双路兜底：location 上的 turn 对象在历史轮次上可能整个缺失，
+  // 那时靠 data.status 判——非 running / 非 interrupted 即已定型。
+  const turnClosed = (locationTurn?.status ?? (data.status !== 'running' ? 'closed' : 'open')) === 'closed'
+  const showCard = turnClosed === true || interrupted
+  /*
+   * 本次渲染是不是本回合的**最终回答**（决定包总结卡还是轻量步骤卡）。
+   *
+   * ⚠ 判据里**不能出现 `data.finalNode !== undefined`**（2026-10-25 修）。
+   *
+   * 那个字段来自官方 projectAssistant：`...settled === void 0 ? {} : { finalNode: settled }`
+   * —— 只要这一步收到过 assistant/message（也就是**每一次工具调用之后的落定**），
+   * 它就有值，**不是**「这一步是最终回答」的意思。拿它当兜底等于宣布「每个中间
+   * 步骤都是总结」：一个 39 步的回合会产出几十张带框的总结卡，把过程播报
+   * （「现在改写渲染…」「浮层效果不错…」）逐条包装成一排碎片卡。
+   *
+   * 实测（2026-10-25，浏览器里量 DOM）：
+   *   · 被插话/停止的回合：22 张 reply 卡、0 张 step 卡，20 张有高度；
+   *   · 正常完成的回合：**89 张 reply 卡、0 张 step 卡，74 张有高度**。
+   * 两组数字证明它与「是否为中断」无关——用户是在中断那一轮才注意到的，
+   * 但每个多步回合都在这样渲染。顺带它还把 hideProcessText 一并废掉：
+   * showBody 里 `isClosingReply` 恒真 → 过程性发言一条都藏不住。
+   *
+   * 正确判据只有两个来源，且都指向「唯一那一句」：
+   *   · owner —— 官方 turn-tail 的 closing（最准，它才是官方认定的收尾回复）；
+   *   · node.key === lastStepKey —— 本回合最后一个 assistant-step（官方答案行的位置）。
+   * lastStepKey 取不到（locations 与全量扫都失败、数据不全）时才退回 finalNode 兜底，
+   * 免得「总结完了怎么查看」那类正文全丢的老问题复发。
+   */
+  const isClosingReply = owner !== undefined
+    || (turnClosed && (node.key === lastStepKey || (lastStepKey === undefined && data.finalNode !== undefined)))
+  const isSummary = isClosingReply || interrupted
+  const variant: 'reply' | 'step' | undefined = !showCard
+    ? undefined
+    : isSummary ? 'reply' : 'step'
+  const labels = useMemo(() => markdownLabelsFrom(t), [t])
+
+  const OfficialComp = getOfficialAssistantNodeView()
+  /*
+   * view.thinking 关闭：在**过程投影**（groupPart=reasoning）里把整个节点原样
+   * 交回官方 AssistantNodeView —— 这是本文件里唯一能真正「把 thinking block
+   * 交回官方」的姿态，官方自己的 ReasoningRow / DisclosureRow 会照常渲染并可
+   * 展开。官方在 reasoning 投影下只渲染 reasoning 块（AssistantMarkdown 的
+   * groupPart 过滤），所以不会把正文重复渲染一份。
+   *
+   * 只让出过程投影、答案投影仍走插件：答案投影里官方本来也不渲染 reasoning
+   * （AssistantMarkdown: groupPart === 'response' 时跳过 reasoning），让出去只会
+   * 连带丢掉 html / iu 围栏卡片。这样关掉思考卡后正文与卡片都还在，是损失最小
+   * 的接法。
+   *
+   * ⚠ 不能改成「把 reasoning 块从 data.blocks 里过滤掉、其余照旧插件渲染」：
+   * 官方拿不到 block 就不是「不折叠」而是「没有」，用户看到的是思考整段消失
+   * ——正是本次接线要避免的「关开关把正文一起藏了」。
+   */
+  if (!thinkingOn && isReasoningProjection && OfficialComp) {
+    return <OfficialComp {...props} />
+  }
+  if (!pluginRenders && OfficialComp) {
+    /*
+     * 普通「对话」把 assistant-step 原样交回官方：thinking block 照常传给
+     * AssistantNodeView，官方自己的 ReasoningRow / DisclosureRow 会照常渲染
+     * 并可展开。
+     *
+     * 曾经在这里把 reasoning block 过滤掉再转发（"彻底移除 thinking block"），
+     * 结果普通对话里思考被整段抹掉——官方组件拿不到 block，就不是"不折叠"
+     * 而是"没有"。插件在普通模式下对官方节点只有「原样委托」这一种姿态。
+     *
+     * 也不在这里套卡片外壳：实测 0.1.5-rc.2 上普通「对话」视图里本组件根本
+     * 不会被调用——官方 assistant-step 的 priority ≥ 0 高于本插件的 -100，
+     * 官方直接渲染，这个分支不可达。想给普通对话加卡片只能走 DOM 观察器，
+     * 那是另一件事（用户明确表示普通对话不需要）。
+     */
+    return <OfficialComp {...props} />
+  }
+
+  const { hasVisible, rendered } = AssistantBody({
+    blocks: visibleBlocks,
+    streaming,
+    interrupted,
+    renderMessageImages,
+    mentions,
+    labels,
+    t,
+    env: bodyEnv,
+    cards: {
+      html: htmlCardOn,
+      iu: iuCardOn,
+      diagram: diagramCardOn,
+      protoTabs: protoTabsOn,
+      pathLinkify: pathLinkifyOn,
+    },
+  })
+
+  /*
+   * KR 模式不显示过程性发言。
+   *
+   * 工具调用之间的助手正文（“Chrome 已在运行”“窗口合并了，重新指向…”这类）
+   * 走的是 response 投影、不是 thinking——KR 把 thinking 收进右栏是对的，但
+   * 这些正文照样以消息气泡堆在左栏，读起来像一堆絮叨抢在正式回答前面。
+   *
+   * 判据是「本节点是不是本回合最后一个 assistant-step」：
+   *   - 最后一个：流式期就是模型正在写的那句，实时可见；回合收口后它就是
+   *     最终答案（isClosingReply），同样要显示。
+   *   - 不是最后一个：说明后面还有工具调用，这段就是过程性发言，不渲染。
+   * 于是过程性发言在新步骤产生时即退场，最终回答始终在场。
+   * 生图画廊（gallery）挂在最后一个 step 上，不能被这条规则一起吃掉，所以
+   * 正文被隐藏时仍保留画廊。
+   */
+  const hideProcessText = KR_CHAT_ENABLED && isKrMode
+  const isLastStep = steps.length > 0 && node.key === steps[steps.length - 1]?.key
+  /*
+   * reasoning 投影一律不渲染正文（见 isReasoningProjection 的注释）：正文只属于
+   * response 投影。少了这条过滤，总结期答案 step 的 reasoning 投影会因思考卡被
+   * 放行而把正文重复露一份。
+   */
+  const showBody = !isReasoningProjection
+    && (!hideProcessText || isLastStep || isClosingReply || interrupted)
+  const shown = showBody ? rendered : []
+
+  /*
+   * 思考过程卡：**贴在 KR 对话流里**，挂在本回合第一条助手节点上。
+   *
+   * 为什么回到对话流：思考与它对应的回答是同一件事的两半，摆在右栏大盘里
+   * 就得来回对照两栏才读得完整。挂在首步（isFirstStep）而不是每步各挂一张：
+   * 一个回合只该有一张思考卡，否则工具调用把它切成好几段、每段都断在半截。
+   *
+   * **折叠时机 = 总结卡出现**：回合已定型（turnClosed）或本轮被中断。
+   *
+   * 不是「assistant-step 是否 running」——工具间隙里 step 早就不 running 了，
+   * 拿它当判据会让卡在那个窗口挂成折叠态且永不再展开。
+   *
+   * 中断等同总结（这一轮不会再有回答了）。历史轮次一律按已定型处理：它们的
+   * tail.closing 早被清空，认不得 isClosingReply，但它们显然已经出过总结了。
+   */
+  const summarizing = turnClosed || interrupted
+  /*
+   * 回合是否「还没出总结卡」——思考卡在它为真时一律展开。
+   *
+   * 不能拿 turnRunning 当这个判据：assistant-step 在工具执行期就已经不在
+   * running 了，但那段时间思考轨仍在、回合也远没到总结。实测这会让卡片在
+   * 工具间隙挂载成折叠态，之后再没有任何东西把它展开——整轮都看不见。
+   * 真正的分界只有一个：这回合的总结卡（最终回答）出来没有。
+   */
+  const turnActive = !summarizing
+  /*
+   * 挂载点随回合状态切换（两段各只有一个合法落点，见上面两个 key 的注释）：
+   *   进行中 → 首个带思考的 step，走**过程投影**那一份 DOM；
+   *   收口后 → 最后一个 step（答案行），走**答案投影**那一份 DOM。
+   *
+   * projectionAllowsCard 是配套的排重：官方对同一个节点最多渲染两份 DOM
+   * （reasoning / response），同一时刻只认其中一份，否则短回合会出现同一张卡
+   * 在屏幕上出现两遍（历史 bug「点开思考到总结时出现两个」）。
+   */
+  const cardAnchorKey = summarizing ? lastStepKey : firstReasoningStepKey
+  const ownsReasoningCard = cardAnchorKey !== undefined && node.key === cardAnchorKey
+  const projectionAllowsCard = summarizing ? groupPart !== 'reasoning' : groupPart !== 'response'
+  const inlineReasoning = thinkingOn && KR_CHAT_ENABLED && isKrMode && projectionAllowsCard
+    && ownsReasoningCard && reasoningItems.length > 0
+    ? (
+      <KrReasoningCard
+        reasoningTexts={stableReasoningTexts}
+        running={turnActive}
+        summarizing={summarizing}
+        inline
+      />
+    )
+    : undefined
+
+  /*
+   * 问答卡：**紧跟思考卡下方**，挂在同一个锚点上。
+   *
+   * 为什么贴在对话流里而不是右栏大盘：思考、提问、回答是同一件事的几段——
+   * 「模型想了什么 → 于是问你什么 → 你答了什么」。分两栏摆就得来回对照才读得
+   * 完整，这正是思考卡当年从右栏搬进对话流的理由，问答同理。
+   *
+   * 挂同一锚点（而不是挂在 ask 那条 tool-call 行上）有两个好处：
+   *  1. DOM 顺序天然就是「思考在上、问答在下」，不需要额外的排序；
+   *  2. 不必去占 tool.call.toolview 的座位，也就不必把官方那行问答行再委托回去
+   *     （少一处与官方抢座位的耦合）。
+   *
+   * 锚点缺失（回合刚开头、既没有 reasoning 也没有定型 step）时整卡不渲染——
+   * 那种时刻本来也还没有提问。
+   *
+   * 收起时机与思考卡完全一致：把同一个 `summarizing` 传下去，回复落定后两卡
+   * 一起收成标题行让位给正文（用户要求「回复完成后这个提问也收起」）。
+   */
+  const turnAsks = useMemo(() => collectAsks(toolNodes), [toolNodes])
+  const inlineAsk = askOn && KR_CHAT_ENABLED && KR_ASK_CARD_VISIBLE && isKrMode && projectionAllowsCard
+    && ownsReasoningCard && turnAsks.length > 0
+    ? <KrAskCard asks={turnAsks} inline summarizing={summarizing} />
+    : undefined
+
+  if (shown.length === 0 && inlineReasoning === undefined && inlineAsk === undefined && gallery === undefined) return null
+
+  return (
+    <div
+      className="dtt__assistant"
+      data-streaming={streaming || undefined}
+      data-running={turnRunning || undefined}
+    >
+      <div className="dtt__assistant-body">
+        {inlineReasoning}
+        {inlineAsk}
+        {shown.length > 0 && (variant !== undefined
+          ? <FlowCard variant={variant} interrupted={interrupted}>{shown}{gallery}</FlowCard>
+          : <>{shown}{gallery}</>)}
+        {shown.length === 0 && gallery}
+        {interrupted && <span className="dtt__stopped">{t('message.stopped')}</span>}
+      </div>
+    </div>
+  )
+})

@@ -1,0 +1,45 @@
+# 由 `dsh plugin add` 自动并入 profile，不要手工编辑 profile 的那份；
+# 要覆盖就在 profile 自己的 cordis.patch.yml（更晚的层）里改。
+# 停用内核 client-side skill 插件（由 dsh-seeker-bot 的 triad/skill-source 接管：
+# 支持技能集合两级 slash 菜单与开关过滤，并补齐 SkillRow 工具行）
+- id: ui-skill
+  name: '@deepseek-ai/dsh-client-ui-skill'
+  disabled: true
+
+# 2026-10-05 起本插件同时承载原 dsh-provider-hub 的供应商中心（供应商设置 + 网络代理
+# 两个工作台 Tab、模型座位、提示词优化图标、生图/识图/生视频工具、AnySearch provider、
+# 凭据密钥环）。dsh-provider-hub 已从 profile bundles 摘除，路由前缀与 settings
+# 命名空间原样保留（用户零迁移）；官方「模型」设置页不再被本插件隐藏。
+
+- insert:
+    - id: dsh-seeker-bot
+      name: dsh-seeker-bot
+    - id: dsh-seeker-bot-cards
+      name: dsh-seeker-bot/packages/cards
+    - id: dsh-seeker-bot-seeker
+      name: dsh-seeker-bot/packages/seeker
+    - id: dsh-seeker-bot-done-pill
+      name: dsh-seeker-bot/packages/done-pill
+    - id: dsh-seeker-bot-memory
+      name: dsh-seeker-bot/packages/memory
+    - id: dsh-seeker-bot-skills
+      name: dsh-seeker-bot/packages/skills
+    - id: dsh-seeker-bot-usage
+      name: dsh-seeker-bot/packages/usage
+    - id: dsh-seeker-bot-gallery
+      name: dsh-seeker-bot/packages/gallery
+    - id: dsh-seeker-bot-vault
+      name: dsh-seeker-bot/packages/vault
+    - id: dsh-seeker-bot-prompt
+      name: dsh-seeker-bot/packages/prompt
+    - id: dsh-seeker-bot-sync
+      name: dsh-seeker-bot/packages/sync
+    - id: dsh-seeker-bot-provider
+      name: dsh-seeker-bot/packages/provider
+    - id: dsh-seeker-bot-mail
+      name: dsh-seeker-bot/packages/mail
+    - id: dsh-seeker-bot-input
+      name: dsh-seeker-bot/packages/input
+    - id: dsh-seeker-bot-host
+      name: dsh-seeker-bot/packages/host
+

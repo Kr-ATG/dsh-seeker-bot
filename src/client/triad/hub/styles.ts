@@ -1,0 +1,250 @@
+/**
+ * styles.ts — 工作台 (Workbench) 统一容器样式 + 全局设计收敛层。
+ *
+ * 2026-10 统一改版（用户要求「所有页面像一个板块、不要各种颜色搭配」）：
+ *
+ *  1. 导航搬走：页面顶部不再有 tab 栏（分类切换在侧栏「工作台」行的
+ *     hover 浮层 / 滚轮上，见 ./row-flyout.tsx），页头只留一行面包屑。
+ *  2. 色彩收敛：在 .wb-root 作用域把官方「业务蓝 / 警告橙 / 成功绿 / 信息蓝」
+ *     四个 alias token 统一换成一枚**中性灰 accent**（明暗两套各一枚固定灰），
+ *     四个页面几百处 var(--dsw-alias-state-*) 引用一次性全部变灰阶，
+ *     不需要逐页改色；错误红保留（唯一的真语义色）。选中态 = 灰底 + 主文字色，
+ *     实心按钮 = 灰底 + 白字（两枚灰都保证白字对比度 ≥ 4.5）。
+ *  3. 工具条几何归一：各页自带的功能工具条（邮件顶栏 / 画廊工具条 / 技能
+ *     标题行 / 记忆视图行）共享同一套内距与分隔线，去掉重复的品牌字与关闭钮，
+ *     页面之间不再「每进一页重新适应一种头部」。
+ */
+
+const STYLE_ID = 'dsh-workbench-hub-styles'
+
+const SHEET = `
+.wb-root {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
+  background: var(--dsw-alias-bg-base, #0f1117);
+  color: var(--dsw-alias-label-primary, #f3f4f6);
+  font-family: inherit;
+  overflow: hidden;
+  position: relative;
+
+  /* ── 现代产品级色彩体系：DeepSeek 品牌蓝与清晰语义色彩 ── */
+  --wb-accent: var(--dsw-alias-state-business-primary, #C3CEDF);
+  --wb-surface-bg: var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.035));
+  --wb-surface-border: var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.08));
+  --wb-surface-radius: 12px;
+  --wb-surface-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+body[data-ds-dark-theme] .wb-root {
+  --wb-accent: #C3CEDF;
+  --wb-surface-bg: rgba(255, 255, 255, 0.03);
+  --wb-surface-border: rgba(255, 255, 255, 0.07);
+}
+
+/* ── 旧顶部 tab 栏（.wb-header / .wb-tabs / .wb-tab-btn）已于 2026-10
+   二次改版整条移除，导航改悬浮 Dock（./Dock.tsx + theme.ts）。
+   kr-chat-controller 的 header:not(.wb-header) 排除选择器仍保留字面量，
+   匹配不到时自然落空，不影响其官方头部识别逻辑。 ── */
+
+.wb-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+/* ── 工作台页面切换动效（分类内容滑入）──
+   .wb-body 的每个直接子级在 key 变化时重播 wb-page-in：淡入 + 轻微右移；
+   150ms 足够快，不拖手感。 */
+.wb-body > * {
+  animation: wb-page-in 190ms cubic-bezier(.2,.8,.2,1);
+}
+@keyframes wb-page-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ── 统一工作台所有页面的工具条与次级导航（Toolbar & Subheader Archetype） ──────
+   让画廊工具条、记忆视图行在视觉上高度一致，成为统一的「页面二级控制条」，
+   不再每进一页面对不同的突兀布局。
+   （邮箱顶栏曾经也吃这一条，2026-10 邮箱改成 Seeker 顶栏的只读抽屉后，
+   dsh-mail-* 这一族类名不再出现在工作台里，相关选择器一并清掉。） */
+.wb-body .tg-toolbar,
+.wb-body .dsh-memory-top-bar,
+.wb-body .wb-page-bar {
+  flex: none;
+  min-height: 44px;
+  padding: 8px 20px;
+  background: transparent;
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.12));
+  box-sizing: border-box;
+}
+.wb-body > div > .psh-head {
+  padding: 8px 20px;
+  background: transparent;
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.12));
+}
+.wb-body > div > .psh-head > .psh-title { display: none !important; }
+
+/* ── 统一搜索框控件（Search Inputs） ─────────────────────────────── */
+.wb-root .tg-search__input,
+.wb-root .dsh-memory-top-input {
+  height: 32px !important;
+  border-radius: 8px !important;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.18)) !important;
+  background: var(--dsw-alias-bg-layer-2, rgba(255,255,255,.04)) !important;
+  color: var(--dsw-alias-label-primary, #eee) !important;
+  font-size: 12.5px !important;
+  transition: border-color 140ms ease, box-shadow 140ms ease !important;
+}
+.wb-root .tg-search__input:focus,
+.wb-root .dsh-memory-top-input:focus {
+  border-color: var(--wb-accent) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--wb-accent) 25%, transparent) !important;
+}
+
+/* ── 统一分段胶囊按钮（Segmented Controls & Tabs） ───────────────────
+   技能页的筛选行不在此列：它照官方「自动化任务」页的 filter tab 原样
+   （纯文字、无边框、选中 = 浅底 + 主文字），不再套主色实心胶囊。 */
+.wb-root .usm-range-btn,
+.wb-root .dsh-memory-view-tab {
+  border-radius: 8px !important;
+  font-size: 12px !important;
+  transition: all 130ms ease !important;
+}
+.wb-root .usm-range-btn[data-active],
+.wb-root .dsh-memory-view-tab[data-active="true"] {
+  background: var(--wb-accent) !important;
+  color: #fff !important;
+  border-color: transparent !important;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2) !important;
+}
+
+/* ── 善用卡片，拒绝碎乱：统一板块卡片质感（Unified Surface System） ──
+   所有页面的主要容器表面采用统一的边框、圆角、背景与内边距，
+   不再零碎散落，形成清晰沉静的板块感。
+   2026-10-23：.skm-skill-card 已撤出这份名单——SKILL 页改用目录式版式，
+   技能条目是「目录行」不是卡片。这条 !important 规则正是「一展开就
+   变回旧卡片」的第二个来源：它把插件样式表里刚撤掉的圆角、边框、阴影
+   又强行补了回来。条目外观从此只由面板样式表决定。 */
+.wb-root .usm-uc-card,
+.wb-root .dsh-memory-entry-card,
+.wb-root .tg-card {
+  border-radius: var(--wb-surface-radius, 12px) !important;
+  border: 1px solid var(--wb-surface-border) !important;
+  background: var(--wb-surface-bg) !important;
+  box-shadow: var(--wb-surface-shadow) !important;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease !important;
+}
+.wb-root .usm-uc-card:hover,
+.wb-root .tg-card:hover {
+  border-color: color-mix(in srgb, var(--wb-accent) 45%, var(--wb-surface-border)) !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08) !important;
+  transform: translateY(-1px) !important;
+}
+
+/* ── 用量统计卡：统一板块质感 ───────────────────────────────────── */
+.wb-root .usm-uc-stat {
+  border-radius: 10px !important;
+  border: 1px solid var(--wb-surface-border) !important;
+  background: var(--wb-surface-bg) !important;
+  padding: 8px 12px !important;
+}
+
+/* ── 彩色标签与徽标降噪（Pills, Tags, Badges） ───────────────────── */
+/* 2026-10-23 SKILL 页改目录式后，这里的每一条都在「补回胶囊」：
+   包名旁的分类被补了底和边（用户反馈「标签包裹很丑」，当时报的就是它），
+   技能条目里的 全局/内置 标记被补成灰胶囊，skill 徽章被补成灰底块。
+   形状一律交回面板样式表（分类 = 下划线、标记 = 圆点 + 文字），
+   本层只保留一处真正需要换肤的东西：颜色降噪本身。
+   唯一保留的例外是「内置」标记的圆点色 —— 它靠 CSS 变量吃强调色，
+   在 .wb-root 里已经是换肤后的值，无需在此重复声明。 */
+
+/* ── 用量嵌入页板块容器（响应式大盘，摆脱狭隘弹窗感） ─────────────── */
+.wb-root .usm-uc {
+  padding: 14px 20px 20px !important;
+  gap: 12px !important;
+  max-width: 1120px !important;
+  width: 100% !important;
+  margin: 0 auto !important;
+  box-sizing: border-box !important;
+}
+.wb-root .usm-uc-stats {
+  gap: 10px !important;
+}
+
+/* ── 画廊与记忆首页板块收敛（Coherent Surfaces） ───────────────
+   （画廊类别 Dock 的外观与位置已移交 theme.ts 的 wb2 规则，此处不再接管） ── */
+.wb-root .dsh-memory-home .hm-card,
+.wb-root .dsh-memory-home .hm-hero,
+.wb-root .dsh-memory-home .hm-mem-card {
+  border-radius: var(--wb-surface-radius, 12px) !important;
+  border: 1px solid var(--wb-surface-border) !important;
+  background: var(--wb-surface-bg) !important;
+  box-shadow: var(--wb-surface-shadow) !important;
+}
+
+/* 技能页：列表区整宽铺满（不限宽、不居中）。
+   2026-10-22 版式改为「目录式」：左右内边距由面板样式表统一给 60px（与刊头/工具条同一条版心），
+   这里只负责解除宽度上限，不再改 padding（否则会把版心改回 22px）。 */
+.wb-root .skm-main-scroll {
+  max-width: none !important;
+  width: 100% !important;
+  margin: 0 !important;
+  box-sizing: border-box !important;
+}
+
+.wb-root .tg-toolbar {
+  max-width: 1140px !important;
+  width: 100% !important;
+  margin: 0 auto !important;
+  box-sizing: border-box !important;
+}
+
+.wb-root .tg-body {
+  max-width: 1140px !important;
+  width: 100% !important;
+  margin: 0 auto !important;
+  padding: 16px 20px 24px !important;
+  box-sizing: border-box !important;
+}
+
+.wb-root .dsh-memory-home {
+  max-width: 1140px !important;
+  width: 100% !important;
+  margin: 0 auto !important;
+  box-sizing: border-box !important;
+}
+
+/* ── 换色后的个别反色修正 ───────────────────────────────────────────
+   记忆面板的开关圆点取 --m-card-bg（恒白），深色主题下轨道换成主文字色
+   （近白）后白点落在白轨上看不见；这里把打开态圆点钉成页面底色。 */
+.wb-root .dsh-memory-switch[aria-checked='true']::after {
+  background: var(--dsw-alias-bg-base, #0f1117);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wb-body > * { animation: none !important; }
+  .wb-bar-btn, .wb-icon-btn { transition: none !important; }
+  .wb-bar-btn[data-spin] svg { animation: none !important; }
+}
+`
+
+export function ensureWorkbenchStyles(): void {
+  if (typeof document === 'undefined') return
+  let tag = document.getElementById(STYLE_ID) as HTMLStyleElement | null
+  if (tag === null) {
+    tag = document.createElement('style')
+    tag.id = STYLE_ID
+    tag.dataset.plugin = 'dsh-triad'
+    tag.textContent = SHEET
+    document.head.appendChild(tag)
+    return
+  }
+  // 内容比对：插件升级后已打开的页面里旧表继续命中早退分支会留旧规则。
+  if (tag.textContent !== SHEET) tag.textContent = SHEET
+}

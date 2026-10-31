@@ -1,0 +1,385 @@
+/**
+ * dsh-seeker-bot — build script.
+ *
+ * Two bundles from one esbuild run (模板：dsh-done-pill/build.mjs）：
+ *
+ *   lib/index.js   host half    ESM,  node platform,  self-contained
+ *   lib/client.js  browser half CJS,  browser platform, wrapped in the
+ *                  `window.__ModuleLoader__.load` factory contract
+ *
+ * host 半身没有任何运行时导入（apply 为 no-op），产物完全自包含——见
+ * assertHostExternals()。client 半身只 external 平台种子词（react 家族）
+ * 与 @deepseek-ai/*（运行时由 DSH client 模块表提供同一份实例）。
+ *
+ * Usage: node build.mjs
+ */
+
+import { createRequire } from 'node:module'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { resolve, dirname, join, basename } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const DSH_CHECKOUT = process.env.DSH_CHECKOUT ?? 'D:/AI/deepseek-harness'
+const PLUGIN_ID = 'dsh-seeker-bot'
+
+/** Resolve esbuild (own node_modules → DSH checkout pnpm store → error). */
+function loadEsbuild() {
+  const localRequire = createRequire(resolve(HERE, 'package.json'))
+  try {
+    return localRequire('esbuild')
+  } catch {
+    // Not installed locally; fall through to the checkout scan.
+  }
+
+  const store = join(DSH_CHECKOUT, 'node_modules', '.pnpm')
+  const candidates = []
+  if (existsSync(store)) {
+    for (const entry of readdirSync(store)) {
+      if (!entry.startsWith('esbuild@')) continue
+      candidates.push(join(store, entry, 'node_modules', 'esbuild'))
+    }
+  }
+  if (candidates.length > 0) {
+    const pick = candidates.sort().at(-1)
+    return createRequire(resolve(pick, 'package.json'))(pick)
+  }
+
+  throw new Error(
+    'dsh-seeker-bot: cannot find esbuild.\n'
+    + '  Run `pnpm install` in this directory (esbuild is a devDependency).\n'
+    + `  Or set DSH_CHECKOUT to a DSH checkout to borrow its copy (currently: ${DSH_CHECKOUT}).`,
+  )
+}
+
+const esbuild = loadEsbuild()
+
+/** Platform seed words + react come from the DSH module table at runtime. */
+const CLIENT_EXTERNAL = [
+  'react',
+  'react/jsx-runtime',
+  'react-dom',
+  'react-dom/client',
+]
+
+/** Browser half: one CJS factory registered with the host module loader. */
+const clientBundle = {
+  entryPoints: [resolve(HERE, 'src/client/index.ts')],
+  outfile: resolve(HERE, 'lib/client.js'),
+  bundle: true,
+  format: 'cjs',
+  platform: 'browser',
+  target: ['es2020'],
+  jsx: 'automatic',
+  sourcemap: true,
+  logLevel: 'info',
+  external: CLIENT_EXTERNAL,
+  // 胶囊的待机机器人引擎 src/client/done-pill/vendor/open-bot-motion.js 是第三方
+  // MIT 代码按原样 vendored（上游有一个无害的重复对象键 scale）。与 dsh-companion
+  // 的构建同款处理：只静音这一条警告，不修改第三方便宜代码；其它警告照常显示。
+  logOverride: { 'duplicate-object-key': 'silent' },
+  // @deepseek-ai/* 默认走运行时 require（模块表）；唯二例外随包内联：
+  // schemastery + cosmokit —— 工作台「供应商」页要反序列化 settings schema
+  // （webui/schema-path.ts），而这两个包不在浏览器模块表里，运行时 require 会炸。
+  alias: {
+    '@deepseek-ai/schemastery': resolve(HERE, 'src/vendor/schemastery/index.mjs'),
+    '@deepseek-ai/cosmokit': resolve(HERE, 'src/vendor/cosmokit/index.js'),
+  },
+  plugins: [{
+    name: 'chat-flow-external-platform',
+    setup(build) {
+      build.onResolve({ filter: /^@deepseek-ai\// }, args => ({ path: args.path, external: true }))
+    },
+  }],
+  banner: {
+    js: [
+      `window.__ModuleLoader__.load({ id: ${JSON.stringify(PLUGIN_ID)}, factory: (__rawRequire) => {`,
+      'const require = (id) => {',
+      '  const mod = __rawRequire(id);',
+      "  if (id === '@deepseek-ai/dsh-client-ui-primitives' && mod && typeof mod === 'object') {",
+      '    return new Proxy(mod, {',
+      '      get(target, prop) {',
+      '        if (prop in target) return target[prop];',
+      "        if (typeof prop === 'string') {",
+      "          const regular = prop.replace(/\\d+$/, 'Regular');",
+      '          if (regular in target) return target[regular];',
+      "          const medium = prop.replace(/\\d+$/, 'Medium');",
+      '          if (medium in target) return target[medium];',
+      '        }',
+      '        return target[prop];',
+      '      }',
+      '    });',
+      '  }',
+      '  return mod;',
+      '};',
+      'var module = { exports: {} };',
+      'var exports = module.exports;',
+      'Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });',
+    ].join('\n'),
+  },
+  footer: {
+    js: 'return module.exports; } });',
+  },
+}
+
+/**
+ * host 产物里允许留给运行时解析的裸包名：**空**。
+ *
+ * 融合进来的四工作台 host 需要的 DSH 叶子模块全部 vendor 化在
+ * `src/vendor/` 下（dsh-llm / dsh-tools / dsh-session / dsh-util-crypto /
+ * usage-skill），所以产物对 `@deepseek-ai/*` 零运行时依赖。
+ *
+ * 曾经 `@deepseek-ai/dsh-util-crypto` 是例外（它有 lib/index.js 且自身零导入），
+ * 实测证伪了：装进 profile 后裸 node 解析不到（profile 的 node_modules 里根本没
+ * 有这个包，DSH 靠 tsx 的 tsconfig paths 才跑得起来），于是 smoke 在源码目录
+ * 一 import 就 ERR_MODULE_NOT_FOUND。改 vendor 化后产物完全自包含。
+ * 详见 src/vendor/README.md。
+ */
+const HOST_RUNTIME_EXTERNAL_ALLOWLIST = new Set([
+  // 融合 dsh-provider-hub 后新增的三个：schemastery / cosmokit 由本插件的
+  // alias 映射到 src/vendor 内联副本（构建期就地打进产物，不算运行时外部）；
+  // undici 必须留给运行时——它的加载器按 process.versions.undici 挑同大版本
+  // 实例，内联会锁死版本并与 Node 内置 fetch 的 dispatcher 协议对不上。
+  'undici',
+])
+
+/** Host half: ESM, self-contained except node builtins and the allowlist. */
+const hostBundle = {
+  entryPoints: [resolve(HERE, 'src/host.ts')],
+  outfile: resolve(HERE, 'lib/index.js'),
+  bundle: true,
+  format: 'esm',
+  platform: 'node',
+  target: 'node22',
+  // host 半身不出 source map：Node 只有带 --enable-source-maps 时才会读它，
+  // DSH 服务没开这个 flag，13.6MB 的 map 纯属占地方（也占 git 历史）。
+  // client 半身的 map 保留 —— 浏览器 DevTools 默认会读，调插件前端要用。
+  sourcemap: false,
+  logLevel: 'info',
+  external: [],
+  // schemastery / cosmokit 随包内联（两个包都是零 cordis 依赖的纯工具库，
+  // 不会与宿主产生第二份实例问题）；其余 @deepseek-ai/* 保持 external，
+  // 由 assertHostExternals 兜住解析面。
+  alias: {
+    '@deepseek-ai/schemastery': resolve(HERE, 'src/vendor/schemastery/index.mjs'),
+    '@deepseek-ai/cosmokit': resolve(HERE, 'src/vendor/cosmokit/index.js'),
+  },
+  // Any runtime CJS dep (none today) would need a real require: keep the guard.
+  banner: {
+    js: [
+      "import { createRequire as __thinkToolsCreateRequire } from 'node:module';",
+      'const require = __thinkToolsCreateRequire(import.meta.url);',
+    ].join('\n'),
+  },
+  plugins: [{
+    name: 'chat-flow-external-platform',
+    setup(build) {
+      build.onResolve({ filter: /^(@deepseek-ai\/|node:)/ }, (args) => {
+        if (args.path === '@deepseek-ai/schemastery' || args.path === '@deepseek-ai/cosmokit') return null
+        return { path: args.path, external: true }
+      })
+      // undici 绝不可内联：代理加载器按 process.versions.undici 挑同大版本实例，
+      // 内联会锁死版本并与 Node 内置 fetch 的 dispatcher 协议对不上。
+      build.onResolve({ filter: /^undici$/ }, args => ({ path: args.path, external: true }))
+    },
+  }],
+}
+
+/**
+ * **源码级**反引号守卫（2026-10-25 新增，跑在 esbuild 之前）。
+ *
+ * 为什么需要它（本轮踩了四次）：`styles.ts` 的整张样式表是一个模板字面量
+ * （`export const KR_STYLES = \`…\``），而 esbuild **不会**转义模板内部的反引号。
+ * 只要在 CSS 注释里写一个反引号（比如把选择器写成 `\`.kr-foo\``），模板就在那里
+ * 提前闭合，剩下的正文被当成 JS 表达式解析。
+ *
+ * 已有的 `assertInjectedCssStrings()` 是**产物侧**守卫，它能抓住"静默变成 false"
+ * 那一类；但这一次是另一类失败 —— esbuild 直接报
+ * 「Expected ";" but found "kr"」并指向某一行 CSS，报错完全没提"反引号"，
+ * 排查时得自己悟出来。而且它是**构建失败**，不是静默失效，产物侧守卫根本没机会跑。
+ *
+ * 所以这里在构建前就把「模板内部还剩几个反引号」数清楚：必须恰好 2 个（首尾）。
+ * 多出来的每一个都会让构建炸，并报一个与根因无关的错。
+ *
+ * ⚠ 2026-10-25 补强：原版只扫 `src/client/kr-chat/styles.ts` 一个文件，判据是
+ * 「全文恰好 2 个反引号」。这管不到**同一文件里有多个模板**、也管不到**别的
+ * 模块的样式表**——当天实际发生的是 `gallery/styles.ts` 里
+ * `const SHEET = \`…\`` 被注释里的反引号打断，构建**成功**、`lib/client.js`
+ * 一加载就 `ReferenceError: root is not defined`（报错指向打包产物，与源码
+ * 对不上，三个人查了半天）。所以改成扫**整个源码树**，并且逐条模板判断，
+ * 而不是「全文计数」——后者只要文件里有第二个模板就会误报。
+ *
+ * @returns {void} 违规时抛错，正常时静默返回。
+ */
+function assertCssTemplateDelimiters() {
+  const roots = ['src/client']
+  const problems = []
+
+  /** 逐行状态机：找出「模板字面量内部又出现反引号」的位置。 */
+  const checkFile = (file) => {
+    const source = readFileSync(file, 'utf8')
+    // 先把注释里合法出现的反引号之外的情况排除掉太复杂——直接按行扫：
+    // 模板起止行之外，任何反引号都是可疑的（CSS/文本模板里不该出现转义外的
+    // 反引号；真要写反引号请用 \` 转义，这里也会放行）。
+    const lines = source.split('\n')
+    let openLine = -1
+    for (let i = 0; i < lines.length; i++) {
+      const raw = lines[i]
+      // 去掉已转义的反引号，避免把 \` 误判成打断
+      const line = raw.replace(/\\`/g, '')
+      const startsTemplate = /=\s*`\s*$/.test(line)
+      if (openLine < 0) {
+        if (startsTemplate) openLine = i
+        continue
+      }
+      // 单独的 ` 或 `; 或 `, 或 `) 视为正常收尾
+      if (/^\s*`\s*[;,)`]?\s*$/.test(line)) {
+        openLine = -1
+        continue
+      }
+      if (line.includes('`')) {
+        problems.push(`  ${file.replace(HERE + '\\\\', '').replace(HERE + '\\', '')}:${i + 1}（模板自第 ${openLine + 1} 行起）\n    ${raw.trim().slice(0, 140)}`)
+        // 跳过这一段，避免同一处连续报错
+        openLine = -1
+      }
+    }
+  }
+
+  const walk = (dir) => {
+    for (const name of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, name.name)
+      if (name.isDirectory()) {
+        if (name.name === 'node_modules' || name.name === 'vendor') continue
+        walk(full)
+      } else if (/\.(ts|tsx)$/.test(name.name)) {
+        checkFile(full)
+      }
+    }
+  }
+
+  for (const root of roots) {
+    const dir = resolve(HERE, root)
+    if (existsSync(dir)) walk(dir)
+  }
+
+  if (problems.length === 0) return
+
+  throw new Error(
+    'dsh-seeker-bot: 源码里的模板字面量被反引号打断了。\n'
+    + `  发现 ${problems.length} 处：\n`
+    + problems.join('\n')
+    + '\n\n  CSS 注释里描述选择器请用「中文角引号」或直接写类名，不要用反引号：\n'
+    + '  它会让模板提前闭合，剩下的正文被当成 JS 求值 —— 构建可能仍然成功，\n'
+    + '  而产物一加载就 ReferenceError（报错行指向打包产物，与源码对不上）。\n'
+    + '  确实需要字面反引号时请写成转义形式。',
+  )
+}
+
+/** Fail the build if the host bundle still hands an unresolvable specifier. */
+function assertHostExternals(outfile) {
+  const source = readFileSync(outfile, 'utf8')
+  const specifiers = new Set()
+  // `[^\n]*?` 而非 `[\s\S]*?`：esbuild 产出的 import/export…from **恒为单行**
+  // （不折行）。用 [\s\S] 会跨行贪婪延伸——曾把某个 kind 的 doc 字符串里的
+  // JSON 示例 `{"from":"start"}` 误当成 import：正则从行首的 import 一路匹配到
+  // 那串 `"from":"`，把中间的 `:` 当成模块名，于是构建误报「host 引了无法解析的
+  // 包 :」。限定同一行后，只有真正的 import 语句才会命中。
+  for (const m of source.matchAll(/(?:^|[;\n])\s*(?:import|export)[^\n]*?from\s*["']([^"']+)["']/g)) {
+    specifiers.add(m[1])
+  }
+  for (const m of source.matchAll(/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g)) {
+    specifiers.add(m[1])
+  }
+
+  const violations = [...specifiers].filter((spec) => {
+    if (spec.startsWith('node:')) return false
+    return !HOST_RUNTIME_EXTERNAL_ALLOWLIST.has(spec)
+  })
+
+  if (violations.length > 0) {
+    throw new Error(
+      'dsh-seeker-bot: host bundle imports packages that an installed plugin cannot resolve.\n'
+      + violations.map(v => `  - ${v}`).join('\n')
+      + '\n\n'
+      + 'DSH ships @deepseek-ai/* as source only; a plugin inside a profile\'s\n'
+      + 'node_modules gets plain node resolution and finds no lib/index.js.\n'
+      + `Add the name to HOST_RUNTIME_EXTERNAL_ALLOWLIST in ${basename(fileURLToPath(import.meta.url))}\n`
+      + 'after verifying the package really ships runtime JS.',
+    )
+  }
+  return [...specifiers]
+}
+
+/**
+ * 注入式 CSS 字符串守卫：产物里每个「赋值给标识符的模板字面量」都必须求值为
+ * 字符串，且长度够大（真样式表至少几千字符）。
+ *
+ * 起因：TypeScript/esbuild **不会**转义写在模板字面量内部的反引号——包括
+ * 写在 CSS 注释里的。一旦某条注释里出现一个反引号，模板就在那里提前闭合，
+ * 剩下的正文被当作 JS 表达式求值，整段变成一个布尔比较（`false`）。产物语法
+ * 完全合法，构建不报错、冒烟不报错，页面里那张 style 元素也真的建出来了，
+ * 只是 textContent 是字符串 "false"：整张表静默全失，肉眼看就是「改了没反应」。
+ * 这里逐个求值把它变成构建期硬失败。
+ *
+ * @param {string} outfile client 产物路径
+ * @returns {number} 检查过的模板字面量数量
+ */
+function assertInjectedCssStrings(outfile) {
+  const source = readFileSync(outfile, 'utf8')
+  const TICK = String.fromCharCode(96)
+  const violations = []
+  let checked = 0
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] !== TICK) continue
+    // 只看「紧跟在 = 或 return 之后的反引号」，其余（属性键、注释里的）跳过。
+    const before = source.slice(Math.max(0, i - 24), i)
+    if (!/=\s*$/.test(before) && !/return\s*$/.test(before)) continue
+    // 配对扫描：跳过 \` 转义，直到未转义的收尾反引号。
+    let j = i + 1
+    let closed = -1
+    while (j < source.length) {
+      if (source[j] === '\\') { j += 2; continue }
+      if (source[j] === TICK) { closed = j; break }
+      j++
+    }
+    if (closed < 0) continue
+    const literal = source.slice(i, closed + 1)
+    // 含插值的模板（`${…}`）是正常的运行时字符串，不是注入式 CSS 常量：
+    // 它们本来就该在调用时求值，跳过。
+    if (literal.includes('${')) { i = closed; continue }
+    // 只看够大的那种：真正的样式表至少几千字符，短模板不构成风险。
+    if (literal.length < 200) { i = closed; continue }
+    checked++
+    let value
+    try {
+      // eslint-disable-next-line no-eval -- 构建期对自家产物求值，是本守卫的判据本身
+      value = (0, eval)(literal)
+    } catch (error) {
+      violations.push(`  - offset ${i}: 模板字面量求值抛错 ${String(error)}`)
+      i = closed
+      continue
+    }
+    if (typeof value !== 'string') {
+      violations.push(`  - offset ${i}: 求值得到 ${typeof value}（${String(value).slice(0, 32)}），`
+        + '模板很可能被注释里的反引号提前闭合了')
+    }
+    i = closed
+  }
+  if (violations.length > 0) {
+    throw new Error(
+      'dsh-seeker-bot: client 产物里有求值不出字符串的模板字面量。\n'
+      + violations.join('\n')
+      + '\n\n注入式 CSS 的正文与注释里都不能出现反引号 ` —— 它会让模板提前闭合，\n'
+      + '整张样式表在运行时静默变成 false。注释请改用「直接子级」这类文字表述。\n',
+    )
+  }
+  return checked
+}
+
+// 源码级守卫先跑：反引号问题会让 esbuild 报一个与根因无关的错，提前拦下更好排查。
+assertCssTemplateDelimiters()
+await Promise.all([esbuild.build(clientBundle), esbuild.build(hostBundle)])
+const hostExternals = assertHostExternals(resolve(HERE, 'lib/index.js'))
+assertInjectedCssStrings(resolve(HERE, 'lib/client.js'))
+console.log('[dsh-seeker-bot] built lib/index.js + lib/client.js')
+console.log(`[dsh-seeker-bot] host runtime imports: ${hostExternals.length === 0 ? '(none)' : hostExternals.join(', ')}`)

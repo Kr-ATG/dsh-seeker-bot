@@ -1,0 +1,644 @@
+/**
+ * dsh-seeker-bot — client 半身入口（思考 chip + 工具调用聚合 + 对话流卡片
+ * + 对话截图）。
+ *
+ * 自 dsh-webui 的 dsh-better-markdown（思考 chip 部分）+ dsh-tool-summary
+ * 拆分为独立插件，三点行为差异见 thinking/ThinkingStepNodeView.tsx 头注释：
+ *  1. 正文链路保持官方（MarkdownText / renderMessageImages），不引入 markstream；
+ *  2. 对话流卡片只在回合结束后出现（流式期不包卡，保住流式输出）；
+ *  3. 思考与工具共用同一个活动抽屉（window 级总线，键名与 webui 相同，
+ *     与 webui 并存时按 last-write-wins 共享同一抽屉）。
+ * 另含对话截图：assistant 消息操作栏相机按钮（conversation.chat.assistant-actions，
+ * id chat-flow-screenshot），与 webui 的截图按钮 id 不同、互不冲突。
+ */
+import type { Context as ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+// Type-only: 拉入 ui-chat / ui-tool / ui-session 的 SlotMap 与标准 props 合并
+// 声明（assistant-step / tool-call keyed 槽位 + assistant-actions 槽位的
+// useChat/useSessions 契约）+ ui-slots 的 slots 服务声明 + dsh-client-locale
+// 的 common 词汇合并（t 的共享键域，markdown 标签用）。
+import type {} from '@deepseek-ai/dsh-client-ui-slots'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
+import type {} from '@deepseek-ai/dsh-client-ui-tool/client'
+import type {} from '@deepseek-ai/dsh-client-ui-session/client'
+import type {} from '@deepseek-ai/dsh-client-locale/client'
+import { injectStyles as injectToolSummaryStyles } from './tool-summary/styles.ts'
+import { injectStyles as injectBaseStyles } from './styles.ts'
+import { injectDiagramStyles } from './diagram/styles.ts'
+import { injectHtmlEmbedStyles } from './html-embed/styles.ts'
+import { injectIuStyles } from './iu/styles.ts'
+import { applyIuSlash } from './iu/slash.ts'
+import { applyRunningAppsSource } from './running-apps/index.tsx'
+import { applyAtGuard } from './running-apps/at-rule.ts'
+import { injectProtoStyles } from './proto/styles.ts'
+import { injectDownloadStyles } from './download/styles.ts'
+import { DownloadCard } from './download/DownloadCard.tsx'
+import { mountActivityDrawer } from './tool-summary/activity-drawer.tsx'
+import { ToolGroupNodeView } from './tool-summary/ToolGroupNodeView.tsx'
+import { TurnProcessShadowView } from './tool-summary/TurnProcessShadowView.tsx'
+import { ThinkingStepNodeView } from './thinking/ThinkingStepNodeView.tsx'
+import { RetryShadowView } from './retry/RetryShadowView.tsx'
+import { installReplyCardChrome } from './reply-card-chrome.ts'
+import { installToolCallsVisible } from './tool-calls-visible.js'
+import { installPlainTimelineVisible } from './plain-timeline-visible.js'
+import { applyMessageScreenshot } from './shot/index.tsx'
+import { mountShellChrome } from './shell-chrome.ts'
+import { installOpenPathFix } from './open-path-fix.ts'
+import { injectKrStyles } from './kr-chat/styles.ts'
+import { mountKrChatController } from './kr-chat/kr-chat-controller.tsx'
+import { KrTodoBridge } from './kr-chat/kr-todo-bridge.ts'
+import { TtftFlatBridge } from './stats-ttft/TtftFlatBridge.tsx'
+import { injectTtftFlatStyles } from './stats-ttft/styles.ts'
+import { KR_CHAT_ENABLED } from './kr-chat/enabled.ts'
+import { applyTriadClient } from './triad/index.ts'
+import { applyProviderClient } from './provider/index.ts'
+import { applyToolsGateClient } from './tools-gate/index.tsx'
+import { applyBrowserFlagClient } from './browser-flag/index.ts'
+import { applySidebarDocument } from './sidebar-doc/index.tsx'
+import { applyUiFont } from './ui-font/index.ts'
+import { applyDonePill } from './done-pill/pill.tsx'
+import { startShellHotReporter } from './done-pill/shell-hot.ts'
+import { applySidebarMedia } from './sidebar-media/index.tsx'
+import { buildActivityGrid, activityColor, ACTIVITY_COLUMNS } from './triad/usage/dashboard/ActivityGrid.js'
+import { setClientCtx } from './client-ctx.ts'
+import { applyFeatureSwitches } from './features/index.tsx'
+import { featureEnabledNow, featureMount } from './features/gate.tsx'
+
+/** 顶层服务依赖（client boot graph 用）。 */
+// 并集 = 原 dsh-seeker-bot 的 slots + 原 dsh-triad 的 locale/inputTriggers/sessions
+// （四工作台融合后由本插件统一提供，少了哪个哪个工作台就不挂载）
+// + layout：2026-10-04 起记忆/能力/邮箱三个工作台改挂官方 `main` 页座位，
+//   开合走 `ctx.layout.selectPanel`（与官方 ui-sidebar / ui-schedule 同一依赖）。
+// 原 dsh-provider-hub 的服务（modelDirectories / remote / configForms）**不写进
+// 这里**：顶层 inject 是硬依赖，少一个整插件都不 apply，融合后会把对话增强一起
+// 拖下水。供应商模块各自用 ctx.inject([...], cb) 延迟注入（见 provider/index.ts
+// 与 provider/model-seats/apply.ts），缺服务时只有那一块不挂。
+export const inject = ['slots', 'locale', 'inputTriggers', 'sessions', 'layout']
+
+/** 单个模块失败不拖垮插件整体。 */
+function guarded(ctx: ClientContext, label: string, mount: () => void): void {
+  try {
+    mount()
+  } catch (error) {
+    console.warn(`[dsh-seeker-bot] ${label} 挂载失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/**
+ * 页面不可见 → 给 body 挂一个标记，配套样式把全页 CSS 动画置为 paused。
+ *
+ * 选 animation-play-state 而不是 display/opacity 关停：前者由合成器直接挂起
+ * 时间轴，不触发任何布局与重绘，切回来就继续；后者会造成一次强制重排，反而
+ * 在切走/切回的瞬间制造新的掉帧。
+ */
+const ANIM_PAUSE_ATTR = 'data-dsh-anim-paused'
+const ANIM_PAUSE_CSS = `
+body[${ANIM_PAUSE_ATTR}] *,
+body[${ANIM_PAUSE_ATTR}] *::before,
+body[${ANIM_PAUSE_ATTR}] *::after {
+  animation-play-state: paused !important;
+}
+`
+function installAnimationThrottle(): void {
+  if (typeof document === 'undefined') return
+  if (document.getElementById('dsh-anim-pause') === null) {
+    const style = document.createElement('style')
+    style.id = 'dsh-anim-pause'
+    style.textContent = ANIM_PAUSE_CSS
+    document.head.appendChild(style)
+  }
+  const sync = (): void => {
+    const hidden = document.visibilityState === 'hidden'
+    if (hidden === document.body.hasAttribute(ANIM_PAUSE_ATTR)) return
+    if (hidden) document.body.setAttribute(ANIM_PAUSE_ATTR, '')
+    else document.body.removeAttribute(ANIM_PAUSE_ATTR)
+  }
+  document.addEventListener('visibilitychange', sync)
+  sync()
+}
+
+let savedCtx: ClientContext | null = null
+export let officialAssistantNodeView: any = null
+export let officialTurnProcessNodeView: any = null
+
+export function getOfficialAssistantNodeView(): any {
+  if (officialAssistantNodeView) return officialAssistantNodeView
+  if (savedCtx) {
+    try {
+      const entries = savedCtx.slots.entries('conversation.chat.node')
+      const assistantEntry = entries.find((e: any) => e.options?.key === 'assistant-step' && (e.options?.priority ?? 0) >= 0)
+      if (assistantEntry?.component) {
+        officialAssistantNodeView = assistantEntry.component
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return officialAssistantNodeView
+}
+
+/**
+ * 捕获官方原生的 turn-process 折叠 control。
+ *
+ * 与 assistant-step 同理：插件用 priority -100 占这个座位只是为了在 KR 模式
+ * 放实时活动卡，普通「对话」必须把座位原样还给官方那条「工具调用 N 次 /
+ * 已思考…」的折叠行。没有这个捕获，插件一旦占座，官方组件就永远没机会渲染，
+ * 普通对话里工具调用与思考就一起消失了。
+ */
+export function getOfficialTurnProcessNodeView(): any {
+  if (officialTurnProcessNodeView) return officialTurnProcessNodeView
+  if (savedCtx) {
+    try {
+      const entries = savedCtx.slots.entries('conversation.chat.node')
+      const processEntry = entries.find((e: any) => e.options?.key === 'turn-process' && (e.options?.priority ?? 0) >= 0)
+      if (processEntry?.component) {
+        officialTurnProcessNodeView = processEntry.component
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return officialTurnProcessNodeView
+}
+
+export function apply(ctx: ClientContext): void {
+  savedCtx = ctx
+  if (typeof window !== 'undefined') {
+    (window as any).__dshClientCtx__ = ctx
+  }
+  // 登记根上下文：右栏「打开工作区预览」与正文文件提及都靠它读跨插件服务
+  // （ctx.get('sidebarRight') / ctx.get('sessions')），见 client-ctx.ts。
+  setClientCtx(ctx as unknown as { get?(name: string): any })
+
+  // ── 组件开关：全体功能的运行时门 ─────────────────────────────────────
+  // 先于所有功能挂载：store 的首帧值来自 localStorage，之后每 2 秒（及窗口
+  // 聚焦时）从 /api/chat-flow/components 校准到宿主 loader 的真实行状态。
+  // 插件页面的开关由 cordis.patch.yml 的 16 条 insert 原生提供，这里不自绘面板。
+  guarded(ctx, 'feature switches', () => { applyFeatureSwitches(ctx) })
+
+  // ── 界面字体（最早应用）──────────────────────────────────────────────
+  // 用户选中的字体必须**先于**其它一切挂载生效：它只改几个根 CSS 变量
+  // （--dsh-font-family-text/-code 是官方 0.2.1 的可写槽位，--dsw-font-family /
+  // --ds-font-family-code 是消费值；官方 body 与 markdown 全部字号 token 都从
+  // 它们派生）。放在最前面是为了让首帧就用上所选字体，少一次「先用系统字体、
+  // 再闪成所选字体」的跳变。
+  //
+  // 2026-10-14 曾整块下线（理由：与官方「更多字体设置」重复、多背 5MB webfont），
+  // 2026-10-25 按用户要求装回来 —— 恢复时发现变量层变了，详见 ui-font/font.ts 头注释。
+  // input.ui-font 不在外层做 apply 期门：ui-font 内部自带 onFeatureChange，
+  // 外层门会让「上次关闭 → 本次打开」时监听装不上、必须刷新。
+  guarded(ctx, 'ui font', () => { applyUiFont(ctx) })
+
+  // ── 对话完成胶囊（2026-10-28 自 dsh-companion 移植）────────────────────
+  // 顶部悬浮胶囊 + 左下角小横条两种形态（设置里切换）、任务完成三通道提醒
+  // （原生通知 → 壳页面桌面浮窗 → 页内卡）、录屏成 GIF、待机机器人。
+  // 存储键 / 样式类名 / 槽位 id / 宿主路由沿用 dsh-companion 原值，
+  // 浏览器里的已读、位置与外观设置无缝延续。
+  // 依赖 slots（顶层 inject 已有）；其它服务全部懒取，缺了只降级不拖垮插件。
+  // view.done-pill 也不在外层做 apply 期门：胶囊组件用 FeatureGate 包住，
+  // 内部按组件行状态渲染/卸载，拨完开关 2 秒内生效。
+  guarded(ctx, 'done pill', () => { applyDonePill(ctx) })
+  // 壳子顶栏热区让位：胶囊贴顶时顶部那条隐形拖拽带会吞掉上半段的点击/悬停，
+  // 这里把胶囊矩形上报给 host、由 host 经 CDP 让拖拽带在胶囊范围内穿透。
+  // 纯浏览器访问（无壳子）时上报始终失败，模块内部有 5s 冷却，零副作用。
+  guarded(ctx, 'done pill shell hot', () => {
+    ctx.effect(() => startShellHotReporter(), 'dsh-seeker-bot: done-pill shell hot reporter')
+  })
+
+  // 样式：工具聚合（dts__）、思考/流卡（dtt__）两枚 + 截图面板（tsh__）独立
+  // <style>，幂等注入。
+  guarded(ctx, 'tool-summary styles', injectToolSummaryStyles)
+  guarded(ctx, 'chat-flow styles', injectBaseStyles)
+  guarded(ctx, 'proto card styles', injectProtoStyles)
+  guarded(ctx, 'diagram styles', injectDiagramStyles)
+  guarded(ctx, 'html embed styles', injectHtmlEmbedStyles)
+  guarded(ctx, 'iu styles', injectIuStyles)
+  // `/iu` 斜杠指令：把「出卡片」从模型的判断变成用户的显式命令。
+  // 与内置提示词通道互补——那条只让模型「知道能力存在」，这条是硬要求。
+  featureMount(ctx, 'card.iu', 'iu slash source', () => { applyIuSlash(ctx) })
+  // 「@ 运行中的程序」：打 @ 时除了官方文件/会话候选，再列出此刻真的开着的
+  // 窗口（带进程图标 + 窗口标题）。数据来自 host 半身常驻 PowerShell 采集器
+  // （/api/chat-flow/running-apps，2~4ms 一次），客户端 2s 缓存。
+  //
+  // 为什么不自己重写菜单：官方 ui-input-trigger 的候选管线已经处理了键盘上下、
+  // 回车、点选、hover、高亮、滚动、无障碍——重写就是抄一份官方实现，官方改版
+  // 就跟着坏。这里只注册一个 @ 源 + 一个自定义图标组件。
+  // input.running-apps 内部自带 onFeatureChange（会注销/重注册 @ 源），
+  // 外层不再判开关，否则上次关过就装不上监听。
+  guarded(ctx, 'running apps @ source', () => { applyRunningAppsSource(ctx) })
+  // 修「普通对话里的 @ 被误渲染成蓝色文件芯片」：官方 @ 文件规则的判据只要求
+  // 「@ 前是空白、后跟一串非空白字符」，中文里「@的时候」这种写法会被误认成
+  // 文件路径（文件不存在 → 蓝色虚线芯片）。这里注册一条 order 更小的规则，
+  // 把「不像路径的 @」盖回普通文字。判据与抢位原理见 running-apps/at-rule.ts。
+  // input.at-guard 同理：规则注册/注销由模块内部的 onFeatureChange 负责。
+  guarded(ctx, 'running apps @ guard', () => { applyAtGuard(ctx) })
+  guarded(ctx, 'download card styles', injectDownloadStyles)
+  // 共享活动抽屉：思考与工具调用的详情面板（body 级宿主，只挂一次）。
+  guarded(ctx, 'activity drawer', mountActivityDrawer)
+
+  // 壳窗口控制联动：壳内（iframe）检测 + header 右簇左移留位 + 主题上报。
+  // 浏览器直开时整模块 no-op。
+  guarded(ctx, 'shell chrome', mountShellChrome)
+
+  // 「用文件资源管理器打开」：官方那条被 windowsHide 吞了窗口，fetch 层改道。
+  guarded(ctx, 'open path fix', installOpenPathFix)
+
+  // 对话截图：assistant 消息操作栏相机按钮 → 截图面板（独立 id，KR模式生效）。
+  featureMount(ctx, 'card.screenshot', 'screenshot seat', () => { applyMessageScreenshot(ctx) })
+
+  // 总结卡外观（框 + 阴影）开关：读 localStorage → 给 body 挂 data-dsh-reply-plain。
+  //
+  // 必须在**首帧之前**跑完：挂晚了会先画一遍带框带影的卡片、再闪成纯正文。
+  // 它没有座位也不渲染任何组件，只是把一条 CSS 规则的前提条件准备好。
+  guarded(ctx, 'reply card chrome', installReplyCardChrome)
+
+  // 工具调用卡展示开关（localStorage 呈现偏好）：读盘 + 绑跨窗口 storage 监听。
+  // KrAgentPanel 经 useSyncExternalStore 订阅，拨完即时生效、刷新后保留。
+  guarded(ctx, 'tool calls visible', installToolCallsVisible)
+
+  // 操作面板卡展示开关（同族第三条：localStorage 呈现偏好）。
+  guarded(ctx, 'plain timeline visible', installPlainTimelineVisible)
+
+  // 捕获官方原生的 assistant-step / turn-process 渲染组件：普通「对话」模式下
+  // 两个座位都原样委托回官方，插件只负责 KR 那一栏。
+  try {
+    const entries = ctx.slots.entries('conversation.chat.node')
+    const assistantEntry = entries.find((e: any) => e.options?.key === 'assistant-step' && (e.options?.priority ?? 0) >= 0)
+    if (assistantEntry?.component) {
+      officialAssistantNodeView = assistantEntry.component
+    }
+    const processEntry = entries.find((e: any) => e.options?.key === 'turn-process' && (e.options?.priority ?? 0) >= 0)
+    if (processEntry?.component) {
+      officialTurnProcessNodeView = processEntry.component
+    }
+  } catch (error) {
+    console.warn('[dsh-seeker-bot] 捕获官方节点视图失败：', error)
+  }
+
+  // 回合过程座位：KR 模式挂单张实时活动卡；普通「对话」把座位原样还给官方
+  // 的折叠 control（工具调用 / 思考都在那条行里）。这个座位仍必须在首条
+  // assistant 输出前占位，供 KR 使用。
+  guarded(ctx, 'turn-process seat', () => {
+    const entries = ctx.slots.entries('conversation.chat.node')
+    const processEntry = entries.find((entry: any) => entry.options?.key === 'turn-process' && (entry.options?.priority ?? 0) >= 0)
+    ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
+      name: 'conversation.chat.node',
+      key: 'turn-process',
+      priority: -100,
+      locale: 'chat',
+      ...(processEntry?.options?.inject ? { inject: processEntry.options.inject } : {}),
+    }, TurnProcessShadowView))
+  })
+
+  // 助手正文：流式期保持官方 Markdown / image 链路，回合结束后呈现步骤与
+  // 总结卡；普通「对话」模式整体委托回官方 AssistantNodeView。
+  guarded(ctx, 'assistant-step seat', () => {
+    const entries = ctx.slots.entries('conversation.chat.node')
+    const assistantEntry = entries.find((e: any) => e.options?.key === 'assistant-step' && (e.options?.priority ?? 0) >= 0)
+    ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
+      name: 'conversation.chat.node',
+      key: 'assistant-step',
+      priority: -100,
+      locale: 'chat',
+      ...(assistantEntry?.options?.inject ? { inject: assistantEntry.options.inject } : {}),
+    }, ThinkingStepNodeView))
+  })
+  // download 原子卡片：接管内置 download 工具行（keyed tool.call.toolview，
+  // key = wire 工具名）。host 半身注册 download 工具 + 进度路由；运行中约
+  // 700ms 轮询真实进度（字节/速度/ETA），完成态读 meta 摘要。host 未就绪或
+  // 旧版本时优雅降级为时长显示。
+  featureMount(ctx, 'card.download', 'download toolview seat', () => {
+    ctx.slots.inject('tool.call.toolview', () => ctx.slots.register(
+      { name: 'tool.call.toolview', key: 'download' },
+      DownloadCard,
+    ))
+  })
+
+  // KR 对话双栏布局与执行大盘（视图分类「KR对话」+ 右侧 Agent 轨迹大盘）。
+  //
+  // 已被 KR_CHAT_ENABLED 关闭 —— 只隐藏、不删除：控制器、样式、面板组件全部
+  // 原样留在 kr-chat/ 下，把 enabled.ts 里的开关改回 true 即完整恢复。
+  if (KR_CHAT_ENABLED && featureEnabledNow('view.seeker')) {
+    guarded(ctx, 'kr-chat styles', injectKrStyles)
+    guarded(ctx, 'kr-chat controller', mountKrChatController)
+  }
+
+  // 全局动画节流：页面不可见时把整页 CSS 动画按暂停处理。
+  //
+  // 背景：显示器 2560×1440 @ 300Hz，Chromium 的 requestAnimationFrame 跟随刷新
+  // 走，实测 rAF 能到 196–300fps。于是一堆常驻 infinite 动画（官方 state-dot /
+  // dash，本插件的卡片呼吸、扫光、转圈）在没人看的时候也按 300Hz 满帧重绘，
+  // 渲染进程实测 121% 单核。
+  //
+  // 只在 document 不可见时暂停（标签页切走、窗口完全隐藏）。不做更激进的「空闲
+  // 降频」——那要判断用户意图，误伤正在看的动画就得不偿失；不可见时暂停是零
+  // 风险且覆盖了绝大多数浪费场景。
+  guarded(ctx, 'animation throttle', installAnimationThrottle)
+
+  // 桥接官方 todos 投影，供右侧大盘实时展示真实任务。
+  //
+  // 大盘已隐藏，但这个座位同时是「会话身份登记点」：它在 session 作用域、
+  // 空白 Hero 态照常渲染，会话 id 一变即清空活动抽屉 / live todos / 已选轮次，
+  // 免得切会话后抽屉里还留着上一会话的思考与工具树。与 KR 的可见 UI 无关，
+  // 因此不随开关关闭。
+  featureMount(ctx, 'view.stats-ttft', 'stat ttft styles', injectTtftFlatStyles)
+
+  guarded(ctx, 'kr-todo bridge', () => {
+    ctx.slots.inject('conversation.input.dock', () => ctx.slots.register(
+      { name: 'conversation.input.dock', id: 'kr-todo-bridge', order: 999 },
+      KrTodoBridge,
+    ))
+  })
+
+  // 首 token 平均平铺：官方会话统计把这数藏在点开的卡片里，这里把它追认进
+  // 输入框下状态栏同一行。同槽再加一个隐形桥（order 1000，不占视觉行），
+  // 读 sessionStats 投影（整场会话），无投影时用窗口节点现算。
+  featureMount(ctx, 'view.stats-ttft', 'stats ttft flat', () => {
+    ctx.slots.inject('conversation.input.dock', () => ctx.slots.register(
+      { name: 'conversation.input.dock', id: 'dsh-stats-ttft-flat', order: 1000 },
+      TtftFlatBridge,
+    ))
+  })
+
+  // ── 融合的原 dsh-triad 工作台（记忆 / 用量 / 技能与 MCP）──────────────
+  // 侧边栏导航行、面板、composer 记忆注入开关的座位 id / order / locale
+  // namespace 全部原样保留（dsh-triad 退役，用户侧零迁移）。内部每个工作台
+  // 各自 try/catch，一个挂载失败不影响其他两个，也不影响上面的对话增强。
+  // 定时自动化不在此列：2026-09-28 起由官方 schedule bundle 提供。
+  guarded(ctx, 'triad (memory/usage/skills)', () => {
+    applyTriadClient(ctx)
+  })
+
+  // ── 融合的原 dsh-provider-hub（供应商中心）────────────────────────────
+  // 对话输入区的三个座位（供应商标签 / 模型选择 / 推理强度滑杆）+ 提示词优化图标；
+  // 供应商页与代理区块由工作台容器渲染（见 triad/hub/WorkbenchPanel.tsx）。
+  //
+  // 这条调用 2026-10-05 融合时**漏了**：import 加进去了但 apply 里没调，
+  // 表现为「对话框的供应商/模型/推理强度整排不见」，而工作台里的供应商页照常
+  // ——因为页面是 WorkbenchPanel 直接渲染的，不依赖这里。
+  guarded(ctx, 'provider hub (seats/prompt-optimize)', () => {
+    applyProviderClient(ctx)
+  })
+
+  // ── 工具闸门胶囊（computer-use / browser-use 按需开关）────────────────
+  // 与 host 半身配对：host 默认把这两组工具挡在每轮请求外（实测占全部工具
+  // 定义 74.7%），这里给输入栏工具行右侧一个看得见、点得到的开关。状态与
+  // `/computer-use`、`/browser-use` 命令读写同一张 host 状态表，无第二套真相。
+  guarded(ctx, 'tools gate chips', () => {
+    applyToolsGateClient(ctx)
+  })
+
+  // ── 浏览器操作标志（2026-10-20）────────────────────────────────────────
+  // 有浏览器工具正在某个会话里跑时，在**该会话行的右端**亮一枚会呼吸的小图标。
+  // 数据来自 host 半身的 /api/chat-flow/browser-activity（与 tools-gate 同族的
+  // 只读观测路由）；路由 404 / 不可达时整块静默降级为「没有图标」，不影响对话。
+  //
+  // 行标记走 DOM 属性注入（官方行是 React 渲染的，插节点会被 diff 抹掉，
+  // 见 tools-gate/menu-icons.ts 的先例）。标题栏胶囊那版已按用户要求整块删除。
+  guarded(ctx, 'browser flag', () => {
+    applyBrowserFlagClient(ctx)
+  })
+
+  // ── 官方侧边栏的 PDF / Office 文档渲染器（2026-10-06）──────────────────
+  // 官方 documentpreview 内嵌的 pdf.js 对带 /ID 的 PDF 会抛
+  // 「n.toHex is not a function」（worker 内联源码，无法补丁），ppt/word 转出的
+  // PDF 走同一条链路一起坏。这里按官方契约注册 priority: 'extension' 的渲染器
+  // 接管 pdf / doc / docx / ppt / pptx 等，正文用浏览器内置 PDF 查看器渲染。
+  //
+  // **不走 ctx.inject**：documentPreviews 是官方包用 `ctx.reflect.provide` 挂到
+  // 根上下文的服务，inject 回调的 scope 上读它会被 cordis Proxy 拒（未声明属性
+  // 一读就抛），表现是静默不挂。根 ctx 上直接读才是官方自己的用法
+  // （它内部各渲染器也是 `ctx.documentPreviews.register`）。bundle 顺序里
+  // dsh-web-app 在本插件之前，provide 已发生；老宿主没这个包时读取抛错，
+  // applySidebarDocument 内部 catch 后原样兜底。
+  featureMount(ctx, 'card.sidebar-doc', 'sidebar document renderer', () => {
+    applySidebarDocument(ctx as unknown as Record<string, any>)
+  })
+
+  // ── 官方侧边栏的音视频渲染器（2026-10-19）──────────────────────────────
+  // 背景：产出物卡与画廊全部收口到官方右栏预览后，右栏成了唯一出口。而官方对
+  // mp4 / webm / mov / mp3 / wav 这些后缀**没有任何渲染器**（它们被列进
+  // UNVIEWABLE_BINARY_EXTENSIONS，打开的正文是"不支持预览"空态）—— 不收下它们，
+  // 这个收口就等于把音频与视频从"能看"退化回"打不开"。
+  // 注册方式与上面的文档渲染器同一套（documentPreviews + extension 档 + 同 id
+  // 的 keyed 正文槽位），正文是原生 <video> / <audio>。
+  featureMount(ctx, 'card.sidebar-media', 'sidebar media renderer', () => {
+    applySidebarMedia(ctx as unknown as Record<string, any>)
+  })
+}
+
+/** 纯逻辑再导出：供 smoke 断言「Token 活动」贡献热力模型 + 人话行动流翻译。 */
+export { buildActivityGrid, activityColor, ACTIVITY_COLUMNS }
+/**
+ * 纯逻辑再导出：用量筛选的下拉选项 ↔ filterDaysByScope 口径。
+ *
+ * 这条口径踩过真坑（选模型后四格全 0、热力图全空），冒烟要能直接断言它，
+ * 所以从 triad 半身一路转发到 client 入口。
+ */
+export { collectModels, collectProviders, filterDaysByScope, providerOfModel } from './triad/usage/dashboard/aggregate.ts'
+export { toPlainStep, plainToolName, siteOf, isMetaTool, spawnsSubagents, humanIssue } from './kr-chat/plain-language.ts'
+export { buildPlainTimeline, condenseSteps } from './kr-chat/plain-timeline.ts'
+/**
+ * 工具闸门菜单图标的判据（纯函数）：供 smoke 直接钉住「哪些菜单行该补图标」。
+ *
+ * 这条判据错了不会报错，只会让菜单里多出几个错的图标（描述里提到命令名的普通
+ * 行被误标），必须能被测试直接断言，不能只靠看代码。
+ */
+export { gateIconForRow, decorateGateMenuRows, GATE_ICON_ATTR, GATE_ICON_COMMANDS } from './tools-gate/menu-icons.ts'
+/**
+ * 产出物点击分流判据（2026-10-22）：**侧栏能正常展示的走侧栏，其余走系统默认**。
+ *
+ * 必须能被 smoke 直接断言：按扩展名判错不会报错，只会让某个类型点开去错地方
+ * （图点出一整个 PowerPoint，或者 3D 模型点开得到一句"不支持预览"）。
+ * 判据的逐扩展名依据见 sidebar-display.ts 文件头。
+ */
+export {
+  canShowInSidebar, sidebarDisplayOf, sidebarRenderedExtensions, extensionOf,
+  PLUGIN_RENDERED_EXT, TEXT_RENDERED_EXT, BROWSER_UNDECODABLE_MEDIA_EXT,
+} from './sidebar-display.ts'
+/**
+ * 产出物分类分组（纯逻辑）：供 smoke 直接断言类别顺序、组内顺序与中文标签。
+ *
+ * 分组判错不会报错，只会让卡片里的「图片 / 网页」顺序和标签静默走样 ——
+ * 这类展示层口径必须能被离线断言。
+ */
+export { groupOutputs, OUTPUT_KIND_LABEL, OUTPUT_KIND_ORDER } from './kr-chat/outputs.ts'
+/**
+ * 对话内 HTML 卡片：围栏切分 + iframe 文档装配的纯逻辑，供 smoke 直接钉住。
+ *
+ * 这两条判据错了都不会报错——围栏不命中就静默显示成代码块，沙箱写错就变成
+ * 「能跑但能碰宿主」。必须能被测试断言，不能只靠看代码。
+ */
+export { splitHtml, looksLikeHtmlFence } from './html-embed/parse.ts'
+export { splitIu, looksLikeIuFence } from './iu/parse.ts'
+/**
+ * diagram / proto-tabs 的围栏切分（纯逻辑）。
+ *
+ * 与 html / iu 并列导出：这四条通道共用同一份 `src/shared/fence-scan.ts` 的
+ * 未闭合围栏扫描，任何一条的流式行为都必须能被 smoke 直接断言——否则「某种
+ * 围栏在流式期又变回代码块逐字外冒」这种退化不会报错，只能靠肉眼撞见。
+ */
+export { splitDiagram } from './diagram/parse.ts'
+export { splitProtoTabs } from './proto/parse.ts'
+export { findOpenFence, openFenceTail } from '../shared/fence-scan.ts'
+/**
+ * iu 注册表（纯逻辑半边）。
+ *
+ * 导出给冒烟做**运行期转义探针**：把带危险字符的样本塞进每个 kind 的模型文本
+ * 字段，跑一遍 snapshot()，断言输出里没有真的标签漏出来。截图页跑在
+ * --disable-web-security 的无头 Chrome 里，一处漏转义就等于任意脚本。
+ *
+ * 这件事必须在运行期做：静态看源码「有没有记得写 esc()」只能靠人眼，
+ * 加一个 kind 就会重新赌一次。
+ */
+export { IU_KIND_MAP, IU_KIND_NAMES, IU_KINDS } from './iu/kinds/registry.ts'
+export { iuSlashTest } from './iu/slash.ts'
+/**
+ * 「@ 运行中的程序」的纯判据（匹配打分 / 排序 / 副标题 / 引用编解码 / 序列化）。
+ *
+ * 这几条判错了都不会报错：排序歪了用户只是找不到东西，序列化歪了模型拿到
+ * 一堆看不懂的 id——只能靠断言钉住。
+ */
+export {
+  RUNNING_APPS_SOURCE,
+  RUNNING_APPS_MENTION_PREFIX,
+  RUNNING_APPS_ROUTE,
+  parseRunningApps,
+  scoreApp,
+  rankApps,
+  appSubtitle,
+  appLabel,
+  appRef,
+  parseAppRef,
+  serializeAppRef,
+  fetchRunningApps,
+} from './running-apps/data.ts'
+export { injectRunningAppsStyles, RUNNING_APPS_STYLE_ID } from './running-apps/styles.ts'
+export { applyRunningAppsSource } from './running-apps/index.tsx'
+/**
+ * 「@ 不是路径」的判据（纯逻辑）：供冒烟直接对拍。
+ *
+ * 判据错了不会报错，只会让普通中文变成蓝色芯片、或让真正的文件路径退化成
+ * 普通文字 —— 两种都只能靠断言钉住。
+ */
+export {
+  looksLikePath,
+  nextPathCandidate,
+  buildGuardRule,
+  applyAtGuard,
+  GUARD_RULE_ID,
+} from './running-apps/at-rule.ts'
+export { sliderFillText, checklistFillText, tabsFillText, pianoFillText } from './iu/IuCard.tsx'
+/**
+ * 裸路径链接化：供 smoke 直接断言「手写反斜杠图片路径会被修正」。
+ *
+ * 这条判据错了不报错，只让用户看到「图片无法预览」——Markdown 把 `\_` 当转义符
+ * 吃掉，渲染出的 src 指向不存在的文件。必须能被测试直接断言。
+ */
+export { linkifyFilePaths, promoteStandaloneImagePath, encodePathForMarkdown } from './path-linkify.ts'
+export { assembleHtmlDocument, BRIDGE_TO_HOST, BRIDGE_TO_FRAME, MAX_FRAME_HEIGHT, MIN_FRAME_HEIGHT } from './html-embed/bridge.ts'
+export { KIT_CSS, needsKit } from './html-embed/kit.ts'
+export { buildRuntime, needsRuntime, RUNTIME_PARTS } from './html-embed/runtime.ts'
+/**
+ * 界面字体：选项表与覆盖 CSS 的纯逻辑，供 smoke 直接钉住。
+ *
+ * 这几条错了都不会报错：默认档写错就静默换了用户的字体；字体栈漏掉通用回退
+ * 会在缺字时掉成浏览器默认衬线；webfont 路径写错则「加载失败」只能靠肉眼发现；
+ * 只写下层变量（--dsw-font-family）而漏掉上层槽位（--dsh-font-family-text）
+ * 会变成「字体加载成功但界面没变」——0.2.1 恢复时踩过，必须被断言钉死。
+ */
+export { FONT_OPTIONS, DEFAULT_FONT_ID, fontOptionOf, fontOverrideCss, fontFileUrl } from './ui-font/index.ts'
+export { uiFontTest } from './ui-font/index.ts'
+/**
+ * 总结卡外观开关：纯逻辑（读写 + body 属性 + 订阅），供 smoke 直接钉住。
+ *
+ * 这条判据错了不会报错：属性名或 CSS 选择器写歪，开关拨下去界面**毫无反应**，
+ * 既没有异常也没有日志，只能靠肉眼比对卡片。必须能被测试断言。
+ */
+export {
+  REPLY_PLAIN_ATTR,
+  replyCardChromeEnabled,
+  setReplyCardChromeEnabled,
+  subscribeReplyCardChrome,
+  installReplyCardChrome,
+} from './reply-card-chrome.js'
+
+/**
+ * 工具调用卡展示开关：同款纯逻辑（读写 + 订阅），供 smoke 直接钉住。
+ * 判据错了同样静默无反应，必须能被测试断言。
+ */
+export {
+  toolCallsVisible,
+  setToolCallsVisible,
+  subscribeToolCallsVisible,
+  installToolCallsVisible,
+} from './tool-calls-visible.js'
+
+/**
+ * 操作面板卡展示开关：同族纯逻辑（读写 + 订阅），供 smoke 直接钉住。
+ * 判据错了同样静默无反应，必须能被测试断言。
+ */
+export {
+  plainTimelineVisible,
+  setPlainTimelineVisible,
+  subscribePlainTimelineVisible,
+  installPlainTimelineVisible,
+} from './plain-timeline-visible.js'
+
+/**
+ * 首 token 平均平铺的纯逻辑：供 smoke 直接钉住口径（平均值 / 紧凑时长 /
+ * 窗口回退）。这三条错了都不会报错，只会让状态栏显示错的数或干脆不显示，
+ * 必须能被测试断言，不能只靠肉眼比对卡片。
+ */
+export {
+  foldWindowTtft,
+  formatFlatDuration,
+  ttftAverageMs,
+  ttftFlatPrefix,
+  ttftFlatText,
+} from './stats-ttft/ttft-flat.ts'
+export { syncTtftFlat, TtftFlatBridge } from './stats-ttft/TtftFlatBridge.tsx'
+export { injectTtftFlatStyles, TTFT_FLAT_STYLE_ID } from './stats-ttft/styles.ts'
+
+/**
+ * 浏览器操作标志的纯逻辑半边：供冒烟直接钉住「响应解析 / 是否显示 / 文案拼装」
+ * 与「行标记打属性」。
+ *
+ * 这三条判据错了都不会报错：回包解析歪了图标永远不出现、判据松了图标常驻不灭、
+ * 文案拼错用户看到一枚无意义的图标——没有异常、没有日志，只能靠断言钉住。
+ */
+export {
+  BROWSER_ACTIVITY_ROUTE,
+  BROWSER_FLAG_PREVIEW_KEY,
+  FAST_POLL_MS,
+  SLOW_POLL_MS,
+  IDLE_ROUNDS_BEFORE_SLOW,
+  isBrowserToolName,
+  parseBrowserActivity,
+  sessionFlagVisible,
+  browserFlagToolLabel,
+  browserFlagTitle,
+  fetchBrowserActivity,
+  getBrowserFlagSnapshot,
+  subscribeBrowserFlag,
+  getBrowserFlagEntry,
+  ingestPreviewSessions,
+  mountBrowserFlagPreview,
+  startBrowserActivityPolling,
+  stopBrowserActivityPolling,
+} from './browser-flag/store.ts'
+export {
+  BROWSER_FLAG_ROW_ATTR,
+  flagAttrValue,
+  sessionIdOfRowKey,
+  syncBrowserFlagRows,
+  mountBrowserFlagRows,
+  unmountBrowserFlagRows,
+} from './browser-flag/row-mark.ts'
+export { BROWSER_FLAG_STYLES, BROWSER_FLAG_STYLE_ID, injectBrowserFlagStyles } from './browser-flag/styles.ts'
+export { applyBrowserFlagClient } from './browser-flag/index.ts'
+/**
+ * 生图实时卡的两条纯判据：入参 → 张数/比例，比例 → 点阵行列。
+ * 判错不会报错，只会让点阵形状或数量走样，必须能被冒烟直接断言。
+ */
+export { parseImageRequest, dotGridForRatio, textHasMarkdownImage } from './generated-images/layout.ts'

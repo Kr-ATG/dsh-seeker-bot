@@ -1,0 +1,169 @@
+/**
+ * dsh-seeker-bot — 浏览器活动（host 半身）：公共类型与契约常量。
+ *
+ * 两半身（host 观测 / client 渲染）逐字共用这一组字段名，改名即契约破裂：
+ * 客户端只认 `sessionId/active/service/tool/since/lastAt/lingering` 六个键，
+ * 多一个不多、少一个就静默不显示。所以类型集中在这里，index.ts 只做实现。
+ */
+
+/** 客户端轮询的路由（只读，同源 GET）。 */
+export const BROWSER_ACTIVITY_ROUTE = '/api/chat-flow/browser-activity'
+
+/**
+ * 尾迹窗口：最后一次浏览器工具调用结束后，图标继续亮 4000ms。
+ *
+ * 为什么需要：playwright 的一次网页操作几乎从不只调一个工具 —— 典型序列是
+ * `browser_navigate` → `browser_snapshot` → `browser_click` → `browser_type`，
+ * 每个工具调用各自有开始/结束。严格按「有调用才亮」渲染，图标会在一串调用之间
+ * 闪成频闪灯；一段尾迹窗口把一串相邻调用缝成一段连续的「正在操作浏览器」。
+ *
+ * 2026-10-29 从 1500 提到 4000：**尾迹必须比客户端轮询周期长**，否则「活动结束
+ * 后才轮到的那次轮询」照样读到空回包。ego 走 `pwsh` 调 CLI，一次调用 2–5 秒，
+ * 结束后 1.5s 尾迹太窄，客户端慢轮询（现 1500ms，原 5000ms）很容易整段错过 ——
+ * 表现就是用户说的「用 EGO 的时候操作间不显示浏览器标识」。
+ *
+ * 代价可控：4000ms 只在「刚刚操作完浏览器」时多亮 2.5 秒，语义仍是「这个会话
+ * 刚才/正在操作浏览器」，不会变成常驻图标（会话本轮结束仍会因 running 转 false
+ * 而由卡头的粘滞判据收回）。
+ */
+export const BROWSER_ACTIVITY_LINGER_MS = 4000
+
+/** 一次调用在状态机里的明细。 */
+export interface BrowserActivityCall {
+  /** 工具名 `mcp__<service>__<tool>` 里的第二段（如 `playwright-mcp`）。 */
+  service: string
+  /** 第三段起的部分（如 `browser_click`）。 */
+  tool: string
+  /** 这次调用开始的时间戳（ms）。 */
+  since: number
+  /**
+   * 这次调用已经转成**后台 job** 时，那个 job 的 id（否则 undefined）。
+   *
+   * 只在本模块内部使用，**不上路由契约**。存在的理由：`pwsh` 跑浏览器 CLI 时，
+   * 前台调用超时会把它转成后台 job 并立刻返回（`kind: 'promoted'`），显式
+   * `run_in_background` 更是如此（`kind: 'background'`）—— 此时 `tools/execute`
+   * 已经结束，但浏览器进程还在跑。不记 jobId 就会「操作没结束、图标先没了」。
+   */
+  jobId?: string
+}
+
+/** 路由里一条会话条目（客户端逐字段消费）。 */
+export interface BrowserActivitySession {
+  sessionId: string
+  /** 此刻仍在进行的浏览器工具调用数（去重后）。 */
+  active: number
+  service: string
+  tool: string
+  /** 最早一次仍在进行（尾迹期则是最后一次）调用的开始时间。 */
+  since: number
+  /** 最近一次调用的开始时间。 */
+  lastAt: number
+  /** true = 调用已全部结束，只是还在 1500ms 尾迹窗口内。 */
+  lingering: boolean
+}
+
+/** 一次快照（`now` 与 sessions 同一时钟，便于客户端算相对时间）。 */
+export interface BrowserActivitySnapshot {
+  now: number
+  sessions: BrowserActivitySession[]
+}
+
+/**
+ * 一条接缝诊断摘要（只在 `?debug=1` 时返回）。
+ *
+ * 刻意只留「接缝是否对得上」需要的那几个事实：工具名、有没有 callId、会话是从
+ * 哪条路径认出来的、认出来的值。**绝不包含 `exec.arguments` 的原文** —— 浏览器
+ * 工具的参数里就是页面内容、输入框文本，甚至登录用的账号密码。
+ *
+ * 为什么需要它：本功能最大的失败模式是「真实运行时 exec 上取不到 sessionId」，
+ * 那样图标永远不亮、且没有任何异常可抓，只有这份摘要能直接指认是哪条路径断了。
+ */
+export interface BrowserActivityDebugEntry {
+  /** 观测时刻（ms）。 */
+  at: number
+  /** 工具名（形如 `mcp__playwright-mcp__browser_click`）。 */
+  name: string
+  /** 这次执行有没有 `callId`（没有的话去重会退化成进程内合成键）。 */
+  hasCallId: boolean
+  /** 会话是从哪条路径认出来的。 */
+  resolvedVia: 'agent.session.id' | 'agent.id' | 'arguments.sessionId' | 'none'
+  /** 认出来的会话 id（`none` 时是空串）。 */
+  sessionIdResolved: string
+}
+
+/** 诊断缓冲上限：够看清最近几次调用是怎么被认出来的，又不至于攒成内存负担。 */
+export const BROWSER_ACTIVITY_DEBUG_LIMIT = 20
+
+/** 配置面（cordis.patch.yml 的 browserActivity 段）。 */
+export interface BrowserActivityConfig {
+  /** 总开关，默认 true。 */
+  enabled?: boolean
+  /** 覆盖尾迹窗口（测试用；生产用 BROWSER_ACTIVITY_LINGER_MS）。 */
+  lingerMs?: number
+  /** 覆盖时钟（测试用假时钟，避免真等 1.5s）。 */
+  now?: () => number
+  /** 覆盖诊断缓冲上限（测试用；生产用 BROWSER_ACTIVITY_DEBUG_LIMIT=20）。 */
+  debugLimit?: number
+}
+
+/** 日志面（与 cordis logger 同形，全部可选）。 */
+export interface BrowserActivityLogger {
+  info?: (message: string) => void
+  warn?: (message: string) => void
+  debug?: (message: string) => void
+}
+
+/** webServer 服务面（与 tools-gate / mail 模块同形）。 */
+export interface BrowserActivityWebServer {
+  register(route: {
+    kind: 'exact' | 'prefix'
+    path: string
+    handler: (req: never, res: never) => void
+  }): () => void
+}
+
+/**
+ * host 上 ctx.jobs 的最小面（只读观测用）。
+ *
+ * 刻意不引 @deepseek-ai/dsh-jobs 的类型：host 产物对 @deepseek-ai/* 零运行时依赖
+ * （build.mjs 的 assertHostExternals 会拦），类型垫片一旦与真实服务面漂移，反而会
+ * 掩盖「服务缺失」这个真正需要运行时防御的失败模式（与 BrowserActivityHostContext
+ * 同一条理由）。
+ */
+export interface BrowserActivityJobs {
+  /** 生命周期事件流（只关心 settled / removed）。 */
+  events?: {
+    subscribe(
+      filter: { owners: 'all' },
+      listener: (event: unknown) => void,
+    ): () => void
+  }
+  /** 查单个 job 的投影（转后台且已结束时的补救路径；可能因 owner 不匹配而抛）。 */
+  get?(id: string, caller?: string): { status?: unknown } | undefined
+}
+
+/**
+ * 后台 job 的最长观察时长：到点仍未收到 settled 就当它没了。
+ *
+ * 为什么需要上限：settled 事件丢失（宿主热重载、事件订阅晚于结算、registrar 被替换）
+ * 会让条目永久挂在表里 —— 那正是本模块最不能接受的失败姿态（图标永不灭、且用户
+ * 无从解释）。6 小时是「一次人类浏览器操作不可能更长」的粗上限，只用来兜底，
+ * 正常路径由 settled 事件即时收尾。
+ */
+export const BROWSER_ACTIVITY_JOB_WATCH_MAX_MS = 6 * 60 * 60 * 1000
+
+/**
+ * 本模块用到的 ctx 面。刻意不引 `@deepseek-ai/cordis` 类型：
+ * host 产物必须对 `@deepseek-ai/*` 零运行时依赖（见 build.mjs 的
+ * assertHostExternals），连 `import type` 也不掺 —— 类型垫片一旦与真实服务面
+ * 漂移，反而会掩盖「服务缺失」这个真正需要运行时防御的失败模式。
+ */
+export interface BrowserActivityHostContext {
+  logger?: BrowserActivityLogger
+  /** 无 inject 要求的服务读取；本模块不需要，但保留成可选以兼容宿主 ctx 形状。 */
+  get?(name: string): unknown
+  effect?(fn: () => void | (() => void), label?: string): void
+  /** 延迟注入：webServer 未就绪时回调不执行，天然静默降级。 */
+  inject(names: string[], callback: (ctx: never) => void): void
+  on?(event: string, listener: (payload: unknown, next: () => Promise<unknown>) => unknown): void
+}

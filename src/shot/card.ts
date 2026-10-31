@@ -1,0 +1,697 @@
+/**
+ * webui — 截图卡片 HTML 组装（host 端）。
+ *
+ * 输入一条或多条消息（user / assistant），输出可直接喂给无头浏览器的完整
+ * HTML 文档：顶部导轨 + 徽标页头 + 标题 + 正文（assistant 走 Markdown 管线、
+ * user 走纯文本）+ 页脚署名。多条消息按段落堆叠，段间有角色标签与细线。
+ *
+ * 正文里的 mermaid 围栏会真的画成图：命中图表围栏时在文档末尾追加
+ * `<script src="mermaid.min.js">` + 引导脚本（引擎文件由 renderer.ts 投放到同
+ * 目录），并把「渲染完成」暴露成 window.__shotMermaid 供渲染器等待。
+ */
+import { escapeHtml, fenceKey, hasDiagramFence, renderMarkdown } from './markdown.ts'
+import { escapeAttr } from '../shared/sanitize-html.ts'
+import { buildCardCss, mermaidConfigJson, baseOf, type ShotTheme } from './theme.ts'
+import { deriveTitle } from '../shared/title.ts'
+import { assembleHtmlDocument, MIN_FRAME_HEIGHT } from '../client/html-embed/bridge.ts'
+import { splitHtml } from '../client/html-embed/parse.ts'
+import { splitIu } from '../client/iu/parse.ts'
+import { iuKindOf } from '../client/iu/kinds/registry.ts'
+import { IU_CSS } from '../client/iu/styles.ts'
+export { deriveTitle } from '../shared/title.ts'
+
+/** 单条待渲染消息。 */
+export interface ShotMessage {
+  role: 'user' | 'assistant'
+  text: string
+}
+
+/** 一条内嵌的本地 HTML 预览（host 侧已探测过高度）。 */
+export interface ShotEmbed {
+  /** 消息里出现的原文（用来定位 <code>…</code> 落点）。 */
+  readonly raw: string
+  /** 解析后的绝对路径。 */
+  readonly abs: string
+  /** iframe 的 file:// 地址（卡片页本身也是 file://，相对资源能解析）。 */
+  readonly fileUrl: string
+  /** iframe 高度（CSS px，按卡片内容宽排版量出来的）。 */
+  readonly height: number
+  /**
+   * 这个高度是否可信（见 renderer 的 `ProbedHeight`）。
+   *
+   * false 时页面很可能被裁掉一截，而 iframe 带 `scrolling="no"`、内部
+   * `overflow:hidden` —— 被裁的部分既不可见也不可滚动。所以必须在图注里
+   * 如实标注，不能假装量准了。
+   */
+  readonly trusted?: boolean
+  /**
+   * 该页面的真实高度是否**超过**了 SHOT_FRAME_MAX_HEIGHT 而被截断。
+   *
+   * 与 `trusted=false` 是两回事：trusted 是「量得准不准」，clipped 是「量准了
+   * 但框装不下」。两种都要在图注里说明——iframe 不可滚动，用户在图里看不到
+   * 被裁的部分，不说他会以为那就是页面的全部。
+   */
+  readonly clipped?: boolean
+}
+
+/**
+ * 一条正文里的 ```html 围栏（与对话流同一份内容，截图里同样要「跑起来」）。
+ */
+export interface ShotHtmlFence {
+  /** 围栏正文（模型原始 HTML）。 */
+  readonly html: string
+  /** 标题（<title>/<h1> 提取，失败给兜底名），用于 figure 的 aria-label。 */
+  readonly title: string
+  /**
+   * 定位键：`fenceKey(围栏正文)` 算出的内容哈希（由 markdown.ts 写进
+   * `data-fence-k`）。用它精确匹配落点，不依赖「第几个标记」这种会被回退围栏
+   * 与两侧解析差异带偏的推断。
+   */
+  readonly key: string
+  /**
+   * 全局唯一的帧 id（跨消息、跨围栏递增）。
+   *
+   * 与 `key` 分开是必须的：`key` 是内容哈希，两段**内容相同**的围栏会得到同一个
+   * 值；而 fid 是截图页配对高度桥上报的键（figure 的 data-fid ↔ 桥上报的 id），
+   * 重复会让两条围栏抢同一个高度。
+   */
+  readonly fid: string
+}
+
+/** 卡片组装参数。 */
+export interface ShotCardInput {
+  messages: readonly ShotMessage[]
+  theme: ShotTheme
+  /** 卡片宽度（CSS px）。 */
+  width: number
+  /** 卡片最小高度（CSS px），短消息保底版面。 */
+  minHeight: number
+  /** 卡片大标题；一般传会话标题，留空时从首条消息正文推导。 */
+  title?: string
+  /** 页头徽章文案（如「这一轮问答」），留空按消息数与角色生成。 */
+  label?: string
+  /** 正文提到的本地 HTML：以 iframe 内嵌进截图（只要页面本身，不带对话里那圈工具条）。 */
+  embeds?: readonly ShotEmbed[]
+  /**
+   * 内容缩放档位（缺省 1）。
+   *
+   * ⚠ 对话流里 iu 卡片的缩放按钮已按用户要求整块移除（2026-10-22），客户端
+   * 不再传这个字段。保留它是为了截图路由仍接受外部调用方显式指定倍率；
+   * 不传就是 1，与对话流「所见即所得」。
+   */
+  zoom?: number
+  /**
+   * 因条数上限被丢弃的消息数（缺省 0）。
+   *
+   * 存在的唯一理由是**不静默**：截图范围选「整段会话」而会话超过上限时，
+   * 超出部分不会进图。页脚必须如实说明，否则用户看到一个自洽的「60 条消息」
+   * 统计，无从知道原本有 100 条。
+   */
+  omitted?: number
+  /**
+   * 正文提到但**没能内嵌**的本地 HTML 张数（缺省 0）。
+   *
+   * 与 `omitted` 分开计数：一个是「消息被截断」，一个是「产物预览没画进来」，
+   * 用户要采取的行动不同（换范围 / 检查路径或体积），合并成一个数字等于什么都没说。
+   */
+  omittedEmbeds?: number
+}
+
+/** 单条消息文本上限，超出截断（避免超长图与内存尖峰）。 */
+const MAX_TEXT_LEN = 80000
+
+/**
+ * 截图里内嵌 iframe 的高度上限（CSS px）。
+ *
+ * 与对话流的 `MAX_FRAME_HEIGHT`（4000）分开取值，因为两者的载体根本不同：
+ *  - 对话流是**视口内的滚动容器**，iframe 太高会把消息流撑得没法读，4000 是
+ *    给阅读体验设的闸；
+ *  - 截图是**长图**，本来就靠「往下长」承载整段内容，管线自己也允许到
+ *    14000px（renderer.ts 的 maxCssHeight）。这里卡在 2400（历史值）意味着
+ *    一张 3000px 的卡片图会被腰斩，而截图这个载体完全没有「太长」的问题——
+ *    截出来的图本来就是给长图场景看的。
+ *
+ * 取值 6000：给绝大多数单页图表留足空间（实测常见可视化在 1500~3500），
+ * 同时远小于管线自身的 14000 上限，不至于让一张内嵌页把整张截图顶到合成
+ * 表面临界（renderer.ts 会按需分段，但段数越多越慢）。
+ *
+ * 导出给 renderer.ts 的 `probePageHeight` 共用：本地 HTML 文件内嵌走的是另一条
+ * 路径（先单独导航量高），上限必须同源，否则同一张长页走文件内嵌与走围栏内嵌
+ * 会得到两种结果。
+ */
+export const SHOT_FRAME_MAX_HEIGHT = 6000
+
+/**
+ * 内嵌 iframe 判定「高度已稳定」所需的静默窗口（ms）。
+ *
+ * 含义：最后一次高度变化之后，连续这么久没有新上报，才认为长完了。
+ * 桥的 tick 间隔是 250ms，窗口取它的两倍以上才能把「连续几次 tick 都没变」与
+ * 「还没测到」区分开；同时远小于 renderer 的 FENCE_WAIT_MS（6000），不会把每次
+ * 截图都拖慢。实测：900ms 后追加内容的页面，700ms 窗口能在总等待 1600ms 左右
+ * 拿到最终高度；若只等「收到过上报」（旧逻辑）则会拿首帧的偏矮值把内容裁掉。
+ *
+ * 导出供 renderer 的等待上限校验共用（等待上限必须大于静默窗口，否则永远判不出稳定）。
+ */
+export const SETTLE_QUIET_MS = 700
+
+// ── DeepSeek 鲸鱼 logo（官方 FishLogo 的 path）─────────────────────────────
+
+const FISH_LOGO_PATH =
+  'M22.9168 1.43018C22.6713 1.31018 22.5658 1.53918 22.4223 1.65519C22.3733 1.69269 22.3318 1.74169 22.2903 1.78669C21.9317 2.1697 21.5127 2.42121 20.9657 2.39121C20.1657 2.34621 19.4827 2.59771 18.8787 3.20973C18.7502 2.45521 18.3236 2.0047 17.6746 1.71569C17.3351 1.56568 16.9916 1.41518 16.7536 1.08867C16.5876 0.856163 16.5421 0.597155 16.4591 0.341647C16.4061 0.187643 16.3536 0.0301382 16.1761 0.00363739C15.9836 -0.0263635 15.9081 0.135141 15.8326 0.270145C15.5306 0.822162 15.4136 1.43018 15.4251 2.0462C15.4516 3.43174 16.0366 4.53527 17.1991 5.3203C17.3311 5.4103 17.3651 5.5003 17.3236 5.63181C17.2441 5.90231 17.1501 6.16482 17.0671 6.43533C17.0141 6.60784 16.9351 6.64584 16.7501 6.57033C16.1121 6.30383 15.5611 5.90931 15.074 5.4328C14.2475 4.63328 13.5 3.75075 12.568 3.05973C12.349 2.89822 12.13 2.74822 11.9034 2.60522C10.9524 1.68169 12.028 0.923165 12.277 0.833162C12.5375 0.739159 12.3675 0.41615 11.5259 0.42015C10.6844 0.42365 9.91439 0.705658 8.93286 1.08117C8.78935 1.13767 8.63835 1.17867 8.48384 1.21267C7.59332 1.04367 6.66829 1.00617 5.70226 1.11517C3.88321 1.31768 2.43016 2.1777 1.36213 3.64575C0.0790928 5.4103 -0.222916 7.41536 0.146595 9.50642C0.535106 11.7105 1.66014 13.535 3.38869 14.9616C5.18125 16.4406 7.24581 17.1657 9.60138 17.0266C11.0319 16.9441 12.6245 16.7526 14.421 15.2321C14.874 15.4576 15.3496 15.5476 16.1381 15.6151C16.7456 15.6' +
+  '716 17.3306 15.5851 17.7836 15.4911C18.4931 15.3411 18.4441 14.6841 18.1876 14.5636C16.1081 13.595 16.5646 13.9891 16.1496 13.67C17.2061 12.42 18.8202 10.1979 19.3182 7.17235C19.3672 6.83834 19.4297 6.36783 19.4222 6.09732C19.4182 5.93231 19.4562 5.86831 19.6447 5.84931C20.1657 5.78931 20.6712 5.64681 21.1357 5.3913C22.4833 4.65528 23.0268 3.44624 23.1548 1.9972C23.1738 1.77569 23.1508 1.54668 22.9168 1.43018ZM11.1749 14.4736C9.15936 12.889 8.18184 12.3675 7.77832 12.39C7.40081 12.4125 7.46881 12.8445 7.55182 13.126C7.63882 13.404 7.75182 13.5955 7.91033 13.8396C8.01983 14.0011 8.09533 14.2411 7.80083 14.4216C7.15181 14.8231 6.02327 14.2866 5.97027 14.2601C4.65673 13.4865 3.5587 12.4655 2.78467 11.069C2.03715 9.72493 1.60314 8.28289 1.53164 6.74384C1.51264 6.37233 1.62214 6.24082 1.99215 6.17332C2.47916 6.08332 2.98118 6.06432 3.46769 6.13582C5.52476 6.43633 7.27581 7.35586 8.74385 8.8129C9.58188 9.64243 10.2159 10.634 10.8689 11.6025C11.5634 12.631 12.3105 13.611 13.262 14.4146C13.598 14.6961 13.866 14.9101 14.1225 15.0681C13.349 15.1546 12.058 15.1731 11.1749 14.4746L11.1749 14.4736ZM12.141 8.25988C12.141 8.09488 12.273 7.96338 12.439 7.96338C12.4765 7.96338 12.5105 7.97088 12.541 7.98188C12.5825 7.99688 12.6205 8.01938 12.6505 8.05338C12.7035 8.10588 12.7335 8.18088 12.7335 8.25988C12.7335 8.42489 12.6015 8.55639 12.4355 8.55639C12.2695 8.55639 12.141 8.42489 12.141 8.25988Z' +
+  'M15.1415 9.79893C14.949 9.87793 14.7565 9.94544 14.5715 9.95294C14.2845 9.96794 13.9715 9.85143 13.8015 9.70893C13.5375 9.48742 13.3485 9.36342 13.2695 8.97691C13.2355 8.8119 13.2545 8.55639 13.2845 8.40989C13.3525 8.09438 13.277 7.89187 13.0545 7.70787C12.8735 7.55786 12.643 7.51636 12.39 7.51636C12.2955 7.51636 12.209 7.47486 12.1445 7.44136C12.039 7.38886 11.9519 7.25735 12.035 7.09585C12.0615 7.04335 12.19 6.91584 12.22 6.89334C12.5635 6.69784 12.9595 6.76184 13.326 6.90834C13.6655 7.04735 13.9225 7.30236 14.292 7.66287C14.6695 8.09838 14.7375 8.21838 14.9525 8.54539C15.1225 8.8009 15.277 9.06341 15.3831 9.36392C15.4471 9.55142 15.3641 9.70493 15.1415 9.79893Z'
+
+/** 内联鲸鱼 SVG（品牌徽标 + 页脚署名共用）。 */
+function whale(width: number, height: number): string {
+  return `<svg width="${width}" height="${height}" viewBox="0 0 23.16 17.04" fill="none" aria-hidden="true"><path d="${FISH_LOGO_PATH}" fill="currentColor"/></svg>`
+}
+
+
+
+/** 时间戳（本地时区，分钟精度）。 */
+function stampNow(): string {
+  const now = new Date()
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`
+}
+
+/** 超长正文截断（保留提示尾注）。 */
+function clamp(text: string): string {
+  return text.length <= MAX_TEXT_LEN ? text : `${text.slice(0, MAX_TEXT_LEN)}\n\n…（内容过长已截断）`
+}
+
+/**
+ * mermaid 引擎文件名（renderer.ts 把解压后的引擎投放到临时页面同目录，
+ * 页面用相对路径加载 —— file:// 页面无网络，必须同目录）。
+ */
+export const MERMAID_FILE = 'mermaid.min.js'
+
+/**
+ * 页面里「图表是否已渲染完」的全局钩子名。renderer.ts 用它决定要不要等图，
+ * 也用它判断本次渲染需不需要投放引擎文件。
+ */
+export const MERMAID_HOOK = '__shotMermaid'
+
+/**
+ * 图表引导脚本：加载引擎 → 逐个围栏渲染 → 失败的围栏回退成源码文本。
+ *
+ * 逐个 run 而非一次性 run 全部：mermaid 的 runThrowsErrors 在循环末尾抛出第一个
+ * 错误，但已 setAttribute('data-processed') 的节点不会重试 —— 一个语法错误会让
+ * 后面的好图一起变成裸源码。逐个跑则互不影响。
+ */
+function mermaidBoot(theme: ShotTheme): string {
+  return `<script src="${MERMAID_FILE}"></script>
+<script>
+window.${MERMAID_HOOK} = (async () => {
+  var nodes = Array.prototype.slice.call(document.querySelectorAll('pre.mermaid'));
+  if (nodes.length === 0) return 'empty';
+  if (!window.mermaid || typeof window.mermaid.run !== 'function') return 'engine-missing';
+  try { window.mermaid.initialize(${mermaidConfigJson(theme)}); } catch (error) { return 'init-failed'; }
+  for (var i = 0; i < nodes.length; i += 1) {
+    var node = nodes[i];
+    // mermaidAPI.render 会先清空容器再解析（r.innerHTML=""），语法错误抛出时
+    // 源码已经没了 —— 必须先存原文，失败时还原成源码块，绝不吞内容。
+    var source = node.textContent;
+    try { await window.mermaid.run({ nodes: [node], suppressErrors: true }); } catch (error) { /* 单张失败不影响其它 */ }
+    if (node.querySelector('svg') === null) {
+      node.removeAttribute('data-processed');
+      node.textContent = source;
+    }
+  }
+  return 'done';
+})();
+</script>`
+}
+
+/** 渲染单条消息的正文 HTML（assistant 走 Markdown，user 保留换行的纯文本）。 */
+async function bodyOf(message: ShotMessage, theme: ShotTheme): Promise<string> {
+  const source = clamp(message.text)
+  if (message.role === 'user') {
+    return `<div class="content plain">${escapeHtml(source)}</div>`
+  }
+  return `<div class="content">${await renderMarkdown(source, theme)}</div>`
+}
+
+/** 卡片组装结果。 */
+export interface ShotCardOutput {
+  /** 可直接写入临时 file:// 页面的完整 HTML。 */
+  html: string
+  /** 正文含图表围栏：渲染器需要投放 mermaid 引擎并等待图画完。 */
+  needsMermaid: boolean
+  /** 正文含 ```html 围栏内嵌：渲染器需要等高度桥上报稳定后再量总高。 */
+  hasFenceEmbed: boolean
+}
+
+/**
+ * 一张内嵌预览的 figure（页面 + 底部一行文件名，不放对话里那套工具条）。
+ *
+ * `src` 与 `title` 一律走 escapeAttr（转义引号/反引号），**不能**用只转义
+ * `& < >` 的 escapeHtml：本地 HTML 的路径与文件名都来自模型正文，POSIX 允许
+ * 文件名里带 `"`，一个裸引号就会闭合属性、把事件处理器注入进 <iframe> 标签。
+ * 而这张卡片页是用带 --disable-web-security --allow-file-access-from-files 的
+ * 无头 Chrome 打开的，注入的处理器有读本地文件的能力。
+ */
+function figureOf(embed: ShotEmbed): string {
+  const name = embed.abs.split(/[\\/]+/).pop() ?? embed.abs
+  const title = escapeAttr(name)
+  // 高度不可信 / 被上限截断时在图注里说明：iframe 带 scrolling="no"、内部
+  // overflow:hidden，被裁的部分用户在图里看不到，不说的话他会以为那就是全部。
+  const clipped = embed.clipped === true ? ` · 页面超过 ${SHOT_FRAME_MAX_HEIGHT}px 上限，底部未显示` : ''
+  const caveat = embed.trusted === false ? ' · 高度未能量准，可能显示不全' : ''
+  return `<figure class="htmlshot"><iframe src="${escapeAttr(embed.fileUrl)}" title="${title}" scrolling="no" loading="eager" style="height:${embed.height}px"></iframe><figcaption>${escapeHtml(name)} · 本地 HTML${caveat}${clipped}</figcaption></figure>`
+}
+
+/** 块级收尾标签（内嵌预览要插到它后面，而不是把句子劈开）。 */
+const BLOCK_END = /<\/(?:p|li|h[1-4]|blockquote|td|th|dd|dt)>/
+
+/**
+ * 一条 ```html 围栏的 figure（与对话流同款的沙箱文档，srcdoc 内联）。
+ *
+ * 与本地 HTML 内嵌（figureOf）的区别：内容不是文件而是模型正文，走
+ * assembleHtmlDocument 包成带高度桥的完整文档后 srcdoc 内联——截图页与
+ * iframe 同为 file:// 且引擎带 --allow-file-access-from-files，srcdoc 的
+ * about:srcdoc 能正常加载并回传高度。
+ *
+ * **截图定格**（settleAnimations=true）是必须的：截图管线只等字体与图片，不等
+ * 动画。卡片正文里的入场动画（`opacity:0` + `animation-delay`）在抓帧时往往还没
+ * 播完，元素停在起始帧 → 截图缺内容且无任何报错。实测一张五段入场动画的卡片只
+ * 出现第一段。定格样式让动画立刻跑完、停在终态（详见 bridge.ts 的 SETTLE_STYLE）。
+ *
+ * 安全：srcdoc 属性值走 escapeAttr（引号/反引号全转义）——模型正文里的 `"`
+ * 若裸着会闭合属性，而这张卡片页是在带 --disable-web-security 的无头 Chrome
+ * 里打开的，注入的事件处理器有读本地文件的能力。
+ */
+function fenceFigureOf(fence: ShotHtmlFence): string {
+  const fid = fence.fid
+  const doc = assembleHtmlDocument(fence.html, fid, { settleAnimations: true })
+  const title = escapeAttr(fence.title)
+  return `<figure class="htmlfence" data-fid="${fid}"><iframe srcdoc="${escapeAttr(doc)}" title="${title}" scrolling="no" loading="eager" sandbox="allow-scripts allow-popups allow-forms allow-modals allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" style="height:320px"></iframe></figure>`
+}
+
+/**
+ * iu 卡片在截图页里的 CSS：宿主变量映射 + 复用 IU_CSS 原文。
+ *
+ * 两个要点：
+ *  1. **映射 `--dsw-alias-*` 到截图卡片的调色板变量**。IU_CSS 是给宿主写的，
+ *     用的是 DSH 的 alias 变量；截图页是另一套 `--card / --border / --accent`，
+ *     不映射的话所有 `var()` 都落到兜底值（中性灰），暗色主题下尤其难看。
+ *  2. **复用同一份 IU_CSS 原文**（从 client 半身 import），不重抄。抄一份就
+ *     等于给自己留了一个「改了组件样式、截图没跟上」的漂移口子。
+ */
+function iuCssFor(theme: ShotTheme, zoom = 1): string {
+  const dark = baseOf(theme) === 'dark'
+  /*
+   * 令牌映射必须和 client 端**实际用到的**保持一致：基座改成「面 = bg-base、
+   * 抬升 = elevation-stroke、文字 = label-*、圆角 = radius-lg」之后，这几个
+   * 映射一个都不能漏 —— 漏一个，var() 就落到兜底值，截图里的卡片会变成
+   * 无底色透明块、或者用错主题的灰（暗色下尤其明显）。
+   *
+   * 截图页拿不到宿主注入的 --dsw-*（独立 file:// 页面），所以在这里把宿主的
+   * token 语义映射到截图自己的调色板变量上。
+   */
+  const vars = [
+    // 卡片面：融合后与正文同色 → 映射到截图卡片的卡片底色。
+    '--dsw-alias-bg-base:var(--card)',
+    '--dsw-alias-bg-layer-1:var(--card)',
+    '--dsw-alias-bg-layer-2:var(--card2, rgba(127,127,127,.10))',
+    // 抬升笔画：.5px 描边直接取截图卡片的细边框色。
+    '--dsw-elevation-stroke:0 0 0 .5px var(--border2)',
+    '--dsw-alias-border-l1:var(--border2)',
+    '--dsw-alias-border-l2:var(--border2)',
+    '--dsw-alias-border-l2-darkmode-thin:var(--border2)',
+    '--dsw-alias-border-l3:var(--border2)',
+    // 文字层级：标题用次要色、副说明用三级色（与对话流里的降级口径一致）。
+    '--dsw-alias-label-secondary:var(--fg2)',
+    '--dsw-alias-label-tertiary:var(--fg3)',
+    '--dsw-alias-label-caption:var(--fg3)',
+    '--dsw-alias-interactive-bg-hover:var(--card2, rgba(127,127,127,.10))',
+    // 圆角轴：截图的卡片圆角比宿主小（24px 外卡），内部元素对齐到 12/8。
+    '--dsw-radius-lg:12px',
+    '--dsw-radius-sm:8px',
+    '--ds-transition-duration:0s',
+    '--ds-ease-in-out:cubic-bezier(.4,0,.2,1)',
+    '--dsw-alias-state-business-primary:var(--accent)',
+  ].join(';')
+  /*
+   * 缩放档位写在 .dtt-iu 上（基座的 --iu-text-scale 会乘上它）。
+   *
+   * 钳到 [0.5, 3] 是防御：这个值来自请求体，脏数据不该把截图撑成一屏一个字。
+   * 只对 iu 卡片生效 —— html 卡片在截图里是静态快照，模型自己写的页面尺寸
+   * 由它自己的 CSS 决定，我们不改它（改了反而与对话流不一致）。
+   *
+   * 缺省 1：对话流不再有缩放按钮，客户端也不传 zoom，截图与屏幕上是同一个字号。
+   */
+  const safeZoom = Number.isFinite(zoom) && zoom > 0 ? Math.min(3, Math.max(0.5, zoom)) : 1
+  const zoomRule = safeZoom === 1 ? '' : `\n.dtt-iu{--iu-zoom:${safeZoom}}`
+  /*
+   * 字号轴与字族：iu 基座的 --iu-text-scale 建立在 --dsh-content-font-size 上
+   * （见 client/iu/styles.ts 文件头）。截图页没有宿主注入的这两个变量，不补的话
+   * 整套字号轴求值失败——calc 里出现非法量纲，font-size 声明被静默丢弃，
+   * 文字全部退回继承值（表现为「截图里 iu 卡文字比对话流里小一截 / 撑爆节点框」）。
+   * 客户端默认字号 14px，与对话流基准一致。
+   */
+  const fontVars = '--dsh-content-font-size:14px;--dsh-content-font-delta:0px;'
+    + '--dsw-font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif'
+  // 截图是定格：关掉入场动效，避免「抓第一帧抓到半透明」。
+  return `.card{${vars};${fontVars}}\n${IU_CSS}${zoomRule}\n.dtt-iu{animation:none}`
+}
+
+/**
+ * 把 ```html 围栏的 figure 插进正文：shiki 把 html 围栏渲染成
+ * `<pre class="shiki …" data-fence-k="…">…</pre>`，整块替换成 figure——
+ * 与对话流一致，围栏就是卡片本身，不保留源码块。
+ *
+ * **按 `data-fence-k`（围栏正文的内容哈希）精确匹配，不按「第几个 language-html」找**。
+ * 后者在正文含被回退成代码块的围栏时必然错位：空内容 / 只有注释的
+ * 围栏走 splitHtml 的 md 分支，但 markdown 侧照样给它打 `language-html` 标记，
+ * 于是「第 0 个合法围栏」会命中「第 0 个 language-html 块」——也就是那个**非法**
+ * 围栏的位置。结果是卡片插错位置 + 合法位置残留一坨源码块。
+ * 序号由 markdown 渲染器按文档顺序写死（见 markdown.ts 的 fenceIndex），
+ * 与 splitHtml 切出的顺序天然一致，不受合法性判定影响。
+ *
+ * 找不到对应序号就放弃该条（宁可少一张图，不劈句子）。
+ */
+function injectFences(body: string, fences: readonly ShotHtmlFence[]): string {
+  if (fences.length === 0) return body
+  let out = body
+  for (const fence of fences) {
+    const at = findFencePre(out, 'language-html', fence.key)
+    if (at < 0) continue
+    const tagEnd = out.indexOf('>', at)
+    if (tagEnd < 0) continue
+    const preEnd = out.indexOf('</pre>', tagEnd)
+    if (preEnd < 0) continue
+    out = out.slice(0, at) + fenceFigureOf(fence) + out.slice(preEnd + '</pre>'.length)
+  }
+  return out
+}
+
+/**
+ * 按「语言标记 + 围栏内容哈希」定位一个 shiki 块的起点下标；找不到返回 -1。
+ *
+ * 定位键 `data-fence-k` 由 markdown.ts 用 `fenceKey(code)` 写入，注入侧对
+ * **同一段围栏正文**独立算出同一个值（见 fenceKey 的说明：内容哈希而非序号，
+ * 因为两侧的围栏识别规则不可能完全一致）。
+ *
+ * 同时仍校验语言标记：万一模型正文里恰好构造出同名属性（markdown 渲染的是模型
+ * 可控文本），双重校验能挡住误命中。属性匹配带引号边界，避免前缀误命中。
+ */
+function findFencePre(html: string, langClass: string, key: string): number {
+  const needle = `data-fence-k="${key}"`
+  let cursor = 0
+  for (;;) {
+    const hit = html.indexOf('<pre class="shiki', cursor)
+    if (hit < 0) return -1
+    const tagEnd = html.indexOf('>', hit)
+    if (tagEnd < 0) return -1
+    const tag = html.slice(hit, tagEnd)
+    if (tag.indexOf(langClass) >= 0 && tag.indexOf(needle) >= 0) return hit
+    cursor = tagEnd + 1
+  }
+}
+
+/**
+ * 截图页引导脚本：两件事。
+ *
+ *  1. 主题应答：内嵌围栏文档里的桥脚本就绪后会发 ready 要主题（与对话流同一
+ *     握手），这里按截图主题回推 dark/light——不回的话暗色截图里围栏画布永远
+ *     是白纸板。
+ *  2. 高度落地：等每个内嵌 iframe 的高度桥上报，把 figure 撑到真实高度。按桥
+ *     上报里的 fid 与 figure 的 data-fid 配对（**不**用 contentWindow 比对——
+ *     无头 Chrome 里 srcdoc iframe 的窗口引用比对实测不可靠，高度永远停在兜底）；
+ *     钳到 [MIN_FRAME_HEIGHT, SHOT_FRAME_MAX_HEIGHT] 后写行内高度；首帧 320px
+ *     兜底，量不到就保持兜底，绝不让整张截图失败。
+ *  3. 稳定标记：`data-settled` 表示「该 iframe 的高度已经不再变化」，供 renderer
+ *     判断可以量总高了。**必须是「静默 QUIET_MS 无新上报」而不是「收到过上报」**：
+ *     桥在 DOMContentLoaded 时就立刻量并上报一次，那时图片/字体往往还没落地、
+ *     报的是偏矮值；此后高度还会长（桥自己挂着 load / fonts.ready / 250ms tick）。
+ *     若一收到上报就放行，renderer 会拿这个偏矮值定格整图高度，而 iframe 带
+ *     `scrolling="no"`、内部 `html{overflow:hidden}` —— 晚到的那截内容既不可见
+ *     也不可滚动，等于被静默裁掉（实测：初始 300px、300ms 后追加 1200px 的卡片，
+ *     追加部分整块消失）。
+ *
+ *     静默窗口取 700ms：桥的 tick 间隔是 250ms，窗口大于它的两倍才能把「连续
+ *     几次 tick 都没再变」与「还没测到」区分开；同时又远小于 FENCE_WAIT_MS 的
+ *     6000ms 总上限，不会把每次截图都拖慢。
+ */
+function embedBoot(theme: ShotTheme): string {
+  const dark = baseOf(theme) === 'dark'
+  return `<script>
+(function () {
+  var DARK = ${dark ? 'true' : 'false'};
+  var MIN_H = ${MIN_FRAME_HEIGHT};
+  var MAX_H = ${SHOT_FRAME_MAX_HEIGHT};
+  var QUIET_MS = ${SETTLE_QUIET_MS};
+  var figures = Array.prototype.slice.call(document.querySelectorAll('figure.htmlfence'));
+  var last = {};
+  var quiet = {};
+  /**
+   * 重置静默计时器。收到新高度就先把 settled 摘掉：renderer 是轮询的，
+   * 摘掉之后它会继续等，而不是拿一个中途值就走。
+   */
+  function scheduleSettle(fid, frame) {
+    if (quiet[fid]) clearTimeout(quiet[fid]);
+    frame.removeAttribute('data-settled');
+    quiet[fid] = setTimeout(function () {
+      quiet[fid] = null;
+      frame.setAttribute('data-settled', '1');
+    }, QUIET_MS);
+  }
+  addEventListener('message', function (event) {
+    var data = event.data;
+    if (!data || typeof data !== 'object' || data.source !== 'dsh-html-card') return;
+    if (data.kind === 'ready') {
+      try { event.source.postMessage({ source: 'dsh-html-card-host', kind: 'theme', dark: DARK }, '*'); } catch (e) {}
+      return;
+    }
+    if (data.kind !== 'height') return;
+    var raw = data.height;
+    if (typeof raw !== 'number' || !isFinite(raw) || typeof data.id !== 'string') return;
+    var h = Math.max(MIN_H, Math.min(MAX_H, Math.round(raw)));
+    // 高度没变（桥的去重阈值是 2px）就不算「有新变化」，不必重置静默窗口——
+    // 否则桥每 250ms 一次的 tick 会让计时器永远重置，白等到超时。
+    if (last[data.id] === h) return;
+    last[data.id] = h;
+    for (var i = 0; i < figures.length; i += 1) {
+      if (figures[i].getAttribute('data-fid') === data.id) {
+        var frame = figures[i].querySelector('iframe');
+        if (frame) {
+          frame.style.height = h + 'px';
+          /*
+           * 内容真高超过上限 → 框装不下。iframe 带 scrolling="no"、内部
+           * html{overflow:hidden}，被裁的部分既不可见也不可滚动，所以必须
+           * 在卡片里说明，不能静默截断。标记写进 figure 的 data-clipped，
+           * 由下面的 CSS 生成角标（不动态建 DOM，保持这段脚本的极简）。
+           */
+          if (raw > MAX_H) figures[i].setAttribute('data-clipped', '1');
+          scheduleSettle(data.id, frame);
+        }
+        break;
+      }
+    }
+  });
+})();
+</script>`
+}
+
+/**
+ * 把内嵌预览插进正文：定位到那条行内代码（<code>路径</code>）后，插到它所在
+ * 块的收尾标签之后——句子保持完整，预览整块出现在段落下方。找不到收尾标签
+ * 就就地替换；正文里根本没有这条路径的（裸路径写在句子里等），统一挂到正文
+ * 末尾，图总比没有强。
+ */
+function injectEmbeds(body: string, embeds: readonly ShotEmbed[]): string {
+  if (embeds.length === 0) return body
+  let out = body
+  const rest: ShotEmbed[] = []
+  for (const embed of embeds) {
+    const needle = `<code>${escapeHtml(embed.raw)}</code>`
+    const at = out.indexOf(needle)
+    if (at < 0) {
+      rest.push(embed)
+      continue
+    }
+    const tail = out.slice(at + needle.length)
+    const close = BLOCK_END.exec(tail)
+    const insertAt = close !== null && close.index >= 0 && close.index < 4000
+      ? at + needle.length + close.index + close[0].length
+      : at
+    const inline = insertAt === at
+    // 就地替换时把行内代码本身拿掉（预览就是它的内容）；插到块后就保留原句不动。
+    out = out.slice(0, inline ? at : insertAt)
+      + figureOf(embed)
+      + out.slice(inline ? at + needle.length : insertAt)
+  }
+  return rest.length === 0 ? out : out + rest.map(figureOf).join('')
+}
+
+/**
+ * 一条 iu 围栏的静态快照（截图管线用）。
+ *
+ * 对话流里它是可交互的原生卡片；截图页没有 React 运行时，只能按当前值定格。
+ * **但 DOM 结构与 class 必须与 IuCard 逐字一致**——内联同一份 IU_CSS 后，
+ * 截图里长出来的就是真卡片的样子，而不是另画一套简化版（那样两处必然漂移：
+ * 截图里的柱子和对话流里的不一样高、配色不一样、清单少了勾选框）。
+ */
+export interface ShotIuFence {
+  readonly title: string
+  readonly body: string
+  /**
+   * 定位键：`fenceKey(围栏原文 JSON)` 算出的内容哈希。
+   *
+   * 与 `ShotHtmlFence.key` 同理——按内容匹配而非序号，因为 splitIu 与
+   * markdown-it 对围栏的识别规则不可能完全一致。
+   */
+  readonly key: string
+}
+
+/** 与 IuCard 的 Head 同构（class 对齐，才能吃到 IU_CSS）。 */
+function iuFigureOf(fence: ShotIuFence): string {
+  return `<figure class="dtt-iu"><div class="dtt-iu__head">`
+    + `<span class="dtt-iu__title">${escapeHtml(fence.title)}</span></div>`
+    + `<div>${fence.body}</div></figure>`
+}
+
+/**
+ * 把 iu 围栏替换成静态快照。定位同样按 `data-fence-k` 精确匹配（理由见
+ * `injectFences` 的说明：按「第几个 language-iu」找会被回退围栏带偏）。
+ *
+ * 找不到落点的围栏**追加到正文末尾**而不是丢弃：iu 卡片是纯文本快照，没有
+ * iframe 那种「位置错了会误导」的风险，而丢掉一张卡是实打实的内容缺失。
+ */
+function injectIu(body: string, fences: readonly ShotIuFence[]): string {
+  if (fences.length === 0) return body
+  let out = body
+  const rest: ShotIuFence[] = []
+  for (const fence of fences) {
+    const at = findFencePre(out, 'language-iu', fence.key)
+    if (at < 0) {
+      rest.push(fence)
+      continue
+    }
+    const tagEnd = out.indexOf('>', at)
+    const preEnd = out.indexOf('</pre>', tagEnd)
+    if (preEnd < 0) continue
+    out = out.slice(0, at) + iuFigureOf(fence) + out.slice(preEnd + '</pre>'.length)
+  }
+  return rest.length === 0 ? out : out + rest.map(iuFigureOf).join('')
+}
+
+/**
+ * 组装完整截图 HTML 文档。
+ * @param input - 消息、主题、尺寸与文案。
+ * @returns HTML 文本与「是否需要 mermaid 引擎」标记。
+ */
+export async function buildCardHtml(input: ShotCardInput): Promise<ShotCardOutput> {
+  const { messages, theme, width, minHeight } = input
+  const embeds = input.embeds ?? []
+  const first = messages[0]
+  if (first === undefined) throw new Error('没有可渲染的消息')
+  const title = (input.title ?? '').trim() !== ''
+    ? (input.title as string).trim()
+    : deriveTitle(first.text, first.role)
+  const multi = messages.length > 1
+  const chars = messages.reduce((sum, message) => sum + message.text.length, 0)
+  const chip = (input.label ?? '').trim() !== ''
+    ? (input.label as string).trim()
+    : multi ? `${messages.length} 条消息` : (first.role === 'user' ? '提问' : 'AI 回复')
+  const sections: string[] = []
+  let hasFenceEmbed = false
+  let hasIuFence = false
+  /** 围栏帧 id 的全局序号（跨消息递增，保证 fid 唯一）。 */
+  let fenceSeq = 0
+  for (const message of messages) {
+    let body = injectEmbeds(await bodyOf(message, theme), embeds)
+    // ```html / ```iu 围栏与对话流同源切分（streaming=false：未闭合/超长一律
+    // 回退代码块，与对话流定稿态语义一致）。只有 assistant 正文走 Markdown 管线，
+    // user 的围栏不会成 pre，切了也无处替换。
+    //
+    // key 由围栏正文算出（fenceKey），与 markdown 侧写进 data-fence-k 的值一致；
+    // 用它定位落点，不数序号——两侧的围栏识别规则不可能完全一致（markdown-it 认
+    // ` ```html title=x `、不认缩进围栏，splitHtml 的正则反之），数序号必然漂移。
+    const parts = message.role === 'assistant' ? splitHtml(clamp(message.text)) : []
+    const fences: ShotHtmlFence[] = []
+    for (const part of parts) {
+      if (part.kind !== 'html') continue
+      // pending 只出现在流式期；截图走定稿语义，pending 的一律不注入。
+      if (part.pending) continue
+      // fid 跨消息全局递增（fenceSeq 在外层循环之外），保证多消息下不重复。
+      const fid = `f${fenceSeq}`
+      fenceSeq += 1
+      fences.push({ html: part.spec.html, title: part.spec.title, key: fenceKey(part.spec.html), fid })
+    }
+    if (fences.length > 0) {
+      body = injectFences(body, fences)
+      hasFenceEmbed = true
+    }
+    // iu 快照：静态定格（无 JS、无交互），多张照单全收——A 的混排在截图里同样混排。
+    //
+    // 快照正文与角标**全部委派给 kind 注册表**（kinds/registry.ts）：每个 kind
+    // 自带 snapshot() 与 label，这里不再有手写的 kind 分支。历史上这段是 150 行
+    // 手写镜像（iuBodyOf），出过两次漂移事故：钢琴卡被标成「对比」（三元链兜底）、
+    // 琴键少两层容器变成阶梯（DOM 重排）。现在镜像逻辑就在 kind 模块自己身上，
+    // 与对话流共用同一份几何/布局函数，漏改会编译不过。
+    if (message.role === 'assistant') {
+      const iuFences: ShotIuFence[] = []
+      for (const part of splitIu(clamp(message.text), false)) {
+        // raw 是围栏原文，用 fenceKey(raw) 算定位键（与 markdown 侧写进
+        // data-fence-k 的值一致）；只认合法且非 pending 的。
+        if (part.kind !== 'iu' || part.pending !== false) continue
+        const mod = iuKindOf(part.spec.kind)
+        // 注册表查不到的 kind 理论上不存在（splitIu 只放行注册过的 kind），
+        // 防御性跳过：截图是定格降级，不认识的结构宁可不画也不崩整张卡。
+        if (mod === undefined) continue
+        iuFences.push({
+          title: part.spec.title !== '' ? part.spec.title : '交互卡片',
+          body: mod.snapshot(part.spec as never),
+          key: fenceKey(part.raw),
+        })
+      }
+      if (iuFences.length > 0) {
+        body = injectIu(body, iuFences)
+        hasIuFence = true
+      }
+    }
+    sections.push(multi
+      ? `<section class="seg"><div class="seg-role">${message.role === 'user' ? '我' : 'AI'}</div>${body}</section>`
+      : body)
+  }
+  const omitted = Math.max(0, Math.floor(input.omitted ?? 0))
+  const omittedEmbeds = Math.max(0, Math.floor(input.omittedEmbeds ?? 0))
+  // 两类截断分开说：只说「60 条消息」会让用户以为整段会话都在图里；
+  // 只说「N 张未内嵌」也不告诉他是超上限还是文件读不到。
+  const omittedNote = omitted > 0 ? ` · 另有 ${omitted} 条未包含（超出单次上限）` : ''
+  const embedNote = omittedEmbeds > 0 ? ` · ${omittedEmbeds} 张产物预览未内嵌` : ''
+  const note = `${multi ? `${messages.length} 条消息 · ` : ''}${chars.toLocaleString('zh-CN')} 字${omittedNote}${embedNote}`
+  // 只有 assistant 正文走 Markdown 管线，user 是纯文本（围栏不会成图）。
+  const needsMermaid = messages.some(m => m.role === 'assistant' && hasDiagramFence(clamp(m.text)))
+  // 多条消息时段与段之间加细线与角色标签（单条不需要额外分隔）。
+  const segCss = multi
+    ? `.seg{border-top:1px solid var(--border2)}
+.seg:first-child{border-top:none}
+.seg-role{padding:calc(var(--pad) * .5) var(--pad) 0;font-size:12px;font-weight:600;letter-spacing:.06em;color:var(--fg3)}
+.seg .content{padding-top:calc(var(--pad) * .3)}`
+    : ''
+  const html = `<!DOCTYPE html>
+<html lang="zh-CN" data-theme="${theme}"><head><meta charset="utf-8"><meta name="viewport" content="width=${width}">
+<style>${buildCardCss(theme, width, minHeight)}
+${segCss}
+${hasIuFence ? iuCssFor(theme, input.zoom) : ''}</style></head>
+<body><div class="card">
+<div class="rail"></div>
+<header class="head">
+  <span class="mark">${whale(20, 15)}</span>
+  <span class="brand">DeepSeek Harness</span>
+  <span class="chip">${escapeHtml(chip)}</span>
+  <span class="stamp">${stampNow()}</span>
+</header>
+<h1 class="title">${escapeHtml(title)}</h1>
+${sections.join('\n')}
+<footer class="foot">
+  <span class="whale">${whale(18, 13)}</span>
+  <span class="sign">DeepSeek Harness</span>
+  <span class="right">${note}</span>
+</footer>
+</div>${needsMermaid ? `\n${mermaidBoot(theme)}` : ''}${hasFenceEmbed ? `\n${embedBoot(theme)}` : ''}</body></html>`
+  return { html, needsMermaid, hasFenceEmbed }
+}

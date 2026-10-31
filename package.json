@@ -1,0 +1,120 @@
+{
+  "name": "dsh-seeker-bot",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness 的 Bot 控制台：把 Agent 升级成有名字、有记忆、有班次的 AI 团队。含对话增强全套能力（思考折叠、工具聚合、html/iu 卡片、截图、下载）、供应商中心、记忆/技能/用量/画廊/档案七个工作台，以及 Work/Bot 双模式 Bot 名册与本地工作区面板。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "bot",
+    "agent-team",
+    "skills",
+    "routines",
+    "memory",
+    "workbench",
+    "vault",
+    "provider",
+    "usage",
+    "chat-plus",
+    "seeker"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kr-ATG/dsh-seeker-bot.git"
+  },
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./packages/*": "./packages/*/index.js",
+    "./packages/*/locale/zh.json": "./packages/*/locale/zh.json",
+    "./packages/*/locale/en.json": "./packages/*/locale/en.json",
+    "./packages/*/icon.svg": "./packages/*/icon.svg",
+    "./packages/*/icon": "./packages/*/icon.svg",
+    "./locale/zh.json": "./locale/zh.json",
+    "./locale/en.json": "./locale/en.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "lib",
+    "assets",
+    "scripts",
+    "build.mjs",
+    "cordis.patch.yml",
+    "README.md",
+    "packages",
+    "locale",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-tool",
+        "@deepseek-ai/dsh-client-ui-locale",
+        "@deepseek-ai/dsh-client-ui-input-trigger",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-model-selection",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke": "node scripts/smoke-client.mjs && node scripts/smoke-host.mjs && node scripts/smoke-triad-client.mjs && node scripts/smoke-triad-host.mjs && node scripts/test-session-isolation.mjs && node scripts/test-browser-on-demand.mjs && node scripts/test-mail-two-phase.mjs && node scripts/test-mail-channel.mjs && node scripts/test-html-card-width.mjs && node scripts/test-mail-drawer.mjs && node scripts/test-settings-card.mjs && node scripts/test-running-apps.mjs && node scripts/test-at-guard.mjs && node scripts/test-turn-input-images.mjs && node scripts/test-prompt-optimize-clean.mjs && node scripts/test-vault.mjs && node scripts/test-vault-http.mjs && node scripts/test-system-prompt.mjs && node scripts/test-scrollbar-autohide.mjs && node scripts/test-usage-hours.mjs && node scripts/test-feature-switches.mjs && node scripts/test-published-reasoning.mjs && node scripts/test-echo-viewport.mjs",
+    "smoke:client": "node scripts/smoke-client.mjs",
+    "smoke:host": "node scripts/smoke-host.mjs",
+    "smoke:triad-client": "node scripts/smoke-triad-client.mjs",
+    "smoke:triad-host": "node scripts/smoke-triad-host.mjs",
+    "test": "node scripts/test-skill-manager.mjs && node scripts/test-skill-preview.mjs && node scripts/test-skill-toggles.mjs && node scripts/test-subagent-catalog.mjs",
+    "test:mail": "node scripts/test-mail-two-phase.mjs",
+    "test:mail-channel": "node scripts/test-mail-channel.mjs",
+    "test:skill-preview": "node scripts/test-skill-preview.mjs",
+    "test:subagents": "node scripts/test-subagent-catalog.mjs",
+    "test:session-isolation": "node scripts/test-session-isolation.mjs",
+    "test:browser-on-demand": "node scripts/test-browser-on-demand.mjs",
+    "test:browser-activity": "node scripts/test-browser-activity.mjs",
+    "test:browser-flag": "node scripts/test-browser-flag.mjs",
+    "test:echo-viewport": "node scripts/test-echo-viewport.mjs",
+    "test:html-card-width": "node scripts/test-html-card-width.mjs",
+    "test:running-apps": "node scripts/test-running-apps.mjs",
+    "test:at-guard": "node scripts/test-at-guard.mjs",
+    "test:turn-input-images": "node scripts/test-turn-input-images.mjs",
+    "test:prompt-optimize": "node scripts/test-prompt-optimize-clean.mjs",
+    "test:vault": "node scripts/test-vault.mjs",
+    "test:vault-http": "node scripts/test-vault-http.mjs",
+    "test:system-prompt": "node scripts/test-system-prompt.mjs",
+    "test:scrollbar-autohide": "node scripts/test-scrollbar-autohide.mjs",
+    "test:usage-hours": "node scripts/test-usage-hours.mjs",
+    "test:feature-switches": "node scripts/test-feature-switches.mjs",
+    "test:published-reasoning": "node scripts/test-published-reasoning.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "markdown-it": "^15.0.1",
+    "markdown-it-emoji": "^3.1.0",
+    "markdown-it-task-lists": "^2.1.1",
+    "shiki": "^4.4.3",
+    "yauzl": "^2.10.0"
+  },
+  "icon": "./icon.svg",
+  "author": "Kr-ATG"
+}

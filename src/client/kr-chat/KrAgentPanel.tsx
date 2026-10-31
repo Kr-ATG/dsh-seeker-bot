@@ -1,0 +1,1064 @@
+/**
+ * dsh-seeker-bot — KR 对话右侧 Agent 实时执行与轨迹大盘。
+ */
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import type { ChatNode } from '@deepseek-ai/dsh-client-ui-chat/client'
+import { activityStore } from '../tool-summary/activity-drawer.tsx'
+import { getCurrentChatSnapshot, latestChatSessionId, collectTurnNodes, collectLatestSessionTasks, subscribeLatestChatSnapshot } from '../tool-summary/TurnProcessShadowView.tsx'
+import { callDurationMs, callName, formatDuration, isRunning } from '../tool-summary/tool-stats.ts'
+import { rowSummary, classifyCategory, toolArgsRaw, argFields, resultParagraphs, rawResultJson, executionFacts } from '../tool-summary/activity-view-model.ts'
+import { useNow } from '../tool-summary/use-now.ts'
+import { getKrChatStore, PANEL_WIDTH_MAX, PANEL_WIDTH_MIN } from './kr-chat-store.ts'
+import { KrTaskOverviewCard, type DshTaskItem, type TaskSource } from './KrTaskOverviewCard.tsx'
+import { KrMemoryCard } from './KrMemoryCard.tsx'
+import { KrToolCallsCard, type ToolCallItemView } from './KrToolCallsCard.tsx'
+import { usePanelSqueezed } from './use-adaptive-rows.ts'
+import { buildPlainTimeline } from './plain-timeline.ts'
+import { collectWorkspaceHints, mergeWorkspaceHints } from '../echo-viewport/workspace-hint.ts'
+import { turnInputImageCount } from './turn-input-images.ts'
+import { spawnsSubagents } from './plain-language.ts'
+import { KrPlainTimelineCard } from './KrPlainTimelineCard.tsx'
+import { KrSubagentsCard } from './KrSubagentsCard.tsx'
+import { useSubagentCatalog } from './subagent-catalog.ts'
+import { KrOutputsCard } from './KrOutputsCard.tsx'
+import { collectOutputs, collectSessionToolNodes, EMPTY_OUTPUTS, mergeOutputs, outputsFingerprint, type OutputsView } from './outputs.ts'
+import { useSubagentOutputs } from './use-subagent-outputs.ts'
+import { useSessionOutputs } from './use-session-outputs.ts'
+import { KR_MEMORY_CARD_VISIBLE, KR_OUTPUTS_CARD_VISIBLE, KR_PLAIN_TIMELINE_CARD_VISIBLE, KR_SUBAGENTS_CARD_VISIBLE, KR_TOOL_CALLS_CARD_VISIBLE } from './enabled.ts'
+import { subscribeToolCallsVisible, toolCallsVisible } from '../tool-calls-visible.js'
+import { subscribePlainTimelineVisible, plainTimelineVisible } from '../plain-timeline-visible.js'
+import { KrPanelSettings } from './KrPanelSettings.tsx'
+import { installConversationScrollGuard } from './scroll-guard.ts'
+import { installConversationScrollbarAutoHide } from './scrollbar-autohide.ts'
+import { useOfficialWidthHandleFix } from './official-width-handles.ts'
+import { useFeature } from '../features/gate.tsx'
+
+/**
+ * 左侧对话流必须保留的最小宽度（px）。
+ *
+ * 官方 AppFrame 把中心栏钳到 CENTER_MIN=400（ui-layout/columns.ts），本面板正是
+ * 挂在中心栏里、且与对话流平分这 400px。留 380 给对话流，剩下 20px 的余量刚好
+ * 抵掉两侧滚动条 —— 再窄，正文一行放不下十几个字，双栏就失去意义了。
+ */
+const CHAT_FLOW_MIN_WIDTH = 380
+
+/**
+ * 工作空间线索的会话级缓存键。
+ *
+ * 为什么需要 sessionStorage：线索来自工具调用参数，而 DSH 快照只保留最后一页窗口
+ * 的内容。用户切到历史轮次或刷新页面后，当前轮可能已经看不到那条 taskSpace 调用，
+ * 但会话仍然关联着那个工作空间 —— 把线索按 sessionId 存下来，回显才能稳定。
+ */
+const WORKSPACE_HINTS_KEY = 'dsh.chat_plus.workspace_hints'
+
+function readStoredWorkspaceHints(sessionId: string | null): string[] {
+  if (typeof sessionId !== 'string' || sessionId === '') return []
+  try {
+    const raw = sessionStorage.getItem(WORKSPACE_HINTS_KEY)
+    if (raw === null) return []
+    const map = JSON.parse(raw) as Record<string, unknown>
+    const list = map[sessionId]
+    return Array.isArray(list) ? list.filter((item): item is string => typeof item === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function storeWorkspaceHints(sessionId: string | null, hints: readonly string[]): void {
+  if (typeof sessionId !== 'string' || sessionId === '' || hints.length === 0) return
+  try {
+    const raw = sessionStorage.getItem(WORKSPACE_HINTS_KEY)
+    const map = raw === null ? {} as Record<string, string[]> : (JSON.parse(raw) as Record<string, string[]>)
+    map[sessionId] = hints.slice(-8)
+    sessionStorage.setItem(WORKSPACE_HINTS_KEY, JSON.stringify(map))
+  } catch {
+    /* 隐私模式 / 存储满时忽略：回显拿不到线索最多是不显示 */
+  }
+}
+
+/**
+ * 一轮的数据视图。
+ *
+ * 显式声明成 readonly 形状，而不是直接用 collectTurnNodes 的返回类型推断：
+ * 下面的稳定化层要先把 actStore.get() 的返回值规整成同一形状，才能对两条
+ * 数据源用同一套指纹。
+ */
+interface TurnDataView {
+  readonly tools: readonly ChatNode<'tool-call'>[]
+  readonly reasoning: readonly { readonly text: string }[]
+  readonly tasks: readonly { readonly id: string; readonly content: string; readonly status: string }[]
+  readonly turnStart?: number | undefined
+  readonly turnEnd?: number | undefined
+  readonly durationMs?: number | undefined
+}
+
+/**
+ * 空轮次数据：**共享同一个冻结实例**，不是每次新建对象。
+ *
+ * 下面 turnData 的 memo 带指纹稳定化，靠引用比较复用上一次结果；每次返回新的
+ * 空对象会让指纹虽然相同、但下游拿到的引用每次都变，memo 链照样被击穿。
+ */
+const EMPTY_TURN_DATA: TurnDataView = Object.freeze({
+  tools: Object.freeze([]) as readonly ChatNode<'tool-call'>[],
+  reasoning: Object.freeze([]) as readonly { readonly text: string }[],
+  tasks: Object.freeze([]) as readonly { readonly id: string; readonly content: string; readonly status: string }[],
+})
+
+/**
+ * 内容指纹：判断「这一轮的数据真的变了没有」。
+ *
+ * 代价必须低到可以在每个 tick 上跑，所以只取**便宜且足够敏感**的几项：
+ * 工具节点的 key + 是否在跑 + 入参串长度；思考的每段长度序列；任务的 id/status。
+ * 代价是「内容变了但长度没变」这种改动会晚一拍被看见（最多到下一次 tick 触发
+ * 的其它变化），对流式场景完全够用——思考增长时长度必变。
+ */
+function fingerprintTurnData(data: TurnDataView): string {
+  const tools = data.tools.map(node => {
+    try {
+      const root = node.data.root
+      return `${node.key}:${isRunning(root) ? 1 : 0}:${toolArgsRaw(root).length}`
+    } catch {
+      return `${node.key}:x`
+    }
+  }).join('|')
+  const reasoning = data.reasoning.map(item => item.text.length).join(',')
+  const tasks = data.tasks.map(task => `${task.id}:${task.status}`).join(',')
+  return `${tools}#${reasoning}#${tasks}#${String(data.turnStart ?? 0)}#${String(data.turnEnd ?? 0)}#${String(data.durationMs ?? 0)}`
+}
+
+export interface KrAgentPanelProps {
+  readonly latestTurn: number
+  readonly isTurnRunning: boolean
+  /**
+   * 大盘已是 KR 对话的常驻右栏，**没有收起态**：原先的 onCollapse（收起大盘 ×）
+   * 与标签行那枚「Agent 轨迹大盘」开关是一对，一起按用户要求删掉了。
+   */
+}
+
+export const KrAgentPanel = memo(function KrAgentPanel({
+  latestTurn,
+  isTurnRunning,
+}: KrAgentPanelProps) {
+  const store = getKrChatStore()
+  const krState = useSyncExternalStore(
+    (cb) => store.subscribe(cb),
+    () => store.snapshot,
+  )
+
+  // 工具调用卡的运行时展示开关（localStorage 呈现偏好，与构建开关叠加）。
+  // 走 useSyncExternalStore：别的窗口拨动同一开关时本面板同步响应。
+  const toolCallsOn = useSyncExternalStore(subscribeToolCallsVisible, toolCallsVisible, toolCallsVisible)
+  // 操作面板卡的同款展示开关（同族：纯呈现偏好、localStorage、跨窗口同步）。
+  const plainTimelineOn = useSyncExternalStore(subscribePlainTimelineVisible, plainTimelineVisible, plainTimelineVisible)
+
+  /*
+   * 功能开关（live）——右栏各卡是否渲染。
+   *
+   * ⚠ 全部在组件顶层**无条件**调用，一个都不能挪进各自的 JSX 分支：
+   * 用户拨开关时组件原地重渲染，条件里的 hook 会让这棵树的 hook 调用顺序
+   * 整体位移，React 直接抛 "Rendered fewer hooks than expected"，整块右栏
+   * 消失。开关值只作为后面 JSX 的布尔条件使用。
+   *
+   * 与 KR_*_CARD_VISIBLE 那组构建期常量是**叠加**关系：常量保留为历史
+   * 隐藏开关（改回 false 重新构建仍可整块关闭），功能开关是给用户的运行时入口。
+   */
+  const panelLiveOn = useFeature('view.panel-live')
+  const panelSubagentsOn = useFeature('view.panel-subagents')
+  const panelTasksOn = useFeature('view.panel-tasks')
+  const panelOutputsOn = useFeature('view.panel-outputs')
+  const panelMemoryOn = useFeature('view.panel-memory')
+  const panelToolCallsOn = useFeature('view.panel-tool-calls')
+
+  // 监听快照更新（实时响应新提问、流式输出与会话切换）
+  const [snapTick, setSnapTick] = useState(0)
+  useEffect(() => {
+    return subscribeLatestChatSnapshot(() => setSnapTick((t) => t + 1))
+  }, [])
+
+  // 对话滚动守卫（2026-10-04 修「滚到上面读旧内容，点一下右栏就被拽回底部」）：
+  // 官方跟随控制器在内容提交/布局变化时会把不贴底的读者拉回 floor，插件层常驻
+  // 状态机只对抗「无用户意图 + 短窗口落底」这一种指纹，其余一律放行。
+  useEffect(() => installConversationScrollGuard(), [])
+
+  // 对话流滚动条自动隐藏（2026-10-29 用户要求）：滚动时显形，停止 3 秒后
+  // 淡出；槽位由官方 scrollbar-gutter 保留，不引起内容跳动。
+  useEffect(() => installConversationScrollbarAutoHide(), [])
+
+  // 官方「正文宽度」两条拖拽手柄按**容器中心**定位（见 official-width-handles.ts）。
+  // Seeker 把容器改成 flex row 并塞进本面板后，容器比对话流宽出一个面板，手柄于是
+  // 整体右移半个面板宽 —— 用户报的「官方那个拖拽手柄不在对应的位置」。这里在面板
+  // 挂载期间把它们摆回对话流内容区两侧（可拖、可调宽度，只是位置对了），
+  // 卸载即还原官方原样。
+  useOfficialWidthHandleFix()
+
+  // 动态计算当前会话真实的最新轮次（以会话快照与 DOM 节点为准，绝不被历史缓存干扰）
+  const snapshot = getCurrentChatSnapshot()
+  const snapTurns = snapshot?.navigation?.current?.map((n: any) => n.turn).filter((n: any) => typeof n === 'number' && n > 0) || []
+  const domTurns = typeof document !== 'undefined'
+    ? Array.from(document.querySelectorAll('[data-chat-turn]')).map(el => parseInt(el.getAttribute('data-chat-turn') || '0', 10)).filter(n => Number.isFinite(n) && n > 0)
+    : []
+  const effectiveLatestTurn = snapTurns.length > 0
+    ? Math.max(...snapTurns)
+    : (domTurns.length > 0 ? Math.max(...domTurns) : (latestTurn > 0 ? latestTurn : 1))
+
+  // 若选中的轮次超出当前会话最大轮次（如切到只有1轮的新会话），立即自动解除越界选中
+  const validSelectedTurn = (krState.selectedTurn !== null && krState.selectedTurn <= effectiveLatestTurn)
+    ? krState.selectedTurn
+    : null
+
+  useEffect(() => {
+    if (krState.selectedTurn !== null && krState.selectedTurn > effectiveLatestTurn) {
+      store.setSelectedTurn(null)
+    }
+  }, [krState.selectedTurn, effectiveLatestTurn, store])
+
+  /*
+   * 会话切换时清掉选中轮次。
+   *
+   * 上面那条只处理「越界」：切到轮次更少的会话时才解除。反过来的情况——从 2 轮
+   * 的会话切到 8 轮的会话、且此前点选过第 2 轮——选中值仍然"合法"，于是右栏
+   * 会**停在新会话的第 2 轮**而不是最新轮次。用户刚切过来看到的是几轮之前的
+   * 中间状态：任务概览显示那时写过的旧清单、操作面板只剩那一轮的动作，
+   * 读起来就是「信息没了」。轮次选中是**会话内**的浏览位置，跨会话不该继承。
+   *
+   * 会话身份由 KrTodoBridge 登记，setLatestChatSessionId 里已经清过一次
+   * （resetSessionCaches），这里再兜一层：本组件在会话切换后可能先于座位
+   * effect 渲染，只靠那一路会漏掉一帧。
+   */
+  const sessionIdRef = useRef<string | null>(latestChatSessionId)
+  useEffect(() => {
+    if (sessionIdRef.current === latestChatSessionId) return
+    sessionIdRef.current = latestChatSessionId
+    if (krState.selectedTurn !== null) store.setSelectedTurn(null)
+  }, [latestChatSessionId, krState.selectedTurn, store])
+
+  // 决定当前展示哪个轮次：若用户点击了历史轮次则显示历史轮次，否则跟随最新轮次
+  const displayTurn = validSelectedTurn ?? effectiveLatestTurn
+  const isViewingHistory = validSelectedTurn !== null && validSelectedTurn !== effectiveLatestTurn
+  const currentRunning = isTurnRunning && !isViewingHistory
+
+  // 监听活动总线数据
+  const actStore = activityStore()
+  const [actTick, setActTick] = useState(0)
+  useEffect(() => {
+    return actStore.subscribe(() => setActTick((t) => t + 1))
+  }, [actStore])
+
+  /*
+   * 官方 todos 投影的订阅**已在本面板移除**（2026-10-24）。
+   *
+   * 它原先只做一件事：给任务概览的 live 回退提供重算滴答。取数口径收紧成
+   * 「只认本轮快照里真实出现过的清单」之后，live todos 不再是任何一张卡的数据源，
+   * 这个订阅就只剩「每次投影变化让整个大盘重渲染一遍」这一个副作用。
+   *
+   * 数据侧、会话隔离那一套（kr-todo-bridge 的 owner 校验与发布指纹）**原样保留**：
+   * test-session-isolation.mjs 仍在测它们，也仍可能在别处被消费；这里只是不再
+   * 从面板读它。
+   */
+
+  /*
+   * 数据源：优先从 latestChatSnapshot 实时提取，回退到 actStore.get。
+   *
+   * 外面套一层**引用稳定化**。原因：collectTurnNodes 每次都返回全新对象，于是
+   * 下游 reasoningTexts / tools 的 memo 拿不到稳定引用 → 每帧被击穿 →
+   * plainTimeline 的 steps 整份重建。而快照发布的频率在流式期很高（每个 delta
+   * 一次），不是每秒一次。
+   *
+   * 指纹不变就复用上一次的引用，下游整条 memo 链原样命中。
+   */
+  const turnDataCacheRef = useRef<{ sig: string; data: TurnDataView } | null>(null)
+  const turnData = useMemo<TurnDataView>(() => {
+    const raw = ((): TurnDataView => {
+      const snap = getCurrentChatSnapshot()
+      if (snap) {
+        try {
+          const collected = collectTurnNodes(snap, displayTurn)
+          return {
+            tools: collected.tools,
+            reasoning: collected.reasoning,
+            tasks: collected.tasks,
+            turnStart: collected.turnStart,
+            turnEnd: collected.turnEnd,
+            durationMs: collected.durationMs,
+          }
+        } catch (err) {
+          console.warn('[kr-agent-panel] collectTurnNodes error', err)
+        }
+      }
+      /*
+       * 回退到活动抽屉缓存。**必须带会话守卫**：
+       *
+       * 上面的快照读取口现在会因「快照属于别的会话」而返回 null（跨会话误发
+       * 已被拒绝）。若这里无条件回退 actStore，那条拒绝就白做了 —— 上一会话的
+       * 轮次数据会从缓存里原样流出来，任务概览照样显示上个对话的清单。
+       *
+       * 判据：只有**已登记会话身份**时才允许回退。身份为 null 意味着「当前不在
+       * 任何会话里」（刚点新会话 / 已离开），此时右栏该走干净空态，不该翻缓存。
+       */
+      if (latestChatSessionId === null) return EMPTY_TURN_DATA
+      return actStore.get(displayTurn)
+    })()
+    const sig = fingerprintTurnData(raw)
+    const cached = turnDataCacheRef.current
+    if (cached !== null && cached.sig === sig) return cached.data
+    turnDataCacheRef.current = { sig, data: raw }
+    return raw
+  }, [displayTurn, actTick, snapTick])
+
+  /*
+   * 本轮用户输入里带了几张图（2026-10-26）。
+   *
+   * 只服务一件事：卡头动画该不该演「查看照片」。用户发图 / 图+文字过来时，
+   * 那一刻还没有任何工具调用，steps 是空的 → 卡头会判成「思考中」，与用户的
+   * 事实（"我给了她一张图"）对不上。判据与理由见 turn-input-images.ts。
+   *
+   * 与 turnData 同一套引用稳定化：这个 memo 每 250ms 会被重算，而它返回的是
+   * **数字**，天然是稳定值，不需要再包缓存。这里只保护「快照形状异常不抛」。
+   *
+   * `latest` 只在**没翻历史**时为真（2026-10-26）：用户刚发图的那一瞬间，
+   * navigation 可能还没把轮次推到新一轮，此时按轮次过滤数不到图，需要退到
+   * "最新一条用户消息"。翻历史时不能这么兜底，否则会把别的轮次的图算进来。
+   */
+  const inputImageCount = useMemo(() => {
+    try {
+      return turnInputImageCount(getCurrentChatSnapshot(), displayTurn, {
+        latest: !isViewingHistory,
+      })
+    } catch {
+      return 0
+    }
+  }, [displayTurn, actTick, snapTick, isViewingHistory])
+
+  const now = useNow(isTurnRunning && !isViewingHistory)
+
+  /*
+   * 会话产出物（「产出物」卡）。
+   *
+   * 口径是**整个会话累计**，不随选中的轮次切换：这张卡回答的是「这次对话一共
+   * 做出来了什么」，而轮次切换是"我想看看某一轮发生了什么"——两者问的不是
+   * 一件事。跨全部轮次收集，所以走 snapshot 全量节点而不是本轮 locations。
+   *
+   * 与 turnData 同一套引用稳定化：collectSessionToolNodes 每次返回新数组，
+   * 而它下游要做的是「遍历全部工具节点 + 对没见过的节点扫结果文本」。指纹
+   * 不变就复用上一次的引用，下游整条 memo 链原样命中。
+   */
+  /**
+   * 会话全部 tool-call 节点（按 anchorSeq 升序）。
+   *
+   * 两个会话级消费者共用这一份：产出物卡（扫成品路径）与「本会话派过子智能体吗」
+   * （扫派生类工具名）。各算一次等于每 tick 多走一遍全量节点 + 一次排序，
+   * 而流式期 tick 频率很高 —— 提到这里算一次、两边读同一份引用。
+   */
+  const sessionToolNodes = useMemo<readonly unknown[]>(() => {
+    try {
+      return collectSessionToolNodes(getCurrentChatSnapshot())
+    } catch (err) {
+      console.warn('[kr-agent-panel] collectSessionToolNodes error', err)
+      return []
+    }
+  }, [actTick, snapTick])
+
+  const outputsCacheRef = useRef<{ sig: string; data: OutputsView } | null>(null)
+  const outputs = useMemo<OutputsView>(() => {
+    let next: OutputsView
+    try {
+      next = collectOutputs(sessionToolNodes)
+    } catch (err) {
+      // 节点形状未知时不该让整张卡消失：退到空态。
+      console.warn('[kr-agent-panel] collectOutputs error', err)
+      next = EMPTY_OUTPUTS
+    }
+    const sig = outputsFingerprint(next)
+    const cached = outputsCacheRef.current
+    if (cached !== null && cached.sig === sig) return cached.data
+    outputsCacheRef.current = { sig, data: next }
+    return next
+  }, [sessionToolNodes])
+
+  /*
+   * 本会话是否派生过子智能体 —— **会话累计**，不是本轮。
+   *
+   * 只喂给子智能体卡的**空目录判定**：目录还没落地（state 不是 ready）时，本会话
+   * 有过派生动作就占一行「正在读取子智能体…」，从没派过就整张卡不渲染 —— 后者
+   * 说明这次会话确实没有子智能体，不该在右栏白占一行高度。
+   *
+   * 口径必须跟着目录走（2026-10-23）：目录已经不再按轮次裁剪，判定若还留在
+   * 「本轮有没有派生动作」，切到新一轮（那一轮还没派东西）时会出现「目录里有行、
+   * 卡却因为空目录判定被判空」的错位。判据改成扫会话全部工具节点里的派生类工具，
+   * 与目录同一粒度。
+   */
+  const spawnedInSession = useMemo(() => {
+    for (const node of sessionToolNodes) {
+      try {
+        const root = (node as { data?: { root?: unknown } }).data?.root
+        if (root === undefined || root === null) continue
+        if (spawnsSubagents(callName(root as Parameters<typeof callName>[0]))) return true
+      } catch { /* 单条形状未知就跳过它 */ }
+    }
+    return false
+  }, [sessionToolNodes])
+
+  // 思考文本提取
+  const reasoningTexts = useMemo<readonly string[]>(() => {
+    return (turnData?.reasoning ?? []).map((r) => r.text).filter((t) => t.trim() !== '')
+  }, [turnData, actTick, snapTick])
+
+  // 工具调用数据转换
+  const tools = useMemo<readonly ChatNode<'tool-call'>[]>(() => {
+    return turnData?.tools ?? []
+  }, [turnData, actTick, snapTick])
+
+  /*
+   * 工作空间线索：当前轮工具参数 + 本会话此前轮次的缓存。
+   *
+   * 只服务操作面板右侧的回显 —— 它必须显示「本会话关联的工作空间」，而不是
+   * 桌面当前激活的任意 ego 标签页。线索从 ego-browser 脚本里的 taskSpace("名字")
+   * 抽取，按 sessionId 存 sessionStorage，切轮次/刷新页面都不丢。
+   */
+  const liveWorkspaceHints = useMemo(() => collectWorkspaceHints(tools), [tools])
+  const [storedWorkspaceHints, setStoredWorkspaceHints] = useState<readonly string[]>(
+    () => readStoredWorkspaceHints(latestChatSessionId),
+  )
+  useEffect(() => {
+    const stored = readStoredWorkspaceHints(latestChatSessionId)
+    const merged = mergeWorkspaceHints(stored, liveWorkspaceHints)
+    if (merged.length > 0) storeWorkspaceHints(latestChatSessionId, merged)
+    setStoredWorkspaceHints((previous) => {
+      const previousKey = previous.join('\u0001')
+      const nextKey = merged.join('\u0001')
+      return previousKey === nextKey ? previous : merged
+    })
+  }, [latestChatSessionId, liveWorkspaceHints])
+  const workspaceHints = useMemo(
+    () => mergeWorkspaceHints(storedWorkspaceHints, liveWorkspaceHints),
+    [storedWorkspaceHints, liveWorkspaceHints],
+  )
+
+  // 耗时计算：精确优先从真实轮次生命周期中获取
+  const turnStart = turnData?.turnStart
+  const turnEnd = turnData?.turnEnd
+  let elapsedMs: number
+  /**
+   * 这个用时有没有真实来源。
+   *
+   * 下面的兜底分支会拿「工具数 × 800ms + 1500ms」硬凑一个数——对副标题里
+   * 「N 次工具调用 · 耗时 …」这句统计说明无所谓，但对话流活动卡上那枚常驻
+   * 读数只认真实起点（见 KrLiveActivityCard），拿不到就不渲染。
+   */
+  let elapsedMeasured = true
+
+  if (currentRunning && turnStart) {
+    elapsedMs = Math.max(0, now - turnStart)
+  } else if (typeof turnData?.durationMs === 'number' && turnData.durationMs > 0) {
+    elapsedMs = turnData.durationMs
+  } else if (typeof turnStart === 'number' && typeof turnEnd === 'number' && turnEnd >= turnStart) {
+    elapsedMs = turnEnd - turnStart
+  } else {
+    // 兜底计算：汇总工具调用实际耗时
+    let toolsDuration = 0
+    for (const t of tools) {
+      try {
+        const d = callDurationMs(t.data.root, now)
+        if (d && d > 0) toolsDuration += d
+      } catch {}
+    }
+    elapsedMs = toolsDuration > 0 ? toolsDuration : (tools.length * 800 + 1500)
+    elapsedMeasured = toolsDuration > 0
+  }
+  const durationText = formatDuration(elapsedMs)
+
+  /*
+   * 工具列表构建（「工具调用」卡的数据源，2026-10-09 恢复）。
+   *
+   * 必须 memo：这段映射里有 `rawResultJson(root)` —— 它对**每一条**工具调用做
+   * 一次 JSON.stringify(…, null, 2)，把完整返回内容重新序列化成带缩进的字符串。
+   * 一次 read 返回两千行文件就是几十到几百 KB，而这只在该条工具的「原始数据」
+   * 页签被展开时才用到（KrToolCallsCard 里 tab === 'raw'）。写在渲染体里意味着
+   * 每个 tick（useNow 1Hz）+ 每个流式快照都要白扔一遍，而且每次给下游
+   * memo 的 KrToolCallsCard 都是全新数组 + 全新元素，卡片自己的 memo 必然失效。
+   */
+  const toolViews = useMemo<readonly ToolCallItemView[]>(() => tools.map((node, index) => {
+    let name = 'tool'
+    let title = '执行工具操作'
+    let duration = '20ms'
+    let status: 'success' | 'running' | 'failed' = 'success'
+    let errorMsg: string | undefined
+    let callId: string | undefined
+    let argsRaw: string | undefined
+    let args: Record<string, unknown> | undefined
+    let resultText: string | undefined
+    let rawJson: string | undefined
+    let exitCode: number | undefined
+    let signal: string | undefined
+
+    try {
+      const root = node.data.root
+      callId = ('callId' in root ? (root as any).callId : undefined) || node.key
+      name = callName(root)
+      argsRaw = toolArgsRaw(root)
+      args = argFields(argsRaw)
+      // 摘要列走 rowSummary（「读取 README.md」这类带对象的人话），比旧版
+      // rowTitle 的变体标题（Read/Bash）信息量大——工具名已在行首单列。
+      title = rowSummary(name, classifyCategory(name), args, argsRaw)
+      resultText = resultParagraphs(root)
+      rawJson = rawResultJson(root)
+      const facts = executionFacts(root)
+      exitCode = facts.exitCode
+      signal = facts.signal
+
+      const ms = callDurationMs(root, now)
+      duration = ms !== undefined ? `${Math.round(ms)}ms` : '10ms'
+      if (isRunning(root)) {
+        status = 'running'
+      } else {
+        // 失败判据：isError 标记 / 非零退出码 / 信号杀死。错误文本按仓库既有
+        // 形状读（plain-timeline.ts 同款 record 断言）：ToolCallBlock 没有
+        // 旧的 .result 字段，error 直接挂在块上。
+        const record = root as { isError?: unknown; error?: unknown }
+        const isErr = record.isError === true
+          || (exitCode !== undefined && exitCode !== 0)
+          || signal !== undefined
+        if (isErr) {
+          status = 'failed'
+          const err = record.error as { message?: unknown } | string | undefined
+          errorMsg = typeof err === 'string' ? err
+            : typeof err?.message === 'string' ? err.message
+            : signal !== undefined ? `killed by signal: ${signal}`
+            : exitCode !== undefined && exitCode !== 0 ? `exit code: ${exitCode}`
+            : '工具执行返回非零状态或异常'
+        }
+      }
+    } catch {
+      title = `工具调用 #${index + 1}`
+    }
+
+    return {
+      id: node.key || `tool-${index}`,
+      callId,
+      name,
+      description: title,
+      durationText: duration,
+      status,
+      errorMessage: errorMsg,
+      argsRaw,
+      args,
+      resultText,
+      rawResultJson: rawJson,
+      exitCode,
+      signal,
+    }
+  }), [tools, now])
+
+  /*
+   * 任务数据源：**只认本轮快照里真实出现过的清单**（2026-10-24 收紧）。
+   *
+   * 用户原话：「发送新的对话时任务概览应该是空的才对」。
+   *
+   * 原先这里是三级回退，其中两条在「刚发出新一轮」的那一屏都在说谎：
+   *  · **live（官方 todos 投影）** —— 它按**会话累积**，新一轮开始时它仍然是
+   *    上一轮那份清单（官方要等模型真的写新 todo 才换）。拿它填「本轮任务」，
+   *    等于把上一轮的任务摆在新一轮头上；
+   *  · **整场会话回溯** —— 同一种错误，只是版本更旧。
+   * 于是用户发一条新消息，任务卡上立刻挂着一份与本次提问毫无关系的清单。
+   *
+   * 现在的口径（两条，按顺序）：
+   *  1. 本轮快照里有 todo_write / submitted-plan → 就是它（source: 'turn'）；
+   *  2. 其余 → **空**（source: 'none'），卡片显示「本轮还没有任务」。
+   *
+   * 唯一的例外是**用户主动查看历史轮次**（isViewingHistory）：那时问的是
+   * 「那一轮发生了什么」，回溯本会话此前的清单才成立，卡片会挂一枚「会话清单」
+   * 小标说明口径。看最新轮次时永远不回溯 —— 最新轮次的真相只有它自己。
+   *
+   * ⚠ 别为了「切换会话时任务卡别空着」把 live 回退加回来。那个老问题（2026-10-05）
+   * 的真实修法在 kr-todo-bridge 的**发布指纹**与回填里，不在面板的取数口径上；
+   * 在面板这一层放开回退，只会把上一轮的清单请回来。
+   *
+   * ── 一个附带的边界：**这一轮其实已经收口了，但我们还在按它显示** ────────
+   *
+   * 新一轮刚发出的那一两秒里，官方 navigation.current 还没把新轮挂上，于是
+   * effectiveLatestTurn 仍停在上一轮 —— 而那一轮的 turnData 是完整的（含它
+   * 自己写的清单、含 turnEnd）。此刻 currentRunning 已经是 true，卡片就会把
+   * 上一轮的清单当成「本轮任务」摆出来。
+   *
+   * 判据：正在跑 + 手上这轮的 turnEnd 有值 = 这一轮已经结束了，不可能是正在跑
+   * 的那一轮，说明 displayTurn 滞后。此时按空处理，等 navigation 更新后自然恢复。
+   *
+   * 不用它做别的判断：轮次正常收口后 currentRunning 变 false，条件不成立，
+   * 收口后的清单照常显示（那正是用户要看的「这次做完了什么」）。
+   */
+  const turnIsStaleWhileRunning = currentRunning && turnData?.turnEnd !== undefined
+
+  const tasksView = useMemo<{ tasks: readonly DshTaskItem[]; source: TaskSource }>(() => {
+    if (turnData?.tasks && turnData.tasks.length > 0 && !turnIsStaleWhileRunning) {
+      return { tasks: turnData.tasks, source: 'turn' }
+    }
+    if (!isViewingHistory) return { tasks: [], source: 'none' }
+    /*
+     * 查看历史轮次时的回溯口径是**整场会话最近一次**（不传 upToTurn）。
+     *
+     * 传 displayTurn（截止到当前查看的轮次）时，点开一个**自己没写过 todo** 的
+     * 历史轮次会回溯不到任何清单，任务卡直接翻成空态 —— 用户看到的就是
+     * 「一切换轮次任务信息就没了」。看历史时给它「这场对话最近一次清单」更可读，
+     * 而且卡片上那枚「会话清单」小标已经声明了这不是本轮的东西。
+     */
+    const snap = getCurrentChatSnapshot()
+    if (snap) {
+      const fallbackTasks = collectLatestSessionTasks(snap)
+      if (fallbackTasks && fallbackTasks.length > 0) {
+        return { tasks: fallbackTasks, source: 'session' }
+      }
+    }
+    return { tasks: [], source: 'none' }
+  }, [turnData, isViewingHistory, turnIsStaleWhileRunning, snapTick, displayTurn])
+  const tasks = tasksView.tasks
+
+
+  // 人话行动时间线：把本轮工具调用翻成中文人话（「打开携程 · 机票」）。
+  // 纯推导，无副作用。tools 已由 collectTurnNodes 按 anchorSeq 升序给出，无需再排。
+  const plainTimeline = useMemo(
+    () => buildPlainTimeline({
+      tools,
+      running: currentRunning,
+      now,
+    }),
+    [tools, currentRunning, now],
+  )
+
+  // 本轮/本会话是否已有可展示内容。新会话空白期一律走干净空态，
+  // 绝不回落到 activityStore 里上一会话的缓存。
+  // 回合已在执行（哪怕工具/思考尚未落盘）也算内容，避免空白新会话刚发起
+  // 提问时错误地显示「等待本次对话开始」。
+  /*
+   * 子智能体目录：**全仓库唯一一处订阅**（见 subagent-catalog.ts）。
+   *
+   * 两处消费：下面「子智能体」卡列清单，操作面板的「派出子任务」那一步取计数。
+   * 只在会话身份存在时订阅；没有会话身份时 hook 内部不挂 interval，零开销。
+   *
+   * 口径是**整场会话**，不按轮次切分（2026-10-23 用户点名「一个会话里的子代理
+   * 卡片不要根据对话区分了」）：这个会话派生过的子智能体一个不落地都在卡上。
+   * 原先是 filterCatalogByTurn 按本轮 turnStart/turnEnd 裁剪，代价是切到新一轮
+   * 时上一轮派出去、到现在还在跑的那几个会从卡上消失 —— 而「谁还在跑」正是这
+   * 张卡存在的理由。行数由卡内的进行中 / 已结束折叠与「展开其余 N 个」承担。
+   */
+  const subagentCatalog = useSubagentCatalog(latestChatSessionId)
+
+  /*
+   * 子智能体产出物：并入主会话产出物卡（2026-10-30 用户要求）。
+   *
+   * 子智能体是独立会话，主会话快照里没有它们的 tool/call 节点 —— 只能按目录
+   * 里的子会话 id 向 host 的单会话产出物路由批量取。合并放在面板层而不是卡片
+   * 里，因为「有没有内容」的判定与右栏卡片挂载条件都读同一份 items。
+   */
+  const subagentOutputs = useSubagentOutputs(subagentCatalog.rows)
+
+  /*
+   * 主会话历史产出物补全（2026-10-30 重启回归）。
+   *
+   * 重启 DSH 后 Chat 只加载最后一页窗口，前面的工具节点还没分页回来；
+   * 只按快照收集会让产出物卡误判「0 项」而整卡消失。这里按会话 id 从 host
+   * 索引补一份，合并去重后卡片恢复成「会话累计」而不是「当前窗口累计」。
+   */
+  const persistedOutputs = useSessionOutputs(latestChatSessionId)
+  const outputsWithSubagents = useMemo<OutputsView>(
+    () => mergeOutputs(outputs, { items: persistedOutputs }, { items: subagentOutputs }),
+    [outputs, persistedOutputs, subagentOutputs],
+  )
+
+  const hasContent = currentRunning
+    || tasks.length > 0
+    || reasoningTexts.length > 0
+    || tools.length > 0
+    // 子智能体可能在本轮毫无动作时依然在跑（前几轮派出去的、还没收口），
+    // 那种情况下这张卡就是右栏唯一还在动的信号，算进内容判定。
+    || subagentCatalog.rows.length > 0
+    // 产出物是**会话累计**的：本轮刚开始、什么都还没落盘时，前几轮做出的文件
+    // 依然该被看见。不算进来的话，切到新一轮的瞬间整栏会闪一次空态。
+    || outputsWithSubagents.items.length > 0
+
+
+  /* ── 右栏挤压自适应 ─────────────────────────────────────────────────────
+     记忆卡是滚动区之下的独立 flex footer（永远钉在右栏最下方，不可挤压），
+     滚动区 flex:1 1 0 自动让出剩余高度。footer 太高时滚动区内容放不下，
+     此刻让操作面板与记忆卡各自缩一档：
+       · 记忆卡条目变化 → KrMemoryCard 经 onContentChange 把 memoryTick +1；
+       · 思考/工具内容变化 → 下面那份 fingerprint 跟着变；
+       · 两者任一变化都让 usePanelSqueezed 重测一次。
+     思考过程卡已于 2026-09-28 移到 KR 对话流内联展示（右栏不再有可缩放的
+     思考视口），所以这里保留的只是「挤了没有」这一个布尔量。 */
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const [memoryTick, setMemoryTick] = useState(0)
+  const handleMemoryContentChange = useCallback(() => { setMemoryTick((tick) => tick + 1) }, [])
+  const reasoningChars = useMemo(
+    () => reasoningTexts.reduce((sum, text) => sum + text.length, 0),
+    [reasoningTexts],
+  )
+  const heightFingerprint = `${memoryTick}|${reasoningChars}|${reasoningTexts.length}|${tools.length}|${tasks.length}|${plainTimeline.steps.length}|${outputsWithSubagents.items.length}|${subagentCatalog.rows.length}`
+  const panelSqueezed = usePanelSqueezed(scrollRef, heightFingerprint)
+
+
+  // ── 左边缘拖拽调宽 ────────────────────────────────────────────────────
+  // pointer events（不是 mouse events）：Pointer Capture 保证指针滑出手柄、
+  // 甚至滑出窗口后 move/up 依然派发给手柄，不丢拖拽；同时天然覆盖触屏。
+  //
+  // 锚点是**面板自身右缘**，不是 window.innerWidth。
+  // 官方 AppFrame 是三栏 grid（sidebar | center | rightbar，见
+  // @deepseek-ai/dsh-client-ui-layout 的 AppFrame.tsx），本面板挂在 center 栏内的
+  // [data-conversation-content] 里，其右缘 = frame 右缘 - rightbar 宽度。官方
+  // rightbar 默认占视口 45%、还能被用户继续拖宽，sidebar 也可展开/折叠成 rail ——
+  // 于是「视口右缘」与「面板右缘」之间恒有一段偏差 δ。旧算法 width = innerWidth - x
+  // 把这段 δ 错算进宽度，手柄于是恒定偏在指针左边 δ 像素，表现为「拖不动 / 位置不对」，
+  // 右栏一开 δ 更大、错位更明显。改成量自己的 getBoundingClientRect().right 后：
+  // 面板左缘 = right - width = 指针 x，与指针逐像素对齐，且官方三栏怎么变都不用跟改。
+  const width = krState.width
+  const [dragging, setDragging] = useState(false)
+  const panelRef = useRef<HTMLDivElement | null>(null)
+  const widthBadgeRef = useRef<HTMLDivElement | null>(null)
+  const dragStateRef = useRef<{ pointerId: number; handle: HTMLElement } | null>(null)
+  /**
+   * 手势内冻结的锚点。right 是拖拽起手那一帧的面板右缘（全程不重取，避免布局
+   * 抖动把基准带跑）；max 是这次手势允许的宽度上限（见下）。
+   */
+  const dragAnchorRef = useRef<{ right: number; max: number } | null>(null)
+  /**
+   * 当前空间允许的宽度上限。拖拽与键盘共用：官方 rightbar / 侧边栏一变，中心栏
+   * 宽窄就变，静态的 PANEL_WIDTH_MAX 不再是真实天花板。挂载时与窗口 resize 时重算。
+   */
+  const [spaceMax, setSpaceMax] = useState(PANEL_WIDTH_MAX)
+  /** handleDragStart 是空依赖的稳定回调，需要读 fullscreen 时走这个镜像。 */
+  const krStateRef = useRef(krState)
+  krStateRef.current = krState
+
+  /**
+   * 本次手势的宽度上限：除了 store 的静态 PANEL_WIDTH_MAX，还要受**当前可用空间**
+   * 约束。中心栏宽度会随官方 rightbar 开合、侧边栏展开/折叠而变，中心栏最窄被官方
+   * 钳到 CENTER_MIN=400；若此时仍允许 720，KR 面板会吃掉整个中心栏、把左栏对话流
+   * 压成 0 宽（content 是 overflow:hidden，看起来就是「面板糊满一整块」）。
+   * 所以上限取 min(静态上限, 宿主宽 - 左栏对话流最小可读宽)，并保底不低于面板自身
+   * 最小宽 —— 空间实在不够时宁可让左栏窄，也不能让面板宽度算成负数或缩到 0。
+   */
+  const resolveDragMax = useCallback((): number => {
+    const panel = panelRef.current
+    if (!panel) return PANEL_WIDTH_MAX
+    const host = panel.closest('[data-conversation-content]') as HTMLElement | null
+    if (!host) return PANEL_WIDTH_MAX
+    const hostWidth = host.getBoundingClientRect().width
+    if (!(hostWidth > 0)) return PANEL_WIDTH_MAX
+    const maxBySpace = Math.max(PANEL_WIDTH_MIN, Math.round(hostWidth - CHAT_FLOW_MIN_WIDTH))
+    return Math.min(PANEL_WIDTH_MAX, maxBySpace)
+  }, [])
+
+  // 空间上限随官方三栏布局的变化实时重算：官方 rightbar 的开关/拖拽、侧边栏的
+  // 展开/折叠都会改中心栏宽度，而它们发生在我们的组件之外，只能靠观测宿主盒。
+  // ResizeObserver 打在 [data-conversation-content] 上（比 window.resize 精确：
+  // 官方三栏重排不改变窗口宽度，却会改变这个盒的宽度）。
+  useEffect(() => {
+    const panel = panelRef.current
+    const host = panel?.closest('[data-conversation-content]') as HTMLElement | null
+    if (!host) return
+    const sync = (): void => setSpaceMax(resolveDragMax())
+    sync()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', sync)
+      return () => window.removeEventListener('resize', sync)
+    }
+    const observer = new ResizeObserver(sync)
+    observer.observe(host)
+    return () => observer.disconnect()
+  }, [resolveDragMax])
+
+  const handleDragStart = useCallback((e: React.PointerEvent<HTMLElement>) => {
+    if (e.button !== 0) return
+    // 全屏态面板铺满整栏，宽度由 CSS !important 决定，拖拽无意义 —— 直接不接。
+    if (krStateRef.current.fullscreen) return
+    const handle = e.currentTarget
+    const panel = panelRef.current
+    if (!panel) return
+    dragStateRef.current = { pointerId: e.pointerId, handle }
+    dragAnchorRef.current = { right: panel.getBoundingClientRect().right, max: resolveDragMax() }
+    setSpaceMax(dragAnchorRef.current.max)
+    // setPointerCapture 之后 move/up 事件始终派发给 handle，指针滑出也不断。
+    try { handle.setPointerCapture(e.pointerId) } catch {}
+    setDragging(true)
+    e.preventDefault()
+  }, [resolveDragMax])
+
+  useEffect(() => {
+    if (!dragging) return
+    // 全局光标/选择锁定：拖拽滑过左栏文字时不再误选中文本。
+    document.body.setAttribute('data-kr-resizing', 'true')
+    // rAF 节流：setPanelWidth 会广播到整棵 KR 面板订阅树，按原始 pointermove
+    // 频率（可达 120Hz+）重渲染只会让拖拽发涩、跟手发飘。每帧至多一次。
+    let frame: number | null = null
+    let queued: number | null = null
+    const flush = (): void => {
+      frame = null
+      if (queued === null) return
+      const anchor = dragAnchorRef.current
+      if (!anchor) return
+      // 向左拖 = 变宽：面板左缘 = 锚点右缘 - 宽度，令它贴住指针 x。
+      const next = Math.min(anchor.max, anchor.right - queued)
+      queued = null
+      store.setPanelWidth(next)
+      // 宽度读数直写 DOM 文本，不走 setState：数值每帧都变，交给 React 会把
+      // 整个大盘按帧重渲染一遍。读 snapshot.width 而不是 next —— store 还会
+      // 按 [PANEL_WIDTH_MIN, PANEL_WIDTH_MAX] 二次钳制，气泡要显示真正生效的值，
+      // 否则撞到上限时会出现「气泡还在涨、面板不动」。
+      if (widthBadgeRef.current) {
+        widthBadgeRef.current.textContent = `${store.snapshot.width} px`
+      }
+    }
+    const onMove = (e: PointerEvent): void => {
+      if (dragStateRef.current?.pointerId !== e.pointerId) return
+      queued = e.clientX
+      frame ??= requestAnimationFrame(flush)
+    }
+    const onUp = (e: PointerEvent): void => {
+      if (dragStateRef.current?.pointerId !== e.pointerId) return
+      if (frame !== null) { cancelAnimationFrame(frame); frame = null }
+      // 最后一帧的位移不能丢：抬手与 move 之间常有一小段没派发的位移。
+      if (queued !== null) {
+        const anchor = dragAnchorRef.current
+        if (anchor) store.setPanelWidth(Math.min(anchor.max, anchor.right - queued))
+        queued = null
+      }
+      const handle = dragStateRef.current.handle
+      try { handle.releasePointerCapture(e.pointerId) } catch {}
+      dragStateRef.current = null
+      dragAnchorRef.current = null
+      setDragging(false)
+      store.commitPanelWidth()
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
+    return () => {
+      if (frame !== null) cancelAnimationFrame(frame)
+      document.body.removeAttribute('data-kr-resizing')
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+    }
+  }, [dragging, store])
+
+  return (
+    <div
+      ref={panelRef}
+      className={`kr-split__side ${krState.fullscreen ? 'kr-split__side--fullscreen' : ''}`}
+      data-dragging={dragging ? 'true' : undefined}
+      style={krState.fullscreen ? undefined : { width, minWidth: width, maxWidth: width }}
+    >
+      {/*
+        左边缘拖拽手柄：按住向左拖 = 加宽，向右拖 = 收窄；宽度持久化。
+
+        键盘可达是必须的：全仓库只有这一处能调大盘宽度，store 里那个
+        resetPanelWidth() 至今没有任何 UI 调用它 —— 手柄不可聚焦、只能拖的话，
+        键盘用户完全无法调整（WCAG 2.1.1），读屏用户听到「拖拽调整大盘宽度，
+        分隔符」却什么也做不了。所以给它 tabIndex + aria-valuenow/min/max，
+        并接上 ←/→（Shift 加速）与 Home（回默认宽度）。
+      */}
+      <div
+        className="kr-panel__resize-handle"
+        onPointerDown={handleDragStart}
+        role="separator"
+        tabIndex={krState.fullscreen ? -1 : 0}
+        aria-orientation="vertical"
+        aria-valuenow={width}
+        aria-valuemin={PANEL_WIDTH_MIN}
+        aria-valuemax={spaceMax}
+        aria-disabled={krState.fullscreen ? 'true' : undefined}
+        aria-label="调整大盘宽度"
+        title="拖拽调整大盘宽度；键盘 ←/→ 微调，Shift 加速，Home 恢复默认"
+        onKeyDown={(event) => {
+          // 键盘与拖拽共用同一条空间上限：官方右栏/侧边栏一改，静态的
+          // PANEL_WIDTH_MAX 就不是真实天花板，键盘也不能把面板推出中心栏。
+          const step = event.shiftKey ? 64 : 16
+          if (event.key === 'ArrowLeft') {
+            // 向左 = 面板变宽（与拖拽方向一致）
+            event.preventDefault()
+            store.setPanelWidth(Math.min(spaceMax, width + step))
+          } else if (event.key === 'ArrowRight') {
+            event.preventDefault()
+            store.setPanelWidth(width - step)
+          } else if (event.key === 'Home') {
+            event.preventDefault()
+            store.resetPanelWidth()
+          } else if (event.key === 'Enter') {
+            event.preventDefault()
+            store.resetPanelWidth()
+          }
+        }}
+        onKeyUp={(event) => {
+          // 键盘调完宽度也要落盘，行为与拖拽结束一致。
+          if (event.key === 'ArrowLeft' || event.key === 'ArrowRight'
+            || event.key === 'Home' || event.key === 'Enter') {
+            store.commitPanelWidth()
+          }
+        }}
+      />
+      {/*
+        拖拽中的实时宽度读数。
+
+        纯 CSS 显隐（挂在 [data-dragging] 下），文本由 pointermove 直接写
+        textContent —— 数值每帧都变，走 setState 会把整棵大盘按帧重渲染。
+        进入拖拽的那一帧 effect 补一次初值，让气泡不是从空字符串跳出来。
+      */}
+      <div
+        ref={widthBadgeRef}
+        className="kr-panel__resize-badge"
+        aria-hidden="true"
+      >{`${width} px`}</div>
+
+
+      {/* 滚动卡片列表 */}
+      <div className="kr-panel__scroll" ref={scrollRef}>
+        {/* 空态：本次对话尚无任何内容（新会话空白期）。显式渲染，
+            不依赖各卡片自行 return null —— 避免上一会话的缓存数据漏进来。 */}
+        {!hasContent && !isViewingHistory && (
+          <div className="kr-panel__empty">
+            <div className="kr-panel__empty-icon">
+              <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="4" y="8" width="16" height="12" rx="2" />
+                <path d="M12 2v6M9 5h6M8 14h.01M16 14h.01M10 17h4" />
+              </svg>
+            </div>
+            <div className="kr-panel__empty-title">等待本次对话开始</div>
+            <div className="kr-panel__empty-desc">发送消息后，任务、思考与操作进展会实时显示在这里</div>
+          </div>
+        )}
+
+        {/*
+         * 原先这里有一条「已选对话：xxx / 返回最新对话」的提示带。
+         * 整条删掉：它常驻在大盘顶部，和下面的卡片标题叠在一起既占位又抢注意力，
+         * 而且「返回最新对话」这个动作本身是多余的——点击对话流里任意一条消息
+         * 就会切换到那一轮，再点另一条即可返回，不需要一个常驻按钮提醒。
+         * 仍保留 store.setSelectedTurn 的能力，只是入口不再常驻占位。
+         */}
+
+        {/*
+         * 子智能体卡：滚动区**第一张**，紧随其下就是「操作面板」（2026-10-24 定稿）。
+         *
+         * 用户三次点名要操作面板「固定位置」，最终确认的形态是：**操作面板排在这张卡
+         * 下面 + 这张卡固定 5 行**。位置恒定靠的就是这 5 行 —— 有 3 个子智能体也只
+         * 占 5 行（第 6 个起在窗口内滚动），有 8 个也只占 5 行，所以下面的操作面板
+         * 永远停在同一位置。
+         *
+         * 唯一的例外是**一个子智能体都没有**：这张卡整张不渲染（用户点名要的），
+         * 操作面板此时上移 5 行。这个取舍是用户明确选的 —— 他觉得一张只有空窗的
+         * 卡比这 5 行的位移更碍眼。
+         */}
+        {KR_SUBAGENTS_CARD_VISIBLE && panelSubagentsOn && (
+          <KrSubagentsCard
+            catalog={subagentCatalog}
+            spawning={spawnedInSession}
+          />
+        )}
+
+        {/*
+         * 人话行动流（「操作面板」卡）。给不懂技术的用户看的一张：「已经做了什么」
+         * 来自工具调用事实，「准备做什么」来自模型自己播报的预告。
+         *
+         * 位置：**紧贴子智能体卡之下**（那张卡定高 5 行，所以这张卡的位置恒定）。
+         * 曾试过把它整块移出滚动区钉在面板顶部 —— 位置是死了，但排到了子智能体卡
+         * 上面，用户看到的是「怎么跑到最上面去了」。现在按阅读顺序排：
+         * 子智能体（谁在干活）→ 操作面板（我干了什么）→ 任务概览（计划）→ 产出物。
+         *
+         * 后缀 plainTimelineOn 是**运行时**展示开关（「大盘设置 → 展示」里那枚），
+         * 与构建开关 KR_PLAIN_TIMELINE_CARD_VISIBLE、功能开关 view.panel-live 三层
+         * 叠加：构建开关决定这张卡还存不存在，功能开关是插件页面的统一入口，
+         * 运行时开关决定用户此刻要不要看。三个都开才渲染。
+         */}
+        {KR_PLAIN_TIMELINE_CARD_VISIBLE && plainTimelineOn && panelLiveOn && (
+          <KrPlainTimelineCard
+            timeline={plainTimeline}
+            running={currentRunning}
+            squeezed={panelSqueezed}
+            sessionId={latestChatSessionId}
+            subagentCatalog={subagentCatalog}
+            inputImageCount={inputImageCount}
+            workspaceHints={workspaceHints}
+          />
+        )}
+
+        {/* 任务概览卡片：空任务时整卡不渲染（2026-10-28 用户要求「空的不要显示卡片」）。
+            source 由 KrAgentPanel 的 tasksView 判定（turn / session / none）：
+            只有**看历史轮次**时才会是 session，卡片据此标注「会话清单」小标。
+            本轮没写 todo 时就是空 —— 用户 2026-10-24：「发送新的对话时任务概览
+            应该是空的才对」；2026-10-28 进一步要求空卡不要占右栏位置。 */}
+        {panelTasksOn && tasks.length > 0 && (
+          <KrTaskOverviewCard tasks={tasks} isRunning={currentRunning} source={tasksView.source} />
+        )}
+
+        {/* 思考过程卡已从右栏移出，改为贴在 KR 对话流里（见 ThinkingStepNodeView
+            挂的 KrReasoningCard inline 模式）：思考与它对应的回答是同一件事的
+            两半，分两栏摆就得来回对照才读得完整。thinking 文本在本面板仍要留
+            一份——操作面板的「接下来」预告要从里面抽播报句。 */}
+
+        {/* 产出物卡：会话累计的成品清单（滚动区最后一张）。
+            与上面那张的分工是「过程 vs 结果」——操作面板回答"中间做了哪些动作"，
+            这张回答"最后落地了哪些文件"。整行可点，点一下即在右栏打开预览。
+            口径是整个会话而非本轮，所以不看 displayTurn（理由见上面 outputs 的注释）。
+
+            2026-10-19 按用户要求：**没产出时整张卡不出现**（原先常驻一行空态）。
+            与任务卡「空态也要占位」的口径相反，理由是这两张卡的默认预期不同：
+            任务清单几乎每轮都会有，空态本身是信息（"这轮还没列计划"）；而产出物
+            大多数对话压根不会有文件，一张常驻的"本次会话还没有产出文件"只是在右栏
+            底部长期占一块地方说"没事发生"，每轮都要看一眼。 */}
+        {KR_OUTPUTS_CARD_VISIBLE && panelOutputsOn && outputsWithSubagents.items.length > 0 && (
+          <KrOutputsCard
+            outputs={outputsWithSubagents}
+            squeezed={panelSqueezed}
+            sessionId={latestChatSessionId}
+          />
+        )}
+      </div>
+
+      {/*
+        右栏底部：滚动区之外的独立 flex footer（.kr-panel__memory-dock）。
+        不放滚动容器内部——sticky 只能在「内容溢出且滚动」时贴底，内容少时卡片会
+        悬在中间；独立 footer 才能做到「永远钉在右栏最下方」。
+
+        自上而下两块：
+          工具调用    —— 技术视角台账，2026-10-09 按用户要求恢复；默认列前 5 行、
+                        超出折叠（点标题行展开全量），展开后明细列表由 styles 的
+                        `.kr-panel__memory-dock .kr-tools-list` 封顶 40vh + 内部
+                        滚动，不会把思考卡挤出屏幕。用时读数已搬去对话流里那张
+                        「Seeker 正在…」活动卡，footer 不再放用时行。
+          记忆        —— 保持钉在最后，维持用户已有的空间习惯；分「工作区记忆 /
+                        全局记忆」两个分区，支持多选批量删除。
+
+        两块都 return null 时 footer 命中 :empty，自身连 padding 一起收起。
+      */}
+      {((KR_MEMORY_CARD_VISIBLE && panelMemoryOn) || (KR_TOOL_CALLS_CARD_VISIBLE && panelToolCallsOn && toolCallsOn && toolViews.length > 0)) && (
+        <div className="kr-panel__memory-dock">
+          {KR_TOOL_CALLS_CARD_VISIBLE && panelToolCallsOn && toolCallsOn && (
+            <KrToolCallsCard
+              tools={toolViews}
+              running={currentRunning}
+              onInspectCall={(callId) => {
+                try {
+                  actStore.handlers().inspectCall(callId)
+                } catch (err) {
+                  console.warn('[kr-agent-panel] inspectCall error', err)
+                }
+              }}
+            />
+          )}
+          {KR_MEMORY_CARD_VISIBLE && panelMemoryOn && (
+            <KrMemoryCard
+              squeezed={panelSqueezed}
+              onContentChange={handleMemoryContentChange}
+            />
+          )}
+        </div>
+      )}
+
+      {/* 大盘设置：顶栏齿轮 + 视口居中的设置卡片（组件自己 createPortal 到 body，
+          不在这棵子树里渲染，也不参与大盘的 flex 流）。把原先只住在 composer
+          「内置提示词通道」悬浮卡里的 8 个开关搬到大盘上 —— 用户在大盘里干活时
+          不必再回到输入框去拨开关。数据面不变：6 条注入通道仍走 /api/dsh-memory/*，
+          2 条外观偏好仍是 localStorage。 */}
+      <KrPanelSettings sessionId={latestChatSessionId} />
+
+    </div>
+  )
+})

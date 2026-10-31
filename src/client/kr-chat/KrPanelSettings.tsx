@@ -1,0 +1,945 @@
+/**
+ * dsh-seeker-bot — Seeker「大盘设置」卡片（视口居中的模态弹层）。
+ *
+ * 为什么存在：这些开关原先分散在两处 —— composer 输入框那枚「内置提示词通道」悬浮卡
+ * （triad/memory/Toggle.tsx 的 BuiltinToggle）与邮箱工作台设置页。用户真正要拨它们的
+ * 时刻，多半是盯着右栏大盘干活的时候：手得离开大盘、回到输入框、hover 展开、拨完再
+ * 回来。于是把它们收敛成一块设置面板，composer 那张重复的卡整块删除。
+ *
+ * 2026-10-18 用户反馈「把大盘设置也变成弹出卡片，布局需要调整下」，于是外壳从
+ * 「右栏内的右滑抽屉」换成「视口居中的模态卡片」，内部从单列长列表改成两栏。
+ *
+ * 2026-10-25 用户反馈「优化大盘设置布局，目前看起来拥挤，排版不合理」，
+ * 再提「工作区记忆应该放在下方独立的空间」，于是内部结构变成：
+ *
+ *   ┌ 提示词通道 4 行 ────────┬ 展示 3 行 ────┐   ← 上方两栏
+ *   │                          │ 任务清单 2 行  │
+ *   ├─────────────────────────┴───────────────┤   ← 发丝线
+ *   │ 工作区记忆（通栏，逐工作区列表，限高可滚）  │   ← 下方独立区块
+ *   ├─────────────────────────────────────────┤
+ *   │ 插件内置，无卸载入口                      │
+ *   └─────────────────────────────────────────┘
+ *
+ * 三条判据（都源于「拥挤」这个具体抱怨，不是审美偏好）：
+ *  1. **每行只占一行**：说明压成一句短话（各行的**差异**那半句），全文挂 title
+ *     与悬停展开。原来每行都被长说明撑成两三行，11 个开关实际占 22 行文字，
+ *     而其中「每会话首步注入一次」这类**共性**在好几种行里各抄了一遍——共性已
+ *     提到组标题右侧，行里不该再重复。
+ *  2. **开关排成一列**：行改成 grid（标签定宽 / 说明弹性 / 开关定宽）。原先是
+ *     flex，开关跟着文字长度浮动，左右两栏加起来有两条不同的竖线，扫视时每换
+ *     一栏就得重新找位置。
+ *  3. **工作区记忆出栏**：它是列表（长度跟工作区数量走）、唯一按工作区存、
+ *     行结构完全不同，而且和左栏「提示词通道」是写入侧 vs 读取侧的相反语义。
+ *     挤在 390px 右栏时路径被截成 `D:\AI\E…`，而路径是「哪个工作区」的唯一
+ *     无歧义标识。
+ *
+ * 分组按**行为**划分，不按"看起来差不多"划分：
+ *   · 提示词通道 —— 真的往提示词里注入文本的 4 条；
+ *   · 展示       —— 纯 localStorage 外观偏好，一个字都不进提示词；
+ *   · 任务清单   —— 清单怎么写（任务清单纪律）、怎么收尾（自动收口）。
+ *     这两行的**作用机理相反**（一个写提示词、一个由 host 改清单状态），所以
+ *     **不合并成一个开关** —— 合并会强迫用户做无意义的交易（想关"末项转圈"
+ *     就得连带关掉"少往返"）。归同组只负责"看起来归一类"，不负责"共用一个开关"。
+ *
+ * 为什么必须跳出右栏：抽屉的定位基准是 `.kr-split__side`（440px 上下），做成卡片后
+ * 若仍留在那棵子树里，卡片最宽也只能盖住右栏 —— 那不是"居中弹卡片"，是"右栏里的
+ * 一块大点的浮层"。所以用 createPortal 挂到 document.body，与右栏的布局 / 裁剪 /
+ * overflow 彻底解耦（与邮箱卡片同一套做法）。
+ *
+ * **入口不在本组件里**：齿轮按钮由 kr-chat-controller 以裸 DOM 注入顶栏标签行、
+ * 紧邻 Seeker 标签（用户点名要求的位置）。本组件只负责卡片本体，开合读
+ * `panel-settings-store`。两者分处不同的 React 根（一个是裸 DOM 按钮、一个是
+ * createRoot 挂的树），props 传不过去，所以走共享 store 而不是组件内 state ——
+ * 这是本文件相对上一版最大的结构变化（上一版齿轮与抽屉同在一个组件里）。
+ *
+ * 数据口径：6 条注入通道 + 1 条**工作区项目记忆记录**开关走 `/api/dsh-memory/*`
+ * （后者顺带复用 `/inject-state` 的 cwd / projectMemory 两个新字段，不另开端点），
+ * 3 条外观偏好是 localStorage；归一化复用 Toggle.tsx 导出的
+ * `normalizeInjectState` / `FALLBACK_INJECT_STATE`，不另写一套。
+ * 踩过的坑：两处各写一份兜底口径（谁按 `!== false`、谁按 `=== true`）的结果，是同一个
+ * 开关在两处显示成两个值 —— 用户会以为其中一个坏了，而两边读的是同一份 host 状态。
+ *
+ * 为什么分三组：「提示词通道」那几条真的会改注入文本（回合结束自动收口除外，见下），
+ * 「展示」那三条一个字都不进 prompt、只改本机观感。混在一列里，读者会以为「总结卡外框」
+ * 也是往提示词里塞东西 —— 这正是本仓反复踩过的「两种不同的东西挤一张卡」的坑。
+ * 自动收口（回合结束把残留的 in_progress 改回 pending）同属「插件内置、全局单值、无
+ * 卸载入口」这一类能力，才并排放在注入组里；它一个字都不进 prompt 这件事由 hint 讲清。
+ * 别把它挪进展示组：展示组是纯客户端 localStorage，而它走 host。
+ *
+ * 「工作区记忆」自成一组的理由（2026-10-15 新增）：它是**写入侧**（这个工作区要不要
+ * 记下新记忆），而「提示词通道」那一组是**读取侧**（把已有记忆注进提示词）—— 两件事
+ * 语义相反，并排放在一组会被读成同一种能力；它又**按工作区**存，与展示组那种全局
+ * 单值的 localStorage 偏好也不同源。所以既不能并进提示词通道，也不能塞进展示组。
+ *
+ * 为什么 DOM 常驻：`data-open` 是**唯一**开合判据，可见性交给 CSS 的
+ * visibility / opacity / pointer-events。写成 `{open && <div/>}` 的话，关闭时元素直接从
+ * DOM 里消失，退场动画（滑出 + 淡出）根本没有机会播 —— 用户看到的是「啪」一下不见。
+ * 代价是卡片里的按钮始终在 DOM 里，靠 CSS 的 `visibility: hidden` 把它们移出 tab 序列
+ * （visibility 隐藏的元素不可聚焦，这是 CSS 自带的，不需要额外 tabIndex）。
+ *
+ * 为什么不再内联 `position: absolute`：卡片 portal 到 document.body，坐标由 CSS 的
+ * `position: fixed` 决定（居中 + 视口夹紧）。之前内联 absolute 是因为渲染在
+ * `.kr-split__side` 这个 flex column 里、static 子节点会把大盘撑高；portal 之后
+ * 这个约束消失了，内联定位反而会与 CSS 打架。
+ */
+
+import type { CSSProperties } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { createPortal } from 'react-dom'
+import { createMemoryApi, type InjectStateView, type ProjectView } from '../triad/memory/api.js'
+import { FALLBACK_INJECT_STATE, normalizeInjectState } from '../triad/memory/Toggle.js'
+import { replyCardChromeEnabled, setReplyCardChromeEnabled, subscribeReplyCardChrome } from '../reply-card-chrome.js'
+import { setToolCallsVisible, subscribeToolCallsVisible, toolCallsVisible } from '../tool-calls-visible.js'
+import { setPlainTimelineVisible, subscribePlainTimelineVisible, plainTimelineVisible } from '../plain-timeline-visible.js'
+import { workspaceCwdOf } from '../client-ctx.js'
+import { getPanelSettingsStore } from './panel-settings-store.js'
+
+/**
+ * 模块级单例，不是每次渲染新建。
+ *
+ * `createMemoryApi()` 每次调用都返回一个新对象；若写在组件里，任何以它为依赖的 effect
+ * 每帧都会重跑（Toggle.tsx 为此专门用 ref 固定引用 —— 那边实测过一分钟 498 次请求的
+ * 请求风暴）。提到模块级是从根上避免这件事，也让下面的 reload 只依赖 sessionId。
+ */
+const api = createMemoryApi()
+
+/**
+ * 两个路径是不是同一个工作区。
+ *
+ * 只做归一化比较（大小写 + 反斜杠 + 末尾分隔符）：Windows 上 D:\AI\Dsh 与
+ * d:\ai\dsh\ 是同一个目录，但字符串不相等 —— 直接 !== 会让「当前」标永远不亮。
+ * 刻意**不**做 resolve/realpath：client 侧拿不到文件系统，且工作区注册表里存的
+ * 本来就是绝对路径，符号链接那种情况交给 host 的项目 hash 去认。
+ */
+function samePath(left: string, right: string): boolean {
+  const normalize = (value: string): string => value.replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase()
+  return normalize(left) === normalize(right)
+}
+
+export interface KrPanelSettingsProps {
+  /** 当前会话 id（host 的 /inject-state 要它；null 时传空串）。 */
+  readonly sessionId?: string | null
+}
+
+/**
+ * 大盘设置卡片：遮罩 + 居中卡片本体。开合状态来自共享 store（顶栏齿轮按钮 toggle 它）。
+ *
+ * 对外只认一个 `sessionId`：卡片里 6 条 host 通道的读取要带上它，好让 host 回传
+ * 「本会话」的那份状态。
+ */
+export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Element {
+  const sessionKey = sessionId ?? ''
+  const store = getPanelSettingsStore()
+  /*
+   * 开合走 useSyncExternalStore 而不是 useState：状态由**组件外**的顶栏按钮写，
+   * 且那份 store 跨 bundle 实例共享。useState + 自定义事件也能做，但事件会丢
+   * （按钮先于卡片挂载时那一次 toggle 没人接），而订阅式读值天然幂等。
+   */
+  const open = useSyncExternalStore(
+    (cb) => store.subscribe(cb),
+    () => store.open,
+    () => store.open,
+  )
+  const [state, setState] = useState<InjectStateView>(FALLBACK_INJECT_STATE)
+  const [busy, setBusy] = useState(false)
+  /**
+   * 工作区列表（「工作区记忆」组的全部行）。
+   *
+   * 2026-10-18 用户要求「显示出来所有工作区每个单独进行开关」：原来是只给**当前**
+   * 工作区一行开关，用户想一次看到全部工作区、逐个拨。数据来自 host 的
+   * GET /api/dsh-memory/projects（已含 DSH 工作区注册表里零记忆的新工作区）。
+   */
+  const [projects, setProjects] = useState<ProjectView[]>([])
+  /** 列表状态：loading=首屏拉取中 / error=拉失败（给重试）/ idle=正常。 */
+  const [projectsState, setProjectsState] = useState<'idle' | 'loading' | 'error'>('idle')
+  /** 正在写的工作区 hash（逐行 busy：写 A 不该把 B 也变灰）。 */
+  const [projectBusy, setProjectBusy] = useState<string | null>(null)
+  /**
+   * 失效工作区的清理交互（2026-10-23）。
+   *
+   * 为什么需要这几个 state 而不是一个 confirm()：项目档案按 cwd 派生 hash 存着、
+   * 永不自动清除，文件夹删掉之后列表里会永久留一行死工作区；用户看到的第一反应
+   * 是「这玩意怎么还在」。清理是**删档案**（条目按需一并进回收站），比拨开关危险，
+   * 所以给两次机会而不是弹原生 confirm：
+   *   · pruneConfirm  —— 哪一行展开了二次确认条（只有含记忆的行才需要）；
+   *   · pruneBusy     —— 哪一行正在清理（逐行，写 A 不该把 B 变灰）；
+   *   · pruneLeaving  —— 哪一行正在播退场动画（先动画、后从 state 移除）；
+   *   · pruneError    —— 行内提示（host 拒绝 / 网络失败），不静默吞掉。
+   */
+  const [pruneConfirm, setPruneConfirm] = useState<string | null>(null)
+  const [pruneBusy, setPruneBusy] = useState<string | null>(null)
+  const [pruneLeaving, setPruneLeaving] = useState<string | null>(null)
+  const [pruneError, setPruneError] = useState<{ hash: string; text: string } | null>(null)
+  /** host 回的真实活跃条数（本地 entryCount 过时、被 /prune-project 拒回时记录）。 */
+  const [pruneCount, setPruneCount] = useState<{ hash: string; count: number } | null>(null)
+
+  /**
+   * 回读整份状态；失败按兜底形状（与 composer 卡同一份兜底，不另写）。
+   *
+   * 顺带把**当前工作区**的 cwd 带上：卡片里那行「工作区项目记忆记录」是按 cwd
+   * 派生的项目 hash 存的，不带 cwd 的话 host 只能回 null（不知道是哪个工作区），
+   * 那一行就永远显示成「未在工作区内」。cwd 每次请求都现取而不是缓存进 state：
+   * 右栏可以在同一个 sessionId 下换工作区，缓存会让开关指向上一个项目 —— 那会
+   * 变成**拨这个项目的开关、改的是另一个项目**，最不能接受的一类静默错误。
+   */
+  const reload = useCallback((): void => {
+    void api.getInjectState(sessionKey, workspaceCwdOf(sessionKey))
+      .then(res => { setState(normalizeInjectState(res)) })
+      .catch(() => { setState(FALLBACK_INJECT_STATE) })
+  }, [sessionKey])
+
+  /**
+   * 拉全部工作区（含 DSH 注册表里零记忆的新工作区）。
+   *
+   * 打开卡片时拉一次、写完某个开关后再拉一次 —— 不做轮询：这些开关的写入者
+   * 只有本卡片（记忆面板里那处项目上下文条也可能改，但那是另一个面板、不同时开），
+   * 打开时现拉一份就够新。
+   */
+  const loadProjects = useCallback((): void => {
+    setProjectsState(prev => (prev === 'loading' ? prev : 'loading'))
+    void api.projects()
+      .then(res => {
+        setProjects(Array.isArray(res.projects) ? res.projects : [])
+        setProjectsState('idle')
+      })
+      .catch(() => { setProjectsState('error') })
+  }, [])
+
+  /**
+   * 会话切换 → 关掉卡片 + 立刻重读；卡片打开 → 重读一次。
+   *
+   * 两个触发条件合在一个 effect 里，是为了避免「sessionId 变化时 open 还是 true」
+   * 那种跨帧状态下两条 effect 各发一次请求。展开看到的一定是最新值。
+   */
+  const sessionRef = useRef(sessionKey)
+  useEffect(() => {
+    if (sessionRef.current !== sessionKey) {
+      sessionRef.current = sessionKey
+      store.setOpen(false)
+      reload()
+      loadProjects()
+      return
+    }
+    if (open) {
+      reload()
+      loadProjects()
+    }
+  }, [sessionKey, open, reload, loadProjects, store])
+
+  /**
+   * Esc 关闭：监听只在打开期间挂。
+   *
+   * 不常驻监听 —— 卡片没开时，Esc 属于页面上别的东西（官方弹层、输入框取消等），
+   * 抢过来关一个看不见的卡片是纯干扰。cleanup 同时负责组件卸载时摘干净。
+   */
+  useEffect(() => {
+    if (!open) return undefined
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') store.setOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('keydown', onKey) }
+  }, [open, store])
+
+  /**
+   * 写单条内置通道（全局单值）。形状完全同构，只有 setter 不同。
+   *
+   * 乐观更新 + 失败回读（与 Toggle.tsx 的 pushChannel 逐字同构）：旧 host 不认识新
+   * 路由时会静默丢弃写入，回滚会让 UI 显示一个它并不具备的能力，回读拿到的是真实状态。
+   */
+  const pushChannel = useCallback((
+    key: 'zhEnabled' | 'htmlEnabled' | 'teamEnabled' | 'todoClosureEnabled' | 'todoRuleEnabled',
+    next: boolean,
+  ): void => {
+    setBusy(true)
+    setState(prev => ({ ...prev, [key]: next }))
+    const write = key === 'zhEnabled'
+      ? api.setZhInjectState(next)
+      : key === 'htmlEnabled'
+        ? api.setHtmlInjectState(next)
+        : key === 'teamEnabled'
+          ? api.setTeamInjectState(next)
+          : key === 'todoRuleEnabled'
+            ? api.setTodoRuleInjectState(next)
+            : api.setTodoClosureState(next)
+    void write
+      .then(res => {
+        // 中文 / 自动收口缺字段按开兜底（默认开的内置能力）；html / team 缺字段按
+        // 关兜底（旧 host 根本没有这个能力，显示「开」是假阳性）—— 与 normalizeInjectState
+        // 的口径逐条一致，改这里必须同步改那里。
+        const enabled = key === 'htmlEnabled' || key === 'teamEnabled' ? res.enabled === true : res.enabled !== false
+        setState(prev => ({ ...prev, [key]: enabled }))
+      })
+      .catch(reload)
+      .finally(() => { setBusy(false) })
+  }, [reload])
+
+  /**
+   * 写 Agent 邮箱能力声明（跨模块，落在 dsh-mail 的 `mail.injectEnabled`）。
+   *
+   * 与上面几条**刻意不同**：这条通道的闸门是两道（工作台总开关 + 声明开关），回包里
+   * 带着 workbenchEnabled / toolsMounted / authorized / address，所以必须**整组替换**
+   * 而不是只改自己那一个字段 —— 只写 mailEnabled 的话，用户在工作台关着时拨这一行，
+   * 界面会显示成「已开启」而实际仍是哑的，那就是要修掉的那个假阳性。
+   *
+   * 也正因为要等回包才知道整组字段，这里**不做乐观置值**：猜一个 enabled 出来会与
+   * workbench 状态打架。busy 期间开关 disabled，用户看得到「正在写」。
+   */
+  const pushMail = useCallback((next: boolean): void => {
+    setBusy(true)
+    void api.setMailInjectState(next)
+      .then(res => {
+        setState(prev => ({
+          ...prev,
+          mailAvailable: res.available !== false,
+          mailEnabled: res.enabled === true,
+          mailWorkbenchEnabled: res.workbenchEnabled === true,
+          mailToolsMounted: res.toolsMounted === true,
+          mailAuthorized: res.authorized === true,
+          mailAddress: typeof res.address === 'string' ? res.address : null,
+        }))
+      })
+      .catch(reload)
+      .finally(() => { setBusy(false) })
+  }, [reload])
+
+
+  /**
+   * 写某个工作区的两个开关（autoMemory / injectExcluded）。
+   *
+   * 为什么**逐行 busy** 而不是全局 busy：这是本轮新加的批量交互 —— 用户会连着拨
+   * 三四个工作区。用全局 busy 的话，拨第一个时其余所有行都变灰、点不动，读起来
+   * 像「卡住了」；逐行 busy 只锁正在写的那一行，其余随时可拨。
+   *
+   * 乐观更新 + 失败回读（与其余几条同一口径）：host 的 /meta 回的是落盘后的真实
+   * meta，所以回包里那两个布尔就是权威值；失败则重拉整份列表，绝不让 UI 停在
+   * 「以为改成功了」的状态上。
+   */
+  const pushProjectFlag = useCallback((hash: string, patch: { autoMemory?: boolean; injectExcluded?: boolean }): void => {
+    setProjectBusy(hash)
+    setProjects(prev => prev.map(item => (item.hash === hash ? { ...item, ...patch } : item)))
+    void api.meta(hash, patch)
+      .then(res => {
+        const meta = res.meta
+        setProjects(prev => prev.map(item => (item.hash !== hash
+          ? item
+          : {
+              ...item,
+              ...(typeof meta.autoMemory === 'boolean' ? { autoMemory: meta.autoMemory } : {}),
+              ...(typeof meta.injectExcluded === 'boolean' ? { injectExcluded: meta.injectExcluded } : {}),
+            })))
+      })
+      .catch(() => { loadProjects() })
+      .finally(() => { setProjectBusy(current => (current === hash ? null : current)) })
+  }, [loadProjects])
+
+  /**
+   * 清理一条失效工作区的记忆档案。
+   *
+   * 只有「文件夹已经不存在」且「记忆库里有它的档案」的行才会走到这里（判据见
+   * ProjectView.pathMissing / fromRegistry）。三种返回必须分开处理，否则用户
+   * 看到的是「点了按钮没反应」：
+   *   · ok            → 先播 320ms 退场动画再从列表摘掉（直接 filter 会让行
+   *                     「啪」一下消失，与卡片其它过渡不是一套语言）；
+   *   · has-entries   → 卡片上的 entryCount 过时了（别处刚给它加过记忆），把真实
+   *                     条数摆出来，让用户重新确认；
+   *   · 其它/网络失败 → 行内红字提示，不静默吞。
+   */
+  const pruneWorkspace = useCallback((hash: string, purgeEntries: boolean): void => {
+    setPruneBusy(hash)
+    setPruneError(null)
+    void api.pruneProject(hash, purgeEntries)
+      .then(res => {
+        if (res.ok !== true) {
+          // has-entries：本地 entryCount 过时了（别处刚给它加过记忆），把真实
+          // 条数记下来并展开确认条，让用户按真实数字重新确认，而不是只弹一行错。
+          if (res.reason === 'has-entries') {
+            setPruneCount({ hash, count: res.entryCount ?? 0 })
+            setPruneConfirm(hash)
+            return
+          }
+          const text = res.reason === 'no-project'
+            ? '记忆库里没有这个项目的档案（它只存在于 DSH 工作区注册表，那里由 DSH 自己清理）'
+            : '档案没删掉（可能被占用），稍后再试'
+          setPruneError({ hash, text })
+          return
+        }
+        setPruneConfirm(null)
+        setPruneCount(null)
+        setPruneLeaving(hash)
+        // 320ms 与 CSS 里 .kr-settings__ws-row--leaving 的动画时长一致，改一处必须同步另一处。
+        window.setTimeout(() => {
+          setProjects(prev => prev.filter(item => item.hash !== hash))
+          setPruneLeaving(null)
+        }, 320)
+      })
+      .catch(() => { setPruneError({ hash, text: '清理失败（宿主没响应）' }) })
+      .finally(() => { setPruneBusy(current => (current === hash ? null : current)) })
+  }, [])
+
+  const zhOn = state.zhEnabled !== false
+  const htmlOn = state.htmlEnabled === true
+  const teamOn = state.teamEnabled === true
+  // 自动收口与 zh 同口径（默认开）：缺字段按开，别抄 html / team 的 === true。
+  const todoClosureOn = state.todoClosureEnabled !== false
+  // 任务清单纪律与 zh / 自动收口同口径（默认开）：缺字段按开。
+  const todoRuleOn = state.todoRuleEnabled !== false
+  /*
+   * Agent 邮箱：唯一一条**跨模块**通道（承载在 dsh-mail），也是唯一一条会「不可用」的行。
+   *
+   * 两道开关解耦（与 composer 卡同口径）：这一行拨的是**声明**（injectEnabled），
+   * 工作台总开关只决定 `mail_*` 工具在不在。工作台关着不是错误状态 —— 注入照常发生，
+   * 只是文本改走 `agently-cli` 命令行，所以副说明如实交代，不把这一行画成关。
+   * 模块没挂（旧 host / 装配失败）时才不给开关：拨不动的开关是骗人。
+   */
+  const mailAvailable = state.mailAvailable === true
+  const mailOn = state.mailEnabled === true
+  const mailToolsMounted = state.mailToolsMounted === true
+  const mailAuthorized = state.mailAuthorized === true
+  const mailAddress = typeof state.mailAddress === 'string' && state.mailAddress !== '' ? state.mailAddress : null
+  const mailHint = !mailAvailable
+    ? '邮箱模块未挂载（本机没有可用的邮箱能力）'
+    : !mailAuthorized
+      ? '邮箱尚未授权：在本机终端跑 agently-cli auth login 扫码，授权后才会注入'
+      : mailToolsMounted
+        ? (mailAddress === null ? '注册第三方服务、收验证码时直接用本 Agent 的专属邮箱，不再问你'
+                                : `注册第三方服务、收验证码时直接用 ${mailAddress}，不再问你`)
+        : (mailAddress === null ? '注册第三方服务、收验证码时直接用本 Agent 的专属邮箱，不再问你。邮箱工作台关着，模型走 agently-cli 命令行收发'
+                                : `注册第三方服务、收验证码时直接用 ${mailAddress}，不再问你。邮箱工作台关着，模型走 agently-cli 命令行收发`)
+  /*
+   * 邮箱行的**短说明**（2026-10-25，与「每行只占一行」的排版改造同批）。
+   *
+   * 为什么另起一句而不是直接砍 mailHint：上面那串是**三态分支**里最长的一条
+   * （工作台开/关 × 有无地址 × 是否已授权，最坏情况 60 余字），常驻会让左栏
+   * 那一段鼓出一块，与相邻几行不在一个密度上——而它讲的其实只有一件事：
+   * 这个邮箱帮你收验证码，不必再问你。
+   *
+   * 完整说明没有丢：它挂在同一行的 title 上（原生 tooltip 是「截断后仍拿得到
+   * 全文」的最后一道保险，与 SettingsRow 的 hint 同一套兜底逻辑）。
+   *
+   * 短句里**刻意不提「工作台关着走命令行」**：那句话说的是「模型用哪个通道」，
+   * 而这一行管的是「要不要声明这个邮箱」——通道细节对拨这个开关的人没有决策
+   * 价值（拨不拨，地址都是这个地址）。要看的人悬停即有全文。
+   */
+  const mailHintShort = !mailAvailable
+    ? '本机没有可用的邮箱能力'
+    : !mailAuthorized
+      ? '尚未授权，需扫码登录'
+      : mailAddress === null
+        ? '用本 Agent 的专属邮箱，不必再问你'
+        : `用 ${mailAddress}，不必再问你`
+
+  /*
+   * 展示组两条：纯呈现偏好，状态在 localStorage（见 reply-card-chrome / tool-calls-visible）。
+   *
+   * 用 useSyncExternalStore 而不是 useState：它们必须与**别的浏览器窗口**里拨动的同一个
+   * 开关保持一致（storage 事件会唤醒订阅），useState 只能看见本组件的那次点击。
+   */
+  const chromeOn = useSyncExternalStore(subscribeReplyCardChrome, replyCardChromeEnabled, replyCardChromeEnabled)
+  const toolCallsOn = useSyncExternalStore(subscribeToolCallsVisible, toolCallsVisible, toolCallsVisible)
+  // 操作面板与上面两条同族：它也是「这张卡要不要出现在右栏」，同样只写 localStorage。
+  const plainTimelineOn = useSyncExternalStore(subscribePlainTimelineVisible, plainTimelineVisible, plainTimelineVisible)
+
+  /*
+   * 当前工作区 cwd（只用来给列表里那一行打「当前」标；拿不到就是 null）。
+   *
+   * 每次渲染现取（workspaceCwdOf 只读快照、无副作用）而不是缓存进 state：右栏
+   * 可以在同一个 sessionId 下换工作区，缓存会让标记停在上一个项目。
+   */
+  const projectCwdRaw = workspaceCwdOf(sessionKey)
+  const projectCwd = projectCwdRaw !== undefined && projectCwdRaw !== '' ? projectCwdRaw : null
+
+  const card = (
+    <>
+      {/* 遮罩：点它关闭。纯装饰，键盘用户走 Esc 与关闭按钮，故 aria-hidden 恒为 true。
+          齿轮触发按钮**不在这里** —— 它由 kr-chat-controller 注入顶栏标签行、
+          紧邻 Seeker 标签（用户点名要求的位置），通过 panel-settings-store 与本卡片联动。 */}
+      <div
+        className="kr-settings__scrim"
+        data-open={open ? 'true' : 'false'}
+        aria-hidden="true"
+        onClick={() => { store.setOpen(false) }}
+      />
+
+      <div
+        className="kr-settings"
+        data-open={open ? 'true' : 'false'}
+        role="dialog"
+        aria-label="大盘设置"
+        aria-modal={open ? true : undefined}
+        aria-hidden={!open}
+      >
+        <div className="kr-settings__head">
+          <span className="kr-settings__title"><GearIcon size={13} />大盘设置</span>
+          <button
+            type="button"
+            className="kr-settings__close"
+            aria-label="关闭设置"
+            onClick={() => { store.setOpen(false) }}
+          >
+            <CloseIcon />
+          </button>
+        </div>
+
+        <div className="kr-settings__body">
+          {/* 左栏：提示词通道。这一组每行都有一大段说明（团队协作 / Agent 邮箱那两条
+              尤其长），单列排下来要滚很久；卡片给到 960px 宽之后，把短的那两组挪到
+              右栏，左栏独占整列高度，长说明不再被挤成窄条。 */}
+          <div className="kr-settings__col kr-settings__col--main">
+          <div className="kr-settings__group">
+            <div className="kr-settings__group-head">
+              <span className="kr-settings__group-title">提示词通道</span>
+              <span className="kr-settings__group-scope">每会话首步 · 存于 host</span>
+            </div>
+            <SettingsRow
+              index={0}
+              lead
+              label="中文优先"
+              hint="中文思考与输出，代码与报错保持原文"
+              on={zhOn}
+              busy={busy}
+              onToggle={() => { pushChannel('zhEnabled', !zhOn) }}
+            />
+            <SettingsRow
+              index={1}
+              label="对话内交互卡片"
+              hint="让模型主动用小工具、图表来交付"
+              title="注入沙箱规范，模型才会主动用它交付小工具（可点、能动、能算的卡片）。"
+              on={htmlOn}
+              busy={busy}
+              onToggle={() => { pushChannel('htmlEnabled', !htmlOn) }}
+            />
+            <SettingsRow
+              index={2}
+              label="团队协作"
+              hint="独立子任务默认并行，复杂任务组队"
+              title="独立子任务默认并行发 subagent；复杂任务组队当 Lead；只有小事自己做。每会话首步注入一次。"
+              on={teamOn}
+              busy={busy}
+              onToggle={() => { pushChannel('teamEnabled', !teamOn) }}
+            />
+            {/* 邮箱行：模块没挂时不给开关，只留 label + 「不可用」角标 + 说明。
+                hint 走 mailHintShort（一句短话），全文仍由 mailHint 挂在 title 上：
+                这一行的完整说明是三态分支里最长的（邮箱工作台开/关 × 有无地址），
+                常驻会让左栏那一段鼓出一块，与相邻几行不在一个密度上。 */}
+            {mailAvailable
+              ? (
+                <SettingsRow
+                  index={3}
+                  label="Agent 邮箱"
+                  hint={mailHintShort}
+                  title={mailHint}
+                  on={mailOn}
+                  busy={busy}
+                  onToggle={() => { pushMail(!mailOn) }}
+                />
+              )
+              : (
+                <SettingsRow
+                  index={4}
+                  label="Agent 邮箱"
+                  hint={mailHintShort}
+                  title={mailHint}
+                  tag="不可用"
+                />
+              )}
+          </div>
+          </div>
+
+          {/* 右栏：只剩「展示」一组。
+              
+              2026-10-25 结构变化：「工作区记忆」整块**搬出右栏**，改成正文下方的
+              通栏区块（见后面 .kr-settings__ws-zone）。理由三条，都不是审美：
+                · 它是**列表**，长度跟工作区数量走（本机 2 个、重度用户几十个），
+                  而右栏那一列是「固定 3 行」的展示组——两种生长性塞进同一列，
+                  列表一长就把上面那组顶得没影；
+                · 它是**唯一按工作区存**的一组，行结构完全不同（名称 + 路径 +
+                  两枚迷你开关，横着排）。挤在 390px 里时路径必然被截成
+                  `D:\AI\E…`，而路径恰恰是「哪个工作区」的唯一无歧义标识；
+                · 它和左栏「提示词通道」是**写入侧 vs 读取侧**的相反语义，并排
+                  读起来像同一种能力的两半。
+              搬下去之后左栏 5 行 / 右栏 4 行（「回合结束自动收口」已另起「行为纪律」
+              组挪到右栏，见下面那段注释），两栏高度差收到约 37px —— 设置面板不是
+              表格，剩下的那点差不值得再为它调结构。 */}
+          <div className="kr-settings__col kr-settings__col--aside">
+
+          {/* 展示组：与上面那几条**不是一类东西**，所以另起一枚组标题隔开。
+              组说明承接标题、写该组**共性**（三条都是纯 localStorage 外观偏好：
+              只改本机观感、不入 prompt、全局所有会话生效、随浏览器持久保存），
+              各行 hint 于是只讲「关掉后具体会怎样」——2026-10-15 之前这三句共性
+              在三条 hint 里各抄了一遍，是设置面板里最占地方的重复。
+              `--compact` 让这一组走紧凑排版（单行省略、悬停/聚焦展开全文），
+              与注入组「每行一大段说明」的读法区分开。 */}
+          <div className="kr-settings__group kr-settings__group--compact">
+            <div className="kr-settings__group-head">
+              <span className="kr-settings__group-title">展示</span>
+              <span className="kr-settings__group-scope">本机浏览器 · 不进提示词</span>
+            </div>
+            <SettingsRow
+              index={5}
+              lead
+              label="总结卡外框"
+              hint="关掉后不留边框与阴影，退回纯正文"
+              title="关掉后 Seeker 对话流的总结卡不留边框与阴影，退回纯正文。"
+              on={chromeOn}
+              // busy 恒为 false：这一行写的是 localStorage（同步落盘 + 刷 body 属性），
+              // 没有网络往返，不存在「正在保存」的中间态。写成 busy={busy} 会让它在别的
+              // host 通道保存时莫名变灰、点不动。
+              busy={false}
+              onToggle={() => { setReplyCardChromeEnabled(!chromeOn) }}
+            />
+            <SettingsRow
+              index={6}
+              label="工具调用卡"
+              hint="关掉后右栏不显示技术台账"
+              title="关掉后 Seeker 右栏不再显示技术向的「工具调用」台账（默认 5 行滚动窗口那张）；人话行动流不受影响。"
+              on={toolCallsOn}
+              // 与总结卡外框同族：写 localStorage，同步落盘无网络往返，busy 恒 false。
+              busy={false}
+              onToggle={() => { setToolCallsVisible(!toolCallsOn) }}
+            />
+            {/* 操作面板：右栏滚动区那三张里的中间那张（人话行动流）。它与上面
+                两条同族（纯外观、localStorage），但读者不同 —— 它是唯一一张讲
+                人话的卡，关掉后右栏只剩技术台账，所以默认开、且 hint 要把这件事
+                说明白，免得用户关完发现"什么都不知道了"。 */}
+            <SettingsRow
+              index={7}
+              label="操作面板"
+              hint="关掉后右栏不显示人话行动流"
+              title="关掉后 Seeker 右栏不再显示那张中文人话行动流（把工具调用翻译成「打开携程 · 机票」的卡）；工具调用台账与其余卡片不受影响。"
+              on={plainTimelineOn}
+              // 同族第三条：localStorage 同步落盘，busy 恒 false。
+              busy={false}
+              onToggle={() => { setPlainTimelineVisible(!plainTimelineOn) }}
+            />
+          </div>
+
+          {/*
+           * 「任务清单」组：清单怎么写（任务清单纪律）、怎么收尾（自动收口）。
+           *
+           * 2026-10-28 用户要求「step 去掉，任务清单保留」：step 纪律通道整条
+           * 退役（它管的「一次调用装多少动作」连同文本一起删除），原先挂在它
+           * 第五节的任务清单纪律独立成通道（engine/todo-rule.ts），自己的开关、
+           * 自己的首步注入。组标题于是恢复成「任务清单」—— 组里两行都归清单管。
+           *
+           * 两行**没有合并成一个开关**（用户问过能不能合）：任务清单纪律往
+           * 提示词里写约束（模型接下来怎么做），自动收口是 host 侧监听器
+           * （agent/turn-stopping 把残留 in_progress 改写成 pending），一个字都
+           * 不进提示词。合成一个开关的后果是想关掉「末项别再转圈」就得连带关掉
+           * 「清单纪律」，两个诉求毫无关系。
+           *
+           * ⚠ 组头右侧不能写「不进提示词」—— 那句对自动收口成立、对清单纪律
+           * 不成立。这正是上一轮修过的坑（「回合结束自动收口」住在「提示词通道」
+           * 组里、而它自己写着「不改提示词」），别在新结构里再犯一次。
+           */}
+          <div className="kr-settings__group">
+            <div className="kr-settings__group-head">
+              <span className="kr-settings__group-title">任务清单</span>
+              <span className="kr-settings__group-scope">纪律 + 兜底</span>
+            </div>
+            <SettingsRow
+              index={8}
+              lead
+              label="任务清单纪律"
+              hint="开工先列、收尾清零"
+              title="多步任务第一步就写 todo_write；过程中逐项推进、收尾清零；pending 不等于「等待用户」，交棒事项（等审阅 / 等重启）不进清单。每会话首步注入一次，是下面那条自动收口的纪律面。"
+              on={todoRuleOn}
+              busy={busy}
+              onToggle={() => { pushChannel('todoRuleEnabled', !todoRuleOn) }}
+            />
+            <SettingsRow
+              index={9}
+              label="回合结束自动收口"
+              hint="兜底：残留的改回「未完成」"
+              title="回合结束时把残留的「进行中」任务项改回「未完成」，右栏任务卡不再挂着没收尾的项。它不进提示词，由 host 在回合结束时直接改清单状态 —— 是上面那条纪律的兜底：模型没自己收拾干净时，这里替它收。"
+              on={todoClosureOn}
+              busy={busy}
+              onToggle={() => { pushChannel('todoClosureEnabled', !todoClosureOn) }}
+            />
+          </div>
+          </div>
+        </div>
+
+        {/*
+         * 「工作区记忆」：正文下方**通栏独立区块**（2026-10-25 用户要求
+         * 「工作区记忆应该放在下方独立的空间」）。
+         *
+         * 为什么不留在上面的两栏里：它是**列表**（长度跟工作区数量走）、是**唯一
+         * 按工作区存**的一组、行结构是「名称 + 路径 + 两枚迷你开关」横排。塞在
+         * 390px 右栏时，路径被截成 `D:\AI\E…`，两个开关挤成一坨，而路径恰恰是
+         * 「哪个工作区」的唯一无歧义标识（重名/别名时名称不够用）。
+         *
+         * 通栏（960px）之后：路径完整、两个开关能左右拉开、列表限高可滚也不
+         * 会把上面两组顶走。区块用一层极淡底色 + 上方一条发丝线与上面分隔 ——
+         * **不套卡片外框**：设置面板里再套一层圆角卡会变成卡中卡（本仓库的
+         * 老坑，操作面板与子智能体卡当年也是这么拆掉外框的）。
+         *
+         * 语义上它也本该独立：上面两组一个是「读取侧」（把已有记忆注进提示词）、
+         * 一个是「纯外观」，而这一组是**写入侧**（要不要往这个工作区攒新记忆），
+         * 与它们都不是同一类东西。
+         */}
+        <div className="kr-settings__ws-zone">
+          <div className="kr-settings__group-head">
+            <span className="kr-settings__group-title">工作区记忆</span>
+            <span className="kr-settings__group-scope">按工作区 · 存于 host</span>
+          </div>
+          <span className="kr-settings__group-note">
+            每个工作区两个开关：<b>记录</b>决定要不要往这里攒新记忆，<b>不注入</b>决定要不要把已有记忆读进它的会话。
+          </span>
+          {/* 全部工作区逐行列出（2026-10-18 用户要求）：原来只给「当前工作区」
+              一行开关，用户看不到别的工作区、也没法一次调好几个。
+
+              三种状态各有归宿，缺一个都会变成「看着像坏了」：
+                · loading → 一行占位（首屏拉取，通常几十毫秒）；
+                · error   → 一行「读取失败 + 重试」，绝不留空白；
+                · 空列表  → 一行说明（本机还没有任何工作区）。
+              列表本身限高可滚：工作区可能有十几个，区块不能无限长下去。 */}
+          {projectsState === 'loading' && projects.length === 0 && (
+            <div className="kr-settings__ws-hint">正在读取工作区…</div>
+          )}
+          {projectsState === 'error' && projects.length === 0 && (
+            <div className="kr-settings__ws-hint">
+              读取工作区失败（宿主没响应）。
+              <button type="button" className="kr-settings__ws-retry" onClick={loadProjects}>重试</button>
+            </div>
+          )}
+          {projectsState !== 'loading' && projectsState !== 'error' && projects.length === 0 && (
+            <div className="kr-settings__ws-hint">本机还没有工作区。打开一个文件夹作为工作区后，这里会出现它的两个开关。</div>
+          )}
+          {projects.length > 0 && (
+            <div className="kr-settings__ws-list">
+              {projects.map(project => {
+                const name = project.alias !== null && project.alias !== ''
+                  ? project.alias
+                  : (project.path.split(/[\\/]/).filter(Boolean).at(-1) ?? project.hash)
+                const isCurrent = projectCwd !== null && samePath(project.path, projectCwd)
+                const rowBusy = projectBusy === project.hash
+                // 文件夹不存在（2026-10-23）：整行标灰 + 禁用开关 + 给「清理」。
+                // fromRegistry 行是「只存在于 DSH 注册表、记忆库没档案」，不给清理入口。
+                const missing = project.pathMissing === true
+                const cleanable = missing && project.fromRegistry !== true
+                const confirmOpen = pruneConfirm === project.hash
+                const leaving = pruneLeaving === project.hash
+                const rowError = pruneError !== null && pruneError.hash === project.hash ? pruneError.text : null
+                return (
+                  <div
+                    key={project.hash}
+                    className={[
+                      'kr-settings__ws-row',
+                      isCurrent ? 'kr-settings__ws-row--current' : '',
+                      missing ? 'kr-settings__ws-row--missing' : '',
+                      leaving ? 'kr-settings__ws-row--leaving' : '',
+                    ].filter(Boolean).join(' ')}
+                    data-current={isCurrent ? 'true' : undefined}
+                    data-missing={missing ? 'true' : undefined}
+                    // 行上带 hash：e2e 按工作区定位开关（只靠名字会在重名/别名时选错行）。
+                    data-hash={project.hash}
+                  >
+                    <div className="kr-settings__ws-main">
+                      <span className="kr-settings__ws-name" title={project.path}>
+                        {name}
+                        {isCurrent && <span className="kr-settings__ws-badge">当前</span>}
+                        {missing && <span className="kr-settings__ws-badge kr-settings__ws-badge--missing">文件夹已不存在</span>}
+                      </span>
+                      <span className="kr-settings__ws-path" title={project.path}>{project.path}</span>
+                      {rowError !== null && (
+                        <span className="kr-settings__ws-error" role="alert">{rowError}</span>
+                      )}
+                      {confirmOpen && (
+                        <span className="kr-settings__ws-confirm" role="alertdialog" aria-label="确认清理">
+                          <span className="kr-settings__ws-confirm-text">
+                            这个项目下还有 {pruneCount !== null && pruneCount.hash === project.hash ? pruneCount.count : project.entryCount} 条记忆，清理会把它们一并移入回收站。
+                          </span>
+                          <button
+                            type="button"
+                            className="kr-settings__ws-confirm-ok"
+                            disabled={pruneBusy === project.hash}
+                            onClick={() => { pruneWorkspace(project.hash, true) }}
+                          >
+                            确认清理
+                          </button>
+                          <button
+                            type="button"
+                            className="kr-settings__ws-confirm-cancel"
+                            disabled={pruneBusy === project.hash}
+                            onClick={() => { setPruneConfirm(null); setPruneCount(null); setPruneError(null) }}
+                          >
+                            取消
+                          </button>
+                        </span>
+                      )}
+                    </div>
+                    <div className="kr-settings__ws-flags">
+                      <span className="kr-settings__ws-flag">
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={project.autoMemory}
+                          aria-label={`${name}：记录新记忆`}
+                          title="记录新记忆：关掉后这个工作区不再自动提取，模型也不能手动往里记；已有记忆不受影响。"
+                          disabled={rowBusy || missing}
+                          className="kr-settings__switch kr-settings__switch--mini"
+                          onClick={() => { pushProjectFlag(project.hash, { autoMemory: !project.autoMemory }) }}
+                        />
+                        <span className="kr-settings__ws-flag-text">记录</span>
+                      </span>
+                      <span className="kr-settings__ws-flag">
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={project.injectExcluded === true}
+                          aria-label={`${name}：不注入记忆`}
+                          title="不注入：开启后，在这个工作区的会话里不再注入任何记忆条目；记录、检索与面板展示都不受影响。"
+                          disabled={rowBusy || missing}
+                          className="kr-settings__switch kr-settings__switch--mini kr-settings__switch--warn"
+                          onClick={() => { pushProjectFlag(project.hash, { injectExcluded: !(project.injectExcluded === true) }) }}
+                        />
+                        <span className="kr-settings__ws-flag-text">不注入</span>
+                      </span>
+                      {cleanable && (
+                        <span className="kr-settings__ws-flag">
+                          <button
+                            type="button"
+                            className="kr-settings__ws-clean"
+                            disabled={rowBusy}
+                            onClick={() => {
+                              setPruneError(null)
+                              // 本地 count 大于 0 直接进确认（条数摆出来再确认一次）；
+                              // 本地是 0 也可能过时（别处刚加过），host 会以 has-entries
+                              // 拒回真实条数，届时再展开确认 —— 两处都兜住。
+                              if (project.entryCount > 0) {
+                                setPruneCount({ hash: project.hash, count: project.entryCount })
+                                setPruneConfirm(project.hash)
+                              } else {
+                                pruneWorkspace(project.hash, false)
+                              }
+                            }}
+                          >
+                            {pruneBusy === project.hash ? '清理中…' : '清理'}
+                          </button>
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+
+        <p className="kr-settings__foot">插件内置，无卸载入口</p>
+      </div>
+    </>
+  )
+
+  /*
+   * portal 到 body：卡片是**全视口模态**，不能留在 .kr-split__side 那棵子树里。
+   *
+   * 留在里面的话，卡片的定位基准是右栏（440px 上下），最宽也只能盖住右栏 ——
+   * 那不是"居中弹卡片"，是"右栏里一块大点的浮层"。而且 .kr-split__side 带
+   * overflow:hidden，卡片超出部分会被直接裁掉。
+   *
+   * SSR / 首帧无 document 时退回原地渲染（本插件只在浏览器跑，这层纯兜底）。
+   */
+  if (typeof document === 'undefined') return card
+  return createPortal(card, document.body)
+}
+
+/**
+ * 卡片里的一行：左侧标签（可带角标）+ 副说明，右侧开关。
+ *
+ * `on` 省略 = 这一行**不给开关**（邮箱模块没挂时那种「拨不动的开关」）。
+ * `lead` 标出该组第一行：上方已经有组标题，不再叠一条分隔虚线。
+ * `index` 是全局行序号（0 起），供 CSS 用 `--row-i` 做错开浮现。
+ *
+ * ## hint 与 title 分离（2026-10-25 排版改造）
+ *
+ * 原来只有 `hint`：它既是**上屏的短句**，又被当成 `title` 的全文。两者合一在
+ * 说明长于一行时是够用的，但一旦「每行只占一行」成为默认排版，它就不成立了 ——
+ * 短句是**给扫视用的**（差异那半句），全文是**给追问用的**（关掉到底会怎样）。
+ * 例：任务清单纪律那一行的全文有 60 余字，而扫视时读者只需要「开工先列、
+ * 收尾清零」这一句。
+ *
+ * 所以给一个可选的 `title`：传了就用它当悬停全文，`hint` 退化成纯展示短句；
+ * 不传则沿用旧行为（hint 兼任 title），既有调用点一处都不用改。
+ */
+function SettingsRow({
+  index,
+  lead = false,
+  label,
+  hint,
+  title,
+  on,
+  busy = false,
+  tag,
+  onToggle,
+}: {
+  readonly index: number
+  readonly lead?: boolean
+  readonly label: string
+  readonly hint?: string
+  /** 悬停全文。省略时退回 hint 本身（旧行为，长说明不必都改）。 */
+  readonly title?: string
+  /** 省略 = 不渲染开关按钮。 */
+  readonly on?: boolean
+  readonly busy?: boolean
+  readonly tag?: string
+  readonly onToggle?: () => void
+}): JSX.Element {
+  // 悬停全文的取值顺序：显式 title > hint > label。最后那档是给「只有标签」的
+  // 行（邮箱未挂载分支）兜底的 —— 没有它，长标签被行宽截断后就没有第二出口。
+  const fullText = title ?? hint ?? label
+  return (
+    <div
+      className={lead ? 'kr-settings__row kr-settings__row--lead' : 'kr-settings__row'}
+      style={{ '--row-i': String(index) } as CSSProperties}
+    >
+      <span className="kr-settings__main">
+        <span className="kr-settings__label">
+          {label}
+          {tag !== undefined && <span className="kr-settings__badge">{tag}</span>}
+        </span>
+        {hint !== undefined && <span className="kr-settings__hint" title={fullText}>{hint}</span>}
+      </span>
+      {on !== undefined && (
+        <button
+          type="button"
+          role="switch"
+          aria-checked={on}
+          aria-label={label}
+          disabled={busy}
+          className="kr-settings__switch"
+          onClick={onToggle}
+        />
+      )}
+    </div>
+  )
+}
+
+/**
+ * 齿轮图标：设置卡片标题用。
+ *
+ * 2026-10-25 第二次修正：**实心** 8 齿 + 中心圆孔（fill + fill-rule:evenodd）。
+ *
+ * 前两版都不对：① 圆 + 八根发散线（那是太阳/辐条）；② 描边闭合 path（小尺寸下
+ * 线宽只剩 1px，齿形糊成一圈锯齿，用户反馈「有点丑」）。实心齿轮在小尺寸下干净
+ * 得多。
+ *
+ * ⚠ 卡头那枚触发按钮在 SeekerHead.tsx 里，是同一形状的独立字符串；改这里时同步改那边。
+ */
+function GearIcon({ size = 15 }: { readonly size?: number }): JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path fillRule="evenodd" d="M10.6 1.5h2.8a1 1 0 0 1 .99.86l.24 1.83a8.2 8.2 0 0 1 2.14 1.24l1.72-.7a1 1 0 0 1 1.24.42l1.4 2.42a1 1 0 0 1-.22 1.28l-1.4 1.2a8.2 8.2 0 0 1 0 2.47l1.4 1.2a1 1 0 0 1 .22 1.28l-1.4 2.42a1 1 0 0 1-1.24.42l-1.72-.7a8.2 8.2 0 0 1-2.14 1.24l-.24 1.83a1 1 0 0 1-.99.86h-2.8a1 1 0 0 1-.99-.86l-.24-1.83a8.2 8.2 0 0 1-2.14-1.24l-1.72.7a1 1 0 0 1-1.24-.42l-1.4-2.42a1 1 0 0 1 .22-1.28l1.4-1.2a8.2 8.2 0 0 1 0-2.47l-1.4-1.2a1 1 0 0 1-.22-1.28l1.4-2.42a1 1 0 0 1 1.24-.42l1.72.7a8.2 8.2 0 0 1 2.14-1.24l.24-1.83a1 1 0 0 1 .99-.86Zm1.4 6.9a3.6 3.6 0 1 0 0 7.2 3.6 3.6 0 0 0 0-7.2Z" />
+    </svg>
+  )
+}
+
+/** 关闭图标（×）。 */
+function CloseIcon({ size = 14 }: { readonly size?: number }): JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+      <path d="M4.2 4.2 11.8 11.8M11.8 4.2 4.2 11.8" />
+    </svg>
+  )
+}

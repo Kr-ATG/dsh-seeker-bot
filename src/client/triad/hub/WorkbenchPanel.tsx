@@ -1,0 +1,271 @@
+/**
+ * WorkbenchPanel — 4 合 1 统一工作台主容器。
+ *
+ * 聚合模块（顺序 = WORKBENCH_TABS 顺序 = 侧栏操作间顺序）：
+ *  0. 记忆 (Memory)    — DSH 暗色系大盘与卡片流
+ *  1. 能力 (Skills)    — 技能与 MCP 工具包管理
+ *  2. 用量 (Usage)     — Token 消耗总览、24小时/月度平滑曲线与 52 周全局热力大盘
+ *  3. 画廊 (Gallery)   — 多媒体画廊：所有对话生成的图片 / 网页 / 演示 / 文档一站查看
+ *  4. 档案 (Vault)     — 结构化个人档案：账号密码 / 支付方式 / 联系方式 / 证件
+ *                        （与记忆库**互不隶属**：不受工作区开关管辖，敏感值加密
+ *                        落盘且绝不进模型上下文；侧栏二级菜单 = 场景分组）
+ *
+ * 供应商与网络代理**不在这里**（2026-10-05 用户点名「还是把供应商配置和代理
+ * 放在设置里面吧」）：两者都在官方「设置」弹窗的「供应商」页
+ * （src/client/provider/webui/section.tsx，座位 settings.section / id provider-hub）。
+ *
+ * 邮件（原第 6 个分类）**也搬走了**（2026-10）：入口改到 Seeker 顶栏齿轮右侧的
+ * 邮件按钮 + 居中只读卡片（src/client/kr-chat/mail-drawer.tsx），本工作台不再
+ * 有 mail 分类 —— 邮箱被裁成纯查看，塞进统一工作台里既占一格又得跟整页三栏
+ * 布局较劲。
+ */
+
+import { useEffect, useMemo, useState } from 'react'
+import { ensureWorkbenchStyles } from './styles.js'
+import { ensureWorkbenchTheme } from './theme.js'
+import { MemoryPanel } from '../memory/Panel.js'
+import { SkillsPanel } from '../usage/dashboard/SkillsPanel.js'
+import { UsagePanel } from '../usage/dashboard/UsagePanel.js'
+import { GalleryPanel } from '../gallery/GalleryPanel.js'
+import { VaultPanel } from '../vault/Panel.js'
+import { SystemPromptPanel } from '../system-prompt/Panel.js'
+import { SyncSettingsPanel } from '../workbench-sync/SyncSettingsPanel.js'
+import { createMemoryApi } from '../memory/api.js'
+import { PopoverShell } from '../popover-shell.js'
+import {
+  readWorkbenchTab,
+  useVisibleWorkbenchTabs,
+  workbenchTabEnabled,
+  writeWorkbenchTab,
+  WORKBENCH_TAB_EVENT,
+  WORKBENCH_TABS,
+} from './row-flyout.js'
+
+/**
+ * 工作台分类。
+ *
+ * 顺序即侧栏顺序 / 滚轮顺序 / ⌘N 直切顺序的唯一真相（三处都遍历
+ * WORKBENCH_TABS，不另起一份表）。
+ *
+ * ⚠ DEFAULT_TAB 仍然是 'memory'：默认页是「上次看过的分类」（localStorage
+ * 回填），首次安装落到记忆是既有约定。
+ */
+export type WorkbenchTab = 'memory' | 'skills' | 'usage' | 'gallery' | 'vault' | 'prompt' | 'sync'
+
+/**
+ * 默认 Tab。
+ *
+ * 2026-10 v4 导航定稿：分类切换**只在侧栏那一行横滑条上**（./strip.tsx），
+ * 页内不再有任何切换器——原先的悬浮胶囊 Dock 与更早的顶部 tab 栏都已删除。
+ * 每个页面各自成为完整板块，页头只表达「我是谁」。
+ * 当前分类写 localStorage（侧栏条与页面共用同一把键），重开工作台回到上次那页。
+ */
+export const DEFAULT_TAB: WorkbenchTab = 'memory'
+
+export interface WorkbenchPanelProps {
+  onClose: () => void
+  initialTab?: WorkbenchTab
+}
+
+/** 现代工作台方阵图标（侧栏「工作台」菜单行用）。 */
+export function WorkbenchGridIcon({ size = 15 }: { size?: number }): JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="3" width="7" height="7" rx="1.5" />
+      <rect x="14" y="3" width="7" height="7" rx="1.5" />
+      <rect x="14" y="14" width="7" height="7" rx="1.5" />
+      <rect x="3" y="14" width="7" height="7" rx="1.5" />
+    </svg>
+  )
+}
+
+/**
+ * 分类页页头（效果图每页的 eyebrow + 巨型标题 + 一句定位）。
+ * 纯展示：eyebrow / 标题 / 副句按分类取，不接状态。
+ */
+const PAGE_HEADS: ReadonlyArray<{ id: WorkbenchTab; eyebrow: string; title: string; sub: string; tail: string }> = [
+  { id: 'memory', eyebrow: 'Memory Stream', title: '记忆', sub: '按时间成河，按重要度分层。左侧图标轨切视图，选中条目右侧滑出详情抽屉。', tail: '记住什么' },
+  { id: 'skills', eyebrow: 'Capability Matrix', title: 'SKILL', sub: '技能包统一编目，展开看每个包里的技能。', tail: '会什么' },
+  { id: 'usage', eyebrow: 'Token Telemetry', title: '用量', sub: '范围胶囊只作用于消耗汇总；热力带恒为全量 52 周，是横跨历史的总览。', tail: '烧了多少' },
+  { id: 'gallery', eyebrow: 'Output Gallery', title: '画廊', sub: '所有对话产出的图片、网页、演示、文档一站看全。', tail: '产出过什么' },
+]
+
+function PageHead({ tab }: { tab: WorkbenchTab }): JSX.Element | null {
+  const head = PAGE_HEADS.find(item => item.id === tab)
+  // 用量页头在 UsagePanel 嵌入分支内（与英雄区同一组件树）；
+  // SKILL 页头由 SkillsPanel 自己的刊头（Skills / 索引 + 三格统计）承担，
+  // 这里再画一次会变成「SKILL / 会什么」压着「Skills 索引」两个大标题。
+  // usage / skills / vault 三个面板自带页头（巨型标题 + 说明），这里再画一次
+  // 会变成两层大标题压在一起。
+  if (head === undefined || tab === 'usage' || tab === 'skills' || tab === 'vault'
+    || tab === 'sync') return null
+  return (
+    <header className="wb2-head wb2-rise">
+      <div className="wb2-head-l">
+        <span className="wb2-eyebrow"><i />{head.eyebrow}</span>
+        <h1 className="wb2-title">{head.title} <em>/ {head.tail}</em></h1>
+        <p className="wb2-sub">{head.sub}</p>
+      </div>
+    </header>
+  )
+}
+
+export function WorkbenchPanel({ onClose, initialTab = DEFAULT_TAB }: WorkbenchPanelProps): JSX.Element {
+  ensureWorkbenchStyles()
+  ensureWorkbenchTheme()
+
+  // 先无条件订阅 work.* 七个开关（hook 顺序固定），再由下面的渲染决定显示哪页。
+  // 关掉某个工作台后：侧栏入口、hover 浮层与本页内容同一拍消失；重新打开也
+  // 同一拍回来，不需要刷新。
+  const visibleTabs = useVisibleWorkbenchTabs()
+  const visibleKey = visibleTabs.map(tab => tab.id).join(',')
+
+  const [activeTab, setActiveTab] = useState<WorkbenchTab>(() => {
+    // 与侧栏行共用同一把 localStorage 键：滚轮切到的分类在这里原样回填。
+    const saved = readWorkbenchTab()
+    return saved !== DEFAULT_TAB || initialTab === DEFAULT_TAB ? saved : initialTab
+  })
+
+  /**
+   * 当前实际展示的分类。
+   *
+   * activeTab 是用户的「上次选择」，可能指向一个刚被关掉的页面；这里在渲染期
+   * 立刻回落到 memory（首次安装的默认落点），memory 也关了则落到第一个仍开启
+   * 的分类。全部关闭时是 undefined —— 页面显示空态，而不是白屏。
+   */
+  const effectiveTab: WorkbenchTab | undefined = visibleTabs.some(tab => tab.id === activeTab)
+    ? activeTab
+    : (visibleTabs.some(tab => tab.id === 'memory') ? 'memory' : visibleTabs[0]?.id)
+
+  // 把 state 收敛到 effectiveTab：否则用户在「memory 被关 → 打开 memory」时
+  // 会看到页面停在被强制回落的那一页，而不是自己上次选的那页。
+  useEffect(() => {
+    if (effectiveTab !== undefined && effectiveTab !== activeTab) setActiveTab(effectiveTab)
+  }, [activeTab, effectiveTab])
+
+  // 侧栏行的滚轮 / 浮层点击经事件广播过来：页面在就原地换页。
+  // 关掉的分类即使收到广播也忽略 —— 入口已经藏了，不能再从别处跳进去。
+  useEffect(() => {
+    const onTab = (event: Event): void => {
+      const next = (event as CustomEvent<WorkbenchTab>).detail
+      if (WORKBENCH_TABS.some((t) => t.id === next) && workbenchTabEnabled(next)) setActiveTab(next)
+    }
+    window.addEventListener(WORKBENCH_TAB_EVENT, onTab)
+    return () => { window.removeEventListener(WORKBENCH_TAB_EVENT, onTab) }
+  }, [])
+
+  // API 面用单例（无状态 fetch 包装）：每次渲染返回新对象会让子面板的
+  // useEffect 依赖随渲染重发请求，记忆面板历史上打过一分钟 498 次的请求风暴。
+  const memoryApi = useMemo(() => createMemoryApi(), [])
+
+  /**
+   * ⌘1–4 / Ctrl+1–4 直切分类（与侧栏横滑条的提示一致）。
+   *
+   * 只在工作台页挂载期间生效（本组件就是那一页），不进全局快捷键表——它是
+   * 页内导航，离开工作台按这组键不该有任何反应。输入框内不劫持。
+   */
+  useEffect(() => {
+    // 直切顺序只算仍开启的分类：否则 ⌘3 会落在一个被关掉、看不见的页上。
+    const tabs = visibleTabs
+    const onKey = (event: KeyboardEvent): void => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return
+      const index = Number.parseInt(event.key, 10) - 1
+      if (!Number.isInteger(index) || index < 0 || index >= tabs.length) return
+      const target = event.target
+      if (target instanceof HTMLElement
+        && (target.isContentEditable || target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return
+      // tabs[index] 是可见分类里的第 N 项；兜底 WORKBENCH_TABS[index] 只为
+      // 极端情况下（可见列表在事件与渲染之间变短）不抛错，正常路径走前者。
+      const tab = tabs[index] ?? WORKBENCH_TABS[index]
+      if (tab === undefined) return
+      event.preventDefault()
+      writeWorkbenchTab(tab.id)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => { window.removeEventListener('keydown', onKey) }
+    // visibleTabs 每次渲染都是新数组，用 visibleKey 作为稳定依赖；
+    // 可见集合一变就重建监听器，闭包里的 tabs 永远是最新那一份。
+  }, [visibleKey])
+
+  return (
+    <PopoverShell
+      onClose={onClose}
+      ariaLabel="工作台"
+    >
+      <div className="wb-root">
+        {/* 分类切换在侧栏横滑条上（./strip.tsx），页内不再放切换器 */}
+
+        {/* 主体内容视图（按分类切换；key 随分类变化，重播 .wb-body > * 的入场动效） */}
+        <div className="wb-body">
+          {/* 全部工作台都被关掉时的空态：保留操作间入口（切换行），只说明怎么办。
+              不给「请打开某个开关」的按钮 —— 开关在插件页，跳过去反而多一步。 */}
+          {visibleTabs.length === 0 && (
+            <div key="empty" className="wb2-page-wrap">
+              <div style={{
+                margin: 'auto',
+                padding: '32px 24px',
+                textAlign: 'center',
+                color: 'var(--dsw-alias-label-tertiary, #8a8a8a)',
+                fontSize: 14,
+                lineHeight: '22px',
+                maxWidth: 420,
+              }}>
+                <div style={{ fontSize: 18, lineHeight: '26px', marginBottom: 10, color: 'var(--dsw-alias-label-secondary, #b0b0b0)' }}>
+                  操作间暂时没有可用页面
+                </div>
+                <div>所有工作台开关都已关闭。可在「设置 → 插件 → dsh-seeker-bot → 包含的组件」里重新打开。</div>
+              </div>
+            </div>
+          )}
+
+          {/* 记忆：完整三栏工作台（列表 / 详情 / 导航），一个能力都不少。
+              默认落点是 memory（activeTab === 'memory' 时就是这一页）；effectiveTab
+              是开关过滤后的最终值，二者在 memory 开启时一致。 */}
+          {effectiveTab === 'memory' && (
+            <div key="memory" className="wb2-page-wrap">
+              <PageHead tab="memory" />
+              <MemoryPanel {...memoryApi} onClose={onClose} embedded />
+            </div>
+          )}
+
+          {effectiveTab === 'skills' && (
+            <div key="skills" className="wb2-page-wrap">
+              <PageHead tab="skills" />
+              <SkillsPanel onClose={onClose} embedded />
+            </div>
+          )}
+
+          {effectiveTab === 'usage' && (
+            <UsagePanel key="usage" onClose={onClose} embedded />
+          )}
+
+          {effectiveTab === 'gallery' && (
+            <div key="gallery" className="wb2-page-wrap">
+              <PageHead tab="gallery" />
+              <GalleryPanel onClose={onClose} />
+            </div>
+          )}
+
+          {/* 档案：自带页头（标题 + 一句说明 + 搜索条），所以不叠 PageHead。 */}
+          {effectiveTab === 'vault' && (
+            <VaultPanel key="vault" onClose={onClose} embedded />
+          )}
+
+          {/* 系统提示词（2026-10-27）：只读视图，看「这次发送会带上什么」。
+              自带页头（标题 + 会话选择 + 刷新/复制），所以不叠 PageHead。 */}
+          {effectiveTab === 'prompt' && (
+            <SystemPromptPanel key="prompt" onClose={onClose} embedded />
+          )}
+
+          {/* 同步设置（2026-10-27）：工作台资产（档案、记忆、技能）双向漫游。 */}
+          {effectiveTab === 'sync' && (
+            <div key="sync" className="wb2-page-wrap">
+              <SyncSettingsPanel onClose={onClose} embedded />
+            </div>
+          )}
+
+        </div>
+      </div>
+    </PopoverShell>
+  )
+}

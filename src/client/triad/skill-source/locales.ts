@@ -1,0 +1,38 @@
+/**
+ * skill-source 字典:`skill` 命名空间(工具行文案,同内核 ui-skill)。
+ * slash 菜单组标题沿用 ui-input-trigger 的 slash.menu 字典('skill' → 技能)。
+ */
+
+/** Dictionary namespace owned by this plugin. */
+export const NS = 'skill'
+
+/** Simplified Chinese dictionary (the key-set source of truth). */
+export const zh = {
+  'row.running': '正在加载 skill',
+  'row.failed': 'skill 加载失败',
+  'row.stopped': 'skill 加载已中止',
+  'row.instructions': '说明',
+  'menu.userOnly': '仅用户',
+  // slash 菜单第一级的分段标题(候选的 section 字段):直达命中的技能 / 技能包。
+  'menu.skill': '技能',
+  'menu.bundle': '技能包',
+  // slash 菜单第一级里「散装技能」那一行(不属于任何集合的技能)。
+  'loose.title': '散装技能',
+  'loose.count': '{count} 个技能',
+} satisfies Record<string, string>
+
+/** The skill namespace key union. */
+export type SkillKey = keyof typeof zh
+
+/** English dictionary, checked complete against the zh key set. */
+export const en = {
+  'row.running': 'Loading skill',
+  'row.failed': 'Skill load failed',
+  'row.stopped': 'Skill load stopped',
+  'row.instructions': 'Instructions',
+  'menu.userOnly': 'user-only',
+  'menu.skill': 'Skills',
+  'menu.bundle': 'Skill bundles',
+  'loose.title': 'Loose skills',
+  'loose.count': '{count} skills',
+} satisfies Record<SkillKey, string>
