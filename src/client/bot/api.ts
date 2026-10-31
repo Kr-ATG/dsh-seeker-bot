@@ -144,3 +144,8 @@ export function deleteRoutine(id: string): Promise<ApiResult<{ ok?: boolean }>> 
 export function testRoutine(id: string): Promise<ApiResult<{ ok?: boolean; delivered?: boolean; reason?: string }>> {
   return request('/routines/' + encodeURIComponent(id) + '/test', { method: 'POST', body: '{}' })
 }
+
+/** 主动找我诊断：返回此刻是否会发、为什么（不真正发消息）。 */
+export function testProactive(botId: string): Promise<ApiResult<{ ok?: boolean; willSend?: boolean; reason?: string; candidateCount?: number; event?: unknown }>> {
+  return request('/bots/' + encodeURIComponent(botId) + '/proactive/test', { method: 'POST', body: '{}' })
+}

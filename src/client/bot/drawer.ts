@@ -10,7 +10,7 @@
 
 import {
   createRoutine, deleteBot, deleteRoutine, fetchRoutines, patchBot, patchRoutine,
-  setBotPaused, setPrimaryBot, testRoutine, type RoutineView,
+  setBotPaused, setPrimaryBot, testProactive, testRoutine, type RoutineView,
 } from './api.ts'
 import {
   buildBotPatch,
@@ -261,6 +261,20 @@ async function runRoutineTest(routine: RoutineView): Promise<void> {
   await loadRoutines(routine.botId)
 }
 
+async function runProactiveTest(): Promise<void> {
+  if (currentBot === null) return
+  const res = await testProactive(currentBot.id)
+  if (!res.ok) {
+    showDrawerError('测试主动找我失败：' + (res.error ?? '未知错误'))
+    return
+  }
+  const data = res.data ?? {}
+  const reason = typeof data.reason === 'string' ? data.reason : ''
+  const count = typeof data.candidateCount === 'number' ? data.candidateCount : 0
+  if (data.willSend === true) notice('此刻会发：有 ' + count + ' 条候选事件（' + reason + '）')
+  else notice('此刻不会发：' + reason + '（候选 ' + count + ' 条）')
+}
+
 function fillControls(bot: BotRecord): void {
   const draft = drawerDraftOf(bot)
   const values: Record<string, string | boolean> = {
@@ -375,6 +389,14 @@ function buildDrawer(): HTMLDivElement {
     box.appendChild(sectionTitle)
     for (const field of section.fields) {
       box.appendChild(buildField(field).wrap)
+    }
+    if (section.title === '主动找我') {
+      const test = el('button', 'skb-btn') as HTMLButtonElement
+      test.type = 'button'
+      test.textContent = '测试主动找我'
+      test.title = '按当前配置与候选事件判断此刻是否会发消息（不会真的发）'
+      test.addEventListener('click', () => { void runProactiveTest() })
+      box.appendChild(test)
     }
     bodyEl.appendChild(box)
   }
