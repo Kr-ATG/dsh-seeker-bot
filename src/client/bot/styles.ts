@@ -442,6 +442,71 @@ body[data-skb-mode="bot"][data-skb-panel="on"] [data-conversation-scroll] {
 body[data-skb-mode="bot"][data-skb-panel="on"] #dsh-kr-panel-container {
   display: none !important;
 }
+
+/* ── 详情抽屉里的「日程」区 ─────────────────────────────────────────── */
+.skb-drawer__hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary, #81858c);
+  margin: -2px 0 6px;
+}
+.skb-routines {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+.skb-routine-empty {
+  font-size: 11.5px;
+  color: var(--dsw-alias-label-tertiary, #81858c);
+  padding: 4px 0 6px;
+}
+.skb-routine {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 5px 0;
+  border-top: 1px solid var(--dsw-alias-separator-primary, rgba(0, 0, 0, 0.08));
+}
+.skb-routine:first-child { border-top: 0; }
+.skb-routine input[type="checkbox"] { flex: none; }
+.skb-routine__meta { flex: 1; min-width: 0; }
+.skb-routine__name {
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary, #0f1115);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.skb-routine__sub {
+  font-size: 10.5px;
+  color: var(--dsw-alias-label-tertiary, #81858c);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.skb-routine__act {
+  flex: none;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  border-radius: 5px;
+  background: var(--dsw-alias-bg-base, #fff);
+  color: var(--dsw-alias-label-secondary, #61666b);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.skb-routine__act:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.04)); }
+.skb-routine__act--danger:hover { color: var(--dsw-alias-state-error-primary, #dc2626); }
+.skb-routine-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--dsw-alias-separator-primary, rgba(0, 0, 0, 0.08));
+}
 `
 
 export const BOT_STYLE_ID = 'skb-styles'

@@ -32,7 +32,7 @@ bundles 层，不用手改配置文件。
 | 右栏 Bot 面板 | 只有 ego 工作区回显画面（复用原回显与切换逻辑），空内容不占宽；子智能体 / 产出物行与 Seeker 大盘同源 |
 | 记忆 | 所有 Bot 共用 `seekerbot` 工作区，记忆面板按工作区独立 |
 | 电脑操作 | Bot 模式下 `computer-use` 默认开启；Work 模式保持默认全关 |
-| 日程 | 原「班次」改名「日程」，`/api/seeker-bot/routines` 支持 CRUD、Test、Webhook、限流与最近 20 次运行 |
+| 日程 | 原「班次」改名「日程」；Bot 详情抽屉里可新建 / 暂停 / Test / 删除，`/api/seeker-bot/routines` 支持 CRUD、Test、Webhook、限流与最近 20 次运行 |
 
 安装/回滚请按 [docs/INSTALL-TROUBLESHOOTING.md](docs/INSTALL-TROUBLESHOOTING.md)；
 **不要手工改 profile，也不要用定时 kill 重启当前 DSH**。

@@ -8,7 +8,10 @@
  * 所有失败都在抽屉底部留一行可见错误，绝不静默。
  */
 
-import { deleteBot, patchBot, setBotPaused, setPrimaryBot } from './api.ts'
+import {
+  createRoutine, deleteBot, deleteRoutine, fetchRoutines, patchBot, patchRoutine,
+  setBotPaused, setPrimaryBot, testRoutine, type RoutineView,
+} from './api.ts'
 import {
   buildBotPatch,
   DRAWER_SECTIONS,
@@ -35,6 +38,12 @@ let pinBtn: HTMLButtonElement | null = null
 let primaryBtn: HTMLButtonElement | null = null
 let currentBot: BotRecord | null = null
 let busy = false
+let routinesBody: HTMLDivElement | null = null
+let routineNameInput: HTMLInputElement | null = null
+let routineInstructionInput: HTMLTextAreaElement | null = null
+let routineScheduleSelect: HTMLSelectElement | null = null
+let routines: RoutineView[] = []
+let routinesBusy = false
 const controls = new Map<string, Control>()
 
 function controlOf(key: string): Control | undefined {
@@ -102,6 +111,154 @@ function buildField(field: DrawerField): { wrap: HTMLElement; control: Control }
   wrap.appendChild(control)
   controls.set(field.key, control)
   return { wrap, control }
+}
+
+/* ───────────────────────────── 日程（原班次） ───────────────────────────── */
+
+/** 把 triggers 归一成一句可读的频率说明。 */
+function scheduleLabelOf(routine: RoutineView): string {
+  const trigger = Array.isArray(routine.triggers)
+    ? routine.triggers.find((item) => item.type === 'schedule')
+    : undefined
+  if (trigger === undefined) return '仅手动 / Webhook'
+  if (typeof trigger.everySeconds === 'number' && trigger.everySeconds > 0) {
+    const hours = trigger.everySeconds / 3600
+    return Number.isInteger(hours) ? '每 ' + hours + ' 小时' : '每 ' + trigger.everySeconds + ' 秒'
+  }
+  if (typeof trigger.cron === 'string' && trigger.cron !== '') {
+    if (trigger.cron === '0 9 * * *') return '每天 09:00'
+    if (trigger.cron === '0 9 * * 1') return '每周一 09:00'
+    return 'cron：' + trigger.cron
+  }
+  return '仅手动 / Webhook'
+}
+
+function lastRunTextOf(routine: RoutineView): string {
+  const run = Array.isArray(routine.runs) && routine.runs.length > 0 ? routine.runs[0] : undefined
+  if (run === undefined) return '还没跑过'
+  const time = new Date(run.at).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  const status = run.status === 'succeeded' ? '成功' : run.status === 'failed' ? '失败' : run.status
+  return time + ' · ' + status + (run.reason ? '：' + run.reason : '')
+}
+
+function renderRoutines(): void {
+  if (routinesBody === null) return
+  routinesBody.innerHTML = ''
+  if (routines.length === 0) {
+    const empty = el('div', 'skb-routine-empty')
+    empty.textContent = '还没有日程。日程会在指定时间让这个 Bot 自己跑一件事。'
+    routinesBody.appendChild(empty)
+    return
+  }
+  for (const routine of routines) {
+    const row = el('div', 'skb-routine')
+    const check = el('input', '') as HTMLInputElement
+    check.type = 'checkbox'
+    check.checked = routine.enabled === true
+    check.title = routine.enabled === true ? '暂停这个日程' : '恢复这个日程'
+    check.addEventListener('change', () => { void toggleRoutine(routine, check.checked) })
+    row.appendChild(check)
+
+    const meta = el('div', 'skb-routine__meta')
+    const name = el('div', 'skb-routine__name')
+    name.textContent = routine.name
+    const sub = el('div', 'skb-routine__sub')
+    sub.textContent = scheduleLabelOf(routine) + ' · ' + lastRunTextOf(routine)
+    meta.appendChild(name)
+    meta.appendChild(sub)
+    row.appendChild(meta)
+
+    const test = el('button', 'skb-routine__act') as HTMLButtonElement
+    test.type = 'button'
+    test.textContent = 'Test'
+    test.title = '立即跑一次（没有可驱动的会话时会如实跳过）'
+    test.addEventListener('click', () => { void runRoutineTest(routine) })
+    row.appendChild(test)
+
+    const remove = el('button', 'skb-routine__act skb-routine__act--danger') as HTMLButtonElement
+    remove.type = 'button'
+    remove.textContent = '删除'
+    remove.addEventListener('click', () => { void removeRoutine(routine) })
+    row.appendChild(remove)
+    routinesBody.appendChild(row)
+  }
+}
+
+async function loadRoutines(botId: string): Promise<void> {
+  const res = await fetchRoutines(botId)
+  if (!res.ok) {
+    routines = []
+    renderRoutines()
+    showDrawerError('读取日程失败：' + (res.error ?? '未知错误'))
+    return
+  }
+  routines = Array.isArray(res.data?.routines) ? res.data.routines : []
+  renderRoutines()
+}
+
+async function addRoutine(): Promise<void> {
+  if (currentBot === null || routinesBusy) return
+  if (routineNameInput === null || routineInstructionInput === null || routineScheduleSelect === null) return
+  const name = routineNameInput.value.trim()
+  const instruction = routineInstructionInput.value.trim()
+  if (name === '' || instruction === '') {
+    showDrawerError('日程名称和内容都不能为空')
+    return
+  }
+  routinesBusy = true
+  showDrawerError('')
+  const schedule = routineScheduleSelect.value
+  const input: Record<string, unknown> = { botId: currentBot.id, name, instruction, enabled: true }
+  if (schedule === 'hourly') input.everySeconds = 3600
+  else if (schedule === 'every4h') input.everySeconds = 4 * 3600
+  else if (schedule === 'daily9') input.cron = '0 9 * * *'
+  else if (schedule === 'weekly') input.cron = '0 9 * * 1'
+  try {
+    const res = await createRoutine(input)
+    if (!res.ok) {
+      showDrawerError('创建日程失败：' + (res.error ?? '未知错误'))
+      return
+    }
+    routineNameInput.value = ''
+    routineInstructionInput.value = ''
+    await loadRoutines(currentBot.id)
+    notice('已创建日程「' + name + '」')
+  } finally {
+    routinesBusy = false
+  }
+}
+
+async function toggleRoutine(routine: RoutineView, enabled: boolean): Promise<void> {
+  const res = await patchRoutine(routine.id, { enabled })
+  if (!res.ok) {
+    showDrawerError('更新日程失败：' + (res.error ?? '未知错误'))
+    return
+  }
+  await loadRoutines(routine.botId)
+}
+
+async function removeRoutine(routine: RoutineView): Promise<void> {
+  const confirmed = typeof window === 'undefined' || typeof window.confirm !== 'function'
+    ? true
+    : window.confirm('删除日程「' + routine.name + '」？')
+  if (!confirmed) return
+  const res = await deleteRoutine(routine.id)
+  if (!res.ok) {
+    showDrawerError('删除日程失败：' + (res.error ?? '未知错误'))
+    return
+  }
+  await loadRoutines(routine.botId)
+  notice('已删除日程「' + routine.name + '」')
+}
+
+async function runRoutineTest(routine: RoutineView): Promise<void> {
+  const res = await testRoutine(routine.id)
+  if (!res.ok) {
+    showDrawerError('Test 失败：' + (res.error ?? '未知错误'))
+    return
+  }
+  notice(res.data?.delivered === true ? '已交给「' + routine.name + '」执行' : 'Test 已记录：' + (res.data?.reason ?? '已接受'))
+  await loadRoutines(routine.botId)
 }
 
 function fillControls(bot: BotRecord): void {
@@ -221,6 +378,51 @@ function buildDrawer(): HTMLDivElement {
     }
     bodyEl.appendChild(box)
   }
+
+  // 日程（原「班次」）：列表 + 新建。与 Bot 档案分开保存，操作即时生效。
+  const routineBox = el('section', 'skb-drawer__section')
+  const routineTitle = el('div', 'skb-drawer__section-title')
+  routineTitle.textContent = '日程'
+  routineBox.appendChild(routineTitle)
+  const routineHint = el('div', 'skb-drawer__hint')
+  routineHint.textContent = '到点让这个 Bot 自己跑一件事；日程失败会进入主动找我的候选事件。'
+  routineBox.appendChild(routineHint)
+  routinesBody = el('div', 'skb-routines')
+  routineBox.appendChild(routinesBody)
+
+  const routineForm = el('div', 'skb-routine-form')
+  const routineRow1 = el('div', 'skb-form-row')
+  routineNameInput = el('input', 'skb-input') as HTMLInputElement
+  routineNameInput.placeholder = '日程名称'
+  routineNameInput.setAttribute('aria-label', '日程名称')
+  routineScheduleSelect = el('select', 'skb-select') as HTMLSelectElement
+  for (const item of [
+    { value: 'daily9', label: '每天 09:00' },
+    { value: 'hourly', label: '每小时' },
+    { value: 'every4h', label: '每 4 小时' },
+    { value: 'weekly', label: '每周一 09:00' },
+    { value: 'manual', label: '仅手动 / Webhook' },
+  ]) {
+    const option = el('option', '') as HTMLOptionElement
+    option.value = item.value
+    option.textContent = item.label
+    routineScheduleSelect.appendChild(option)
+  }
+  routineRow1.appendChild(routineNameInput)
+  routineRow1.appendChild(routineScheduleSelect)
+  routineForm.appendChild(routineRow1)
+  routineInstructionInput = el('textarea', 'skb-textarea') as HTMLTextAreaElement
+  routineInstructionInput.rows = 3
+  routineInstructionInput.placeholder = '到点要做什么（给 Bot 的指令）'
+  routineInstructionInput.setAttribute('aria-label', '日程内容')
+  routineForm.appendChild(routineInstructionInput)
+  const routineAdd = el('button', 'skb-btn skb-btn--primary') as HTMLButtonElement
+  routineAdd.type = 'button'
+  routineAdd.textContent = '添加日程'
+  routineAdd.addEventListener('click', () => { void addRoutine() })
+  routineForm.appendChild(routineAdd)
+  routineBox.appendChild(routineForm)
+  bodyEl.appendChild(routineBox)
 
   // 动作区：暂停 / 置顶 / 主 Bot / 删除（即时生效，不需要点保存）
   const actionBox = el('section', 'skb-drawer__section')
@@ -380,6 +582,9 @@ export function openBotDrawer(bot: BotRecord): void {
     primaryBtn.textContent = bot.primary === true ? '主 Bot' : '设为主 Bot'
     primaryBtn.disabled = bot.primary === true
   }
+  routines = []
+  renderRoutines()
+  void loadRoutines(bot.id)
   drawerEl.setAttribute('data-open', 'true')
   drawerEl.setAttribute('aria-hidden', 'false')
 }

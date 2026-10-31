@@ -31,6 +31,8 @@ export interface KrEchoViewportProps {
   readonly browserOn?: boolean
   /** 真实可见性变化通知：只有拿到工作空间画面才为 true。 */
   readonly onVisibleChange?: (visible: boolean) => void
+  /** 严格模式：只认本会话明确线索，禁止「唯一空间」兜底（Bot 面板用）。 */
+  readonly strictWorkspace?: boolean
 }
 
 /** ego-browser 背后的桌面进程候选（点击画面时按序尝试置顶）。 */
@@ -46,6 +48,7 @@ export const KrEchoViewport = memo(function KrEchoViewport({
   workspaceHints = [],
   browserOn = false,
   onVisibleChange,
+  strictWorkspace = false,
 }: KrEchoViewportProps): ReactElement | null {
   const [frame, setFrame] = useState<EchoSpaceFrameSuccess | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
@@ -72,6 +75,7 @@ export const KrEchoViewport = memo(function KrEchoViewport({
       session: sessionRef.current,
       hints: hintsRef.current,
       maxW: 400,
+      strict: strictWorkspace,
     })
     if (res.ok) {
       setFrame(res)
@@ -85,7 +89,7 @@ export const KrEchoViewport = memo(function KrEchoViewport({
       setFrame(null)
       onVisibleChangeRef.current?.(false)
     }
-  }, [hintsKey])
+  }, [hintsKey, strictWorkspace])
 
   useEffect(() => {
     let disposed = false

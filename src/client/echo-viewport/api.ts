@@ -57,15 +57,18 @@ export interface FetchEchoSpaceFrameOptions {
   /** 从会话工具调用里提取的工作空间线索（taskSpace 名称 / spaceId）。 */
   readonly hints?: readonly string[]
   readonly maxW?: number
+  /** 严格模式：只有明确线索命中才出画面，禁止「唯一空间」兜底（Bot 面板用）。 */
+  readonly strict?: boolean
 }
 
-function paramsOf(options: { session?: string | null; hints?: readonly string[]; maxW?: number }): string {
+function paramsOf(options: { session?: string | null; hints?: readonly string[]; maxW?: number; strict?: boolean }): string {
   const params = new URLSearchParams()
   const session = typeof options.session === 'string' ? options.session.trim() : ''
   if (session !== '') params.set('session', session)
   const hints = (options.hints ?? []).map((hint) => hint.trim()).filter((hint) => hint !== '')
   if (hints.length > 0) params.set('hint', hints.slice(-6).join(','))
   if (options.maxW && options.maxW > 0) params.set('maxW', String(Math.round(options.maxW)))
+  if (options.strict === true) params.set('strict', '1')
   return params.toString()
 }
 

@@ -35,7 +35,7 @@ export function BotPanelView({ sessionId, catalog, outputs }: BotPanelViewProps)
     <div className="skb-bot-panel">
       {sections.includes('viewport') && (
         <div className="skb-bot-panel__viewport">
-          <KrEchoViewport sessionId={sessionId} browserOn />
+          <KrEchoViewport sessionId={sessionId} browserOn strictWorkspace />
         </div>
       )}
       {sections.includes('subagents') && (

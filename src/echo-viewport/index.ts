@@ -422,6 +422,7 @@ export async function handleEchoViewportSpaceRoute(
   let sessionId = ''
   let clientHints: string[] = []
   let maxW = 400
+  let strict = false
   try {
     const query = String(req.url ?? '').split('?')[1] ?? ''
     const params = new URLSearchParams(query)
@@ -432,6 +433,7 @@ export async function handleEchoViewportSpaceRoute(
     }
     const mw = Number(params.get('maxW'))
     if (Number.isFinite(mw) && mw > 0) maxW = Math.min(Math.round(mw), 1600)
+    strict = params.get('strict') === '1'
   } catch {
     /* 查询参数坏掉时按无参处理 */
   }
@@ -481,6 +483,9 @@ export async function handleEchoViewportSpaceRoute(
   } else {
     picked = hintPick
   }
+
+  // 严格模式：Bot 面板不接受「唯一空间」兜底，避免把用户私人页面当成 Bot 工作区。
+  if (picked !== null && strict && picked.matchedBy === 'single') picked = null
 
   if (picked === null) {
     sendJson(res, 200, {

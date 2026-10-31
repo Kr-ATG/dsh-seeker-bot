@@ -99,3 +99,48 @@ export async function bindBotSession(botId: string, sessionId: string): Promise<
 export function setBotUiMode(mode: 'work' | 'bot'): Promise<ApiResult<{ ok?: boolean; mode?: string }>> {
   return request('/ui/mode', { method: 'POST', body: JSON.stringify({ mode }) })
 }
+
+/* ───────────────────────────── 日程（原班次） ───────────────────────────── */
+
+/** 日程触发方式（与 host 的 RoutineTrigger 同形）。 */
+export interface RoutineTriggerView {
+  type: 'schedule' | 'webhook' | 'manual'
+  cron?: string
+  everySeconds?: number
+  timezone?: string
+}
+
+/** 一条日程（只声明客户端用到的字段）。 */
+export interface RoutineView {
+  id: string
+  botId: string
+  name: string
+  instruction: string
+  enabled: boolean
+  key: string
+  scheduleId?: string
+  triggers: RoutineTriggerView[]
+  runs?: Array<{ at: number; status: string; trigger: string; reason?: string }>
+  createdAt?: number
+  updatedAt?: number
+}
+
+export function fetchRoutines(botId: string): Promise<ApiResult<{ ok?: boolean; routines: RoutineView[] }>> {
+  return request('/routines?botId=' + encodeURIComponent(botId))
+}
+
+export function createRoutine(input: Record<string, unknown>): Promise<ApiResult<{ ok?: boolean; routine: RoutineView; schedule?: unknown }>> {
+  return request('/routines', { method: 'POST', body: JSON.stringify(input) })
+}
+
+export function patchRoutine(id: string, patch: Record<string, unknown>): Promise<ApiResult<{ ok?: boolean; routine: RoutineView }>> {
+  return request('/routines/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify(patch) })
+}
+
+export function deleteRoutine(id: string): Promise<ApiResult<{ ok?: boolean }>> {
+  return request('/routines/' + encodeURIComponent(id), { method: 'DELETE' })
+}
+
+export function testRoutine(id: string): Promise<ApiResult<{ ok?: boolean; delivered?: boolean; reason?: string }>> {
+  return request('/routines/' + encodeURIComponent(id) + '/test', { method: 'POST', body: '{}' })
+}
