@@ -548,19 +548,22 @@ console.log('[bot-client] 右栏 Bot 面板')
   const emptyOut = { types: [], texts: [] }
   collect(emptyTree, emptyOut)
   check('空数据时渲染画面组件', emptyOut.types.includes('echo-viewport'), emptyOut.types.join(','))
-  check('空数据时没有任何文字', emptyOut.texts.length === 0, emptyOut.texts.join('|'))
-  check('没有标题 / 终端元素', !emptyOut.types.some((type) => ['h1', 'h2', 'h3', 'p', 'header', 'footer'].includes(type)), emptyOut.types.join(','))
+  check('空数据时仍有浏览器卡头', emptyOut.texts.includes('浏览器'), emptyOut.texts.join('|'))
+  check('没有终端 / 输入框元素', !emptyOut.types.some((type) => ['textarea', 'pre', 'input'].includes(type)), emptyOut.types.join(','))
 
   const dataTree = panelModule.BotPanelView({
     sessionId: 's1',
     catalog: { rows: [{ id: 'sub-1', parentSessionId: 's1', label: '研究员小A', running: true, hasChildren: false, mode: 'one-shot' }], runningCount: 1, doneCount: 0, state: 'ready' },
     outputs: { items: [{ path: 'reports/a.html', name: 'a.html', kind: 'page' }] },
+    bot: { id: 'b1', name: 'Seeker', role: '主 Bot', avatar: { shape: 'whale', color: '#0f1115' }, status: 'idle' },
+    tree: [{ name: 'reports', path: 'reports', type: 'dir', children: [{ name: 'a.html', path: 'reports/a.html', type: 'file', size: 1024 }] }],
   })
   const dataOut = { types: [], texts: [] }
   collect(dataTree, dataOut)
   check('有数据时列出子智能体名字', dataOut.texts.includes('研究员小A'), dataOut.texts.join('|'))
   check('有数据时列出产出物名字', dataOut.texts.includes('a.html'), dataOut.texts.join('|'))
-  check('没有额外标题文字', !dataOut.texts.includes('子智能体') && !dataOut.texts.includes('产出物') && !dataOut.texts.includes('浏览器'), dataOut.texts.join('|'))
+  check('有数据时显示卡片标题', ['浏览器', '子智能体', '当前 Bot', '产出物', '文件'].every((title) => dataOut.texts.includes(title)), dataOut.texts.join('|'))
+  check('有数据时显示文件树', dataOut.texts.includes('reports'), dataOut.texts.join('|'))
 }
 
 /* ── 6. 样式纪律：颜色只走 --dsw-alias-*，无渐变发光 ────────────────── */
@@ -577,7 +580,7 @@ console.log('[bot-client] 样式纪律')
   check('颜色属性全部使用 --dsw-alias-*', offenders.length === 0, offenders.join(' | '))
   check('没有渐变', !/gradient/i.test(stylesSource))
   check('主题变量至少覆盖背景/标签/分隔线', ['--dsw-alias-bg-base', '--dsw-alias-label-primary', '--dsw-alias-border-l2'].every((token) => stylesSource.includes(token)))
-  check('空面板不占宽（:has 收起规则）', stylesSource.includes('#dsh-bot-panel-container:has(.skb-bot-panel__viewport:empty)'))
+  check('右栏卡片样式在位', stylesSource.includes('.skb-card') && stylesSource.includes('.skb-bot-header'))
 }
 
 rmSync(scratch, { recursive: true, force: true })

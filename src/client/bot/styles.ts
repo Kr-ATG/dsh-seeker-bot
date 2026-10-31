@@ -25,17 +25,40 @@ const BOT_CORE_STYLES = `/* ══ Bot 控制台：侧栏名册 / 新建表单 /
   width: 100%;
 }
 
-/* ── Work / Bot 分段 ─────────────────────────────────────────────── */
-.skb-mode {
-  display: flex;
-  gap: 2px;
-  padding: 3px;
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.04));
+/* ── Work / Bot 滑块（独立放在「新会话」上方）──────────────────────── */
+.skb-mode-host {
+  flex: 0 0 auto;
+  width: 100%;
+  padding: 8px 10px 2px;
+  box-sizing: border-box;
 }
+.skb-mode {
+  position: relative;
+  display: flex;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.035));
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.08));
+  box-sizing: border-box;
+}
+.skb-mode-thumb {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc(50% - 3px);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-base, #fff);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 0 0 0.5px var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.08));
+  transition: transform 0.24s cubic-bezier(0.22, 0.8, 0.24, 1);
+  pointer-events: none;
+}
+.skb-mode[data-mode="bot"] .skb-mode-thumb { transform: translateX(100%); }
 .skb-mode button {
+  position: relative;
+  z-index: 1;
   flex: 1;
-  height: 26px;
+  height: 27px;
   border: 0;
   border-radius: 6px;
   font: inherit;
@@ -43,16 +66,75 @@ const BOT_CORE_STYLES = `/* ══ Bot 控制台：侧栏名册 / 新建表单 /
   color: var(--dsw-alias-label-secondary, #61666b);
   background: transparent;
   cursor: pointer;
+  transition: color 0.18s ease;
 }
-.skb-mode button:hover {
-  background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.04));
-}
+.skb-mode button:hover { color: var(--dsw-alias-label-primary, #0f1115); }
 .skb-mode button.on {
-  background: var(--dsw-alias-bg-base, #fff);
+  background: transparent;
   color: var(--dsw-alias-label-primary, #0f1115);
   font-weight: 500;
-  box-shadow: 0 1px 2px var(--dsw-alias-bg-mask-1, rgba(0, 0, 0, 0.08)), 0 0 0 1px var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
+  box-shadow: none;
 }
+
+/* Bot 模式独占侧栏：官方菜单 / 插件菜单让位，只留品牌、新会话、滑块与名册。 */
+body[data-skb-mode="bot"] [data-skb-native-hide="true"] { display: none !important; }
+body[data-skb-mode="work"] #skb-sidebar-host { display: none !important; }
+
+/* ── Bot 对话流头部（名称 / 岗位 / 状态 + 页签）──────────────────── */
+.skb-bot-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: none;
+  min-height: 48px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--dsw-alias-separator-primary, rgba(0, 0, 0, 0.08));
+  background: var(--dsw-alias-bg-base, #fff);
+  box-sizing: border-box;
+}
+.skb-bot-header__identity { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.skb-bot-header__avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  color: var(--dsw-alias-label-on-primary, #fff);
+  font-size: 12px;
+  font-weight: 600;
+  flex: none;
+}
+.skb-bot-header__name { font-size: 13px; font-weight: 500; color: var(--dsw-alias-label-primary, #0f1115); white-space: nowrap; }
+.skb-bot-header__role { font-size: 11px; color: var(--dsw-alias-label-tertiary, #81858c); white-space: nowrap; }
+.skb-bot-header__status {
+  margin-left: 2px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.04));
+  font-size: 10.5px;
+  color: var(--dsw-alias-label-secondary, #61666b);
+  white-space: nowrap;
+}
+.skb-bot-tabs { display: flex; align-items: center; gap: 2px; margin-left: 6px; }
+.skb-bot-tab {
+  height: 27px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary, #61666b);
+  cursor: pointer;
+}
+.skb-bot-tab:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.04)); }
+.skb-bot-tab[data-active="true"] {
+  background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.04));
+  color: var(--dsw-alias-label-primary, #0f1115);
+  font-weight: 500;
+}
+body[data-skb-mode="work"] .skb-bot-header { display: none !important; }
 
 /* ── 新建 Bot 入口与内联表单 ─────────────────────────────────────── */
 .skb-actions { display: flex; justify-content: flex-end; }
@@ -360,49 +442,91 @@ const BOT_CORE_STYLES = `/* ══ Bot 控制台：侧栏名册 / 新建表单 /
   overflow-y: auto;
   box-sizing: border-box;
 }
-.skb-bot-panel__viewport {
+/* 右栏卡片堆叠（对齐 Bot 控制台原型） */
+.skb-bot-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  padding: 10px 10px 14px;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+.skb-card {
+  flex: none;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-base, #fff);
+  overflow: hidden;
+}
+.skb-card__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 8px 11px;
+  border-bottom: 1px solid var(--dsw-alias-separator-primary, rgba(0, 0, 0, 0.07));
+}
+.skb-card__title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary, #0f1115);
+}
+.skb-card__meta {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  color: var(--dsw-alias-label-tertiary, #81858c);
+}
+.skb-card__action {
+  flex: none;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-base, #fff);
+  color: var(--dsw-alias-label-secondary, #61666b);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.skb-card__action:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.04)); }
+.skb-card__viewport {
   position: relative;
   width: 100%;
-  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
-  border-radius: 8px;
+  aspect-ratio: 16 / 10;
   overflow: hidden;
   background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02));
-  flex: none;
 }
-.skb-bot-panel__viewport:empty { display: none; }
-/* 完全没内容（无画面、无子智能体、无产出物）时整条右栏不占宽。
- * KrEchoViewport 拿不到工作空间时返回 null，viewport 包装层因此 :empty；
- * 一旦有帧 / 有列表，选择器失配，容器自动恢复 336px。 */
-#dsh-bot-panel-container:has(.skb-bot-panel__viewport:empty):not(:has(.skb-bot-panel__list)) {
-  display: none !important;
-}
-.skb-bot-panel__viewport .kr-echo-viewport {
+.skb-card__viewport:empty { min-height: 120px; }
+.skb-card__viewport .kr-echo-viewport {
   width: 100%;
-  height: auto;
-  aspect-ratio: 16 / 10;
+  height: 100%;
   margin: 0;
   border: 0;
   border-radius: 0;
   align-self: stretch;
   background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02));
 }
-.skb-bot-panel__viewport .kr-echo-viewport__badge { display: none; }
-.skb-bot-panel__list {
+.skb-card__viewport .kr-echo-viewport__badge { display: none; }
+.skb-card__list {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  border-top: 1px solid var(--dsw-alias-separator-primary, rgba(0, 0, 0, 0.08));
-  padding-top: 6px;
+  padding: 4px 6px 7px;
 }
-.skb-bot-panel__row {
+.skb-row-line {
   display: flex;
   align-items: center;
   gap: 7px;
   min-width: 0;
   width: 100%;
-  padding: 4px 2px;
+  padding: 5px 6px;
   border: 0;
-  border-radius: 4px;
+  border-radius: 5px;
   background: none;
   font: inherit;
   font-size: 11.5px;
@@ -410,28 +534,73 @@ const BOT_CORE_STYLES = `/* ══ Bot 控制台：侧栏名册 / 新建表单 /
   color: var(--dsw-alias-label-secondary, #61666b);
   cursor: pointer;
 }
-.skb-bot-panel__row:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.04)); }
-.skb-bot-panel__dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  flex: none;
-  background: var(--dsw-alias-label-caption, #adb2b8);
-}
-.skb-bot-panel__dot[data-running="true"] { background: var(--dsw-alias-state-success-primary, #16a34a); }
-.skb-bot-panel__name {
+.skb-row-line:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.04)); }
+.skb-row-line__mark { flex: none; width: 12px; text-align: center; color: var(--dsw-alias-label-caption, #adb2b8); }
+.skb-row-line__mark[data-running="true"] { color: var(--dsw-alias-state-success-primary, #16a34a); }
+.skb-row-line__name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--dsw-alias-label-primary, #0f1115);
 }
-.skb-bot-panel__meta {
-  margin-left: auto;
+.skb-row-line__meta { margin-left: auto; flex: none; font-size: 10.5px; color: var(--dsw-alias-label-tertiary, #81858c); }
+.skb-bot-card { display: flex; align-items: center; gap: 8px; padding: 10px 11px 8px; }
+.skb-bot-card__avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  color: var(--dsw-alias-label-on-primary, #fff);
+  font-size: 13px;
+  font-weight: 600;
   flex: none;
+}
+.skb-bot-card__meta { min-width: 0; }
+.skb-bot-card__name { font-size: 12.5px; color: var(--dsw-alias-label-primary, #0f1115); }
+.skb-bot-card__status { margin-top: 1px; font-size: 10.5px; color: var(--dsw-alias-label-tertiary, #81858c); }
+.skb-bot-card__icon { margin-left: auto; color: var(--dsw-alias-label-tertiary, #81858c); font-size: 12px; }
+.skb-bot-card__icon + .skb-bot-card__icon { margin-left: 8px; }
+.skb-card__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 7px 11px;
+  border: 0;
+  border-top: 1px solid var(--dsw-alias-separator-primary, rgba(0, 0, 0, 0.07));
+  background: none;
+  font: inherit;
+  font-size: 10.5px;
+  color: var(--dsw-alias-label-tertiary, #81858c);
+  cursor: pointer;
+}
+.skb-card__footer:disabled { cursor: default; }
+.skb-output-group { padding-top: 4px; }
+.skb-output-group__head {
+  display: flex;
+  justify-content: space-between;
+  padding: 5px 6px 1px;
   font-size: 10.5px;
   color: var(--dsw-alias-label-tertiary, #81858c);
 }
+.skb-file-tree { padding-bottom: 8px; }
+.skb-file-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 2px 6px 2px 6px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary, #61666b);
+}
+.skb-file-row[data-depth="1"] { padding-left: 18px; }
+.skb-file-row[data-depth="2"] { padding-left: 30px; }
+.skb-file-icon { flex: none; width: 10px; color: var(--dsw-alias-label-caption, #adb2b8); }
+.skb-file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skb-file-size { margin-left: auto; flex: none; font-size: 9.5px; color: var(--dsw-alias-label-caption, #adb2b8); }
 
 /* 面板挂载时把会话区变成右栏布局（官方 KR 未开启时 content 不一定是 flex）。 */
 body[data-skb-mode="bot"][data-skb-panel="on"] [data-conversation-content] {

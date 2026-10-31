@@ -26,6 +26,7 @@ import { getService } from '../client-ctx.ts'
 import { openSessionById, pushNotice, setSessionNavContext } from '../done-pill/session-nav.ts'
 import { bindBotSession, createBot, createBotSession, fetchBotState, setBotUiMode } from './api.ts'
 import { closeBotDrawer, openBotDrawer } from './drawer.ts'
+import { applyBotHeader } from './header.ts'
 import {
   AVATAR_COLORS,
   AVATAR_SHAPES,
@@ -39,7 +40,9 @@ import { injectBotStyles } from './styles.ts'
 
 const ANCHOR = '[data-slot="sidebar.workspaces"]'
 const HOST_ID = 'skb-sidebar-host'
+const MODE_HOST_ID = 'skb-mode-host'
 const HIDE_ATTR = 'data-skb-official-hidden'
+const NATIVE_HIDE_ATTR = 'data-skb-native-hide'
 const CONTROLLER_KEY = '__dshSeekerBotConsoleV1__'
 
 interface UiWorkspaceLike {
@@ -48,6 +51,8 @@ interface UiWorkspaceLike {
 }
 
 let hostEl: HTMLElement | null = null
+let modeHostEl: HTMLElement | null = null
+let modeSegmentEl: HTMLElement | null = null
 let listEl: HTMLElement | null = null
 let statusEl: HTMLElement | null = null
 let formEl: HTMLElement | null = null
@@ -321,16 +326,29 @@ function modeButton(mode: 'work' | 'bot', label: string): HTMLButtonElement {
   return btn
 }
 
+/** Work / Bot 滑块：独立放在「新会话」上方，不跟随名册滚动。 */
+function buildModeHost(): HTMLElement {
+  const host = document.createElement('div')
+  host.id = MODE_HOST_ID
+  host.className = 'skb-mode-host'
+  const segment = document.createElement('div')
+  segment.className = 'skb-mode'
+  segment.dataset.mode = 'bot'
+  const thumb = document.createElement('span')
+  thumb.className = 'skb-mode-thumb'
+  thumb.setAttribute('aria-hidden', 'true')
+  segment.appendChild(thumb)
+  modeButtons = [modeButton('work', 'Work'), modeButton('bot', 'Bot')]
+  for (const btn of modeButtons) segment.appendChild(btn)
+  modeSegmentEl = segment
+  host.appendChild(segment)
+  return host
+}
+
 function buildHost(): HTMLElement {
   const host = document.createElement('div')
   host.id = HOST_ID
   host.className = 'skb-host'
-
-  const segment = document.createElement('div')
-  segment.className = 'skb-mode'
-  modeButtons = [modeButton('work', 'Work'), modeButton('bot', 'Bot')]
-  for (const btn of modeButtons) segment.appendChild(btn)
-  host.appendChild(segment)
 
   const actions = document.createElement('div')
   actions.className = 'skb-actions'
@@ -437,10 +455,48 @@ function applyModeDom(): void {
       node.removeAttribute(HIDE_ATTR)
     }
   }
+
+  /*
+   * Bot 模式是「独占侧栏」：除了品牌行、新会话、Work/Bot 滑块与 Bot 名册，
+   * 官方菜单（插件 / 自动化任务 / 工作台 / 更多）和插件菜单（操作间等）全部让位。
+   * 用属性 + CSS 隐藏而不是 display:none 内联，切回 Work 时能精确还原。
+   */
+  const root = sidebarRoot()
+  const hide = (el: Element | null, on: boolean): void => {
+    if (el === null || typeof (el as unknown as { setAttribute?: unknown }).setAttribute !== 'function') return
+    if (on) {
+      if (!el.hasAttribute(NATIVE_HIDE_ATTR)) el.setAttribute(NATIVE_HIDE_ATTR, 'true')
+    } else if (el.hasAttribute(NATIVE_HIDE_ATTR)) {
+      el.removeAttribute(NATIVE_HIDE_ATTR)
+    }
+  }
+  if (root !== null) {
+    for (const child of Array.from(root.children)) {
+      const el = child as HTMLElement
+      if (el === modeHostEl) { hide(el, false); continue }
+      const keep = el.classList.contains('hHd-Xa_logoRow')
+        || el.classList.contains('hHd-Xa_newSession')
+        || el.classList.contains('hHd-Xa_regionArea')
+      hide(el, mode === 'bot' && !keep)
+    }
+    const region = root.querySelector('.hHd-Xa_regionArea') as HTMLElement | null
+    if (region !== null) {
+      for (const child of Array.from(region.children)) {
+        const el = child as HTMLElement
+        // 名册宿主保留；工作区列表由 HIDE_ATTR 单独处理；其它插件菜单一并让位。
+        if (el === hostEl) { hide(el, false); continue }
+        if (el.hasAttribute('data-slot') && el.getAttribute('data-slot') === 'sidebar.workspaces') { hide(el, false); continue }
+        hide(el, mode === 'bot')
+      }
+    }
+  }
+  const navSections = document.getElementById('dsh-sidebar-nav-sections')
+  hide(navSections, mode === 'bot')
 }
 
 function updateModeButtons(): void {
   const mode = getBotConsoleStore().getSnapshot().mode
+  if (modeSegmentEl !== null && modeSegmentEl.dataset.mode !== mode) modeSegmentEl.dataset.mode = mode
   for (const btn of modeButtons) {
     const className = 'skb-mode-btn' + (btn.dataset.mode === mode ? ' on' : '')
     if (btn.className !== className) btn.className = className
@@ -495,9 +551,13 @@ function renderList(): void {
 /** 旧 bundle 留下的 host：摘掉并清空引用，避免新旧两套 DOM 并存。 */
 function discardForeignHost(): void {
   const existing = document.getElementById(HOST_ID)
-  if (existing === null || existing === hostEl) return
-  try { existing.remove() } catch { /* 已脱离文档 */ }
+  const existingMode = document.getElementById(MODE_HOST_ID)
+  if (existing === null && existingMode === null) return
+  if (existing !== null && existing !== hostEl) { try { existing.remove() } catch { /* 已脱离文档 */ } }
+  if (existingMode !== null && existingMode !== modeHostEl) { try { existingMode.remove() } catch { /* 已脱离文档 */ } }
   hostEl = null
+  modeHostEl = null
+  modeSegmentEl = null
   listEl = null
   statusEl = null
   formEl = null
@@ -508,9 +568,40 @@ function discardForeignHost(): void {
   modeButtons = []
 }
 
+/** 侧栏根节点（官方 SidebarRoot 的 flex 容器）。 */
+function sidebarRoot(): HTMLElement | null {
+  if (typeof document === 'undefined') return null
+  const sidebar = document.querySelector('[data-slot="sidebar"]') as HTMLElement | null
+  return (sidebar?.firstElementChild as HTMLElement | null) ?? null
+}
+
+/** 确保 Work/Bot 滑块在「新会话」上方（幂等：位置没变就零写入）。 */
+function ensureModeHost(): void {
+  const root = sidebarRoot()
+  if (root === null) return
+  if (modeHostEl === null) {
+    modeHostEl = document.getElementById(MODE_HOST_ID) as HTMLElement | null
+  }
+  if (modeHostEl === null) {
+    modeHostEl = buildModeHost()
+    stats.mounts += 1
+  }
+  const newSession = root.querySelector('button.hHd-Xa_newSession, button[aria-label="新建会话"].hHd-Xa_newSession') as HTMLElement | null
+  const before = newSession ?? (root.children[1] as HTMLElement | undefined) ?? null
+  if (before === null) {
+    if (modeHostEl.parentElement !== root) root.appendChild(modeHostEl)
+    return
+  }
+  if (modeHostEl.parentElement !== root || modeHostEl.nextElementSibling !== before) {
+    root.insertBefore(modeHostEl, before)
+    stats.mounts += 1
+  }
+}
+
 /** 确保 host 在锚点之前（幂等：位置没变就零写入）。 */
 function ensureHost(): boolean {
   if (typeof document === 'undefined') return false
+  ensureModeHost()
   const anchor = document.querySelector(ANCHOR) as HTMLElement | null
   if (anchor === null) return false
   const parent = anchor.parentElement
@@ -578,6 +669,7 @@ export function botConsoleStats(): { mounts: number; renders: number; reconciles
 
 export function applyBotConsole(ctx?: unknown): void {
   if (typeof document === 'undefined') return
+  applyBotHeader(ctx)
   if (ctx !== undefined) {
     try { setSessionNavContext(ctx as { get?(name: string): unknown }) } catch { /* 旧宿主没有该登记口 */ }
   }

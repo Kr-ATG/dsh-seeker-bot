@@ -45,6 +45,9 @@ import {
   updateGroupFromBody,
 } from './groups.js'
 import { setGateDefaultEnabled } from '../tools-gate/index.js'
+import { readdirSync, lstatSync } from 'node:fs'
+import { join } from 'node:path'
+import { resolveBotWorkspace } from './state.js'
 
 type Handler = (req: any, res: any) => void | Promise<void>
 
@@ -85,6 +88,45 @@ function crossSite(req: any): boolean {
     const u = new URL(origin)
     return typeof host !== 'string' || u.host !== host
   } catch { return true }
+}
+
+interface TreeEntry {
+  name: string
+  path: string
+  type: 'dir' | 'file'
+  size?: number
+  children?: TreeEntry[]
+}
+
+/** 读 Bot 工作区目录树（深度 2、最多 160 条；跳过依赖/版本库/隐藏目录）。 */
+function readTree(root: string): TreeEntry[] {
+  const skip = new Set(['node_modules', '.git', '.svn', '.hg', 'dist', 'build', '.next', '.cache'])
+  let budget = 160
+  const walk = (dir: string, depth: number): TreeEntry[] => {
+    if (depth > 2 || budget <= 0) return []
+    let names: string[] = []
+    try { names = readdirSync(dir) } catch { return [] }
+    const rows: TreeEntry[] = []
+    for (const name of names) {
+      if (budget <= 0) break
+      if (name.startsWith('.') && name !== '.env.example') continue
+      if (skip.has(name)) continue
+      const full = join(dir, name)
+      let stat
+      try { stat = lstatSync(full) } catch { continue }
+      if (stat.isSymbolicLink()) continue
+      const rel = full.slice(root.length + 1).replace(/\\/g, '/')
+      budget -= 1
+      if (stat.isDirectory()) {
+        rows.push({ name, path: rel, type: 'dir', children: walk(full, depth + 1) })
+      } else if (stat.isFile()) {
+        rows.push({ name, path: rel, type: 'file', size: stat.size })
+      }
+    }
+    rows.sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1))
+    return rows
+  }
+  return walk(root, 0)
 }
 
 function publicState() {
@@ -146,6 +188,14 @@ async function dispatch(ctx: any, req: any, res: any): Promise<void> {
   }
   if (path === '/state' && method === 'GET') {
     return sendJson(res, 200, { ok: true, ...publicState() })
+  }
+
+  if (path === '/computer/tree' && method === 'GET') {
+    const botId = url.searchParams.get('botId') ?? ''
+    const bot = findBot(botId)
+    if (bot === null) return sendJson(res, 404, { ok: false, error: 'bot not found' })
+    const root = resolveBotWorkspace(bot)
+    return sendJson(res, 200, { ok: true, root, entries: readTree(root) })
   }
   if (path === '/usage' && method === 'GET') {
     return sendJson(res, 200, { ok: true, usage: readUsage() })

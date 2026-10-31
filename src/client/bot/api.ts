@@ -149,3 +149,16 @@ export function testRoutine(id: string): Promise<ApiResult<{ ok?: boolean; deliv
 export function testProactive(botId: string): Promise<ApiResult<{ ok?: boolean; willSend?: boolean; reason?: string; candidateCount?: number; event?: unknown }>> {
   return request('/bots/' + encodeURIComponent(botId) + '/proactive/test', { method: 'POST', body: '{}' })
 }
+
+/** Bot 工作区文件树（右栏「文件」卡）。 */
+export interface BotTreeEntry {
+  name: string
+  path: string
+  type: 'dir' | 'file'
+  size?: number
+  children?: BotTreeEntry[]
+}
+
+export function fetchBotTree(botId: string): Promise<ApiResult<{ ok?: boolean; root?: string; entries?: BotTreeEntry[] }>> {
+  return request('/computer/tree?botId=' + encodeURIComponent(botId))
+}

@@ -12,7 +12,7 @@
  * 同一时刻只显示一套。
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import type { ReactElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { ErrorBoundary } from '../error-boundary.tsx'
@@ -25,6 +25,8 @@ import { openSubagentSession } from '../kr-chat/subagent-catalog.ts'
 import { tryOpenInSidebar } from '../open-preview.ts'
 import { openWithDefaultApp } from '../open-default-app.ts'
 import { workspaceCwdOf } from '../client-ctx.ts'
+import { activateBrowserWindow } from '../browser-flag/activate.ts'
+import { fetchBotTree, type BotTreeEntry } from './api.ts'
 import { panelShouldMount } from './model.ts'
 import { BotPanelView } from './panel-view.tsx'
 import { getBotConsoleStore } from './store.ts'
@@ -61,19 +63,41 @@ function BotPanelConnected(): ReactElement {
     { items: persistedOutputs },
     { items: subagentOutputs },
   )
+  const store = getBotConsoleStore()
+  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
+  const bot = snapshot.bots.find((item) => item.id === snapshot.selected) ?? snapshot.bots[0] ?? null
+  const [tree, setTree] = useState<readonly BotTreeEntry[]>([])
+
+  useEffect(() => {
+    let alive = true
+    if (bot === null) {
+      setTree([])
+      return () => { alive = false }
+    }
+    void fetchBotTree(bot.id).then((res) => {
+      if (!alive) return
+      setTree(res.ok && Array.isArray(res.data?.entries) ? res.data.entries : [])
+    })
+    return () => { alive = false }
+  }, [bot?.id])
+
   const openSubagent = (row: (typeof catalog.rows)[number]): void => { openSubagentSession(row) }
   const openOutput = (item: (typeof outputs.items)[number]): void => {
     const owner = item.sessionId ?? sessionId
     if (tryOpenInSidebar(item.path, { sessionId: owner, cwd: workspaceCwdOf(owner) })) return
     void openWithDefaultApp(item.path)
   }
+  const openEgo = (): void => { void activateBrowserWindow(['ego', 'chrome', 'msedge']) }
   return (
     <BotPanelView
       sessionId={sessionId}
       catalog={catalog}
       outputs={outputs.items.length > 0 ? outputs : EMPTY_OUTPUTS}
+      bot={bot}
+      tree={tree}
       onOpenSubagent={openSubagent}
       onOpenOutput={openOutput}
+      onOpenEgo={openEgo}
     />
   )
 }
