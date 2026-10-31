@@ -1,5 +1,5 @@
 /**
- * 工作台本地资产收集与还原（档案、记忆、技能）。
+ * 工作台本地资产收集与还原（档案、记忆、技能、MCP 配置）。
  *
  * 不碰系统提示词与全局设定。所有写盘走原子写与目录递归保护。
  */
@@ -9,6 +9,7 @@ import { cp, mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } fro
 import { homedir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { getWebuiMemoryStore } from '../memory-store-singleton.js'
+import { gatherMcpEntries, mcpPatchSummary, restoreMcpEntries, type GatheredMcp } from './mcp-patch.js'
 import { memoryHome } from '../memory/engine/store.js'
 import { detectMediaType } from '../vault/blobs.js'
 import { VaultCipher } from '../vault/crypto.js'
@@ -46,6 +47,7 @@ export interface GatheredWorkbenchPayload {
   vault?: GatheredVault
   memory?: GatheredMemory
   skills?: GatheredSkills
+  mcp?: GatheredMcp
 }
 
 /** 递归统计目录大小（支持忽略以 . 开头的隐藏目录/回收站）。 */
@@ -75,6 +77,8 @@ export async function getWorkbenchSizes(): Promise<{
   vaultBytes: number
   memoryBytes: number
   skillsBytes: number
+  mcpBytes: number
+  mcpEntries: number
   totalBytes: number
 }> {
   // 1. 档案：vault.json + key + blobs/（排除 store/workbench-sync.json 运行历史与 audit.jsonl 审计日志）
@@ -114,11 +118,16 @@ export async function getWorkbenchSizes(): Promise<{
     skillsBytes += await getDirSize(sRoot, true)
   }
 
+  // 4. MCP：cordis.patch.yml 里的 mcp-client 条目（不是独立目录，按块字节算）
+  const mcp = mcpPatchSummary()
+
   return {
     vaultBytes,
     memoryBytes,
     skillsBytes,
-    totalBytes: vaultBytes + memoryBytes + skillsBytes,
+    mcpBytes: mcp.bytes,
+    mcpEntries: mcp.count,
+    totalBytes: vaultBytes + memoryBytes + skillsBytes + mcp.bytes,
   }
 }
 
@@ -224,6 +233,8 @@ export async function gatherWorkbenchAssets(options: {
   includeVault: boolean
   includeMemory: boolean
   includeSkills: boolean
+  /** 未显式传入时按「不收」处理（老调用方与测试的兼容口径）。 */
+  includeMcp?: boolean
   vaultStore: VaultStore
 }): Promise<GatheredWorkbenchPayload> {
   const [vault, memory, skills] = await Promise.all([
@@ -231,6 +242,7 @@ export async function gatherWorkbenchAssets(options: {
     options.includeMemory ? gatherMemory() : undefined,
     options.includeSkills ? gatherSkills() : undefined,
   ])
+  const mcp = options.includeMcp === true ? gatherMcpEntries() : undefined
 
   return {
     format: 'dsh-workbench-sync',
@@ -239,7 +251,13 @@ export async function gatherWorkbenchAssets(options: {
     ...(vault ? { vault } : {}),
     ...(memory ? { memory } : {}),
     ...(skills ? { skills } : {}),
+    ...(mcp ? { mcp } : {}),
   }
+}
+
+/** 还原 MCP 配置（只更新同名 / 新增缺失，不删本机独有条目）。 */
+export async function restoreMcp(mcp: GatheredMcp): Promise<{ added: number; updated: number; kept: number }> {
+  return restoreMcpEntries(mcp)
 }
 
 /** 原子写文本。 */

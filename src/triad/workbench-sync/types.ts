@@ -5,6 +5,7 @@
  *   · 档案（Vault：账号密码、服务器、证件、图片及主密钥）
  *   · 记忆（Memory：条目数据库 entries.json、状态元数据、各工作区 meta.json）
  *   · 技能（Skills：自定义技能包与 SKILL.md、技能启停开关）
+ *   · MCP（cordis.patch.yml 里的 mcp-client 条目：服务配置与启停开关）
  *
  * 安全约束：
  *   · 严禁在代码中出现任何私库、Token 或个人信息；
@@ -59,6 +60,8 @@ export interface WorkbenchSyncSettings {
   includeMemory: boolean
   /** 是否包含技能（默认 true）。 */
   includeSkills: boolean
+  /** 是否包含 MCP 配置与开关（默认 true）。 */
+  includeMcp: boolean
   /** 上次成功上传时间（ISO 字符串）。 */
   lastUploadedAt?: string
   /** 上次成功上传的 commit sha。 */
@@ -96,6 +99,7 @@ export interface WorkbenchSyncPublic {
   includeVault: boolean
   includeMemory: boolean
   includeSkills: boolean
+  includeMcp: boolean
   nextUploadAt: string
   nextSyncAt: string
   lastUploadedAt: string
@@ -107,6 +111,8 @@ export interface WorkbenchSyncPublic {
   localVaultBytes: number
   localMemoryBytes: number
   localSkillsBytes: number
+  localMcpBytes: number
+  localMcpEntries: number
   passphraseSet: boolean
   tokenSet: boolean
   tokenSource: 'gh' | 'stored' | 'none'
@@ -129,6 +135,7 @@ export interface WorkbenchSyncPatch {
   includeVault?: boolean
   includeMemory?: boolean
   includeSkills?: boolean
+  includeMcp?: boolean
   clearToken?: boolean
   clearPassphrase?: boolean
 }
@@ -143,6 +150,7 @@ export const DEFAULT_WORKBENCH_SYNC_SETTINGS: WorkbenchSyncSettings = {
   includeVault: true,
   includeMemory: true,
   includeSkills: true,
+  includeMcp: true,
   history: [],
 }
 

@@ -27,6 +27,7 @@ export interface SyncEnvelope {
     vaultRecords?: number
     memoryEntries?: number
     skillFiles?: number
+    mcpEntries?: number
   }
   kdf: {
     name: string

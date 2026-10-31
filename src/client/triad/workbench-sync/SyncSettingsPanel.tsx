@@ -80,6 +80,7 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
   const [includeVault, setIncludeVault] = useState<boolean>(true)
   const [includeMemory, setIncludeMemory] = useState<boolean>(true)
   const [includeSkills, setIncludeSkills] = useState<boolean>(true)
+  const [includeMcp, setIncludeMcp] = useState<boolean>(true)
 
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -94,6 +95,7 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
       setIncludeVault(s.includeVault)
       setIncludeMemory(s.includeMemory)
       setIncludeSkills(s.includeSkills)
+      setIncludeMcp(s.includeMcp)
       if (s.progress) setProgress(s.progress)
       setRunning(s.running)
     } catch (err) {
@@ -141,6 +143,7 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
         includeVault,
         includeMemory,
         includeSkills,
+        includeMcp,
       })
       setStatus(updated)
       setPassphrase('')
@@ -206,7 +209,7 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
           <span className={syncCss.eyebrow}><i />Workbench Sync</span>
           <h1 className={syncCss.title}>同步设置 <em>/ 工作台资产双向漫游</em></h1>
           <p className={syncCss.hint}>
-            将档案（账号密码与证件）、长期记忆库、自定义技能与 MCP 配置进行端侧加盐强加密后推送到您的 GitHub 私库，实现跨机一键漫游。
+            将档案（账号密码与证件）、长期记忆库、自定义技能（SKILL.md 及其开关状态）与 MCP 配置（cordis.patch.yml 条目）进行端侧加盐强加密后推送到您的 GitHub 私库，实现跨机一键漫游。
           </p>
         </div>
         <div className={syncCss.headActions}>
@@ -271,10 +274,12 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
           </div>
 
           <div className={syncCss.stat}>
-            <span className={syncCss.statLabel}>技能与配置规模</span>
-            <span className={syncCss.statValue}>{formatBytes(status?.localSkillsBytes ?? 0)}</span>
+            <span className={syncCss.statLabel}>技能与 MCP 规模</span>
+            <span className={syncCss.statValue}>
+              {formatBytes((status?.localSkillsBytes ?? 0) + (status?.localMcpBytes ?? 0))}
+            </span>
             <span className={syncCss.statSub}>
-              自定义技能包与 MCP 开关
+              技能包 {formatBytes(status?.localSkillsBytes ?? 0)} · MCP 条目 {status?.localMcpEntries ?? 0} 个
             </span>
           </div>
         </div>
@@ -523,7 +528,18 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
                 checked={includeSkills}
                 onChange={(e) => { setIncludeSkills(e.target.checked) }}
               />
-              <span>技能与 MCP 开关</span>
+              <span>自定义技能</span>
+            </label>
+            <label
+              className={syncCss.checkboxRow}
+              title="cordis.patch.yml 里的 mcp-client 条目（服务配置与启用/禁用开关）；条目里若含访问令牌，同样随包加密"
+            >
+              <input
+                type="checkbox"
+                checked={includeMcp}
+                onChange={(e) => { setIncludeMcp(e.target.checked) }}
+              />
+              <span>MCP 配置</span>
             </label>
           </div>
 

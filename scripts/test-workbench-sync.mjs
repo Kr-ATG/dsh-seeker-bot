@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { rmSync, mkdirSync, readFileSync } from 'node:fs'
+import { rmSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { build } from 'esbuild'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -35,6 +35,7 @@ await build({
       export * from './src/triad/workbench-sync/types.ts';
       export * from './src/triad/workbench-sync/crypto.ts';
       export * from './src/triad/workbench-sync/gather.ts';
+      export * from './src/triad/workbench-sync/mcp-patch.ts';
       export * from './src/triad/workbench-sync/engine.ts';
       export * from './src/triad/vault/store.ts';
     `,
@@ -156,6 +157,95 @@ const restoredBytes = await targetStore.blobs.get(restoredRecord.files[0].sha256
 assert.ok(restoredBytes !== null && restoredBytes.equals(syncYaml), '还原必须把文件字节原样写回 blobs')
 console.log('✓ 档案文件随同步收集 / 还原通过')
 
+console.log('--- 3.6 MCP 配置（cordis.patch.yml 条目）随同步收集与还原 ---')
+const profileDir = join(SMOKE_HOME, 'profiles', 'web')
+mkdirSync(profileDir, { recursive: true })
+const patchPath = join(profileDir, 'cordis.patch.yml')
+const patchSource = [
+  '# web profile 补丁（测试用）',
+  '- insert:',
+  '    - id: dsh-mcp-github',
+  "      name: '@deepseek-ai/dsh-mcp-client'",
+  '      config:',
+  '        serverName: github',
+  '        transport: streamable-http',
+  '        url: https://mcp.example.com/github',
+  '    - id: dsh-mcp-playwright',
+  "      name: '@deepseek-ai/dsh-mcp-client'",
+  '      config:',
+  '        serverName: playwright-mcp',
+  '        transport: stdio',
+  '        command: npx',
+  '        args:',
+  "          - '@playwright/mcp@latest'",
+  '- insert:',
+  '    - id: other-plugin',
+  "      name: '@deepseek-ai/dsh-something-else'",
+  '      config:',
+  '        foo: bar',
+  '',
+].join('\n')
+writeFileSync(patchPath, patchSource, 'utf8')
+
+const scanned = mod.scanMcpEntries(patchSource)
+assert.equal(scanned.length, 2, '只应识别两个 mcp-client 条目，非 mcp 条目不算')
+assert.deepEqual(scanned.map((entry) => entry.serverName).sort(), ['github', 'playwright-mcp'])
+
+const gatheredMcp = mod.gatherMcpEntries()
+assert.equal(gatheredMcp.entries.length, 2, 'gatherMcpEntries 必须收齐两条')
+assert.equal(gatheredMcp.profile, 'web', '必须记住来源 profile，还原时写回同一 profile')
+assert.ok(gatheredMcp.entries.some((entry) => entry.block.includes('https://mcp.example.com/github')),
+  '条目原文块必须完整（含 url / args 等全部配置）')
+
+const withMcp = await mod.gatherWorkbenchAssets({
+  includeVault: false, includeMemory: false, includeSkills: false, includeMcp: true, vaultStore: syncStore,
+})
+assert.ok(withMcp.mcp !== undefined && withMcp.mcp.entries.length === 2, 'includeMcp=true 时 payload 必须带 mcp 段')
+const withoutMcp = await mod.gatherWorkbenchAssets({
+  includeVault: false, includeMemory: false, includeSkills: false, vaultStore: syncStore,
+})
+assert.equal(withoutMcp.mcp, undefined, 'includeMcp 未开启时不得带 mcp 段')
+
+// 模拟换机：目标机已有 playwright（处于 disabled）与本机独有 local-only，缺 github
+const targetPatch = [
+  '# web profile 补丁（目标机）',
+  '- insert:',
+  '    - id: dsh-mcp-playwright',
+  "      name: '@deepseek-ai/dsh-mcp-client'",
+  '      config:',
+  '        serverName: playwright-mcp',
+  '        transport: stdio',
+  '        disabled: true',
+  '    - id: dsh-mcp-local',
+  "      name: '@deepseek-ai/dsh-mcp-client'",
+  '      config:',
+  '        serverName: local-only',
+  '        transport: stdio',
+  '',
+].join('\n')
+writeFileSync(patchPath, targetPatch, 'utf8')
+
+const restoredMcp = mod.restoreMcpEntries(gatheredMcp)
+assert.equal(restoredMcp.added, 1, '目标机缺失的 github 条目应被新增')
+assert.equal(restoredMcp.updated, 1, '同名的 playwright 条目应被更新')
+const afterRestore = readFileSync(patchPath, 'utf8')
+const afterEntries = mod.scanMcpEntries(afterRestore)
+assert.deepEqual(afterEntries.map((entry) => entry.serverName).sort(), ['github', 'local-only', 'playwright-mcp'],
+  '本机独有的 MCP 条目绝不能被云端包删掉')
+assert.ok(afterRestore.includes('# web profile 补丁（目标机）'), '写回必须保留注释')
+assert.ok(!afterRestore.includes('disabled: true'), '云端块应覆盖本机旧的 disabled 状态')
+assert.ok(afterEntries.find((entry) => entry.serverName === 'github').block.includes('https://mcp.example.com/github'),
+  '新增条目必须带着完整配置落回文件')
+
+// 空 patch 文件：必须能新建 insert 容器
+writeFileSync(patchPath, '', 'utf8')
+const freshRestore = mod.restoreMcpEntries(gatheredMcp)
+assert.equal(freshRestore.added, 2, '空文件时两条都应新增')
+const freshContent = readFileSync(patchPath, 'utf8')
+assert.ok(freshContent.includes('- insert:'), '空文件还原必须新建 insert 容器')
+assert.equal(mod.scanMcpEntries(freshContent).length, 2, '还原后应能被重新扫描到两条')
+console.log('✓ MCP 配置收集 / 还原（新增 + 更新 + 保留本机独有 + 空文件重建）通过')
+
 console.log('--- 4. 同步引擎：同步范围的保存与公开状态 ---')
 const vaultStore = new mod.VaultStore(null)
 const engine = new mod.WorkbenchSyncEngine(vaultStore, null, {})
@@ -164,8 +254,14 @@ const persistedFile = JSON.parse(readFileSync(engine.filePath, 'utf8'))
 assert.equal(persistedFile.settings.includeVault, false, 'save 必须把 includeVault 落盘')
 assert.equal(persistedFile.settings.includeMemory, true, 'save 只改点名的开关，其它范围保持默认')
 assert.equal(persistedFile.settings.includeSkills, true)
+assert.equal(persistedFile.settings.includeMcp, true, 'includeMcp 默认开启')
 const view = await engine.publicView()
 assert.equal(view.includeVault, false, 'publicView 必须回传 includeVault')
+assert.equal(view.includeMcp, true, 'publicView 必须回传 includeMcp')
+assert.equal(view.localMcpEntries, 2, '公开状态必须带上本机 MCP 条目数')
+await engine.save({ includeMcp: false })
+const viewAfterMcp = await engine.publicView()
+assert.equal(viewAfterMcp.includeMcp, false, 'includeMcp 开关必须能单独保存')
 console.log('✓ 同步引擎的同步范围保存与状态视图通过')
 
 console.log('--- 5. 检查安全规范（零私密硬编码） ---')
