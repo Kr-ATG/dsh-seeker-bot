@@ -36,7 +36,7 @@
     "./packages/*/icon": "./packages/*/icon.svg",
     "./locale/zh.json": "./locale/zh.json",
     "./locale/en.json": "./locale/en.json",
-    "./icon": "./icon.svg"
+    "./icon": "./icon.png"
   },
   "files": [
     "lib",
@@ -47,7 +47,7 @@
     "README.md",
     "packages",
     "locale",
-    "icon.svg"
+    "icon.png"
   ],
   "dsh": {
     "bundle": {
@@ -119,6 +119,6 @@
     "shiki": "^4.4.3",
     "yauzl": "^2.10.0"
   },
-  "icon": "./icon.svg",
+  "icon": "./icon.png",
   "author": "Kr-ATG"
 }
