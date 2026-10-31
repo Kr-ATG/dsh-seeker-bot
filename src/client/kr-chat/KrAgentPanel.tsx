@@ -14,7 +14,6 @@ import { KrMemoryCard } from './KrMemoryCard.tsx'
 import { KrToolCallsCard, type ToolCallItemView } from './KrToolCallsCard.tsx'
 import { usePanelSqueezed } from './use-adaptive-rows.ts'
 import { buildPlainTimeline } from './plain-timeline.ts'
-import { collectWorkspaceHints, mergeWorkspaceHints } from '../echo-viewport/workspace-hint.ts'
 import { turnInputImageCount } from './turn-input-images.ts'
 import { spawnsSubagents } from './plain-language.ts'
 import { KrPlainTimelineCard } from './KrPlainTimelineCard.tsx'
@@ -41,40 +40,6 @@ import { useFeature } from '../features/gate.tsx'
  * 抵掉两侧滚动条 —— 再窄，正文一行放不下十几个字，双栏就失去意义了。
  */
 const CHAT_FLOW_MIN_WIDTH = 380
-
-/**
- * 工作空间线索的会话级缓存键。
- *
- * 为什么需要 sessionStorage：线索来自工具调用参数，而 DSH 快照只保留最后一页窗口
- * 的内容。用户切到历史轮次或刷新页面后，当前轮可能已经看不到那条 taskSpace 调用，
- * 但会话仍然关联着那个工作空间 —— 把线索按 sessionId 存下来，回显才能稳定。
- */
-const WORKSPACE_HINTS_KEY = 'dsh.chat_plus.workspace_hints'
-
-function readStoredWorkspaceHints(sessionId: string | null): string[] {
-  if (typeof sessionId !== 'string' || sessionId === '') return []
-  try {
-    const raw = sessionStorage.getItem(WORKSPACE_HINTS_KEY)
-    if (raw === null) return []
-    const map = JSON.parse(raw) as Record<string, unknown>
-    const list = map[sessionId]
-    return Array.isArray(list) ? list.filter((item): item is string => typeof item === 'string') : []
-  } catch {
-    return []
-  }
-}
-
-function storeWorkspaceHints(sessionId: string | null, hints: readonly string[]): void {
-  if (typeof sessionId !== 'string' || sessionId === '' || hints.length === 0) return
-  try {
-    const raw = sessionStorage.getItem(WORKSPACE_HINTS_KEY)
-    const map = raw === null ? {} as Record<string, string[]> : (JSON.parse(raw) as Record<string, string[]>)
-    map[sessionId] = hints.slice(-8)
-    sessionStorage.setItem(WORKSPACE_HINTS_KEY, JSON.stringify(map))
-  } catch {
-    /* 隐私模式 / 存储满时忽略：回显拿不到线索最多是不显示 */
-  }
-}
 
 /**
  * 一轮的数据视图。
@@ -408,32 +373,6 @@ export const KrAgentPanel = memo(function KrAgentPanel({
     return turnData?.tools ?? []
   }, [turnData, actTick, snapTick])
 
-  /*
-   * 工作空间线索：当前轮工具参数 + 本会话此前轮次的缓存。
-   *
-   * 只服务操作面板右侧的回显 —— 它必须显示「本会话关联的工作空间」，而不是
-   * 桌面当前激活的任意 ego 标签页。线索从 ego-browser 脚本里的 taskSpace("名字")
-   * 抽取，按 sessionId 存 sessionStorage，切轮次/刷新页面都不丢。
-   */
-  const liveWorkspaceHints = useMemo(() => collectWorkspaceHints(tools), [tools])
-  const [storedWorkspaceHints, setStoredWorkspaceHints] = useState<readonly string[]>(
-    () => readStoredWorkspaceHints(latestChatSessionId),
-  )
-  useEffect(() => {
-    const stored = readStoredWorkspaceHints(latestChatSessionId)
-    const merged = mergeWorkspaceHints(stored, liveWorkspaceHints)
-    if (merged.length > 0) storeWorkspaceHints(latestChatSessionId, merged)
-    setStoredWorkspaceHints((previous) => {
-      const previousKey = previous.join('\u0001')
-      const nextKey = merged.join('\u0001')
-      return previousKey === nextKey ? previous : merged
-    })
-  }, [latestChatSessionId, liveWorkspaceHints])
-  const workspaceHints = useMemo(
-    () => mergeWorkspaceHints(storedWorkspaceHints, liveWorkspaceHints),
-    [storedWorkspaceHints, liveWorkspaceHints],
-  )
-
   // 耗时计算：精确优先从真实轮次生命周期中获取
   const turnStart = turnData?.turnStart
   const turnEnd = turnData?.turnEnd
@@ -624,10 +563,6 @@ export const KrAgentPanel = memo(function KrAgentPanel({
     [tools, currentRunning, now],
   )
 
-  // 本轮/本会话是否已有可展示内容。新会话空白期一律走干净空态，
-  // 绝不回落到 activityStore 里上一会话的缓存。
-  // 回合已在执行（哪怕工具/思考尚未落盘）也算内容，避免空白新会话刚发起
-  // 提问时错误地显示「等待本次对话开始」。
   /*
    * 子智能体目录：**全仓库唯一一处订阅**（见 subagent-catalog.ts）。
    *
@@ -663,18 +598,6 @@ export const KrAgentPanel = memo(function KrAgentPanel({
     () => mergeOutputs(outputs, { items: persistedOutputs }, { items: subagentOutputs }),
     [outputs, persistedOutputs, subagentOutputs],
   )
-
-  const hasContent = currentRunning
-    || tasks.length > 0
-    || reasoningTexts.length > 0
-    || tools.length > 0
-    // 子智能体可能在本轮毫无动作时依然在跑（前几轮派出去的、还没收口），
-    // 那种情况下这张卡就是右栏唯一还在动的信号，算进内容判定。
-    || subagentCatalog.rows.length > 0
-    // 产出物是**会话累计**的：本轮刚开始、什么都还没落盘时，前几轮做出的文件
-    // 依然该被看见。不算进来的话，切到新一轮的瞬间整栏会闪一次空态。
-    || outputsWithSubagents.items.length > 0
-
 
   /* ── 右栏挤压自适应 ─────────────────────────────────────────────────────
      记忆卡是滚动区之下的独立 flex footer（永远钉在右栏最下方，不可挤压），
@@ -911,21 +834,6 @@ export const KrAgentPanel = memo(function KrAgentPanel({
 
       {/* 滚动卡片列表 */}
       <div className="kr-panel__scroll" ref={scrollRef}>
-        {/* 空态：本次对话尚无任何内容（新会话空白期）。显式渲染，
-            不依赖各卡片自行 return null —— 避免上一会话的缓存数据漏进来。 */}
-        {!hasContent && !isViewingHistory && (
-          <div className="kr-panel__empty">
-            <div className="kr-panel__empty-icon">
-              <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="4" y="8" width="16" height="12" rx="2" />
-                <path d="M12 2v6M9 5h6M8 14h.01M16 14h.01M10 17h4" />
-              </svg>
-            </div>
-            <div className="kr-panel__empty-title">等待本次对话开始</div>
-            <div className="kr-panel__empty-desc">发送消息后，任务、思考与操作进展会实时显示在这里</div>
-          </div>
-        )}
-
         {/*
          * 原先这里有一条「已选对话：xxx / 返回最新对话」的提示带。
          * 整条删掉：它常驻在大盘顶部，和下面的卡片标题叠在一起既占位又抢注意力，
@@ -975,7 +883,6 @@ export const KrAgentPanel = memo(function KrAgentPanel({
             sessionId={latestChatSessionId}
             subagentCatalog={subagentCatalog}
             inputImageCount={inputImageCount}
-            workspaceHints={workspaceHints}
           />
         )}
 

@@ -125,7 +125,7 @@ const SHEET = [
   '  border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.14));border-radius:12px;overflow:hidden;',
   '  background:var(--dsw-alias-border-l1,rgba(127,127,127,.14))}',
   '.dsh-sync-stat{display:flex;flex-direction:column;gap:4px;padding:12px 16px;',
-  '  background:var(--dsw-alias-bg-base,#16181d)}',
+  '  background:var(--dsw-alias-bg-base,#1b1b1c)}',
   '.dsh-sync-stat-label{font-size:11px;line-height:15px;color:var(--dsw-alias-label-tertiary,#8b8b8b);user-select:none}',
   '.dsh-sync-stat-value{font-family:var(--ds-font-family-code,ui-monospace,SFMono-Regular,Menlo,monospace);',
   '  font-size:17px;line-height:24px;font-weight:640;color:var(--dsw-alias-label-primary,#e8e8e8);',
@@ -172,7 +172,7 @@ const SHEET = [
   /* ── 配置分段区块（参考 system-prompt 组容器） ── */
   '.dsh-sync-section{display:flex;flex-direction:column;gap:16px;padding:20px;border-radius:12px;',
   '  border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.14));',
-  '  background:var(--dsw-alias-bg-base,#16181d)}',
+  '  background:var(--dsw-alias-bg-base,#1b1b1c)}',
   '.dsh-sync-section-title{font-size:13.5px;line-height:20px;font-weight:650;',
   '  color:var(--dsw-alias-label-primary,#e8e8e8);display:flex;align-items:center;gap:7px;letter-spacing:-.01em}',
 
@@ -215,7 +215,7 @@ const SHEET = [
   '  border:none;border-radius:7px;background:transparent;color:var(--dsw-alias-label-tertiary,#8b8b8b);font-family:inherit;',
   '  font-size:12px;font-weight:500;cursor:pointer;transition:all 140ms ease;user-select:none}',
   '.dsh-sync-seg-item:hover{color:var(--dsw-alias-label-primary,#e8e8e8)}',
-  '.dsh-sync-seg-item[data-active="true"]{background:var(--dsw-alias-bg-base,#16181d);color:var(--dsw-alias-label-primary,#e8e8e8);',
+  '.dsh-sync-seg-item[data-active="true"]{background:var(--dsw-alias-bg-base,#1b1b1c);color:var(--dsw-alias-label-primary,#e8e8e8);',
   '  font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,.25);border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.2))}',
   '.dsh-sync-slider-desc{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#a3a3a3);',
   '  padding-top:2px;display:flex;align-items:center;gap:6px}',

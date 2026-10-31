@@ -85,7 +85,7 @@ export const FEATURES: ReadonlyArray<FeatureDef> = [
   { id: 'view.panel-header', group: 'view', label: '大盘顶栏', desc: '右栏顶部的头像 + 标题 + 统计 + 截图按钮；默认不显示。', default: false, apply: 'live' },
   { id: 'view.task-motion', group: 'view', label: '任务动画', desc: '卡头那 9 段按状态切换的透明底人物动画；关掉后显示静态首帧。', default: true, apply: 'live' },
   { id: 'view.hero-head', group: 'view', label: '新对话页卡头', desc: '空白新对话页上方的 Seeker 卡头；发出首条消息后本来就会自动摘掉。', default: true, apply: 'live' },
-  { id: 'view.git-status', group: 'view', label: '卡头 Git 状态', desc: '操作面板卡头的 Git 徽章与一键提交 / Git 大盘入口。', default: true, apply: 'live' },
+  { id: 'view.git-status', group: 'view', label: '卡头 Git 状态', desc: '操作面板卡头的 Git 徽章与 Git 大盘入口。', default: true, apply: 'live' },
   { id: 'view.mail', group: 'view', label: '邮箱按钮', desc: '卡头右上角的信封按钮与未读角标；关掉后邮箱工作台仍可从操作间进入。', default: true, apply: 'live' },
   { id: 'view.browser-flag', group: 'view', label: '浏览器操作标志', desc: '该会话正在操作浏览器时亮起的呼吸小图标（可点击拉窗口到前台）。', default: true, apply: 'live' },
   { id: 'view.done-pill', group: 'view', label: '对话完成胶囊', desc: '回合完成提醒小横条 / 顶部悬浮胶囊（含录屏与待机机器人）。', default: true, apply: 'live' },

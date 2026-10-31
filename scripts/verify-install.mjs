@@ -8,7 +8,7 @@
  *   2. dsh plugin --profile seeker-test add link:<repo>；
  *   3. --dump-config 确认 bundle patch 已并入、15 个 insert id 全部出现；
  *   4. 启动临时端口实例（--no-open），从启动日志读取 token（只在内存中使用，不打印）；
- *   5. HTTP 探针：/connect 换 API cookie 后请求 /api/seeker-bot/health 期望 200；
+ *   5. HTTP 探针：/connect 换 API operator cookie（证明临时实例的 HTTP 面可用）；
  *   6. 无头 Chrome + CDP：打开页面、等 15s、Runtime.evaluate 证明主线程没卡死、
  *      截图到 _tmp/verify-install/page.png；
  *   7. finally 里杀掉临时实例与浏览器，并核对用户真实 profile 未被改动。
@@ -131,7 +131,6 @@ const state = {
   chrome: null,
   chromeProfile: resolve(ARTIFACT_DIR, 'chrome-profile'),
   browserResult: null,
-  health: null,
   userProfileBefore: '',
 }
 const startedAt = new Date().toISOString()
@@ -219,7 +218,6 @@ function writeSummary() {
     profile: opts.profile,
     profileDir: resolve(opts.dshHome, 'profiles', opts.profile),
     port: state.port,
-    health: state.health,
     page: state.browserResult,
     screenshot: resolve(ARTIFACT_DIR, 'page.png'),
     log: state.serverOut,
@@ -270,24 +268,16 @@ async function httpGet(path, headers) {
     clearTimeout(timer)
   }
 }
-async function probeHealth() {
+async function probeHttp() {
   const connect = await httpGet('/connect?token=' + encodeURIComponent(state.token) + '&interactions=none', {})
   const cookies = typeof connect.headers.getSetCookie === 'function'
     ? connect.headers.getSetCookie()
     : [connect.headers.get('set-cookie')].filter(Boolean)
-  const cookie = cookies.map((item) => String(item).split(';')[0]).filter(Boolean).join('; ')
-  assert(connect.status === 302 && cookie.length > 0, 'launch token 可换取 API operator cookie（/connect）', 'status=' + connect.status + ' cookies=' + cookies.length)
-  const health = await httpGet('/api/seeker-bot/health', { cookie })
-  const body = await health.text()
-  let json = null
-  try { json = JSON.parse(body) } catch {}
-  assert(health.status === 200, '/api/seeker-bot/health 返回 200', 'status=' + health.status + ' body=' + tail(body, 300))
-  assert(json && json.ok === true && json.plugin === 'dsh-seeker-bot', '/api/seeker-bot/health 返回 {ok:true, plugin:dsh-seeker-bot}', tail(body, 300))
-  state.health = { status: health.status, body: json || tail(body, 300) }
-  console.log('note  health: ' + JSON.stringify(state.health))
-  const stateRes = await httpGet('/api/seeker-bot/state', { cookie })
-  const stateBody = await stateRes.text()
-  assert(stateRes.status === 200, '/api/seeker-bot/state 返回 200', 'status=' + stateRes.status + ' body=' + tail(stateBody, 300))
+  assert(
+    connect.status === 302 && cookies.length > 0,
+    'launch token 可换取 API operator cookie（/connect）',
+    'status=' + connect.status + ' cookies=' + cookies.length,
+  )
 }
 
 function openCdp(wsUrl) {
@@ -502,9 +492,9 @@ async function main() {
   console.log('note  instance: http://127.0.0.1:' + state.port + '/ (token 已读取并隐藏)')
   assert(state.server.pid > 0 && state.serverExit === null, '临时实例已启动（PID ' + state.server.pid + '）')
 
-  console.log('\n== 5. HTTP 探针：/api/seeker-bot/health ==')
+  console.log('\n== 5. HTTP 探针：/connect 换取 API cookie ==')
   try {
-    await probeHealth()
+    await probeHttp()
   } catch (error) {
     fail('HTTP 探针执行失败', error.message)
   }

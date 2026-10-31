@@ -63,7 +63,7 @@ const TOOLTIP_JS = `
         }
       } catch (e) {}
       s.background = "light-dark(#1f2126,#f2f3f5)";
-      s.color = "light-dark(#f2f3f5,#16181d)";
+      s.color = "light-dark(#f2f3f5,#1b1b1c)";
       s.boxShadow = "0 4px 16px rgba(0,0,0,.18)";
       s.whiteSpace = "normal"; s.wordBreak = "break-word";
       document.body.appendChild(tip);

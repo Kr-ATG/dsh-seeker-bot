@@ -134,7 +134,7 @@ const SHEET = [
   '  border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.14));border-radius:12px;overflow:hidden;',
   '  background:var(--dsw-alias-border-l1,rgba(127,127,127,.14))}',
   '.dsh-sp-stat{display:flex;flex-direction:column;gap:3px;padding:11px 13px;',
-  '  background:var(--dsw-alias-bg-base,#16181d)}',
+  '  background:var(--dsw-alias-bg-base,#1b1b1c)}',
   '.dsh-sp-stat-label{font-size:11px;line-height:15px;color:var(--dsw-alias-label-tertiary,#8b8b8b);user-select:none}',
   '.dsh-sp-stat-value{font-family:var(--ds-font-family-code,ui-monospace,SFMono-Regular,Menlo,monospace);',
   '  font-size:15px;line-height:21px;font-weight:640;color:var(--dsw-alias-label-primary,#e8e8e8);',

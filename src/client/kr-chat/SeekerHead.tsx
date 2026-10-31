@@ -14,9 +14,15 @@
  *
  * ## 两套骨架（2026-10-30）
  *
- * 操作面板卡传 `compact`：小立绘（64×114）在左、名字/状态在右、底部一条摘要；
- * 不传时是原来的竖排大立绘（92×164），新对话页 Hero 继续用那一版。两套只差
- * 一个类名，DOM 与数据源完全共用，避免再次出现"两处长得不一样"的分叉。
+ * 操作面板卡传 `compact`：**插件头像（64×64）**在左、名字/状态在右、底部一条摘要；
+ * 不传时是原来的竖排大立绘（92×164）+ 任务动画，新对话页 Hero 继续用那一版。
+ * 两套只差一个类名，DOM 与数据源完全共用，避免再次出现"两处长得不一样"的分叉。
+ *
+ * 身份位在两套骨架里**不是同一个东西**（2026-10-31 用户要求）：
+ *  · 操作面板（compact）→ 插件头像，一张 128×128 的内联 PNG（brand-avatar.ts）；
+ *  · 新对话页 Hero → 原来的 9 段任务动画（SeekerStage 的 WebM 人物）。
+ * 用户的原话是「操作面板的这个人物删除替换为我们的插件头像」，点名的是操作面板；
+ * Hero 那边是"她在这儿"的开场形象，与这轮要求无关，故未动。
  *
  * ## 它不负责什么
  *
@@ -28,21 +34,20 @@
  */
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import type { ReactElement } from 'react'
+import type { MouseEvent as ReactMouseEvent, ReactElement } from 'react'
 import { SeekerStage } from './SeekerStage.tsx'
+import { BRAND_AVATAR_SRC } from './brand-avatar.ts'
 import { idleClipFor, type MotionClipId } from './motion-clips.ts'
 import type { StageMode } from './stage-mode.ts'
 import { activateBrowserWindow } from '../browser-flag/activate.ts'
+import { browserFlagTitle } from '../browser-flag/store.ts'
 import type { BrowserActivitySession } from '../browser-flag/store.ts'
-import { workspaceCwdOf } from '../client-ctx.ts'
 import { getPanelSettingsStore } from './panel-settings-store.ts'
 import { getMailDrawerStore } from './mail-drawer-store.ts'
 import { getMailUnreadStore } from './mail-unread-store.ts'
 import { getGitRosterStore, useGitRosterSnapshot } from './git-roster-store.ts'
-import { SeekerGitStatus } from './SeekerGitStatus.tsx'
 import { GitRosterModal } from './GitRosterModal.tsx'
 import { useFeature } from '../features/gate.tsx'
-import { KrEchoViewport } from '../echo-viewport/index.ts'
 
 /** 一行状态：要么是一个动作，要么是空闲文案。 */
 export interface SeekerHeadLine {
@@ -83,8 +88,6 @@ export interface SeekerHeadProps {
   readonly browserEntry?: BrowserActivitySession | undefined
   /** 是否显示浏览器标志（粘滞判据在调用方，见 KrPlainTimelineCard）。 */
   readonly browserOn?: boolean
-  /** 从会话工具调用里提取的工作空间线索（操作面板回显用）。 */
-  readonly workspaceHints?: readonly string[]
   /** 整个卡头可点（操作面板卡用它折叠时间线；新对话页不需要）。 */
   readonly onClick?: () => void
   /** aria-expanded（只有可折叠时才传）。 */
@@ -96,17 +99,13 @@ export interface SeekerHeadProps {
   /**
    * 紧凑骨架（操作面板卡专用，2026-10-30）。
    *
-   * 打开后：小立绘（64×114）在左，名字 / 状态两行在右，整块卡头压到约 160px；
-   * 关闭时保持原来的竖排大立绘（新对话页 Hero 用那一版）。
+   * 打开后：插件头像（64×64）在左，名字 / 状态两行在右，整块卡头压到约 100px；
+   * 关闭时保持原来的竖排大立绘 + 任务动画（新对话页 Hero 用那一版）。
    * 两处共用同一个组件，但布局差异只由这一个开关决定，不复制 DOM。
    */
   readonly compact?: boolean
   /** 紧凑骨架底部摘要里的动作条数（操作面板传 timeline.steps.length；Hero 不传）。 */
   readonly stepCount?: number
-  /** 当前会话 ID（用于解析当前工作区根目录）。 */
-  readonly sessionId?: string | null
-  /** 工作区根目录（优先）。 */
-  readonly cwd?: string
   /**
    * 是否渲染右上角那三枚动作按钮（Git / 邮箱 / 齿轮）。默认 true。
    *
@@ -138,16 +137,14 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
     line = null,
     idleLine,
     thinking = false,
+    browserEntry,
     browserOn = false,
-    workspaceHints = [],
     onClick,
     expanded,
     renderIcon,
     className,
     compact = false,
     stepCount,
-    sessionId,
-    cwd,
     chrome = true,
   } = props
 
@@ -221,7 +218,6 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
    * 45 秒轮询（/api/chat-flow/git-roster 会逐个仓库跑 git status，不能让
    * 两处各轮一遍）。view.git-status 关闭时不订阅，store 内也不会启动定时器。
    */
-  const resolvedCwd = cwd ?? workspaceCwdOf(sessionId)
   const gitRosterSnapshot = useGitRosterSnapshot(chrome && gitStatusOn)
   const gitDirtyRepoCount = gitRosterSnapshot.dirtyRepoCount
   const gitRosterOpen = gitRosterSnapshot.open
@@ -244,11 +240,45 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
    * 的警示色 + title 里换成"没找到窗口"。都不弹窗、不打断，但能分清两种结果。
    */
   /*
+   * 点击结果的**一次性反馈**（2026-10-25 补，2026-10-31 随图标还原保留）。
+   *
+   * 'ok' → 主色脉冲一次；'fail' → 警示色 + 悬浮说明换文案。900ms 后自动清掉，
+   * 让图标回到常态灰。失败也要看得见：静默失败让人连「是不是坏了」都判断不了。
+   */
+  const [browserFlash, setBrowserFlash] = useState<'ok' | 'fail' | undefined>(undefined)
+  const flashTimerRef = useRef<number | null>(null)
+  useEffect(() => () => {
+    if (flashTimerRef.current !== null) window.clearTimeout(flashTimerRef.current)
+  }, [])
+
+  /*
+   * 点浏览器标志 → 把那个窗口拉到前台。
+   *
    * 候选进程名从活动条目的 service/tool 推：ego-browser 背后的桌面进程是 ego，
    * playwright-mcp 背后通常是 chrome。推不出来时退到 'ego'（用户的默认场景）。
-   * 传给操作面板右侧的实时回显视口 KrEchoViewport。
+   * 服务端按序试，第一个成功的赢。
+   *
+   * stopPropagation：卡头整块是折叠热区，点图标不该顺带展开时间线。
    */
-  const [isEchoActive, setIsEchoActive] = useState(false)
+  const handleBrowserClick = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>) => {
+      event.stopPropagation()
+      const service = (browserEntry?.service ?? '').toLowerCase()
+      const tool = (browserEntry?.tool ?? '').toLowerCase()
+      const processes = service === 'playwright' || tool.includes('playwright')
+        ? ['chrome', 'ego', 'msedge']
+        : ['ego', 'chrome', 'msedge']
+      void activateBrowserWindow(processes).then((ok) => {
+        setBrowserFlash(ok ? 'ok' : 'fail')
+        if (flashTimerRef.current !== null) window.clearTimeout(flashTimerRef.current)
+        flashTimerRef.current = window.setTimeout(() => {
+          setBrowserFlash(undefined)
+          flashTimerRef.current = null
+        }, ok ? 700 : 2200)
+      })
+    },
+    [browserEntry],
+  )
 
   const hasLine = line !== null && line !== undefined
   const lineText = hasLine
@@ -267,7 +297,6 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
   return (
     <div
       className={headClass}
-      data-browser-on={isEchoActive || undefined}
       onClick={onClick}
       role={onClick === undefined ? undefined : 'button'}
       tabIndex={onClick === undefined ? undefined : 0}
@@ -281,25 +310,68 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
       }}
     >
       {/*
-       * 立绘位现在是**任务动画**（2026-10-26 用户给的 9 个 GIF 转成的透明底
-       * WebM，见 SeekerStage.tsx / motion-clips.ts）。
+       * 身份位。两套骨架在这里分叉（2026-10-31 用户要求「操作面板的这个人物
+       * 删除替换为我们的插件头像」）：
        *
-       * 基础盒子 92×164 是 Hero / 旧竖排版用的尺寸（见 styles.ts 的 .kr-stage）；
-       * 操作面板的紧凑骨架在 .kr-plain-head--compact 下覆写成 64×114。
+       *  · compact（操作面板卡）：**插件头像**。原来那 9 段任务动画在这张卡里
+       *    被换掉了 —— 它占着 64×114 一整条竖条，而右栏本来就是窄栏，一张方头像
+       *    同样能表达"是谁在干活"，还省下 50px 高度。图片是 brand-avatar.ts 里
+       *    内联的 128×128 PNG（正好覆盖 2× DPI），不走 host 路由，改完立刻可见。
+       *
+       *  · Hero（新对话页）：**任务动画**不变。那是开场形象，"她在这儿"的观感
+       *    全靠这段动画，与这轮要求无关。view.task-motion 关闭时 motion=false，
+       *    SeekerStage 只显示当前状态的静态首帧（内部会收到 restingClip，不会
+       *    停在一段被暂停的一次性动画上）。
        */}
-      {/* view.task-motion 关闭：motion=false 让 SeekerStage 只显示当前状态的静态首帧
-          （它内部会把画面收到 restingClip，不会停在一段被暂停的一次性动画上）。 */}
-      <SeekerStage
-        mode={stageMode}
-        idleClip={idleClip ?? idleClipFor(idleLine)}
-        motion={motion && taskMotionOn}
-      />
+      {compact ? (
+        <img
+          className="kr-plain-head__avatar"
+          src={BRAND_AVATAR_SRC}
+          width={64}
+          height={64}
+          alt=""
+          draggable={false}
+        />
+      ) : (
+        <SeekerStage
+          mode={stageMode}
+          idleClip={idleClip ?? idleClipFor(idleLine)}
+          motion={motion && taskMotionOn}
+        />
+      )}
       {/*
-       * 名字行：已按用户要求移除原浏览器图标按钮，
-       * 统一移至右侧由实时回显画面视口接管唤起工作区功能。
+       * 名字行：Seeker + **浏览器标志**（2026-10-31 按用户要求还原）。
+       *
+       * 2026-10-30 那版把图标摘掉、改用右侧实时回显视口接管「唤起工作区」，
+       * 用户现在要求去掉回显、把这枚小图标放回来：它比一张画面省位置，
+       * 而且点它就是把 ego 那个窗口拉到前台（activateBrowserWindow）。
+       *
+       * 只在 browserOn 时才渲染：判据是**粘滞**的（本会话出现过浏览器活动就亮到
+       * 本轮收口，见 KrPlainTimelineCard），否则每场对话都会亮一枚点了没用的图标。
        */}
       <span className="kr-plain-head__name-row">
         <span className="kr-plain-head__name">Seeker</span>
+        {browserOn && (
+          <button
+            type="button"
+            className="kr-plain-head__browser"
+            title={browserFlash === 'fail' ? '没找到浏览器窗口' : browserFlagTitle(browserEntry)}
+            aria-label={browserFlash === 'fail' ? '没找到浏览器窗口' : '唤起浏览器工作区'}
+            data-flash={browserFlash}
+            onClick={handleBrowserClick}
+          >
+            {/*
+             * 地球 / 浏览器图标：外圆 + 赤道 + 一条经线，纯手写内联 SVG
+             * （仓库硬约束，禁止外部图标库）。几何与 browser-flag/styles.ts 里
+             * 那枚行标记同一份，两处视觉不会分叉。
+             */}
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="8" cy="8" r="6.25" />
+              <path d="M1.75 8h12.5" />
+              <path d="M8 1.75c1.7 1.8 2.6 3.9 2.6 6.25S9.7 12.45 8 14.25C6.3 12.45 5.4 10.35 5.4 8S6.3 3.55 8 1.75z" />
+            </svg>
+          </button>
+        )}
       </span>
       {hasLine ? (
         <span className="kr-plain-head__act" data-status={line.status}>
@@ -317,20 +389,6 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
         <span className="kr-plain-head__idle" data-thinking={thinking || undefined}>
           {idleLine}
         </span>
-      )}
-
-      {/*
-       * 操作面板右侧实时回显画面视口（紧凑骨架专享）：
-       * 实时捕获 ego/浏览器工作区画面，点击唤起 ego 窗口，右下角带放大图标弹窗。
-       * 严格按会话隔离：仅在本会话确实操作了工作空间（browserOn 为 true）时才渲染！
-       */}
-      {compact && browserOn && (
-        <KrEchoViewport
-          sessionId={sessionId ?? null}
-          workspaceHints={workspaceHints}
-          browserOn={browserOn}
-          onVisibleChange={(active) => setIsEchoActive(active)}
-        />
       )}
 
       {/*
@@ -371,8 +429,8 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
       {/*
        * 三枚按钮各自受功能开关控制：Git（view.git-status）、邮箱（view.mail）可以
        * 单独关掉，齿轮设置按钮（大盘设置）不属于这几个 id，保持常驻。
-       * 关掉 Git 时连 SeekerGitStatus 的 15s 轮询与 GitRosterModal 一起摘掉——
-       * 只藏按钮不卸载组件等于还在后台每 15 秒请求一次 /git-status。
+       * 关掉 Git 时连 git-roster 的 45s 轮询与 GitRosterModal 一起摘掉——
+       * 只藏按钮不卸载组件等于还在后台每 45 秒请求一次 /git-roster。
        */}
       <div className="kr-plain-head__tools">
         {gitStatusOn && (
@@ -464,7 +522,6 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
           </svg>
         </button>
       </div>
-      {gitStatusOn && <SeekerGitStatus sessionId={sessionId} cwd={resolvedCwd} />}
       {gitStatusOn && <GitRosterModal />}
       </>
       )}

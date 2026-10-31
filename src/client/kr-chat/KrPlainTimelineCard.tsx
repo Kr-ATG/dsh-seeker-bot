@@ -2,12 +2,14 @@
  * dsh-seeker-bot — 「操作面板」卡（右栏大盘滚动区的一张卡）。
  *
  * 读者是**不会编程的普通用户**。2026-10-24 起这张卡换了形态（用户点名要的），
- * 2026-10-30 再压成紧凑横排（用户：「操作面板人物变小，整个卡片重新设计布局」）：
+ * 2026-10-30 再压成紧凑横排（用户：「操作面板人物变小，整个卡片重新设计布局」），
+ * 2026-10-31 卡头的人物换成**插件头像**（用户：「操作面板的这个人物删除替换为
+ * 我们的插件头像」—— 那张 64×114 的任务动画在这张卡里撤掉了，见 brand-avatar.ts）：
  *
- *     ┌ 小立绘 ┐  Seeker                [Git][邮件][齿轮]
- *     │ 64×114 │  观月中 / ▶ 打开网页 携程旅行网 · 机票   ← 只有这一行，新动作把它顶掉
- *     └────────┘  ──────────────────────────────────────
- *                 33 个动作                    展开时间线 ⌄
+ *     ┌ 头像  ┐  Seeker                [Git][邮件][齿轮]
+ *     │ 64×64 │  观月中 / ▶ 打开网页 携程旅行网 · 机票   ← 只有这一行，新动作把它顶掉
+ *     └───────┘  ──────────────────────────────────────
+ *                33 个动作                    展开时间线 ⌄
  *
  * 也就是说它从「一列按时间读的流水」变成了**一张状态卡**：卡上永远只有
  * 当前正在做的那一件事，不堆历史。为什么这样更好：
@@ -108,10 +110,8 @@ export interface KrPlainTimelineCardProps {
   readonly running: boolean
   /** 右栏被挤压时为 true，列表降一档高度。 */
   readonly squeezed?: boolean
-  /** 当前会话 id：用于查该会话派生了哪些子智能体。 */
+  /** 当前会话 id：用于查该会话派生了哪些子智能体、浏览器标志按它隔离。 */
   readonly sessionId?: string | null
-  /** 从会话工具调用里提取的工作空间线索（操作面板右侧回显用）。 */
-  readonly workspaceHints?: readonly string[]
   /**
    * **本会话**的子智能体目录（KrAgentPanel 单点订阅后原样传下来）。
    *
@@ -338,7 +338,6 @@ export const KrPlainTimelineCard = memo(function KrPlainTimelineCard({
   sessionId = null,
   subagentCatalog = null,
   inputImageCount = 0,
-  workspaceHints = [],
 }: KrPlainTimelineCardProps) {
   /*
    * 默认**收起**（2026-10-24 按用户要求）。
@@ -583,9 +582,10 @@ export const KrPlainTimelineCard = memo(function KrPlainTimelineCard({
        * 卡头：2026-10-30 起是**紧凑横排**「小立绘 / 名字 / 当前动作 / 摘要行」。
        *
        * 与更早的竖排大立绘版差别：
-       *  · 人物从 92×164 缩到 64×114，名字与状态移到右侧，卡头高度省约 55px；
+       *  · 名字与状态移到右侧，卡头高度从 215px 压到 160px；
        *  · 底部摘要行显示动作条数与「展开 / 收起时间线」，把可点击的暗示说清楚；
-       *  · 头像位仍是**活物**：9 段任务动画（SeekerStage，随状态切换的 WebM）；
+       *  · **头像位是插件头像**（2026-10-31 起）：原来那 9 段任务动画在这里撤掉了，
+       *    换成 64×64 的方形头像（brand-avatar.ts 的内联 PNG），卡头再省 60px；
        *  · 动作行只显示一条（当前进行中优先），新动作把它顶掉；本轮收口后回到
        *    空闲文案（观月中 / 吃饭中 / 小憩中，按钟点选）。
        */}
@@ -607,9 +607,7 @@ export const KrPlainTimelineCard = memo(function KrPlainTimelineCard({
         idleClip={idleClipFor(idleLine)}
         browserEntry={browserEntry}
         browserOn={browserOn}
-        workspaceHints={workspaceHints}
         expanded={open}
-        sessionId={sessionId}
         onClick={() => { setOpen((value) => !value) }}
         renderIcon={(name) => <Icon name={name as PlainIconKey} />}
       />

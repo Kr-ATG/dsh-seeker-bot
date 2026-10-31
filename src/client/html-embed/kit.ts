@@ -49,10 +49,10 @@ const KIT_TOKENS = [
    * 文字三档（与宿主 label-primary / secondary / caption 同层级）。
    *
    * 兜底值必须用 light-dark() 而不是写死深色：bridge 的基线样式已经按主题设了
-   * html{color-scheme}，所以 light-dark() 在亮暗下各取一套。写死 #16181d 的后果
+   * html{color-scheme}，所以 light-dark() 在亮暗下各取一套。写死 #1b1b1c 的后果
    * 实测过——宿主没下发 fg 时（截图页 / 第三方宿主），暗色卡片就是黑字压深底。
    */
-  '--k-ink:var(--dsh-frame-fg,light-dark(#16181d,#f2f3f5));',
+  '--k-ink:var(--dsh-frame-fg,light-dark(#1b1b1c,#f2f3f5));',
   '--k-ink-2:color-mix(in srgb,var(--k-ink) 62%,transparent);',
   '--k-ink-3:color-mix(in srgb,var(--k-ink) 40%,transparent);',
   // 结构线：永远比文字淡一档，不抢视线

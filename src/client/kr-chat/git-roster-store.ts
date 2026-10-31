@@ -10,7 +10,7 @@
  * store：卡头角标与 GitRosterModal 共用同一份数据、同一个 45 秒轮询；弹窗
  * 打开时立即强制刷新一次，关闭后仍跟着 45 秒节拍走（角标要持续可见）。
  *
- * 与 mail-unread-store / git-status-store 同款约束：
+ * 与 mail-unread-store 同款约束：
  *   · getSnapshot 必须返回稳定引用（每次现造对象会让 useSyncExternalStore
  *     判定「永远在变」，右栏大盘直接撞 React error #185）；
  *   · 页面隐藏时暂停轮询，切回前台 / 窗口聚焦时补一次；

@@ -2191,22 +2191,22 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
           overflow: 'hidden',
           background: 'var(--dsw-alias-border-l1,rgba(127,127,127,.14))',
         }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 16px', background: 'var(--dsw-alias-bg-base,#16181d)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 16px', background: 'var(--dsw-alias-bg-base,#1b1b1c)' }}>
             <span style={{ fontSize: '11px', color: 'var(--dsw-alias-label-tertiary,#8b8b8b)', userSelect: 'none' }}>技能包数量</span>
             <span style={{ fontFamily: 'var(--ds-font-family-code,ui-monospace,monospace)', fontSize: '18px', fontWeight: 640, color: 'var(--dsw-alias-label-primary,#e8e8e8)', fontVariantNumeric: 'tabular-nums' }}>{bundles.length}</span>
             <span style={{ fontSize: '11px', color: 'var(--dsw-alias-label-tertiary,#8b8b8b)' }}>编目组</span>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 16px', background: 'var(--dsw-alias-bg-base,#16181d)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 16px', background: 'var(--dsw-alias-bg-base,#1b1b1c)' }}>
             <span style={{ fontSize: '11px', color: 'var(--dsw-alias-label-tertiary,#8b8b8b)', userSelect: 'none' }}>技能总数</span>
             <span style={{ fontFamily: 'var(--ds-font-family-code,ui-monospace,monospace)', fontSize: '18px', fontWeight: 640, color: 'var(--dsw-alias-label-primary,#e8e8e8)', fontVariantNumeric: 'tabular-nums' }}>{totalSkills}</span>
             <span style={{ fontSize: '11px', color: 'var(--dsw-alias-label-tertiary,#8b8b8b)' }}>已索引工具能力</span>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 16px', background: 'var(--dsw-alias-bg-base,#16181d)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 16px', background: 'var(--dsw-alias-bg-base,#1b1b1c)' }}>
             <span style={{ fontSize: '11px', color: 'var(--dsw-alias-label-tertiary,#8b8b8b)', userSelect: 'none' }}>已启用技能</span>
             <span style={{ fontFamily: 'var(--ds-font-family-code,ui-monospace,monospace)', fontSize: '18px', fontWeight: 640, color: 'var(--dsw-alias-label-primary,#e8e8e8)', fontVariantNumeric: 'tabular-nums' }}>{enabledSkills}</span>
             <span style={{ fontSize: '11px', color: 'var(--dsw-alias-label-tertiary,#8b8b8b)' }}>{totalSkills > 0 ? Math.round((enabledSkills / totalSkills) * 100) : 0}% 激活率</span>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 16px', background: 'var(--dsw-alias-bg-base,#16181d)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 16px', background: 'var(--dsw-alias-bg-base,#1b1b1c)' }}>
             <span style={{ fontSize: '11px', color: 'var(--dsw-alias-label-tertiary,#8b8b8b)', userSelect: 'none' }}>分类覆盖</span>
             <span style={{ fontFamily: 'var(--ds-font-family-code,ui-monospace,monospace)', fontSize: '18px', fontWeight: 640, color: 'var(--dsw-alias-label-primary,#e8e8e8)', fontVariantNumeric: 'tabular-nums' }}>{categoryList.length}</span>
             <span style={{ fontSize: '11px', color: 'var(--dsw-alias-label-tertiary,#8b8b8b)' }}>业务场景分类</span>

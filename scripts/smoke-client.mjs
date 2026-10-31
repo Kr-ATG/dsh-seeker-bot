@@ -407,9 +407,10 @@ const expectedStyles = [
   // 工具闸门胶囊（src/client/tools-gate/styles.ts）：computer-use / browser-use
   // 按需开关的滑块、扫光、抖动。纯 CSS 动效，带 prefers-reduced-motion 兜底。
   'dsh-tools-gate-style',
-  // Bot 控制台样式（src/client/bot/styles.ts）：侧栏 Work/Bot 分段、名册、
-  // 新建表单、详情抽屉与右栏 Bot 面板。applyBotConsole 在 apply 阶段同步注入。
-  'skb-styles',
+  // 侧栏 Work / Bot 分段控件（src/client/mode-switch/styles.ts）：Bot 功能已按
+  // 要求整块删除，只留这枚切换控件；2026-10-31 起 Bot 那一半被禁用（置灰 +
+  // cursor:not-allowed），模式恒为 Work。applyModeSwitch 在 apply 阶段同步注入。
+  'dsh-seeker-bot-mode-switch',
   // 侧栏文档预览面板样式（src/client/sidebar-doc/index.tsx）。8b1db4b 引入时
   // 漏登本表，导致 smoke 一直报 unexpected extra styles —— 补录。
   'dsh-sdp-styles',
@@ -1835,21 +1836,26 @@ if (krEnabled) {
        */
       fail('操作面板卡头必须挂任务动画（SeekerStage，且传 idleClip）')
     } else if (!/className="kr-plain-head__name-row"/.test(seekerHeadSrc)
-      || !/<KrEchoViewport/.test(seekerHeadSrc)) {
+      || !/<button[\s\S]{0,120}className="kr-plain-head__browser"/.test(seekerHeadSrc)) {
       /*
-       * 实时回显视口：按用户要求去掉 Seeker 名字旁的旧球状浏览器标志，
-       * 改为在操作面板紧凑卡头右侧挂载实时回显画面视口（KrEchoViewport）。
+       * 浏览器标志（2026-10-31 用户：「还原之前的浏览器标志」）。
+       *
+       * 2026-10-30 那版把它摘掉、改用右侧实时回显视口接管「唤起工作区」；现在
+       * 回显移除，这枚小图标必须回到 Seeker 名字右侧 —— 它比一张画面省位置，
+       * 点击仍由 activateBrowserWindow 把 ego 窗口拉到前台。
        */
-      fail('操作面板紧凑卡头必须挂载实时回显视口（KrEchoViewport）')
-    } else if (!/\.kr-echo-viewport/.test(code) || !/\.kr-echo-modal/.test(code)) {
-      fail('client bundle 缺 .kr-echo-viewport 或 .kr-echo-modal 样式（实时回显与放大弹窗）')
+      fail('Seeker 名字旁必须有浏览器标志按钮（.kr-plain-head__browser）')
+    } else if (/<KrEchoViewport/.test(seekerHeadSrc)) {
+      /*
+       * 操作面板**不得再挂实时回显视口**（用户 2026-10-31：「移除操作面板的浏览器回显」）。
+       * 回显会把紧凑卡头撑成三栏、右侧多出一张 16:10 的截图，而卡头这一行
+       * 只需要回答「浏览器在跑吗」—— 那是这枚小图标的事。
+       */
+      fail('操作面板卡头不得再挂实时回显视口（KrEchoViewport 已移除）')
+    } else if (!/data-flash={browserFlash}/.test(seekerHeadSrc)) {
+      fail('浏览器标志必须有点击结果反馈（data-flash=ok/fail），否则点击唤起时用户无从判断')
     } else if (!/export async function activateBrowserWindow/.test(readFileSync(resolve(ROOT, 'src/client/browser-flag/activate.ts'), 'utf8'))) {
       fail('缺 activateBrowserWindow（POST /api/chat-flow/activate-window 的客户端封装）')
-    } else if (!readFileSync(resolve(ROOT, 'src/client/echo-viewport/KrEchoViewport.tsx'), 'utf8').includes('data-flash={flash ?? undefined}')) {
-      /*
-       * 点击回显画面要有**结果反馈**（继承原浏览器标志的脉冲反馈）。
-       */
-      fail('回显视口必须有点击结果反馈（data-flash=ok/fail），否则点击唤起工作区时用户无从判断')
     } else if (!/\.kr-card--subs\s*\{[^}]*background:\s*transparent/.test(code)
       || !/\.kr-card--subs\s*\{[^}]*border:\s*0/.test(code)
       || !/\.kr-card--subs\s*\{[^}]*box-shadow:\s*none/.test(code)) {
@@ -1910,8 +1916,13 @@ if (krEnabled) {
     } else if (!/\.kr-plain-head__name-row\s*\{[^}]*display:\s*flex/.test(code)
       || !/\.kr-plain-head--compact \.kr-plain-head__name-row\s*\{[^}]*gap:\s*8px/.test(code)) {
       fail('卡头名字行必须是 flex 且带有 8px gap')
-    } else if (!/\.kr-echo-viewport__zoom/.test(code)) {
-      fail('回显视口右下角必须包含放大标识按钮样式（.kr-echo-viewport__zoom）')
+    } else if (/\.kr-echo-viewport__zoom/.test(code)) {
+      /*
+       * 回显样式**不该再进 bundle**（2026-10-31 用户：「移除操作面板的浏览器回显，
+       * bot 页面也移除浏览器回显」）。两处消费点都删了，样式还拼在 KR_STYLES /
+       * BOT_STYLES 里就只是死代码 —— 白白把一份几百行的样式表塞进每个 bundle。
+       */
+      fail('client bundle 不该再注入回显样式（.kr-echo-viewport__zoom 未删除）')
     } else if (!/\.kr-plain-head__tool\s*\{[^}]*opacity:\s*1/.test(code)) {
       /*
        * 两枚动作按钮的常态**不许再压透明度**（2026-10-25 用户：「设置被遮住了」）。
@@ -2086,12 +2097,31 @@ if (krEnabled) {
        */
       fail('操作面板卡头必须启用紧凑骨架（SeekerHead compact + KrPlainTimelineCard 传 compact）')
     } else if (!/\.kr-plain-head--compact\s*\{[^}]*grid-template-columns:\s*64px/.test(code)
-      || !/\.kr-plain-head--compact\s+\.kr-stage\s*\{[^}]*width:\s*64px[^}]*height:\s*114px/.test(code)) {
+      || !/\.kr-plain-head__avatar\s*\{[^}]*width:\s*64px[^}]*height:\s*64px/.test(code)) {
       /*
-       * 人物尺寸是本轮的核心诉求：92×164 → 64×114。两条一起钉住，否则单改
-       * grid 列宽而不改舞台盒，人物会被裁切或继续撑高卡头。
+       * 身份位尺寸：左列 64px、头像 64×64。
+       *
+       * 2026-10-31 之前这条钉的是「人物缩到 64×114」——用户现在要求「操作面板的
+       * 这个人物删除替换为我们的插件头像」，那条 .kr-stage 覆写已随人物一起撤掉，
+       * 所以判据换成头像盒子。两条一起钉：单改 grid 列宽不改头像盒会留缝/裁切。
        */
-      fail('紧凑卡头必须把人物缩到 64×114（.kr-plain-head--compact 的 grid 列宽 + .kr-stage 尺寸）')
+      fail('紧凑卡头的身份位必须是 64×64 插件头像（grid 列宽 64px + .kr-plain-head__avatar 64×64）')
+    } else if (!(() => {
+      /*
+       * 光有样式不够：compact 分支必须**真的渲染 img**，且不能再挂 SeekerStage。
+       * 后者正是「人物还在」的直接来源，也是这轮要求要删掉的东西 —— 只改样式不改
+       * 渲染，页面上照样是那 9 段动画在动。
+       *
+       * 判据按分支切段再查，不用一条跨段正则：SeekerStage 在 else 分支里本来就该
+       * 出现（新对话页 Hero 用），一条写松了会把「两分支都有」误判成通过，写紧了
+       * 又会把正确实现判死。
+       */
+      const branch = seekerHeadSrc.split('{compact ? (')[1]?.split(') : (')[0] ?? ''
+      return branch.includes('kr-plain-head__avatar')
+        && branch.includes('BRAND_AVATAR_SRC')
+        && !branch.includes('<SeekerStage')
+    })()) {
+      fail('紧凑卡头必须渲染插件头像且不再挂 SeekerStage（compact 分支只留 img + BRAND_AVATAR_SRC）')
     } else if (!/className="kr-plain-head__summary"/.test(seekerHeadSrc)
       || !/stepCount=\{timeline\.steps\.length\}/.test(cardSrc)) {
       /*
@@ -6472,20 +6502,20 @@ if (krEnabled) {
     }
 
     /*
-     * 10d) Git 待提交角标（2026-10-29 用户要求「操作面板的这个 git 图标换图二，
+     * 10d) Git 角标（2026-10-29 用户要求「操作面板的这个 git 图标换图二，
      *      并且提示有多少个需要提交的，跟邮箱的检查一样」）。
      *
-     * 五条一起才成立，缺一条都是「看起来做了、其实不会亮」：
-     *   1. Git 图标不再是原来的 GitHub 菱形 Logo，换成图二的 git-branch 图标；
+     * 2026-10-31 用户要求删除操作面板卡头上的「最近提交时间 + 待提交」两行微组件
+     * （SeekerGitStatus）以及它打开的提交弹窗（GitCommitModal）。保留项四条：
+     *   1. Git 图标仍是图二的 git-branch 图标；
      *   2. SeekerHead 从 git-roster-store 订阅「有未提交改动的项目数」（不是自己 fetch）；
      *   3. 角标只在 >0 时渲染、三位数折成 99+、title/aria-label 带「N 个项目有未提交改动」；
-     *   4. GitRosterModal 与角标共用同一个 store（不再自己 fetch / 自己轮询）；
-     *   5. SeekerGitStatus 仍与 git-status-store 共用单仓库轮询（不重复请求）。
+     *   4. GitRosterModal 与角标共用同一个 store（不再自己 fetch / 自己轮询）。
+     * 删除项必须同时满足「组件文件不存在 + SeekerHead 不引用 + 样式不残留」，否则
+     * 热重载或旧 bundle 会把它复活。
      */
-    const gitStoreSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/git-status-store.ts'), 'utf8')
     const gitRosterStoreSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/git-roster-store.ts'), 'utf8')
     const gitRosterModalSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/GitRosterModal.tsx'), 'utf8')
-    const gitStatusSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/SeekerGitStatus.tsx'), 'utf8')
     const krStyleSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/styles.ts'), 'utf8')
     if (!/data-git-branch-icon/.test(seekerHeadSrcHere) || /M23\.546/.test(seekerHeadSrcHere)) {
       fail('Git 图标必须换成图二的 git-branch 图标（不再使用 GitHub 菱形 Logo）')
@@ -6497,21 +6527,22 @@ if (krEnabled) {
       fail('Git 按钮的 title / aria-label 必须带「N 个项目有未提交改动」')
     } else if (!/useGitRosterSnapshot/.test(gitRosterModalSrc) || !/dirtyRepoCount/.test(gitRosterModalSrc) || /fetch\(\`\/api\/chat-flow\/git-roster/.test(gitRosterModalSrc)) {
       fail('GitRosterModal 必须与角标共用 git-roster-store（禁止自己 fetch 大盘）并显示项目数')
-    } else if (/setInterval\(\s*fetchStatus/.test(gitStatusSrc) || !/useGitStatusSnapshot/.test(gitStatusSrc) || !/refreshGitStatus/.test(gitStatusSrc) || !/getGitRosterStore\(\).refresh\(true\)/.test(gitStatusSrc)) {
-      fail('SeekerGitStatus 必须与 git-status-store 共用单仓库轮询，且提交后同时刷新大盘角标')
+    } else if (existsSync(resolve(ROOT, 'src/client/kr-chat/SeekerGitStatus.tsx'))
+      || existsSync(resolve(ROOT, 'src/client/kr-chat/GitCommitModal.tsx'))
+      || /SeekerGitStatus/.test(seekerHeadSrcHere)
+      || /kr-plain-head__git/.test(krStyleSrc)) {
+      fail('操作面板卡头的 Git 时间 / 待提交微组件（含提交弹窗）已按用户要求删除，不该残留文件、挂载点或样式')
     } else if (!/__dshChatPlusGitRosterStore__/.test(gitRosterStoreSrc) || !/STORE_BRAND/.test(gitRosterStoreSrc)) {
       fail('git-roster-store 必须挂 window + 品牌字段（否则 live reload 后两套轮询分叉）')
     } else if (!/dirtyRepoCountOf/.test(gitRosterStoreSrc) || !/return this\._snapshot/.test(gitRosterStoreSrc)) {
       fail('git-roster-store 必须计算 dirtyRepoCountOf 且 getSnapshot 返回稳定引用')
-    } else if (!/__dshChatPlusGitStatusStore__/.test(gitStoreSrc) || !/return this\.entries\.get\(cwd\)\?\.snapshot \?\? EMPTY_SNAPSHOT/.test(gitStoreSrc)) {
-      fail('git-status-store 必须挂 window 且 getSnapshot 返回稳定引用')
     } else if (!/data-kind="git-dirty-repos"/.test(seekerHeadSrcHere)
       || !/data-kind="mail-unread"/.test(seekerHeadSrcHere)
       || !/\.kr-plain-head__badge\[data-kind="git-dirty-repos"\]/.test(krStyleSrc)
       || !/\.kr-plain-head__badge\s*\{[\s\S]{0,900}?animation:\s*none/.test(krStyleSrc)) {
       fail('邮箱与 Git 两个角标都必须用同一套简约样式（data-kind 区分色相、无弹入动画）')
     } else {
-      pass('Git 角标：卡头订阅 git-roster-store 的「有未提交改动项目数」 + 图标换 git-branch + 仅 >0 渲染 / 99+ 折叠 + 简约淡色变体 + 与大盘弹窗共用轮询')
+      pass('Git 角标：卡头订阅 git-roster-store 的「有未提交改动项目数」 + 图标换 git-branch + 仅 >0 渲染 / 99+ 折叠 + 简约淡色变体 + 与大盘弹窗共用轮询（时间/待提交微组件已删除）')
     }
 
     // 11) 共享 store 的跨 bundle 共享语义：live reload 会让模块级单例分叉，

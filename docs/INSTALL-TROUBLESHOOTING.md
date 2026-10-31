@@ -24,17 +24,17 @@ node scripts/verify-install.mjs
 ### 1.1 现象
 
 - 用户先前手动把 `dsh-chat-plus` 换成 `dsh-seeker-bot` 后，DSH 页面加载出来但整页像死了一样：点击、滚动、切换侧栏都不响应，Windows 上表现为窗口「未响应」。
-- DSH 进程本身还活着，HTTP 服务也还在；`GET /api/seeker-bot/health` 仍返回 200。
+- DSH 进程本身还活着，HTTP 服务也还在（`/connect` 换 cookie 仍正常）。
 - 因此不能只看「服务是否启动」判断安装成功：**服务活着不等于浏览器页面没卡死**。
 
 ### 1.2 根因：MutationObserver 无限重绘
 
-`src/client/bot/index.ts` 旧写法把三个动作串进了 MutationObserver 回调：
+原 `src/client/bot/index.ts`（已随 Bot 功能整块删除）的旧写法把「模式切换 + 列表重渲染」串进了 MutationObserver 回调：
 
 ```ts
 observer = new MutationObserver(() => {
   applyMode()      // 切换侧栏显示/隐藏
-  renderList()     // 用 innerHTML 重建 Bot 名册
+  renderList()     // 用 innerHTML 重建列表
 })
 observer.observe(document.body, { childList: true, subtree: true })
 ```
@@ -45,18 +45,18 @@ observer.observe(document.body, { childList: true, subtree: true })
 
 这类故障的特征：
 
-- 服务端完全正常（health 200、WebSocket 连接甚至已建立）。
+- 服务端完全正常（HTTP 200、WebSocket 连接甚至已建立）。
 - 页面首屏可能是完整的，但 15 秒后 evaluate 仍不返回。
 - CPU 持续占用（本次复现的 3199 实例 CPU 累计很高）。
 
-### 1.3 修复要点（Lead 已初步修复）
+### 1.3 修复要点（已落地）
 
 修复版把职责拆开，核心不是「指纹相同就跳过」这一条兜底，而是：
 
-1. **MutationObserver 只做幂等外壳对账**：`handleBotConsoleMutations()` → `scheduleReconcile()`（微任务去重）→ `reconcileBotConsole()`；回调里只做 `ensureHost()`（位置不变就零写入）、`applyModeDom()`、`updateModeButtons()`、`renderStatus()`，**永远不重建名册**。
-2. **名册只在 store 状态变化时渲染**：`store.subscribe(() => renderFromState())`，新建 / 选中 / 刷新才触发。
-3. **渲染函数自身再防一层**：`renderRoster()` 返回「是否真的改了」，相同输入不写 DOM。
-4. **重复挂载保护**：全局 `__dshSeekerBotConsoleV1__` 控制器在重挂载前 dispose 旧 observer / 订阅。
+1. **MutationObserver 只做幂等外壳对账**：`handleModeSwitchMutations()` → `scheduleReconcile()`（微任务去重）→ `reconcileModeSwitch()`；回调里只做 `ensureHost()`（位置正确就零写入）、`renderSeg()`、`applyModeDom()`，**永远不重建 DOM 结构**。
+2. **位置判断不用 `nextSibling`**：官方侧栏节点之间可能夹着空白文本节点，`nextSibling` 会把「位置正确」误判成「位置不对」，于是每次对账都 `insertBefore` 一次、再触发观察器；改用 `previousElementSibling` / `firstElementChild`。
+3. **写 DOM 前先比对**：属性、class、位置与当前值一致就不写，保证观察器第二次回调就收敛。
+4. **重复挂载保护**：全局控制器 `__dshSeekerModeSwitchV1__` 在重挂载前 dispose 旧 observer，并摘掉旧 bundle 留下的宿主（监听器绑在旧实例上）。
 
 ### 1.4 页面卡死的验证方法
 
@@ -96,8 +96,8 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\web\node_modul
 问题：
 
 1. **漏写 profile 的 `dsh.profile.bundles`**：`dsh plugin add` 不但装包，还会把 `dsh-seeker-bot` 写进 profile 的 bundles；手工 junction 只产生 node_modules 链接，加载器根本不会把插件当 profile 层加载。
-2. **与 bundle patch 双注册**：本包自带 `cordis.patch.yml`（15 个 insert），`dsh plugin add` 会自动并入。如果 profile 的 patch 里再手写同样 15 行，同名组件会挂两次：轻则侧栏出现两份、设置页重复，重则 loader 报重复注册。
-3. **残留旧插件**：`dsh-chat-plus` 的 bundle 行或 disabled 行没清，和 seeker-bot 抢同一个侧栏座位；卸载后旧 fiber 还可能活到下次重启。
+2. **与 bundle patch 双注册**：本包自带 `cordis.patch.yml`，`dsh plugin add` 会自动并入。如果 profile 的 patch 里再手写同样的组件行，同名组件会挂两次：轻则侧栏出现两份、设置页重复，重则 loader 报重复注册。
+3. **残留旧插件**：`dsh-chat-plus` 的 bundle 行或 disabled 行没清，和 dsh-seeker-bot 抢同一个侧栏座位；卸载后旧 fiber 还可能活到下次重启。
 4. **profile 路径写错（已修）**：此前 README 的「本地开发安装」示例写的是 `D:\AI\Dsh\dsh-seeker-bot`，实际仓库是 `D:\AI\dsh-seeker-bot`（本次检查发现，见第 6 节问题清单）。Junction 指到错误目录后，插件能显示但依赖/资源可能缺失；README 现已改为官方 `dsh plugin add link:D:/AI/dsh-seeker-bot`，不再教用户手工建 junction。
 
 ### 2.2 延迟重启 / 定时 kill 当前 DSH 宿主
@@ -155,7 +155,7 @@ node scripts/smoke-host.mjs
 
 - package.json 五件套：`main` / `exports` / `files` / `dsh.bundle.patch` / `dsh.client`；
 - `lib/index.js`、`lib/client.js` 存在，host 无 `@deepseek-ai/*` 运行时 import；
-- `cordis.patch.yml` 15 个 insert 全部能解析到 `packages/*/index.js`（根条目走 `main`）。
+- `cordis.patch.yml` 里的全部 insert 行都能解析到 `packages/*/index.js`（根条目走 `main`）。
 
 `smoke-host.mjs` 是 host 半身裸 node 冒烟；它同时驱动 apply()、路由注册与资产链路。
 
@@ -171,7 +171,7 @@ node $dsh --profile seeker-test --from-default-profile web --dump-config | Out-N
 # 2) 安装本地 link 包
 node $dsh plugin --profile seeker-test add link:D:/AI/dsh-seeker-bot
 
-# 3) 确认 15 个组件行已注册
+# 3) 确认插件组件行已注册
 node $dsh --profile seeker-test --dump-config | Select-String dsh-seeker-bot
 ```
 
@@ -198,7 +198,7 @@ node scripts/verify-install.mjs
 1. 断言 `DSH_HOME` 不在 `C:\Users\Anti\.dsh` 内，否则直接拒绝执行；
 2. 重建 profile → `dsh plugin add link:...` → `--dump-config` 校验；
 3. 起临时端口 `--no-open --port 0`，等启动日志里的 URL/token；
-4. 用 `/connect` 换 API cookie，请求 `/api/seeker-bot/health` 期望 200 + `{ok:true,plugin:dsh-seeker-bot}`；
+4. 用 `/connect` 换 API cookie（期望 302 + Set-Cookie）；
 5. 无头 Chrome/Edge 打开页面，等 15 秒，`Runtime.evaluate` 验证主线程可响应、`body.innerText` 非空、`window.__DSH_BOOT__` 已注入；
 6. 截图 `_tmp/verify-install/page.png`；
 7. finally 杀临时实例/浏览器，核对用户真实 profile 的 package.json / cordis.patch.yml / cordis.yml 指纹未变。
@@ -228,9 +228,9 @@ dsh plugin --profile web add link:D:/AI/dsh-seeker-bot
 
 然后**手动**重启 DSH（关闭再打开，不要定时 kill）。重启后：
 
-- 侧栏出现 Work / Bot 分段与「新建 Bot」；
+- 侧栏出现 Work / Bot 切换控件；
 - 打开页面 15 秒后仍可点击/滚动（必要时用 ego-browser evaluate 或第 1.4 节方法复核）；
-- 设置 → 插件 → dsh-seeker-bot 的「包含的组件」显示 15 行。
+- 设置 → 插件 → dsh-seeker-bot 的「包含的组件」显示插件的组件行。
 
 ### 3.6 升级已有安装
 
@@ -271,7 +271,7 @@ dsh plugin --profile web remove dsh-seeker-bot
   disabled: true
 ```
 
-这是热停用旧 fiber 的过渡行，**下次重启后可以删除**。确认旧插件已从 `package.json` 的 `dependencies` / `dsh.profile.bundles` 中移除，不要让它和 seeker-bot 同时加载。
+这是热停用旧 fiber 的过渡行，**下次重启后可以删除**。确认旧插件已从 `package.json` 的 `dependencies` / `dsh.profile.bundles` 中移除，不要让它和 dsh-seeker-bot 同时加载。
 
 ## 5. 常见症状 → 定位命令
 
@@ -279,8 +279,8 @@ dsh plugin --profile web remove dsh-seeker-bot
 |---|---|---|
 | 页面白屏 / 点击滚动无响应 | 服务是否活、页面 evaluate 是否超时 | `node scripts/verify-install.mjs`；FAIL 在 15s evaluate 就是客户端主线程卡死，不是后端 |
 | DSH 启动即崩 / 页面 404 | bundle patch 是否注册、profile bundles | `dsh --profile web --dump-config` 搜 `dsh-seeker-bot`；没有则 `dsh plugin --profile web add ...` 未完成 |
-| `/api/seeker-bot/health` 401 | 必须带启动日志里的 token 换 cookie | `/connect?token=...&interactions=none` 拿 302 + Set-Cookie，再带 Cookie 请求；不要把 token 贴到聊天/日志 |
-| health 404 | 插件 host 路由没挂 / 前缀错 | 确认 dump-config 有主入口；确认测试的是 http://127.0.0.1:<port>，不是用户 3080 |
+| 插件健康探针 401 | 必须带启动日志里的 token 换 cookie | `/connect?token=...&interactions=none` 拿 302 + Set-Cookie，再带 Cookie 请求；不要把 token 贴到聊天/日志 |
+| 探针 404 | 插件 host 路由没挂 / 前缀错 | 确认 dump-config 有主入口；确认测试的是 http://127.0.0.1:<port>，不是用户 3080 |
 | `ERR_MODULE_NOT_FOUND: @deepseek-ai/*` | host 产物有外部运行时 import | `node scripts/test-bot-install.mjs`；若 FAIL 重新 `node build.mjs`；不要在 profile 里补 @deepseek-ai 包 |
 | 侧栏没有 Work/Bot | client 半身没加载 | 检查 package.json `dsh.client.platform = "web"`、`exports["./client"]`；刷新页面；看浏览器 console |
 | 组件出现两份 / 设置页重复 | 手工 insert + bundle patch 双注册 | 删 profile 里手写的 15 行，只保留 `dsh.bundle.patch` 自动注册 |
@@ -298,14 +298,14 @@ dsh plugin --profile web remove dsh-seeker-bot
 | 命令 | 结果 |
 |---|---|
 | `node build.mjs` | PASS：lib/index.js 5.0MB + lib/client.js 3.8MB，仅 node: + undici 外部导入 |
-| `node scripts/smoke-host.mjs`（修复前） | FAIL：`expected exactly 28 route registrations, got 29` —— 新增 `prefix /api/seeker-bot`（Bot 控制台 API） |
-| `node scripts/smoke-host.mjs`（修复后） | **SMOKE PASSED**：期望值改为 29，并新增 `/api/seeker-bot` 路径断言 |
+| `node scripts/smoke-host.mjs`（修复前） | FAIL：`expected exactly 28 route registrations, got 29` —— 新增一条 prefix 路由后期望值未同步 |
+| `node scripts/smoke-host.mjs`（修复后） | **SMOKE PASSED**：期望值与路由断言同步 |
 | `node scripts/test-bot-install.mjs` | **PASSED — 54 checks**；note：`@xenova/transformers` 是可选动态依赖（未装时回退，不影响加载） |
 | `node scripts/verify-install.mjs` | **PASSED — 29 checks**：health 200、页面 evaluate 不超时、截图约 68KB、临时实例已清理、用户 profile 未改动 |
 
-> `smoke-host.mjs` 会在系统临时目录建独立 `DSH_HOME`，预置 `storages/dsh-seeker-bot/state.json`（version 2、`ui.mode='work'`）；这是为了固定「工具闸门默认全关」的 Work 基线，不是改产品默认值（新装默认仍是 Bot 模式、computer-use 默认开）。
+> `smoke-host.mjs` 会在系统临时目录建独立 `DSH_HOME`，预置插件自己的状态文件；这是为了固定冒烟基线，不是改产品默认值。
 
-截图：`_tmp/verify-install/page.png`（侧栏可见 Work/Bot、「新建 Bot」与 Bot 名册 Scout，说明 Bot 控制台已挂载且页面未卡死；官方预览版弹窗仍在，属于隔离环境未登录账号的正常现象）。
+截图：`_tmp/verify-install/page.png`（侧栏可见 Work / Bot 切换控件，说明插件已挂载且页面未卡死；官方预览版弹窗仍在，属于隔离环境未登录账号的正常现象）。
 
 ### 6.2 已知问题（按严重度）
 
@@ -313,7 +313,7 @@ dsh plugin --profile web remove dsh-seeker-bot
 2. **[中] `build.mjs` 的 `assertHostExternals()` 会漏掉带注释的动态 import**：源码 `await import(/* @vite-ignore */ "@xenova/transformers")` 中，注释让构建守卫的 `import\s*\(\s*["']` 正则匹配不到；`lib/index.js` 实际保留了 `@xenova/transformers` 动态引用。当前行为是可选能力：未安装时自动回退混合检索，不影响插件加载；但守卫应改为先剥注释再扫描，并把 `@xenova/transformers` 列入显式可选依赖白名单，避免未来误把必需依赖当可选放过。
 3. **[中] 用户真实 DSH 里可能仍有 3199 旧实例 / 旧插件残留**：本次验证前发现 `--profile seeker-test --port 3199` 的旧 Node 进程仍在监听（PID 24176，CPU 累计高）。本任务未擅自杀它（它不是本脚本启动的实例）；排障/切换真实 profile 前应确认它是否还需要，若不需要按 PID 正常清理，避免端口/资源占用和「以为已停止」的误判。
 4. **[低] `dsh.client.inject` 列出 11 个模块，但 `lib/client.js` 实际只 require `@deepseek-ai/dsh-client-ui-primitives`**：其余注入行当前依赖运行时注入表按名匹配，在 0.1.2 模块表变化时可能成为隐性风险；建议每次升级 DSH 后跑一次 `scripts/test-bot-install.mjs` + 真机页面探针。
-5. **[低] 官方预览版/登录弹窗会遮挡首屏截图**：验证脚本会尝试点「继续」，但登录弹窗仍可能出现；截图用于证明「页面可交互/名册已挂载」足够，若需纯净截图可在隔离 profile 里先配置账号或给脚本加 `--no-browser` 后手工点选。
+5. **[低] 官方预览版/登录弹窗会遮挡首屏截图**：验证脚本会尝试点「继续」，但登录弹窗仍可能出现；截图用于证明「页面可交互/插件已挂载」足够，若需纯净截图可在隔离 profile 里先配置账号或给脚本加 `--no-browser` 后手工点选。
 
 ## 7. 相关文件
 

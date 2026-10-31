@@ -1,9 +1,10 @@
 /**
  * dsh-seeker-bot — KR 对话双栏布局与执行大盘独立样式表。
+ *
+ * 2026-10-31：不再拼入 echo-viewport 那张表 —— 工作区实时回显已按用户要求移除，
+ * 没有对应 DOM 的样式留在 bundle 里只是死代码（源文件仍保留在 echo-viewport/）。
  */
-import { echoViewportStyles } from '../echo-viewport/styles.ts'
-
-export const KR_STYLES = echoViewportStyles + `
+export const KR_STYLES = `
 /* ══ 当处于 KR 对话模式时，外层 conversation-content 成为双栏 row 布局 ══════ */
 body[data-dsh-kr-chat="true"] [data-conversation-content] {
   flex-direction: row !important;
@@ -573,46 +574,6 @@ body[data-kr-resizing="true"] * {
 .kr-panel__avatar svg {
   width: 18px;
   height: 18px;
-}
-
-/* ══ 空态：本次对话尚无内容（新会话空白期） ══════════════════════════════ */
-.kr-panel__empty {
-  flex: 1 1 auto;
-  min-height: 220px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 32px 24px;
-  text-align: center;
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.kr-panel__empty-icon {
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--kr-surface-bg);
-  border: 1px solid var(--kr-card-border);
-  color: var(--dsw-alias-label-tertiary);
-  margin-bottom: 2px;
-}
-
-.kr-panel__empty-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--dsw-alias-label-secondary);
-}
-
-.kr-panel__empty-desc {
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--dsw-alias-label-tertiary);
-  max-width: 240px;
 }
 
 .kr-panel__titles {
@@ -2265,27 +2226,29 @@ body[data-ds-dark-theme] .kr-card--reasoning[data-inline] {
 }
 
 /*
- * ══ 操作面板 · 紧凑卡头（2026-10-30 用户要求「人物变小、整张卡重排」）══════════
+ * ══ 操作面板 · 紧凑卡头（2026-10-30 定形，2026-10-31 换头像）══════════════════
  *
  * 旧版是「大立绘 92×164 居中 / 名字 / 状态」的竖排三行，人物占掉卡头 3/4 的
  * 高度（实测卡头 215px），右栏本来就窄，信息反而挤在下面。这一版把身份区
  * 压成一张横向的「小卡」：
  *
- *   ┌ 小立绘(64×114) ┐  Seeker              [Git][邮件][齿轮]
- *   │                │  ● 观月中
- *   └────────────────┘  查看文件 · 设计面板布局
+ *   ┌ 头像(64×64) ┐  Seeker              [Git][邮件][齿轮]
+ *   │             │  ● 观月中
+ *   └─────────────┘  查看文件 · 设计面板布局
  *   ───────────────────────────────────────────────────────
  *   12 个动作                                        展开时间线 ⌄
  *
- *  - 立绘缩到 64×114（原 92×164），完整保留任务动画；
- *  - 名字与状态移进右侧信息列，左对齐，不再被大图压到卡片底部；
+ *  - **身份位是插件头像**（2026-10-31 用户要求「操作面板的这个人物删除替换为
+ *    我们的插件头像」）：原来那条 64×114 的任务动画在这张卡里撤掉，换成 64×64
+ *    的方形头像（brand-avatar.ts 的内联 PNG）。人物动画没删，新对话页 Hero 照旧；
+ *  - 名字与状态在右侧信息列，左对齐，不再被大图压到卡片底部；
  *  - 底部摘要行负责「还有东西可看」的暗示：动作数 + 展开/收起 + 箭头；
  *  - 整块卡头仍然是折叠热区，点击行为不变；
  *  - 以上只作用于 .kr-plain-head--compact（操作面板），新对话页 Hero 仍是原来的
- *    竖排大立绘 —— 同一个组件、两套骨架，不会互相影响。
+ *    竖排大立绘 + 任务动画 —— 同一个组件、两套骨架，不会互相影响。
  *
- * 高度账：64×114 的立绘 + 8px 内距 + 23px 摘要行 ≈ 160px（旧版 215px），
- * 一屏能多放约 55px 的内容；动作行最长两排时卡头会自然长高，逻辑不变。
+ * 高度账：64×64 的头像 + 8px 内距 + 23px 摘要行 ≈ 100px（立绘版 160px、旧竖排版
+ * 215px），一屏能多放约 115px 的内容；动作行最长两排时卡头会自然长高，逻辑不变。
  */
 .kr-plain-head--compact {
   display: grid;
@@ -2303,33 +2266,37 @@ body[data-ds-dark-theme] .kr-card--reasoning[data-inline] {
   padding: 8px 0 0;
 }
 
-/* 本会话正在操作工作空间时，动态展开右侧实时回显视口三栏布局 */
-.kr-plain-head--compact[data-browser-on="true"] {
-  grid-template-columns: 64px minmax(0, 1fr) auto;
-  grid-template-areas:
-    "stage name echo"
-    "stage status echo"
-    "summary summary summary";
-  column-gap: 12px;
-}
-
-.kr-plain-head--compact .kr-stage {
+/*
+ * 身份位：插件头像（2026-10-31）。
+ *
+ * 这里原来是 .kr-stage / .kr-stage__glow 的两条覆写（64×114 的小立绘 + 更收敛的
+ * 光晕），随「人物换成插件头像」一起撤掉了 —— 紧凑骨架现在根本不渲染 SeekerStage，
+ * 留着只是不会命中的死规则。将来若要恢复人物动画，把这两条按 64×114 / 92px 光晕
+ * 的尺寸加回来即可。
+ *
+ * 为什么是圆角方形而不是圆形：原图是 256×256 的方形构图（人物 + 花束铺满四角），
+ * 裁成圆形会把两侧的构图切掉、显得局促；64px 上取 18px 圆角（约 28%）既柔化直角，
+ * 又保住整幅画面。
+ */
+.kr-plain-head__avatar {
   grid-area: stage;
   width: 64px;
-  height: 114px;
+  height: 64px;
   align-self: center;
-  /* 小尺寸下原来的 14px 投影会糊成一圈灰雾，收小一点。 */
-  filter: drop-shadow(0 4px 9px rgba(60, 110, 170, .14));
+  display: block;
+  /* 头像本身是浅底插画：解码前先给一块同色系占位，避免深色下闪一块黑。 */
+  background: #EAF2FB;
+  border-radius: 18px;
+  object-fit: cover;
+  /* 柔和边 + 浅投影：浅色插画贴浅色侧栏时，没有这一圈边会「糊进背景」。 */
+  box-shadow: 0 2px 8px rgba(60, 110, 170, .16), 0 0 0 1px rgba(60, 110, 170, .08);
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
-.kr-plain-head--compact .kr-stage__glow {
-  height: 92px;
-  margin-top: -46px;
-  background: radial-gradient(ellipse 50% 50% at 50% 50%, rgba(96, 165, 250, .12) 0%, rgba(96, 165, 250, .04) 52%, transparent 76%);
-}
-
-body[data-ds-dark-theme] .kr-plain-head--compact .kr-stage {
-  filter: brightness(1.12) contrast(0.94) drop-shadow(0 4px 10px rgba(0, 0, 0, .45));
+body[data-ds-dark-theme] .kr-plain-head__avatar {
+  background: #1F2228;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .45), 0 0 0 1px rgba(255, 255, 255, .08);
 }
 
 .kr-plain-head--compact .kr-plain-head__name-row {
@@ -2624,169 +2591,12 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-stage {
   }
 }
 
-/*
- * ══ 卡头右上角 Git 状态微组件（邮件与设置按钮下方）════════════════════════
- *
- * 位于右上角动作按钮的正下方，展示最近提交时间与待提交提示（全内联 SVG）。
- * 居右对齐，紧贴工具按钮边缘。
- */
-.kr-plain-head__git {
-  position: absolute;
-  top: 30px;
-  right: -2px;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 3px;
-  z-index: 1;
-  pointer-events: auto;
-  user-select: none;
-}
-
-.kr-plain-head__git-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 1px 0;
-  border-radius: 0;
-  background: transparent !important;
-  border: 0 !important;
-  font-size: var(--kr-fs-11, 11px);
-  line-height: 16px;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-  transition:
-    color var(--kr-dur-tap) linear,
-    transform var(--kr-dur-tap) var(--kr-ease-out);
-}
-
-/* 第一行：提交时间（次级灰字，时钟 SVG 图标） */
-.kr-plain-head__git-time {
-  color: var(--dsw-alias-label-tertiary);
-  background: transparent !important;
-  border: 0 !important;
-  cursor: default;
-}
-
-.kr-plain-head__git-time:hover {
-  color: var(--dsw-alias-label-secondary);
-}
-
-/* 第二行（干净态）：纯净透明无底色无边框无填充，对勾微绿 */
-.kr-plain-head__git-clean {
-  color: var(--dsw-alias-label-tertiary);
-  background: transparent !important;
-  border: 0 !important;
-  cursor: default;
-  padding: 0 !important;
-}
-
-.kr-plain-head__git-clean .kr-plain-head__git-icon {
-  color: var(--dsw-alias-state-success, #22c55e);
-}
-
-/* 第二行（待提交态）：按钮，纯净无底色无边框，靠主色与文字交互 */
-.kr-plain-head__git-pending {
-  border: 0 !important;
-  background: transparent !important;
-  color: var(--kr-accent);
-  cursor: pointer;
-  padding: 0 !important;
-  font-family: inherit;
-  font-weight: 500;
-  -webkit-tap-highlight-color: transparent;
-}
-
-.kr-plain-head__git-pending:hover {
-  background: transparent !important;
-  color: var(--dsw-alias-label-primary);
-  transform: translateY(-0.5px);
-}
-
-.kr-plain-head__git-pending:active {
-  transform: scale(0.96);
-  background: transparent !important;
-}
-
-.kr-plain-head__git-pending:focus-visible {
-  outline: 2px solid var(--kr-accent);
-  outline-offset: -1px;
-}
-
-.kr-plain-head__git-icon {
-  flex: none;
-  display: block;
-}
-
-.kr-plain-head__git-text {
-  flex: none;
-  font-size: var(--kr-fs-11, 11px);
-}
-
-.kr-plain-head__git-arrow {
-  flex: none;
-  margin-left: -1px;
-  opacity: 0.75;
-  transition: transform var(--kr-dur-tap) var(--kr-ease-out);
-}
-
-.kr-plain-head__git-pending:hover .kr-plain-head__git-arrow {
-  transform: translateY(-1px);
-  opacity: 1;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .kr-plain-head__git-row,
-  .kr-plain-head__git-pending,
-  .kr-plain-head__git-arrow {
-    transition: none !important;
-    transform: none !important;
-  }
-}
-
-/* 待合并态高亮（纯净无底色警告色，提醒需要拉取或解决冲突） */
-.kr-plain-head__git-pending--merge {
-  border: 0;
-  background: transparent;
-  color: var(--dsw-alias-state-warning, #f59e0b);
-}
-
-.kr-plain-head__git-pending--merge:hover {
-  background: transparent;
-  color: var(--dsw-alias-label-primary);
-}
+/* 卡头右上角只保留 Git 图标（Git 大盘入口）。原先的「最近提交时间 + 待提交」
+ * 两行微组件已按用户要求删除，不再渲染。 */
 
 /*
- * ══ Git 提交确认弹窗卡片（GitCommitModal）═════════════════════════════════
+ * 弹窗共用动画关键帧（Git 大盘弹窗复用）。
  */
-.kr-git-modal-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 10000;
-  background: rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(2px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  animation: kr-git-modal-fade-in 0.15s ease-out;
-}
-
-.kr-git-modal {
-  position: relative;
-  background: var(--dsw-alias-bg-base);
-  color: var(--dsw-alias-label-primary);
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 12px;
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
-  width: 100%;
-  max-width: 480px;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  animation: kr-git-modal-scale-in 0.18s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
 @keyframes kr-git-modal-fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -2797,388 +2607,14 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-stage {
   to { opacity: 1; transform: scale(1) translateY(0); }
 }
 
-.kr-git-modal__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--dsw-alias-border-l2);
-}
-
-.kr-git-modal__title-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.kr-git-modal__branch-icon {
-  color: var(--kr-accent);
-  flex: none;
-}
-
-.kr-git-modal__title {
-  font-size: var(--kr-fs-title, 13px);
-  font-weight: 600;
-}
-
-.kr-git-modal__branch-badge {
-  font-size: var(--kr-fs-10-5, 10.5px);
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--kr-accent) 12%, transparent);
-  color: var(--kr-accent);
-  font-family: inherit;
-  font-weight: 500;
-}
-
-.kr-git-modal__close-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary);
-  cursor: pointer;
-  padding: 0;
-  transition: background-color var(--kr-dur-tap) linear, color var(--kr-dur-tap) linear;
-}
-
-.kr-git-modal__close-btn:hover {
-  background: var(--kr-hover-bg);
-  color: var(--dsw-alias-label-primary);
-}
-
-.kr-git-modal__body {
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-/* 概览卡片盒 */
-.kr-git-modal__summary-box {
-  background: color-mix(in srgb, var(--dsw-alias-bg-base) 80%, var(--dsw-alias-border-l2));
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.kr-git-modal__summary-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-}
-
-.kr-git-modal__summary-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--kr-fs-12, 12px);
-  color: var(--dsw-alias-label-secondary);
-}
-
-.kr-git-modal__summary-label strong {
-  color: var(--dsw-alias-label-primary);
-}
-
-.kr-git-modal__toggle-files {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  background: transparent;
-  border: 0;
-  color: var(--kr-accent);
-  font-size: var(--kr-fs-11, 11px);
-  cursor: pointer;
-  padding: 2px 4px;
-  border-radius: 4px;
-}
-
-.kr-git-modal__toggle-files:hover {
-  background: color-mix(in srgb, var(--kr-accent) 10%, transparent);
-}
-
-.kr-git-modal__chevron {
-  transition: transform var(--kr-dur-tap) var(--kr-ease-out);
-}
-
-.kr-git-modal__chevron--up {
-  transform: rotate(180deg);
-}
-
-.kr-git-modal__file-list {
-  max-height: 140px;
-  overflow-y: auto;
-  border-top: 1px solid var(--dsw-alias-border-l2);
-  padding: 6px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  background: var(--dsw-alias-bg-base);
-}
-
-.kr-git-modal__file-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: var(--kr-fs-11, 11px);
-  padding: 2px 0;
-}
-
-.kr-git-modal__status-tag {
-  font-size: var(--kr-fs-10, 10px);
-  font-weight: 600;
-  padding: 0 4px;
-  border-radius: 3px;
-  min-width: 22px;
-  text-align: center;
-  line-height: 16px;
-}
-
-.kr-git-modal__status-tag--m {
-  background: color-mix(in srgb, var(--dsw-alias-state-warning, #f59e0b) 15%, transparent);
-  color: var(--dsw-alias-state-warning, #f59e0b);
-}
-
-.kr-git-modal__status-tag--a,
-.kr-git-modal__status-tag--\? {
-  background: color-mix(in srgb, var(--dsw-alias-state-success, #22c55e) 15%, transparent);
-  color: var(--dsw-alias-state-success, #22c55e);
-}
-
-.kr-git-modal__status-tag--d {
-  background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ef4444) 15%, transparent);
-  color: var(--dsw-alias-state-error-primary, #ef4444);
-}
-
-.kr-git-modal__file-path {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--dsw-alias-label-secondary);
-}
-
-/* 字段与 Textarea */
-.kr-git-modal__field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.kr-git-modal__field-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.kr-git-modal__field-label {
-  font-size: var(--kr-fs-12, 12px);
-  font-weight: 500;
-  color: var(--dsw-alias-label-secondary);
-}
-
-.kr-git-modal__ai-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border: 1px solid color-mix(in srgb, var(--kr-accent) 30%, transparent);
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--kr-accent) 8%, transparent);
-  color: var(--kr-accent);
-  padding: 2px 7px;
-  font-size: var(--kr-fs-11, 11px);
-  cursor: pointer;
-  transition: all var(--kr-dur-tap) var(--kr-ease-out);
-}
-
-.kr-git-modal__ai-btn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--kr-accent) 16%, transparent);
-  border-color: var(--kr-accent);
-}
-
-.kr-git-modal__ai-btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.kr-git-modal__sparkle-icon {
-  flex: none;
-}
-
-.kr-git-modal__textarea {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--dsw-alias-border-l1);
-  background: color-mix(in srgb, var(--dsw-alias-bg-base) 80%, var(--dsw-alias-border-l2));
-  color: var(--dsw-alias-label-primary);
-  font-family: inherit;
-  font-size: var(--kr-fs-body, 12.5px);
-  line-height: 1.5;
-  resize: vertical;
-  min-height: 85px;
-  outline: none;
-  transition: border-color var(--kr-dur-tap) linear, box-shadow var(--kr-dur-tap) linear;
-}
-
-.kr-git-modal__textarea:focus {
-  border-color: var(--kr-accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--kr-accent) 20%, transparent);
-}
-
-/* 选项行 */
-.kr-git-modal__options-row {
-  display: flex;
-  align-items: center;
-}
-
-.kr-git-modal__checkbox-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--kr-fs-12, 12px);
-  color: var(--dsw-alias-label-secondary);
-  cursor: pointer;
-  user-select: none;
-}
-
-.kr-git-modal__checkbox-label input[type="checkbox"] {
-  cursor: pointer;
-}
-
-/* 进度条与状态 */
-.kr-git-modal__progress-box {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--dsw-alias-border-l2) 40%, transparent);
-}
-
-.kr-git-modal__progress-bar-bg {
-  width: 100%;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--dsw-alias-border-l2);
-  overflow: hidden;
-}
-
-.kr-git-modal__progress-bar-fill {
-  height: 100%;
-  border-radius: 2px;
-  background: var(--kr-accent);
-  transition: width 0.35s ease-out;
-}
-
-.kr-git-modal__progress-bar-fill--error {
-  background: var(--dsw-alias-state-error-primary, #ef4444);
-}
-
-.kr-git-modal__progress-status-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--kr-fs-11, 11px);
-  color: var(--dsw-alias-label-secondary);
-}
-
-.kr-git-modal__done-text {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--dsw-alias-state-success, #22c55e);
-  font-weight: 500;
-}
-
-.kr-git-modal__error-text {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--dsw-alias-state-error-primary, #ef4444);
-}
-
-/* 底部操作 */
-.kr-git-modal__footer {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 12px 16px;
-  border-top: 1px solid var(--dsw-alias-border-l2);
-  background: color-mix(in srgb, var(--dsw-alias-bg-base) 90%, var(--dsw-alias-border-l2));
-}
-
-.kr-git-modal__cancel-btn {
-  padding: 6px 14px;
-  border-radius: 6px;
-  border: 1px solid var(--dsw-alias-border-l1);
-  background: transparent;
-  color: var(--dsw-alias-label-secondary);
-  font-size: var(--kr-fs-12, 12px);
-  cursor: pointer;
-  transition: all var(--kr-dur-tap) linear;
-}
-
-.kr-git-modal__cancel-btn:hover:not(:disabled) {
-  background: var(--kr-hover-bg);
-  color: var(--dsw-alias-label-primary);
-}
-
-.kr-git-modal__submit-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 16px;
-  border-radius: 6px;
-  border: 0;
-  background: var(--kr-accent);
-  color: #fff;
-  font-size: var(--kr-fs-12, 12px);
-  font-weight: 500;
-  cursor: pointer;
-  transition: filter var(--kr-dur-tap) linear, transform var(--kr-dur-tap) var(--kr-ease-out);
-}
-
-.kr-git-modal__submit-btn:hover:not(:disabled) {
-  filter: brightness(1.08);
-  transform: translateY(-0.5px);
-}
-
-.kr-git-modal__submit-btn:active:not(:disabled) {
-  transform: scale(0.97);
-}
-
-.kr-git-modal__submit-btn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-.kr-git-modal__spin {
-  animation: kr-git-spin 1s linear infinite;
-}
-
 @keyframes kr-git-spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .kr-git-modal-overlay,
-  .kr-git-modal,
-  .kr-git-modal__progress-bar-fill,
-  .kr-git-modal__submit-btn {
-    animation: none !important;
-    transition: none !important;
-    transform: none !important;
-  }
-}
-
+/*
+ * ══ 工作区与自制插件 Git 工作台大盘（宽幅优雅现代版，840px 低饱和列式布局）════
+ */
 /*
 /*
  * ══ 工作区与自制插件 Git 工作台大盘（宽幅优雅现代版，840px 低饱和列式布局）════
@@ -4009,8 +3445,9 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-stage {
     1. **基础盒子按 Hero / 旧竖排版定**。宽度沿用立绘那版的 92px，高度按素材比例
        放到 164px —— 素材是 320x640（比原立绘更瘦长），按 164 高算出来正好 82 宽，
        居中后左右各留 5px。不做裁剪、不拉伸、不改卡头其它元素的排布。
-       （操作面板的紧凑骨架在 .kr-plain-head--compact 下覆写成 64×114；见上方
-       2026-10-30 的紧凑卡头注释。）
+       （操作面板的紧凑骨架**已不再渲染这段动画** —— 2026-10-31 用户要求把那张卡
+       的人物换成插件头像，见 .kr-plain-head__avatar；这里的 92×164 只服务
+       新对话页 Hero。）
     2. **背景羽化**（用户选了「2羽化」）。素材的白底是在 Node 里用边沿洪泛
        抠掉的，轮廓边缘难免留一圈极淡的残影；羽化遮罩把最外一圈压到透明，
        让它在深色卡片上没有硬边。

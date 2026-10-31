@@ -62,8 +62,7 @@ import { applySidebarMedia } from './sidebar-media/index.tsx'
 import { buildActivityGrid, activityColor, ACTIVITY_COLUMNS } from './triad/usage/dashboard/ActivityGrid.js'
 import { setClientCtx } from './client-ctx.ts'
 import { applyFeatureSwitches } from './features/index.tsx'
-import { applyBotConsole } from './bot/index.js'
-import { applyBotPanel } from './bot/panel.tsx'
+import { applyModeSwitch } from './mode-switch/index.ts'
 import { featureEnabledNow, featureMount } from './features/gate.tsx'
 
 /** 顶层服务依赖（client boot graph 用）。 */
@@ -178,10 +177,10 @@ export function apply(ctx: ClientContext): void {
   // 插件页面的开关由 cordis.patch.yml 的 16 条 insert 原生提供，这里不自绘面板。
   guarded(ctx, 'feature switches', () => { applyFeatureSwitches(ctx) })
 
-  // ── Bot 控制台：侧栏 Work/Bot 双模式 + 名册 ─────────────────────────
-  guarded(ctx, 'bot console', () => { applyBotConsole(ctx) })
-  // 右栏 Bot 面板：只有浏览器画面 + 同源子智能体/产出物行，只在 Bot 模式挂载。
-  guarded(ctx, 'bot panel', () => { applyBotPanel(ctx) })
+  // ── 侧栏 Work / Bot 模式切换（Bot 功能已移除，只保留这枚分段控件）────
+  // 纯 DOM 模块：不请求任何 host 接口，模式记在 localStorage；Bot 模式下
+  // 官方侧栏其余内容让位、只剩分段控件。见 mode-switch/index.ts 头注释。
+  guarded(ctx, 'mode switch', () => { applyModeSwitch(ctx) })
 
   // ── 界面字体（最早应用）──────────────────────────────────────────────
   // 用户选中的字体必须**先于**其它一切挂载生效：它只改几个根 CSS 变量
