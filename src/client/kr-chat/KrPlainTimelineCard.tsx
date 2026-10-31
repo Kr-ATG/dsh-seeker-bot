@@ -31,8 +31,8 @@
  *     本身就是事实，折叠成一行会把它抹掉；
  *  3. 不自己算进度百分比——进行中 / 已完成 / 失败三个计数已经够了。
  *
- * 头像位（鲸鱼娘）见 SeekerStage.tsx：9 段透明底 WebM，按状态切换（2026-10-26
- * 起替掉了原来那张静态立绘 WhalePortrait）。
+ * 头像位是**插件头像**（brand-avatar.ts 内联的 128×128 PNG，2026-10-31 起）；
+ * 原来那套 9 段透明底 WebM 人物动画已随「之前那个人物彻底删除」整条移除。
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
@@ -45,9 +45,7 @@ import type { SubagentCatalogView } from './subagent-catalog.ts'
 import { workspaceCwdOf } from '../client-ctx.ts'
 import { tryOpenInSidebar } from '../open-preview.ts'
 import { SeekerHead } from './SeekerHead.tsx'
-import { idleClipFor, type MotionClipId } from './motion-clips.ts'
 import { idlePhraseFor, THINKING_PHRASE, VIEWING_PHRASE } from './idle-phrase.ts'
-import { useStageMode } from './stage-mode.ts'
 import { getBrowserFlagEntry, subscribeBrowserFlag } from '../browser-flag/store.ts'
 
 /**
@@ -97,8 +95,8 @@ const LIST_MAX_ROWS_SQUEEZED = 9
  *   · **有动作** → 照旧显示当前这一件事（正常流程）。
  *
  * 2026-10-26 用户定稿：删掉「休息中」「晒太阳」，改成按夜里的时段说「观月中」，
- * 白天说「小憩中」，11–13 点说「吃饭中」。这三个说法各自对应一段动画
- * （观月中 → 月亮 / 吃饭中 → 吃饭 / 小憩中 → 打盹），见 motion-clips.ts。
+ * 白天说「小憩中」，11–13 点说「吃饭中」。（这三个说法原先各对应一段动画片段，
+ * 那套动画已于 2026-10-31 整条删除，现在它们只是卡头上的一句话。）
  *
  * 时段表**不在这个文件里**了：新对话页的卡头也要用同一份，两处各抄一遍必然
  * 分叉（改一处忘了另一处 = 两处说法不一致）。现在它是 idle-phrase.ts 的
@@ -514,41 +512,6 @@ export const KrPlainTimelineCard = memo(function KrPlainTimelineCard({
     if (!running) return null
     return all[all.length - 1] ?? null
   }, [timeline.steps, running])
-  /**
-   * 此刻是否**真有一条**在跑（与 currentAction 故意不同口径）。
-   *
-   * currentAction 在「本轮在跑、但两条动作之间」时会退回最后一条 done 动作 ——
-   * 卡头那一行该这么显示（总比空着好），但**动画不行**：那时候她并没有在做那件事，
-   * 而「没有一条在跑」正是「收尾」的判据之一（见 stage-mode.ts）。
-   */
-  const hasRunningStep = useMemo(
-    () => timeline.steps.some((step) => step.status === 'running'),
-    [timeline.steps],
-  )
-
-  /**
-   * 卡头此刻演哪一段动画（2026-10-26）。
-   *
-   * 判定全在 stage-mode.ts 里（含收尾那 900ms 滞回），这里只把数据喂进去。
-   * icon 传的是**当前正在跑的那一条**的图标，而不是 currentAction 的 —— 原因同上：
-   * 两次动作之间退回的那条 done 动作不该让动画变成「查看照片」。
-   */
-  const stageMode = useStageMode({
-    running,
-    empty,
-    hasRunningStep,
-    icon: hasRunningStep ? (currentAction?.icon ?? null) : null,
-    /*
-     * 用户这一轮发了图（或「图 + 文字」）→ 先演「查看照片」。
-     *
-     * 为什么必须从**输入**判、而不是等某个读图工具跑起来：图片在模型这一步的
-     * **输入**里，不在某个工具的产出里。模型看到图之后经常一次工具都不调、直接
-     * 开始写回答，于是「等工具跑」的判据永远等不到 —— 卡头就一路「思考中」到底，
-     * 正是用户 2026-10-26 报的那个现象。
-     */
-    inputImages: inputImageCount,
-  })
-
   /*
    * 卡头「没在干活」时显示哪一句（见文件顶部的 IDLE_SLOTS 说明）。
    *
@@ -590,7 +553,6 @@ export const KrPlainTimelineCard = memo(function KrPlainTimelineCard({
        *    空闲文案（观月中 / 吃饭中 / 小憩中，按钟点选）。
        */}
       <SeekerHead
-        motion={motion}
         compact
         stepCount={timeline.steps.length}
         line={currentAction === null ? null : {
@@ -602,9 +564,6 @@ export const KrPlainTimelineCard = memo(function KrPlainTimelineCard({
         }}
         idleLine={idleLine}
         thinking={idleLine === THINKING_PHRASE || idleLine === VIEWING_PHRASE}
-        /* 动画：模式由 stage-mode.ts 判定，空闲片段按钟点那句话反查。 */
-        stageMode={stageMode}
-        idleClip={idleClipFor(idleLine)}
         browserEntry={browserEntry}
         browserOn={browserOn}
         expanded={open}

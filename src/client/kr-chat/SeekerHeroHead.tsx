@@ -33,7 +33,6 @@ import { latestChatSessionId } from '../tool-summary/TurnProcessShadowView.tsx'
 import { getPanelSettingsStore } from './panel-settings-store.ts'
 import { getMailDrawerStore } from './mail-drawer-store.ts'
 import { idlePhraseFor, THINKING_PHRASE } from './idle-phrase.ts'
-import { idleClipFor } from './motion-clips.ts'
 import { featureEnabledNow } from '../features/gate.tsx'
 
 /** 容器 id（幂等复用 + 冒烟断言）。 */
@@ -89,9 +88,6 @@ function SeekerHeroHead({ running }: { readonly running: boolean }): ReactElemen
       <SeekerHead
         idleLine={idleLine}
         thinking={thinking}
-        /* 动画：新对话页只有两档 —— 本轮在跑就是「思考中」，否则按钟点空闲。 */
-        stageMode={thinking ? 'thinking' : 'idle'}
-        idleClip={idleClipFor(idleLine)}
         browserEntry={browserEntry}
         browserOn={browserOn}
         /* 不渲染齿轮/邮箱（chrome=false）：这两枚按钮带固定 id，而 Hero 卡头是

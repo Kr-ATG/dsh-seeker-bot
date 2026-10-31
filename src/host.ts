@@ -48,7 +48,6 @@ import { applyOpenPathRoutes } from './open-path/index.ts'
 import { applyOpenFileRoutes } from './open-file/index.ts'
 import { applyOfficePreview } from './office/index.ts'
 import { applyFontRoutes } from './fonts/index.ts'
-import { applyMotionRoutes } from './motion/index.ts'
 import { applyTriadHost } from './triad/host.ts'
 import { applyProviderHub, providerHubServices } from './provider/index.ts'
 import { applyMailHost } from './mail/index.ts'
@@ -68,8 +67,6 @@ import { applyGitStatusRoutes, GIT_STATUS_ROUTE, collectGitStatus, handleGitStat
 import { applyFeatureRoutes, hostFeatureEnabled, initializeFeatures } from './features/store.ts'
 export { applyDownloadRoutes, downloadTool, readDownloadState, watchShellDownload } from './download/index.ts'
 export { applyFontRoutes, FONT_ROUTE } from './fonts/index.ts'
-// 「任务动画」资产（/api/chat-flow/motion/*）：9 段透明底 WebM + 首帧海报。
-export { applyMotionRoutes, MOTION_ROUTE } from './motion/index.ts'
 export {
   applyEchoViewport,
   ECHO_VIEWPORT_FRAME_ROUTE,
@@ -356,11 +353,8 @@ export function apply(ctx: Record<string, any>, config?: { mail?: Record<string,
         webCtx.logger?.warn?.(`[dsh-seeker-bot] done-pill media routes failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`)
       } catch { /* 日志不可用也不炸 */ }
     }
-    // 「任务动画」资产（/api/chat-flow/motion/*，2026-10-26）：操作面板卡头那 9 段
-    // 透明底 WebM（思考 / 开始操作 / 操作中 / 查看照片 / 操作结束 / 完成 / 吃饭 /
-    // 观月 / 小憩）与各自的首帧海报。与字体同一条理由：2.57MB 的动画若内联进
-    // client.js，关掉动画的人也要白下载一次；走路由后只拉当前在播的那一段。
-    if (hostFeatureEnabled('host.motion')) applyMotionRoutes(webCtx)
+    // 「任务动画」资产路由（/api/chat-flow/motion/*）已于 2026-10-31 删除：
+    // 卡头那 9 段人物动画整条链路被移除，两处卡头统一改用内联的插件头像。
     // 当前工作区 Git 状态与一键提交流路由
     if (hostFeatureEnabled('host.git-status')) applyGitStatusRoutes(webCtx, ctx)
     // Office / PDF 页图与 PDF 渲染（/api/chat-flow/office/*）：画廊 ppt/word 缩略图、

@@ -1,28 +1,28 @@
 /**
- * dsh-seeker-bot — 「Seeker 卡头」（鲸鱼娘 + 名字 + 一行当前状态 + 右上角两枚动作）。
+ * dsh-seeker-bot — 「Seeker 卡头」（插件头像 + 名字 + 一行当前状态 + 右上角几枚动作）。
  *
  * ## 为什么单独抽出来
  *
  * 2026-10-25 用户要求：「新对话页面的上面放上我们这个东西」—— 新对话（空白 Hero
  * 态）也要有这张卡头，让用户在发第一条消息之前就能看到"她在这儿"。
  *
- * 但卡头不能复制两份：它包含立绘、浏览器标志、按钟点轮换的空闲文案、Git / 邮箱 /
+ * 但卡头不能复制两份：它包含头像、浏览器标志、按钟点轮换的空闲文案、Git / 邮箱 /
  * 齿轮三枚动作按钮（还带着 e2e 依赖的 id）。两份必然分叉 —— 改一处忘了另一处，
  * 表现是"新对话页的图标是旧的"这类没人会想到去查的 bug。
  *
  * 所以把卡头抽成这个组件，操作面板卡与新对话页共用同一份。
  *
- * ## 两套骨架（2026-10-30）
+ * ## 两套骨架（2026-10-30 定形）
  *
  * 操作面板卡传 `compact`：**插件头像（64×64）**在左、名字/状态在右、底部一条摘要；
- * 不传时是原来的竖排大立绘（92×164）+ 任务动画，新对话页 Hero 继续用那一版。
+ * 不传时是竖排骨架（**头像 96×96** 居中、名字、状态），新对话页 Hero 用那一版。
  * 两套只差一个类名，DOM 与数据源完全共用，避免再次出现"两处长得不一样"的分叉。
  *
- * 身份位在两套骨架里**不是同一个东西**（2026-10-31 用户要求）：
- *  · 操作面板（compact）→ 插件头像，一张 128×128 的内联 PNG（brand-avatar.ts）；
- *  · 新对话页 Hero → 原来的 9 段任务动画（SeekerStage 的 WebM 人物）。
- * 用户的原话是「操作面板的这个人物删除替换为我们的插件头像」，点名的是操作面板；
- * Hero 那边是"她在这儿"的开场形象，与这轮要求无关，故未动。
+ * 身份位在两套骨架里**是同一个东西**（2026-10-31 用户两次点名）：
+ * 先「操作面板的这个人物删除替换为我们的插件头像」，再「新对话的也换上，之前那个
+ * 人物彻底删除」。原来那 9 段任务动画（SeekerStage / motion-clips / stage-mode /
+ * assets/motion / host 的 /api/chat-flow/motion 路由）已整条链路删除，两处都只用
+ * brand-avatar.ts 里那张 128×128 的内联 PNG，尺寸由 CSS 区分。
  *
  * ## 它不负责什么
  *
@@ -35,10 +35,7 @@
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { MouseEvent as ReactMouseEvent, ReactElement } from 'react'
-import { SeekerStage } from './SeekerStage.tsx'
 import { BRAND_AVATAR_SRC } from './brand-avatar.ts'
-import { idleClipFor, type MotionClipId } from './motion-clips.ts'
-import type { StageMode } from './stage-mode.ts'
 import { activateBrowserWindow } from '../browser-flag/activate.ts'
 import { browserFlagTitle } from '../browser-flag/store.ts'
 import type { BrowserActivitySession } from '../browser-flag/store.ts'
@@ -64,20 +61,6 @@ export interface SeekerHeadLine {
 }
 
 export interface SeekerHeadProps {
-  /** 动画开关（系统「减少动态效果」时为 false）。 */
-  readonly motion?: boolean
-  /**
-   * 卡头此刻演哪一段（见 stage-mode.ts）。默认 'idle'。
-   *
-   * 右栏由 KrPlainTimelineCard 按当前动作算好传进来；新对话页只有「在思考中 /
-   * 没在干活」两档，直接给 thinking / idle。
-   */
-  readonly stageMode?: StageMode
-  /**
-   * 空闲时段对应的片段。不传就按 {@link SeekerHeadProps.idleLine} 的文案反查
-   * （idle-phrase.ts 的三个说法各对应一段，见 motion-clips.ts 的 idleClipFor）。
-   */
-  readonly idleClip?: MotionClipId
   /** 当前这一行要显示什么；null 表示没有动作，显示 {@link idleLine}。 */
   readonly line?: SeekerHeadLine | null
   /** 没动作时显示的那句话（休息中 / 吃饭中 / 在思考中…）。 */
@@ -100,7 +83,7 @@ export interface SeekerHeadProps {
    * 紧凑骨架（操作面板卡专用，2026-10-30）。
    *
    * 打开后：插件头像（64×64）在左，名字 / 状态两行在右，整块卡头压到约 100px；
-   * 关闭时保持原来的竖排大立绘 + 任务动画（新对话页 Hero 用那一版）。
+   * 关闭时是竖排骨架（头像 96×96 居中、名字、状态），新对话页 Hero 用那一版。
    * 两处共用同一个组件，但布局差异只由这一个开关决定，不复制 DOM。
    */
   readonly compact?: boolean
@@ -131,9 +114,6 @@ export interface SeekerHeadProps {
  */
 export function SeekerHead(props: SeekerHeadProps): ReactElement {
   const {
-    motion = true,
-    stageMode = 'idle',
-    idleClip,
     line = null,
     idleLine,
     thinking = false,
@@ -150,12 +130,11 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
 
   /*
    * 功能开关（live）——卡头是「右栏操作面板」与「新对话页 Hero」共用的唯一一份，
-   * 所以动画 / Git / 邮箱三个开关都在这里统一判，两处自然一致，不需要各写一遍。
+   * 所以 Git / 邮箱两个开关都在这里统一判，两处自然一致，不需要各写一遍。
    *
    * 同样必须顶层无条件调用：卡头经常随面板每 250ms 重渲染，条件调 hook 会让
    * 组件树直接崩。
    */
-  const taskMotionOn = useFeature('view.task-motion')
   const gitStatusOn = useFeature('view.git-status')
   const mailOn = useFeature('view.mail')
 
@@ -310,35 +289,17 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
       }}
     >
       {/*
-       * 身份位。两套骨架在这里分叉（2026-10-31 用户要求「操作面板的这个人物
-       * 删除替换为我们的插件头像」）：
+       * 身份位：**插件头像**，两套骨架共用这一个 img。
        *
-       *  · compact（操作面板卡）：**插件头像**。原来那 9 段任务动画在这张卡里
-       *    被换掉了 —— 它占着 64×114 一整条竖条，而右栏本来就是窄栏，一张方头像
-       *    同样能表达"是谁在干活"，还省下 50px 高度。图片是 brand-avatar.ts 里
-       *    内联的 128×128 PNG（正好覆盖 2× DPI），不走 host 路由，改完立刻可见。
+       * 2026-10-31 用户先要求「操作面板的这个人物删除替换为我们的插件头像」，
+       * 随后「新对话的也换上，之前那个人物彻底删除」—— 于是那 9 段任务动画
+       * （SeekerStage 的透明底 WebM）连同它的整条链路一起删掉了，卡头不再有
+       * 任何人物动画分支。图片是 brand-avatar.ts 内联的 128×128 PNG。
        *
-       *  · Hero（新对话页）：**任务动画**不变。那是开场形象，"她在这儿"的观感
-       *    全靠这段动画，与这轮要求无关。view.task-motion 关闭时 motion=false，
-       *    SeekerStage 只显示当前状态的静态首帧（内部会收到 restingClip，不会
-       *    停在一段被暂停的一次性动画上）。
+       * 尺寸由 CSS 给：Hero 96×96、紧凑骨架 64×64（见 .kr-plain-head__avatar）。
+       * 不写 width/height 属性 —— 图片是内联 data URL，解码零延迟，不会抖。
        */}
-      {compact ? (
-        <img
-          className="kr-plain-head__avatar"
-          src={BRAND_AVATAR_SRC}
-          width={64}
-          height={64}
-          alt=""
-          draggable={false}
-        />
-      ) : (
-        <SeekerStage
-          mode={stageMode}
-          idleClip={idleClip ?? idleClipFor(idleLine)}
-          motion={motion && taskMotionOn}
-        />
-      )}
+      <img className="kr-plain-head__avatar" src={BRAND_AVATAR_SRC} alt="" draggable={false} />
       {/*
        * 名字行：Seeker + **浏览器标志**（2026-10-31 按用户要求还原）。
        *

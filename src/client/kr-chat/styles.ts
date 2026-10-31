@@ -2269,33 +2269,48 @@ body[data-ds-dark-theme] .kr-card--reasoning[data-inline] {
 /*
  * 身份位：插件头像（2026-10-31）。
  *
- * 这里原来是 .kr-stage / .kr-stage__glow 的两条覆写（64×114 的小立绘 + 更收敛的
- * 光晕），随「人物换成插件头像」一起撤掉了 —— 紧凑骨架现在根本不渲染 SeekerStage，
- * 留着只是不会命中的死规则。将来若要恢复人物动画，把这两条按 64×114 / 92px 光晕
- * 的尺寸加回来即可。
+ * 这是卡头里**唯一**的身份图形：原来那块 92×164 的任务动画（.kr-stage 的 9 段
+ * 透明底 WebM）连同 .kr-stage / .kr-stage__glow / .kr-stage__clip 全套样式已于
+ * 2026-10-31 随「新对话的也换上，之前那个人物彻底删除」一起删除，两套骨架现在
+ * 共用这一张 brand-avatar.ts 里的 128×128 内联 PNG。
+ *
+ * 基础尺寸 = **Hero（新对话页）**：96×96。原来 Hero 那块竖版立绘是 92×164，
+ * 换成方形头像后卡头自然矮了 68px，但「她在这儿」的观感靠的是画面本身，不靠高度。
  *
  * 为什么是圆角方形而不是圆形：原图是 256×256 的方形构图（人物 + 花束铺满四角），
- * 裁成圆形会把两侧的构图切掉、显得局促；64px 上取 18px 圆角（约 28%）既柔化直角，
+ * 裁成圆形会把两侧的构图切掉、显得局促；圆角取边长的约 28%，既柔化直角，
  * 又保住整幅画面。
  */
 .kr-plain-head__avatar {
   grid-area: stage;
-  width: 64px;
-  height: 64px;
+  width: 96px;
+  height: 96px;
   align-self: center;
   display: block;
   /* 头像本身是浅底插画：解码前先给一块同色系占位，避免深色下闪一块黑。 */
   background: #EAF2FB;
-  border-radius: 18px;
+  border-radius: 26px;
   object-fit: cover;
   /* 柔和边 + 浅投影：浅色插画贴浅色侧栏时，没有这一圈边会「糊进背景」。 */
-  box-shadow: 0 2px 8px rgba(60, 110, 170, .16), 0 0 0 1px rgba(60, 110, 170, .08);
+  box-shadow: 0 3px 12px rgba(60, 110, 170, .18), 0 0 0 1px rgba(60, 110, 170, .08);
   user-select: none;
   -webkit-user-drag: none;
 }
 
+/* 紧凑骨架（操作面板卡）：右栏窄，头像收到 64×64，圆角同比例收。 */
+.kr-plain-head--compact .kr-plain-head__avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: 18px;
+  box-shadow: 0 2px 8px rgba(60, 110, 170, .16), 0 0 0 1px rgba(60, 110, 170, .08);
+}
+
 body[data-ds-dark-theme] .kr-plain-head__avatar {
   background: #1F2228;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, .45), 0 0 0 1px rgba(255, 255, 255, .08);
+}
+
+body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   box-shadow: 0 2px 10px rgba(0, 0, 0, .45), 0 0 0 1px rgba(255, 255, 255, .08);
 }
 
@@ -3436,159 +3451,6 @@ body[data-ds-dark-theme] .kr-plain-head__avatar {
   animation: kr-pulse 1.4s var(--kr-ease-loop) infinite;
 }
 
-/* ══ 任务动画（卡头立绘位，2026-10-26 换掉静态立绘）══════════════════════
-
-   素材：用户给的 9 个 GIF 转成的透明底 WebM（见 motion-clips.ts 与
-   src/motion/index.ts）。播放器在 SeekerStage.tsx。
-
-   两条硬约束（用户点名）：
-    1. **基础盒子按 Hero / 旧竖排版定**。宽度沿用立绘那版的 92px，高度按素材比例
-       放到 164px —— 素材是 320x640（比原立绘更瘦长），按 164 高算出来正好 82 宽，
-       居中后左右各留 5px。不做裁剪、不拉伸、不改卡头其它元素的排布。
-       （操作面板的紧凑骨架**已不再渲染这段动画** —— 2026-10-31 用户要求把那张卡
-       的人物换成插件头像，见 .kr-plain-head__avatar；这里的 92×164 只服务
-       新对话页 Hero。）
-    2. **背景羽化**（用户选了「2羽化」）。素材的白底是在 Node 里用边沿洪泛
-       抠掉的，轮廓边缘难免留一圈极淡的残影；羽化遮罩把最外一圈压到透明，
-       让它在深色卡片上没有硬边。
-
-   为什么用 mask 而不是再抠一次图：mask 是纯 CSS 的，不增加一个字节的素材，
-   而且改羽化范围只需改一行数字。 */
-.kr-stage {
-  position: relative;
-  flex: none;
-  /* 盒子：宽 92（与原立绘那版一致）、高 164（素材比例）。 */
-  width: 92px;
-  height: 164px;
-  /* 身后的柔光与视频都不该溢出到卡头其它元素上 */
-  overflow: hidden;
-  /* 落地感：与原来那张立绘同一套投影语言 */
-  filter: drop-shadow(0 6px 14px rgba(60, 110, 170, .16));
-  transition: filter var(--kr-dur-fade) var(--kr-ease-soft);
-}
-
-.kr-card:hover .kr-stage {
-  filter: drop-shadow(0 8px 18px rgba(60, 110, 170, .24));
-}
-
-/*
- * 身后的柔光：素材是透明底的，直接贴在深色卡片上会显得「浮」。
- * 一圈极淡的主色径向渐变把人物坐回卡片里 —— 它是羽化的另一半：
- * mask 负责边缘渐隐，它负责让人物与背景之间有一层过渡色。
- * 只动 opacity / 不参与布局，卡片 250ms 重渲染也不会掉帧。
- */
-.kr-stage__glow {
-  position: absolute;
-  /* 铺满舞台盒、纵向略高（人物是瘦长的）：用椭圆渐变而不是圆，贴得更准。 */
-  left: 0;
-  top: 50%;
-  width: 100%;
-  height: 132px;
-  margin-top: -66px;
-  background: radial-gradient(ellipse 50% 50% at 50% 50%, rgba(96, 165, 250, .14) 0%, rgba(96, 165, 250, .05) 52%, transparent 76%);
-  pointer-events: none;
-}
-
-/*
- * 视频本体：9 个节点全在 DOM 里，只有当前那个 data-active。
- *
- * 高度铺满 164，宽度按 320/640 比例自动算出 82 —— 不做 object-fit: cover，
- * 那是「填满盒子」的做法，会把人物裁掉左右。素材本来就完整，等比缩放即可。
- * 水平居中靠 left:50% + translateX(-50%)，这样窄到 82 也仍然是居中。
- */
-.kr-stage__clip {
-  position: absolute;
-  left: 50%;
-  top: 0;
-  height: 100%;
-  width: auto;
-  max-width: none;
-  transform: translateX(-50%);
-  display: block;
-  background: transparent;
-  pointer-events: none;
-  -webkit-user-select: none;
-  user-select: none;
-  /* 未激活的一律不可见（而不是 display:none：那会让浏览器销毁解码器） */
-  opacity: 0;
-  transition: opacity 140ms var(--kr-ease-soft);
-  /*
-   * 羽化：只压最外一圈（上下 7%、左右 8%），人物主体一个像素都不碰。
-   * 两条 linear-gradient 用 mask-composite: intersect 相交，得到「四边渐隐、
-   * 中间完全不透明」的圆角矩形羽化。
-   */
-  -webkit-mask-image:
-    linear-gradient(to bottom, transparent 0%, #000 7%, #000 93%, transparent 100%),
-    linear-gradient(to right, transparent 0%, #000 8%, #000 92%, transparent 100%);
-  -webkit-mask-composite: source-in;
-  mask-image:
-    linear-gradient(to bottom, transparent 0%, #000 7%, #000 93%, transparent 100%),
-    linear-gradient(to right, transparent 0%, #000 8%, #000 92%, transparent 100%);
-  mask-composite: intersect;
-}
-
-.kr-stage__clip[data-active] {
-  opacity: 1;
-  /* 激活的那个压在其它之上，避免切换那一帧两个片段叠着闪 */
-  z-index: 1;
-}
-
-/*
- * 关动效（调用方传 motion=false，见 motion-utils 的 useMotionAllowed）：
- * 播放/暂停由 SeekerStage 的 JS 负责，这里只保证**静止画面**不抖 ——
- * 关掉过渡，切片段时直接换图，不带淡入。
- */
-.kr-stage[data-motion="off"] .kr-stage__clip {
-  transition: none;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .kr-stage__clip {
-    transition: none;
-  }
-}
-
-/*
- * 深色主题：把人物从暗底上「托」起来（2026-10-26 用户：「优化下深色主题下
- * 脸部变黑的问题」）。
- *
- * 先说实测到的事实，免得后来人再翻一遍素材：
- *   · 9 段片子在脸区（crop 44x44 @58,36）逐帧量过，最暗一帧的 YAVG 也有 92.7，
- *     没有任何一帧掉到 60 以下 —— 素材里没有「黑掉」的片段；
- *   · WebM 的 tv/full range 各解一遍、再和原始 GIF 比：L = 101.7 / 103.6 / 102.9，
- *     转码没有压暗任何东西；
- *   · 拿真实 CSS 在 #16181d 上跑 full / 去 mask / 去 filter / 裸 video 四种变体，
- *     脸部亮度**完全一样**（L = 102.4）—— 所以不是遮罩、也不是投影干的。
- *
- * 那「脸变黑」是怎么来的：这张稿子的皮肤本身就是冷调的中低明度
- * （实测 RGB ≈ 99/101/123，L ≈ 101），而同屏另外两样东西很亮 —— 白蕾丝与高光
- * 裙面在 L ≈ 220 以上。亮色卡面（#ffffff，L ≈ 100 的区域更多）上，这三者读起来
- * 是「白底上的一段灰」，正常；换成深色卡面（L ≈ 24）之后，白蕾丝与暗底的反差被
- * 拉到极限，皮肤夹在中间成了**整块画面里最暗的那一层**，眼睛就把它读成「黑了」。
- *
- * 所以这不是渲染 bug，是明度分工在深底上反转了。补偿只用两招，且都不改素材：
- *   1. 背光：冷蓝淡光换成中性浅光并显著提高 —— 人物背后有一圈亮，脸不再是全场最暗；
- *   2. 明度：整体微提亮 + 略降对比。数值刻意压得很小：L 101 → 约 114（+13%），
- *      白裙 220 → 约 239，仍在色域内、不会糊成一片白。
- *
- * ⚠ 别把 brightness 单独调到 1.2 以上：白蕾丝先过曝，人物会「发光」而不是「变清楚」。
- * ⚠ filter 必须留在 .kr-stage 这一层（整块一起算），别下放到 9 个 video 元素上 ——
- *    9 个滤镜实例每秒 10 帧，暗色下掉帧很明显。
- */
-body[data-ds-dark-theme] .kr-stage {
-  filter: brightness(1.12) contrast(0.94) drop-shadow(0 6px 14px rgba(0, 0, 0, .5));
-}
-
-body[data-ds-dark-theme] .kr-card:hover .kr-stage {
-  filter: brightness(1.12) contrast(0.94) drop-shadow(0 8px 18px rgba(0, 0, 0, .6));
-}
-
-body[data-ds-dark-theme] .kr-stage__glow {
-  background: radial-gradient(ellipse 50% 50% at 50% 50%,
-    rgba(178, 202, 244, .30) 0%,
-    rgba(132, 166, 222, .14) 54%,
-    transparent 80%);
-}
 
 
 /* 原 .kr-card--plain[data-empty] .kr-card__badge 规则已删：徽标整体取消，

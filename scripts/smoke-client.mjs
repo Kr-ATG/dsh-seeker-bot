@@ -1811,30 +1811,27 @@ if (krEnabled) {
       pass('操作面板默认收起 + 卡头耗时已隐藏、明细行耗时保留')
     }
 
-    // 卡头形态：竖排「任务动画 / 名字(+浏览器标志) / 一行当前动作」，点一下展开全部。
+    // 卡头形态：竖排「插件头像 / 名字(+浏览器标志) / 一行当前动作」，点一下展开全部。
     // 卡头已抽成 SeekerHead.tsx（操作面板卡与新对话页共用），断言改查那个文件。
-    // 2026-10-26：立绘位从静态 WhalePortrait 换成 9 段任务动画（SeekerStage）。
+    // 2026-10-31：立绘位那 9 段任务动画整条删除，两处卡头统一改用插件头像。
     const seekerHeadSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/SeekerHead.tsx'), 'utf8')
     // 空闲文案的唯一真相（2026-10-26 从两处重复的表抽成一个模块）。
     const idleSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/idle-phrase.ts'), 'utf8')
-    // 「这一轮的输入里有没有图」的判据（2026-10-26 新增，卡头据此先演「查看照片」）。
+    // 「这一轮的输入里有没有图」的判据（2026-10-26 新增，卡头据此先说「查看照片中」）。
     const turnImgSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/turn-input-images.ts'), 'utf8')
-    // 文案与动画的共同上游：判据拆到 stage-mode.ts 里，两处共用同一个函数。
-    const stageModeSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/stage-mode.ts'), 'utf8')
-    // 卡头舞台的样式（深色主题补光那条断言读它）。
-    const krPlainStyle = readFileSync(resolve(ROOT, 'src/client/kr-chat/styles.ts'), 'utf8')
     if (!/className="kr-plain-head__name">Seeker</.test(seekerHeadSrc)) {
       fail('操作面板卡头必须显示名字（Seeker）')
-    } else if (!/<SeekerStage/.test(seekerHeadSrc) || !/idleClip=\{/.test(seekerHeadSrc)) {
+    } else if (!/<img className="kr-plain-head__avatar" src=\{BRAND_AVATAR_SRC\}/.test(seekerHeadSrc)
+      || /<SeekerStage/.test(seekerHeadSrc)) {
       /*
-       * 立绘位 2026-10-26 换成**任务动画**：用户给了 9 个 GIF，转成透明底 WebM 后
-       * 按卡头状态播放（SeekerStage + motion-clips.ts）。原 WhalePortrait 已删除。
+       * 身份位 2026-10-31 换成**插件头像**（用户：「操作面板的这个人物删除替换为
+       * 我们的插件头像」→「新对话的也换上，之前那个人物彻底删除」）。
        *
-       * 同时钉住 idleClip 这个传参：空闲片段（观月中/吃饭中/小憩中）是按钟点那句
-       * 话反查出来的，漏传就永远只播默认那一段 —— 界面上不报错，只是「夜里她也在
-       * 打盹」，只能靠断言看出来。
+       * 两条一起钉：卡头里必须**有**那个 img，且**不能再有** SeekerStage 分支 ——
+       * 只加 img 不删旧分支的话，页面上照样是动画在动（或者两样叠着），
+       * 而这种"多挂了一个"的错在界面上不会报错，只能靠断言。
        */
-      fail('操作面板卡头必须挂任务动画（SeekerStage，且传 idleClip）')
+      fail('卡头身份位必须是插件头像 img，且不得再有 SeekerStage 分支')
     } else if (!/className="kr-plain-head__name-row"/.test(seekerHeadSrc)
       || !/<button[\s\S]{0,120}className="kr-plain-head__browser"/.test(seekerHeadSrc)) {
       /*
@@ -1980,8 +1977,8 @@ if (krEnabled) {
        * 显示休息中、吃饭中、小憩、晒太阳；当我发送出去对话的时候就变成在思考中」。
        *
        * 2026-10-26 用户删掉「休息中 / 晒太阳」、加回「观月中 / 小憩中」，判据改成
-       * 按**夜里**分：19:00–次日 05:00 观月中。这三个说法各对应一段动画，所以
-       * 这张表同时是动画片段的入口（idleClipFor）。
+       * 按**夜里**分：19:00–次日 05:00 观月中。（这三个说法原先还各对应一段卡头
+       * 动画，那套动画已于 2026-10-31 整条删除，现在它们只是卡头上的一句话。）
        *
        * 断言读 idle-phrase.ts 而不是卡片源码：那张表是唯一真相，两处共用。
        */
@@ -2011,14 +2008,15 @@ if (krEnabled) {
       fail('刚发出消息、还没有任何动作时必须显示「在思考中」'
         + '（判据 running && empty）；本轮输入带图时同一位置必须换成「查看照片中」')
     } else if (!/readonly inputImageCount\?: number/.test(cardSrc)
-      || !/inputImages: inputImageCount/.test(cardSrc)
       || !/export function turnInputImageCount/.test(turnImgSrc)
       || !/type: 'image'/.test(turnImgSrc)) {
       /*
-       * 图片判据必须来自**用户消息里的 image 内容块**，且同时喂给文案与动画。
-       * 只改文案不改 inputImages，卡头就会出现「写着查看照片中、演着思考中」。
+       * 图片判据必须来自**用户消息里的 image 内容块**。
+       *
+       * 2026-10-31 之前这条还钉着 `inputImages: inputImageCount`（喂给动画判定）；
+       * 那套动画删掉后这个传参也没了，判据只服务卡头那句话（「查看照片中」）。
        */
-      fail('卡头必须按本轮输入里的图片块切「查看照片中」（turnInputImageCount → inputImageCount → inputImages）')
+      fail('卡头必须按本轮输入里的图片块切「查看照片中」（turnInputImageCount → inputImageCount）')
     } else if (!/total \+= countImages\(data\?\.content\)/.test(turnImgSrc)
       || !/countImages\(payload\?\.content\)/.test(turnImgSrc)
       || !/options\?\.latest !== true/.test(turnImgSrc)
@@ -2038,37 +2036,6 @@ if (krEnabled) {
        */
       fail('图片判据必须同时从 data.content / payload.content 取数（写死一处会静默失效），'
         + '且「最新用户消息」兜底只在看最新一轮时启用（latest: !isViewingHistory）')
-    } else if (!/\| 'viewing'/.test(stageModeSrc)
-      || !/if \(input\.empty\) return 'viewing'/.test(stageModeSrc)
-      || stageModeSrc.indexOf("return 'viewing'") > stageModeSrc.indexOf("return 'thinking'")) {
-      /*
-       * stage-mode 是文案与动画的**共同上游**：'viewing' 排在「没在跑 → idle」之后、
-       * 「空 → thinking」之前 —— 顺序反了的话带图那一步就落回 thinking。
-       */
-      fail('stage-mode 必须有 viewing 档，且排在 idle 之后、thinking 之前（inputImages > 0 && empty）')
-    } else if (!/body\[data-ds-dark-theme\] \.kr-stage \{\s*filter: brightness\((1\.\d+)\) contrast\(0\.\d+\)/
-      .test(krPlainStyle)
-      || Number(RegExp.$1) < 1.05 || Number(RegExp.$1) > 1.2
-      || !/body\[data-ds-dark-theme\] \.kr-stage__glow/.test(krPlainStyle)) {
-      /*
-       * 深色主题下脸部发黑（2026-10-26 用户：「优化下深色主题下脸部变黑的问题」）。
-       *
-       * 实测结论先记在这里，免得后来人再去素材里找原因：9 段片子逐帧量过脸区，
-       * 最暗一帧 YAVG 也有 92.7、没有一帧掉到 60 以下；tv/full 两种 range 各解一遍、
-       * 再和原始 GIF 比，L = 101.7 / 103.6 / 102.9 —— 素材与转码都没问题。真实 CSS
-       * 在 #16181d 上跑 full / 去 mask / 去 filter / 裸 video 四种变体，脸部亮度
-       * 完全一样（L = 102.4），所以也不是遮罩或投影干的。
-       *
-       * 真正的原因是明度分工在深底上反转：皮肤本身是冷调中低明度（L ≈ 101），
-       * 而同屏的白蕾丝与高光裙面在 L ≈ 220 以上。白底上这是「白底上一段灰」，
-       * 深底上它就成了整块画面里最暗的一层。补偿 = 背后一圈中性浅光 + 整体微提亮
-       * 略降对比（L 101 → 114），两招都在 .kr-stage 这一层做完，不减素材、不加滤镜实例。
-       *
-       * ⚠ brightness 必须落在 (1.05, 1.2]：低于 1.05 看不出差别，高于 1.2 白蕾丝先过曝，
-       *    人物会「发光」而不是「变清楚」。这条区间就是验收标准。
-       */
-      fail('深色主题必须给卡头人物补光（body[data-ds-dark-theme] .kr-stage 提亮 1.05–1.2 + 背光），'
-        + '否则冷调皮肤在暗底上会成为全场最暗的一层、被读成「脸变黑」')
     } else if (/等待本轮开始/.test(stripComments(cardSrc)) || /已收口/.test(stripComments(cardSrc))) {
       // 必须剥注释再查：这两句在这一轮的注释里被反复引用（"原来写的是…"），
       // 拿原文匹配会把说明文字当成残留 —— 本文件里 stripComments 已有定义。
@@ -2097,31 +2064,28 @@ if (krEnabled) {
        */
       fail('操作面板卡头必须启用紧凑骨架（SeekerHead compact + KrPlainTimelineCard 传 compact）')
     } else if (!/\.kr-plain-head--compact\s*\{[^}]*grid-template-columns:\s*64px/.test(code)
-      || !/\.kr-plain-head__avatar\s*\{[^}]*width:\s*64px[^}]*height:\s*64px/.test(code)) {
+      || !/\.kr-plain-head__avatar\s*\{[^}]*width:\s*96px[^}]*height:\s*96px/.test(code)
+      || !/\.kr-plain-head--compact\s+\.kr-plain-head__avatar\s*\{[^}]*width:\s*64px[^}]*height:\s*64px/.test(code)) {
       /*
-       * 身份位尺寸：左列 64px、头像 64×64。
+       * 身份位尺寸：两套骨架**同一个 img**，靠 CSS 分两档。
        *
-       * 2026-10-31 之前这条钉的是「人物缩到 64×114」——用户现在要求「操作面板的
-       * 这个人物删除替换为我们的插件头像」，那条 .kr-stage 覆写已随人物一起撤掉，
-       * 所以判据换成头像盒子。两条一起钉：单改 grid 列宽不改头像盒会留缝/裁切。
+       *  · Hero（新对话页）基础档 96×96 —— 原来那块竖版立绘是 92×164，换方头像后
+       *    卡头矮了 68px，这是刻意的；
+       *  · 紧凑骨架（操作面板）64×64 + grid 左列 64px。
+       *
+       * 三条一起钉：只改 grid 列宽不改头像盒会留缝；只写基础档不写紧凑档，
+       * 右栏里那张头像会把 64px 的列撑开、把名字挤成竖排。
        */
-      fail('紧凑卡头的身份位必须是 64×64 插件头像（grid 列宽 64px + .kr-plain-head__avatar 64×64）')
-    } else if (!(() => {
+      fail('身份位必须是插件头像且分两档尺寸（基础 96×96 / 紧凑 64×64 + grid 列宽 64px）')
+    } else if ((seekerHeadSrc.match(/className="kr-plain-head__avatar"/g) ?? []).length !== 1) {
       /*
-       * 光有样式不够：compact 分支必须**真的渲染 img**，且不能再挂 SeekerStage。
-       * 后者正是「人物还在」的直接来源，也是这轮要求要删掉的东西 —— 只改样式不改
-       * 渲染，页面上照样是那 9 段动画在动。
+       * 身份位**只许有一个**（2026-10-31）。
        *
-       * 判据按分支切段再查，不用一条跨段正则：SeekerStage 在 else 分支里本来就该
-       * 出现（新对话页 Hero 用），一条写松了会把「两分支都有」误判成通过，写紧了
-       * 又会把正确实现判死。
+       * 上一版这里是「compact ? img : SeekerStage」两条分支；用户要求「新对话的也
+       * 换上，之前那个人物彻底删除」之后，分支合并成单个 img。这条断言防的是
+       * 后来又有人加回一条分支：多挂一个身份位不会报错，只会让两处长得不一样。
        */
-      const branch = seekerHeadSrc.split('{compact ? (')[1]?.split(') : (')[0] ?? ''
-      return branch.includes('kr-plain-head__avatar')
-        && branch.includes('BRAND_AVATAR_SRC')
-        && !branch.includes('<SeekerStage')
-    })()) {
-      fail('紧凑卡头必须渲染插件头像且不再挂 SeekerStage（compact 分支只留 img + BRAND_AVATAR_SRC）')
+      fail('卡头身份位只许有一个（.kr-plain-head__avatar 出现次数必须为 1）')
     } else if (!/className="kr-plain-head__summary"/.test(seekerHeadSrc)
       || !/stepCount=\{timeline\.steps\.length\}/.test(cardSrc)) {
       /*
