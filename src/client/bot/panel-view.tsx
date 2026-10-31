@@ -24,9 +24,13 @@ export interface BotPanelViewProps {
   readonly catalog: SubagentCatalogView
   /** 当前会话的产出物（与 KrOutputsCard 同源）。 */
   readonly outputs: OutputsView
+  /** 点击子智能体行（由连接层提供跳转）。 */
+  readonly onOpenSubagent?: (row: SubagentCatalogView['rows'][number]) => void
+  /** 点击产出物行（由连接层提供打开逻辑）。 */
+  readonly onOpenOutput?: (item: OutputsView['items'][number]) => void
 }
 
-export function BotPanelView({ sessionId, catalog, outputs }: BotPanelViewProps): ReactElement {
+export function BotPanelView({ sessionId, catalog, outputs, onOpenSubagent, onOpenOutput }: BotPanelViewProps): ReactElement {
   const sections = visiblePanelSections({
     hasSubagents: catalog.rows.length > 0,
     hasOutputs: outputs.items.length > 0,
@@ -41,20 +45,32 @@ export function BotPanelView({ sessionId, catalog, outputs }: BotPanelViewProps)
       {sections.includes('subagents') && (
         <div className="skb-bot-panel__list" data-kind="subagents">
           {catalog.rows.map((row) => (
-            <div className="skb-bot-panel__row" key={row.id} title={row.label}>
+            <button
+              type="button"
+              className="skb-bot-panel__row"
+              key={row.id}
+              title={row.label + ' · 点击跳转'}
+              onClick={() => { onOpenSubagent?.(row) }}
+            >
               <span className="skb-bot-panel__dot" data-running={row.running ? 'true' : undefined} aria-hidden />
               <span className="skb-bot-panel__name">{row.label}</span>
-            </div>
+            </button>
           ))}
         </div>
       )}
       {sections.includes('outputs') && (
         <div className="skb-bot-panel__list" data-kind="outputs">
           {outputs.items.slice(0, 8).map((item) => (
-            <div className="skb-bot-panel__row" key={item.path} title={item.path}>
+            <button
+              type="button"
+              className="skb-bot-panel__row"
+              key={item.path}
+              title={item.path}
+              onClick={() => { onOpenOutput?.(item) }}
+            >
               <span className="skb-bot-panel__dot" aria-hidden />
               <span className="skb-bot-panel__name">{item.name}</span>
-            </div>
+            </button>
           ))}
         </div>
       )}

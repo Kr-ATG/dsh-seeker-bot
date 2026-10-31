@@ -21,6 +21,10 @@ import { useSubagentOutputs } from '../kr-chat/use-subagent-outputs.ts'
 import { useSessionOutputs } from '../kr-chat/use-session-outputs.ts'
 import { mergeOutputs, EMPTY_OUTPUTS } from '../kr-chat/outputs.ts'
 import { latestChatSessionId, subscribeLatestChatSnapshot } from '../tool-summary/TurnProcessShadowView.tsx'
+import { openSubagentSession } from '../kr-chat/subagent-catalog.ts'
+import { tryOpenInSidebar } from '../open-preview.ts'
+import { openWithDefaultApp } from '../open-default-app.ts'
+import { workspaceCwdOf } from '../client-ctx.ts'
 import { panelShouldMount } from './model.ts'
 import { BotPanelView } from './panel-view.tsx'
 import { getBotConsoleStore } from './store.ts'
@@ -57,7 +61,21 @@ function BotPanelConnected(): ReactElement {
     { items: persistedOutputs },
     { items: subagentOutputs },
   )
-  return <BotPanelView sessionId={sessionId} catalog={catalog} outputs={outputs.items.length > 0 ? outputs : EMPTY_OUTPUTS} />
+  const openSubagent = (row: (typeof catalog.rows)[number]): void => { openSubagentSession(row) }
+  const openOutput = (item: (typeof outputs.items)[number]): void => {
+    const owner = item.sessionId ?? sessionId
+    if (tryOpenInSidebar(item.path, { sessionId: owner, cwd: workspaceCwdOf(owner) })) return
+    void openWithDefaultApp(item.path)
+  }
+  return (
+    <BotPanelView
+      sessionId={sessionId}
+      catalog={catalog}
+      outputs={outputs.items.length > 0 ? outputs : EMPTY_OUTPUTS}
+      onOpenSubagent={openSubagent}
+      onOpenOutput={openOutput}
+    />
+  )
 }
 
 interface PanelHandle {

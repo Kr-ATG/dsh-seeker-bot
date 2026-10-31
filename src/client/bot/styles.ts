@@ -399,10 +399,18 @@ const BOT_CORE_STYLES = `/* ══ Bot 控制台：侧栏名册 / 新建表单 /
   align-items: center;
   gap: 7px;
   min-width: 0;
+  width: 100%;
   padding: 4px 2px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  font: inherit;
   font-size: 11.5px;
+  text-align: left;
   color: var(--dsw-alias-label-secondary, #61666b);
+  cursor: pointer;
 }
+.skb-bot-panel__row:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.04)); }
 .skb-bot-panel__dot {
   width: 5px;
   height: 5px;
