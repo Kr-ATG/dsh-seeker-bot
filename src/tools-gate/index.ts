@@ -305,6 +305,22 @@ function estimateTokens(bytes: number): number {
 /** 每个 agent 的开关状态。用 WeakMap：agent 销毁即回收，无需监听 disposed。 */
 const agentStates = new WeakMap<object, Record<string, boolean>>()
 
+/**
+ * 部署级默认开关（可被 Bot 模式运行时改写）。
+ *
+ * 为什么需要模块级共享：Bot 模式下「电脑操作」必须默认开启，而模式切换来自
+ * Bot 控制台的路由（另一个模块）；applyToolsGate 的 defaultEnabled 闭包只在
+ * 装配时建一次。把同一个 Set 暴露出来，路由改的就是闸门真正读的那一份。
+ */
+let sharedDefaults: Set<string> | null = null
+
+/** 改一组工具的部署级默认值（Bot 模式进入时开 computer-use，回 Work 关）。 */
+export function setGateDefaultEnabled(key: string, enabled: boolean): void {
+  if (sharedDefaults === null) return
+  if (enabled) sharedDefaults.add(key)
+  else sharedDefaults.delete(key)
+}
+
 /** 读一个 agent 的状态表（懒建）。 */
 function stateOf(agent: unknown, groups: readonly GateGroup[]): Record<string, boolean> {
   if (typeof agent !== 'object' || agent === null) return {}
@@ -335,6 +351,7 @@ function usage(group: GateGroup): string {
 export function applyToolsGate(ctx: GateHostContext, config: GateConfig = {}): GateHandle {
   const groups = normalizeGroups(config.groups)
   const defaultEnabled = new Set(config.defaultEnabled ?? [])
+  sharedDefaults = defaultEnabled
 
   /** 读某会话的全部组状态（enabled 已并入部署默认值）。 */
   const status = (sessionId: string): GateGroupStatus[] => {
@@ -427,7 +444,14 @@ export function applyToolsGate(ctx: GateHostContext, config: GateConfig = {}): G
     })
   })
 
-  return { status, setEnabled, groups }
+  const setDefaultEnabled = (key: string, enabled: boolean): boolean => {
+    if (!groups.some((group) => group.key === key)) return false
+    if (enabled) defaultEnabled.add(key)
+    else defaultEnabled.delete(key)
+    return true
+  }
+
+  return { status, setEnabled, setDefaultEnabled, groups }
 }
 
 /** 闸门状态路由（GET 读 / POST 写）。 */
@@ -532,6 +556,8 @@ export interface GateHandle {
   status(sessionId: string): GateGroupStatus[]
   /** 写某会话的一组开关；会话或组未知时返回 false。 */
   setEnabled(sessionId: string, key: string, enabled: boolean): boolean
+  /** 改部署级默认值（Bot 模式电脑操作默认开）。 */
+  setDefaultEnabled(key: string, enabled: boolean): boolean
   /** 生效的分组表。 */
   groups: readonly GateGroup[]
 }

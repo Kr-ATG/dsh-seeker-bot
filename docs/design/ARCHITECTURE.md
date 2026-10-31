@@ -202,7 +202,7 @@ dsh-seeker-bot/
 | POST | `/bots/:id/duplicate` | 复制（带配置，不带历史） |
 | POST | `/groups` · PATCH · DELETE | 群聊 |
 | POST | `/groups/:id/send` | 群内发消息（@ 路由到具体 Bot） |
-| GET/POST/PATCH/DELETE | `/routines` | 班次 CRUD |
+| GET/POST/PATCH/DELETE | `/routines` | 日程 CRUD |
 | POST | `/routines/:id/test` | 立即跑一次 |
 | GET | `/routines/:id/runs` | 运行历史 |
 | POST | `/webhook/:routineId/:key` | 外部事件入口 |
@@ -233,7 +233,7 @@ ctx.on('system-prompt/assemble', (prompt, c) => {
 ```
 ~/.dsh/storages/dsh-seeker-bot/
 ├── state.json      # bots / groups / rules / usage 缓存（tmp + rename 原子写）
-├── routines.json   # 班次与运行历史（每班次保留 20 条）
+├── routines.json   # 日程与运行历史（每日程保留 20 条）
 └── backups/        # 结构升级前快照
 ```
 
@@ -266,7 +266,7 @@ type UiMode = 'work' | 'bot'
 
 ### 7.3 主区页签
 
-Bot 模式下在主区顶部注入「班次 / 技能 / 审批 / 用量」四个页签（复用原生 tab 组件或自绘 36px 高、
+Bot 模式下在主区顶部注入「日程 / 技能 / 审批 / 用量」四个页签（复用原生 tab 组件或自绘 36px 高、
 1.5px 下划线的轻量版）。Work 模式下这排页签整体 `hidden`——注意 `[hidden]` 会被 `display:flex` 覆盖，
 必须补 `.tabs[hidden]{display:none}`（原型里踩过）。
 

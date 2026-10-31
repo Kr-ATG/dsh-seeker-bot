@@ -1,7 +1,7 @@
 {
   "name": "dsh-seeker-bot",
   "version": "0.1.0",
-  "description": "DeepSeek Harness 的 Bot 控制台：把 Agent 升级成有名字、有记忆、有班次的 AI 团队。含对话增强全套能力（思考折叠、工具聚合、html/iu 卡片、截图、下载）、供应商中心、记忆/技能/用量/画廊/档案七个工作台，以及 Work/Bot 双模式 Bot 名册与本地工作区面板。",
+  "description": "DeepSeek Harness 的 Bot 控制台：把 Agent 升级成有名字、有记忆、有日程的 AI 团队。含对话增强全套能力（思考折叠、工具聚合、html/iu 卡片、截图、下载）、供应商中心、记忆/技能/用量/画廊/档案七个工作台，以及 Work/Bot 双模式 Bot 名册与本地工作区面板。",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -76,7 +76,11 @@
   "scripts": {
     "build": "node build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "smoke": "node scripts/smoke-client.mjs && node scripts/smoke-host.mjs && node scripts/smoke-triad-client.mjs && node scripts/smoke-triad-host.mjs && node scripts/test-session-isolation.mjs && node scripts/test-browser-on-demand.mjs && node scripts/test-mail-two-phase.mjs && node scripts/test-mail-channel.mjs && node scripts/test-html-card-width.mjs && node scripts/test-mail-drawer.mjs && node scripts/test-settings-card.mjs && node scripts/test-running-apps.mjs && node scripts/test-at-guard.mjs && node scripts/test-turn-input-images.mjs && node scripts/test-prompt-optimize-clean.mjs && node scripts/test-vault.mjs && node scripts/test-vault-http.mjs && node scripts/test-system-prompt.mjs && node scripts/test-scrollbar-autohide.mjs && node scripts/test-usage-hours.mjs && node scripts/test-feature-switches.mjs && node scripts/test-published-reasoning.mjs && node scripts/test-echo-viewport.mjs",
+    "smoke": "node scripts/smoke-client.mjs && node scripts/smoke-host.mjs && node scripts/smoke-triad-client.mjs && node scripts/smoke-triad-host.mjs && node scripts/test-session-isolation.mjs && node scripts/test-browser-on-demand.mjs && node scripts/test-mail-two-phase.mjs && node scripts/test-mail-channel.mjs && node scripts/test-html-card-width.mjs && node scripts/test-mail-drawer.mjs && node scripts/test-settings-card.mjs && node scripts/test-running-apps.mjs && node scripts/test-at-guard.mjs && node scripts/test-turn-input-images.mjs && node scripts/test-prompt-optimize-clean.mjs && node scripts/test-vault.mjs && node scripts/test-vault-http.mjs && node scripts/test-system-prompt.mjs && node scripts/test-scrollbar-autohide.mjs && node scripts/test-usage-hours.mjs && node scripts/test-feature-switches.mjs && node scripts/test-published-reasoning.mjs && node scripts/test-echo-viewport.mjs && node scripts/test-bot-host.mjs && node scripts/test-bot-client.mjs && node scripts/test-bot-install.mjs",
+    "test:bot": "node scripts/test-bot-host.mjs && node scripts/test-bot-client.mjs && node scripts/test-bot-install.mjs",
+    "test:bot-host": "node scripts/test-bot-host.mjs",
+    "test:bot-client": "node scripts/test-bot-client.mjs",
+    "test:bot-install": "node scripts/test-bot-install.mjs",
     "smoke:client": "node scripts/smoke-client.mjs",
     "smoke:host": "node scripts/smoke-host.mjs",
     "smoke:triad-client": "node scripts/smoke-triad-client.mjs",

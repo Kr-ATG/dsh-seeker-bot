@@ -24,8 +24,9 @@
  * Usage: node scripts/smoke-host.mjs
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { resolve, dirname } from 'node:path'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { resolve, dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -34,6 +35,27 @@ const HOST = resolve(ROOT, 'lib/index.js')
 
 const fail = (msg) => { console.error(`FAIL  ${msg}`); process.exitCode = 1 }
 const pass = (msg) => console.log(`ok    ${msg}`)
+
+/*
+ * 隔离 DSH_HOME：Bot 控制台新装的默认状态是 ui.mode='bot'，host 启动时会把
+ * computer-use 的部署级默认打开；而本冒烟的「工具闸门默认全关」基线必须固定在
+ * Work 模式。这里预置 version 2 + ui.mode='work' 的 state.json（不是改产品默认值）。
+ * 不指定 DSH_HOME 时会读到用户真实 ~/.dsh，测试还会往那里写 bot 状态，绝对不行。
+ */
+const SMOKE_HOME = mkdtempSync(join(tmpdir(), 'dsh-seeker-bot-smoke-home-'))
+process.env.DSH_HOME = SMOKE_HOME
+mkdirSync(join(SMOKE_HOME, 'storages', 'dsh-seeker-bot'), { recursive: true })
+writeFileSync(join(SMOKE_HOME, 'storages', 'dsh-seeker-bot', 'state.json'), JSON.stringify({
+  version: 2,
+  bots: [],
+  groups: [],
+  routines: [],
+  rules: [],
+  usage: {},
+  sessions: {},
+  ui: { mode: 'work' },
+}, null, 2), 'utf8')
+process.on('exit', () => { try { rmSync(SMOKE_HOME, { recursive: true, force: true }) } catch { /* 进程退出清理失败不改变断言 */ } })
 
 // 先做文本守卫：安装位置解析不了的 specifier 一个都不许出现——包括
 // `@deepseek-ai/*`。融合进来的工作台把需要的 DSH 叶子模块全部 vendor 化在
@@ -320,13 +342,21 @@ else pass('deferred webServer callback executed')
 //   4 条 done-pill（增量 / 壳热区 / 通知 / 通知点击）+ 2 条录屏（窗口枚举 / 抓帧）
 //   + 1 条提示音 prefix + 2 条工作区实时回显（echo-viewport/frame 窗口抓帧 +
 //     echo-viewport/space-frame 会话工作空间抓帧）。
+// 29 = 28（上一轮既有）+ 1（2026-10-31 Bot 控制台：prefix /api/seeker-bot；它的
+//   子路径 /health /state /bots /ui/mode 等都由同一条 prefix 路由接管，漏注册的
+//   表现是页面右侧 Bot 面板永远空白 —— 计数与路径断言一起钉住）。
 // 这些路由漏注册的表现全是静默的：胶囊不出现、通知不弹、录屏面板只剩整屏 ——
 // 只有计数与路径断言能钉住它们。
-if (registered.length !== 28) {
-  fail(`expected exactly 28 route registrations, got ${registered.length}: ${JSON.stringify(registered)}`)
+if (registered.length !== 29) {
+  fail(`expected exactly 29 route registrations, got ${registered.length}: ${JSON.stringify(registered)}`)
 } else {
   const exacts = registered.filter(spec => spec?.kind === 'exact')
   const prefix = registered.filter(spec => spec?.kind === 'prefix')
+  if (!prefix.some(spec => spec?.path === '/api/seeker-bot')) {
+    fail(`missing Bot console route (prefix /api/seeker-bot): ${JSON.stringify(prefix)}`)
+  } else {
+    pass('registered /api/seeker-bot (kind=prefix, Bot console API)')
+  }
   if (!exacts.some(spec => spec?.path === '/api/chat-flow/components')) {
     fail(`missing feature switches route (exact /api/chat-flow/features): ${JSON.stringify(exacts)}`)
   } else if (!exacts.some(spec => spec?.path === '/api/chat-flow/generated-images')) {
@@ -890,15 +920,16 @@ if (registeredCommands.length !== 2) {
     pass(`gate commands registered: /${names.join(', /')} (input hint ${JSON.stringify(registeredCommands[0]?.input?.hint)})`)
   }
 }
-// 两条监听是**两个不同职责**，都要在：
+// 三条监听是**三个不同职责**，都要在：
 //   1. 工具闸门 —— 出口过滤掉关着的工具组与它们的提示词段；
-//   2. 系统提示词观测（2026-10-27）—— 出口抓最终快照给「操作间 → 系统提示词」页。
+//   2. 系统提示词观测（2026-10-27）—— 出口抓最终快照给「操作间 → 系统提示词」页；
+//   3. Bot 岗位注入（2026-10-31）—— 按 sessionId 追加「# 你的身份」与产出偏好段。
 // 计数写死而不是「至少一条」：漏挂一条都是静默失效（闸门失效 = 每轮多烧 3 万 token；
-// 观测失效 = 页面永远取不到快照），两种都不会抛错，只能靠计数钉住。
-if (assembleListeners.length !== 2) {
-  fail(`expected exactly 2 system-prompt/assemble listeners (tools-gate + system-prompt inspector), got ${assembleListeners.length}`)
+// 观测失效 = 页面永远取不到快照；岗位注入失效 = Bot 不知道自己是谁），只能靠计数钉住。
+if (assembleListeners.length !== 3) {
+  fail(`expected exactly 3 system-prompt/assemble listeners (tools-gate + system-prompt inspector + bot prompt), got ${assembleListeners.length}`)
 } else {
-  pass('gate + system-prompt inspector both hook system-prompt/assemble (registration-layer agnostic)')
+  pass('gate + system-prompt inspector + bot prompt all hook system-prompt/assemble (registration-layer agnostic)')
 }
 
 const gateTest = mod.toolsGateTest
@@ -918,10 +949,22 @@ if (gateTest === undefined) {
       { name: 'mcp:playwright-mcp', text: 'server instructions' },
     ],
   })
-  const project = async (agent) => {
-    const listener = assembleListeners[0]
-    return listener(assemble(agent), { agent, scope: agent }, async () => assemble(agent))
+  // 监听器顺序由 host apply 的挂载顺序决定：applyBotPrompt 最先挂，随后工具闸门、
+  // 系统提示词观测。不能因为过去恰好 assembleListeners[0] 是闸门就写死序号；
+  // 按行为挑出「会过滤工具」的那一条（只有工具闸门会删掉 cua/playwright 工具）。
+  const runListener = (listener, agent) => listener(assemble(agent), { agent, scope: agent }, async () => assemble(agent))
+  let gateListener
+  for (const listener of assembleListeners) {
+    try {
+      const out = await runListener(listener, { id: 'listener-probe' })
+      if (Array.isArray(out?.tools) && out.tools.length === 1 && out.tools[0]?.name === 'pwsh') {
+        gateListener = listener
+        break
+      }
+    } catch { /* 别的监听器可能对桩形状敏感；工具闸门在下面单独报缺失 */ }
   }
+  if (gateListener === undefined) fail('3 条 system-prompt/assemble 监听里找不到工具闸门（默认 Work 下应只剩 pwsh）')
+  const project = async (agent) => runListener(gateListener ?? assembleListeners[0], agent)
   const namesOf = (out) => out.tools.map(t => t.name).sort().join(',')
   const sectionsOf = (out) => out.sections.map(s => s.name).sort().join(',')
 
@@ -1392,7 +1435,26 @@ if (!/applySupplierSection\(ctx\)/.test(providerClientSrc)) {
   // root 发现：base 必须并上「插件启动时记住的原始 tmpdir」—— office 模块会把
   // TEMP 改到 workspace，改完 os.tmpdir() 就不再是 spill root 的出生地，只信当前
   // tmpdir 会一个历史 root 都扫不到（整批生图重新变 403）。
-  const bases = spillTest.spillBases()
+  // 这里主动模拟一次 TEMP 改写，而不是依赖 office 模块在当前环境是否真的改了
+  // （测试顺序/环境 ACL 不同会让它偶发不触发，断言就假红）。
+  const prevTemp = process.env.TEMP
+  const prevTmp = process.env.TMP
+  const prevTmpdir = process.env.TMPDIR
+  const simulatedTemp = join(ROOT, '_tmp', '.dsh-office-scratch')
+  process.env.TEMP = simulatedTemp
+  process.env.TMP = simulatedTemp
+  process.env.TMPDIR = simulatedTemp
+  let bases = []
+  try {
+    bases = spillTest.spillBases()
+  } finally {
+    if (prevTemp === undefined) delete process.env.TEMP
+    else process.env.TEMP = prevTemp
+    if (prevTmp === undefined) delete process.env.TMP
+    else process.env.TMP = prevTmp
+    if (prevTmpdir === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = prevTmpdir
+  }
   if (bases.length < 2) fail(`spill root 扫描基准必须 ≥2 个（原始 tmpdir + 当前 tmpdir + 平台惯例），实得 ${bases.length}`)
   else pass(`spill root 扫描基准取并集（${bases.length} 个，TEMP 被改写后仍能发现历史 root）`)
 }

@@ -61,7 +61,7 @@
 | C7 | 运行中任务 | 新写 | 订阅会话事件，聚合「哪个 Bot 在跑什么」 | 面板实时列出运行中的工具调用 |
 | C8 | 产出物面板 | 原生 + 新写 | 订阅会话的 file/deliverable 事件，按类型（网页/文档/表格/图片）分组；数据源与 DSH 原生产出物同源 | 面板列出该 Bot 生成的文件，点击能打开；数量与原生面板一致 |
 
-### 1.4 班次（Routines）
+### 1.4 日程（Routines）
 
 | # | 功能 | 状态 | 实现路径 | 验收 |
 |---|---|---|---|---|
@@ -218,7 +218,7 @@ watching ──点击画面──▶ handed-off ──点回到面板──▶ w
 
 面板文案必须跟着状态走：`观看中 · 5fps` / `已交给你在 ego 操作` / `ego 未连接`。
 
-### 2.5 班次（`src/host/routines.ts`）
+### 2.5 日程（`src/host/routines.ts`）
 
 ```ts
 // 创建
@@ -275,7 +275,7 @@ interface ProactiveConfig {
 
 ```
 定时器（按 freq 起一个 dsh-schedule，或用 setInterval + 窗口判断）
-   → 收集「候选事件」：新结果 / 待拍板 / 班次失败 / 风险信号
+   → 收集「候选事件」：新结果 / 待拍板 / 日程失败 / 风险信号
    → 去重（事件指纹 24h 内只发一次）
    → 无候选 → 静默返回，不写消息
    → 有候选 → 发起一次 Bot 主动回合 → 写进该 Bot 会话 + 推送通知
@@ -287,7 +287,7 @@ interface ProactiveConfig {
 - 主动回合的 prompt 固定为「基于以下变化，用三句话告诉我最要紧的一件事」；
 - 主动消息在会话里带一个「主动」标记，可一键关闭该 Bot 的主动。
 
-验收：把 freq 设成 1 分钟（测试用），无事件时 10 分钟内不发消息；造一条班次失败后 1 分钟内收到主动消息。
+验收：把 freq 设成 1 分钟（测试用），无事件时 10 分钟内不发消息；造一条日程失败后 1 分钟内收到主动消息。
 
 ### 2.10 图表与交互页面（`src/client/chat/chart.tsx` + `src/host/output-hint.ts`）
 
@@ -351,7 +351,7 @@ format(at) // 今天 HH:mm / 昨天 HH:mm / 周三 HH:mm / M月D日 HH:mm
 | POST/PATCH/DELETE | `/bots[/:id]` | Bot CRUD |
 | POST | `/bots/:id/{duplicate,pause,resume,primary}` | 动作 |
 | GET/POST | `/groups[/:id/send]` | 群聊 |
-| GET/POST/PATCH/DELETE | `/routines[/:id]` | 班次 |
+| GET/POST/PATCH/DELETE | `/routines[/:id]` | 日程 |
 | POST | `/routines/:id/test` | 立即跑 |
 | GET | `/routines/:id/runs` | 历史 |
 | POST | `/webhook/:id/:key` | 事件入口 |
@@ -374,7 +374,7 @@ format(at) // 今天 HH:mm / 昨天 HH:mm / 周三 HH:mm / M月D日 HH:mm
 | **M1 骨架** | 双半身插件 + 名册座位 + Bot CRUD + 持久化 | 装插件重启 → 侧栏出现名册；建 3 个 Bot 重启后还在；`node scripts/smoke-host.mjs` 通过 | 2–3 天 |
 | **M2 会话** | 岗位注入 + 会话绑定 + 注意力状态 | 两 Bot 对话不串；系统提示词页能看到岗位；名册三态正确 | 2–3 天 |
 | **M3 电脑** | FramePump + 点击进入 ego + 文件树 + 运行中任务 | 面板 5fps 出画面；点击后 ego 前台显示该页；回到面板帧流恢复 | 3–4 天 |
-| **M4 班次** | Routine CRUD + schedule 包装 + webhook + 限流 + 历史 | 定时到点跑；curl webhook 返回 200 且会话出现结果；超限 429 | 3–4 天 |
+| **M4 日程** | Routine CRUD + schedule 包装 + webhook + 限流 + 历史 | 定时到点跑；curl webhook 返回 200 且会话出现结果；超限 429 | 3–4 天 |
 | **M5 群聊** | 群会话 + @ 路由 + 交接可视化 | 3 Bot 同室按 @ 分工，交接行可见，群内无审批卡 | 3–5 天 |
 | **M6 控制台** | 技能库 + 审批规则表 + 用量 + 通知 | 规则改动立即生效；用量与原生对账一致；通知能弹 | 3–4 天 |
 | **M7 加分** | Bot 邮箱、演示教学、Library | 按需 | — |

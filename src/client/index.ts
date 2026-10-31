@@ -63,6 +63,7 @@ import { buildActivityGrid, activityColor, ACTIVITY_COLUMNS } from './triad/usag
 import { setClientCtx } from './client-ctx.ts'
 import { applyFeatureSwitches } from './features/index.tsx'
 import { applyBotConsole } from './bot/index.js'
+import { applyBotPanel } from './bot/panel.tsx'
 import { featureEnabledNow, featureMount } from './features/gate.tsx'
 
 /** 顶层服务依赖（client boot graph 用）。 */
@@ -179,6 +180,8 @@ export function apply(ctx: ClientContext): void {
 
   // ── Bot 控制台：侧栏 Work/Bot 双模式 + 名册 ─────────────────────────
   guarded(ctx, 'bot console', () => { applyBotConsole(ctx) })
+  // 右栏 Bot 面板：只有浏览器画面 + 同源子智能体/产出物行，只在 Bot 模式挂载。
+  guarded(ctx, 'bot panel', () => { applyBotPanel(ctx) })
 
   // ── 界面字体（最早应用）──────────────────────────────────────────────
   // 用户选中的字体必须**先于**其它一切挂载生效：它只改几个根 CSS 变量

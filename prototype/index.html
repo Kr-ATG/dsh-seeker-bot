@@ -272,7 +272,7 @@ input,textarea{font:inherit;color:inherit}
 .kv .k{font-size:10px;color:var(--dsw-alias-label-caption)}
 .kv .v{font-size:15px;font-weight:600;color:var(--dsw-alias-label-primary);margin-top:1px}
 
-/* 班次 / 技能 / 审批 / 用量 */
+/* 日程 / 技能 / 审批 / 用量 */
 .list{padding:16px 24px;overflow:auto}
 .list-in{max-width:760px;margin:0 auto}
 .h{display:flex;align-items:baseline;gap:10px;margin-bottom:14px}
@@ -520,7 +520,7 @@ table.tb td:first-child{color:var(--dsw-alias-label-primary)}
     <div class="top" id="top"></div>
     <div class="tabs" id="tabs" hidden>
       <button data-v="chat" class="on">会话</button>
-      <button data-v="routines">班次</button>
+      <button data-v="routines">日程</button>
       <button data-v="skills">技能</button>
       <button data-v="approvals">审批</button>
       <button data-v="usage">用量</button>
@@ -535,7 +535,7 @@ table.tb td:first-child{color:var(--dsw-alias-label-primary)}
             <div class="box">
               <textarea id="composer" rows="1" placeholder="给 Chief 发消息…"></textarea>
               <div class="box-row">
-                <button class="tool" onclick="toast('@ 提及 Bot / 群聊 / 班次 / 应用')">@ 提及</button>
+                <button class="tool" onclick="toast('@ 提及 Bot / 群聊 / 日程 / 应用')">@ 提及</button>
                 <button class="tool" onclick="toast('添加附件')">＋ 附件</button>
                 <button class="tool" onclick="toast('调用技能')">技能</button>
                 <button class="tool" onclick="stopNow()">停止</button>
@@ -549,10 +549,10 @@ table.tb td:first-child{color:var(--dsw-alias-label-primary)}
         </div>
       </section>
 
-      <!-- 班次 -->
+      <!-- 日程 -->
       <section class="pane" id="pane-routines" hidden>
         <div class="list"><div class="list-in">
-          <div class="h"><h3>班次</h3><p>定时或事件触发，笔记本关着也照跑</p><div class="r"><button class="btn" onclick="toast('新建班次：说一句话，Bot 自己排期')">＋ 新建班次</button></div></div>
+          <div class="h"><h3>日程</h3><p>定时或事件触发，笔记本关着也照跑</p><div class="r"><button class="btn" onclick="toast('新建日程：说一句话，Bot 自己排期')">＋ 新建日程</button></div></div>
           <div id="routineList"></div>
         </div></div>
       </section>
@@ -582,7 +582,7 @@ table.tb td:first-child{color:var(--dsw-alias-label-primary)}
           <div class="h"><h3>用量</h3><p>每周重置 · 按 Bot 拆分</p></div>
           <div class="stats">
             <div class="stat"><div class="k">本周已用</div><div class="v">63%</div><div class="d">剩余 4 天</div></div>
-            <div class="stat"><div class="k">班次运行</div><div class="v">142</div><div class="d">较上周 +12%</div></div>
+            <div class="stat"><div class="k">日程运行</div><div class="v">142</div><div class="d">较上周 +12%</div></div>
             <div class="stat"><div class="k">工具调用</div><div class="v">3.8k</div><div class="d">27 次/回合</div></div>
             <div class="stat"><div class="k">按需花费</div><div class="v">¥0</div><div class="d">未超额度</div></div>
           </div>
@@ -625,7 +625,7 @@ table.tb td:first-child{color:var(--dsw-alias-label-primary)}
             </select></div>
           <div class="drow"><span class="lab">时段</span><span class="val">09:00 – 22:00</span></div>
           <div class="drow"><span class="lab">上次主动</span><span class="val" id="lastProactive">今天 09:02</span></div>
-          <div class="note">只在「有值得说的变化」时才发消息：新结果、需要你拍板、班次失败。没事不打扰。</div>
+          <div class="note">只在「有值得说的变化」时才发消息：新结果、需要你拍板、日程失败。没事不打扰。</div>
         </div>
 
         <div class="dsec">
@@ -646,9 +646,9 @@ table.tb td:first-child{color:var(--dsw-alias-label-primary)}
         <div class="dsec">
           <h4>危险操作</h4>
           <div class="drow"><span class="lab">暂停这个 Bot</span>
-            <button class="btn sm" onclick="toast('已暂停：不再接新任务，班次仍可单独控制')">暂停</button></div>
+            <button class="btn sm" onclick="toast('已暂停：不再接新任务，日程仍可单独控制')">暂停</button></div>
           <div class="drow"><span class="lab">删除</span>
-            <button class="btn sm" style="color:var(--dsw-alias-state-danger)" onclick="toast('删除会移除配置与班次，会话保留')">删除</button></div>
+            <button class="btn sm" style="color:var(--dsw-alias-state-danger)" onclick="toast('删除会移除配置与日程，会话保留')">删除</button></div>
         </div>
       </div>
     </aside>
@@ -760,7 +760,7 @@ table.tb td:first-child{color:var(--dsw-alias-label-primary)}
 <!-- 命令面板 -->
 <div class="mask" id="maskPal" onclick="if(event.target===this)closePal()">
   <div class="pal" id="palBox">
-    <input id="palInput" placeholder="搜索 Bot、班次、技能，或输入命令…" oninput="renderPal(this.value)">
+    <input id="palInput" placeholder="搜索 Bot、日程、技能，或输入命令…" oninput="renderPal(this.value)">
     <div class="pal-list" id="palList"></div>
   </div>
 </div>
@@ -1177,7 +1177,7 @@ function showView(v){
   if (v === 'usage') renderUsage();
 }
 
-/* ═══ 班次 ═══ */
+/* ═══ 日程 ═══ */
 function renderRoutines(){
   $('routineList').innerHTML = ROUTINES.map(function(r){
     var b = botById(r.bot);
@@ -1194,7 +1194,7 @@ function renderRoutines(){
       '<dt>When to run</dt><dd>' + esc(r.when) + '（' + r.tz + '）</dd><dt>下次</dt><dd>' + (r.on ? '明天 09:00' : '已暂停') + '</dd></dl>' + wh +
       '<div class="runs"><div style="font-size:11px;color:var(--dsw-alias-label-caption);margin-bottom:3px">最近运行</div>' + runs + '</div>' +
       '<div class="acts"><button class="btn sm primary" onclick="toast(\'Test 会真跑一次，结果进会话\')">Test</button>' +
-      '<button class="btn sm" onclick="toast(\'编辑：Bot 会开一条「编辑你的班次：」的消息\')">编辑</button>' +
+      '<button class="btn sm" onclick="toast(\'编辑：Bot 会开一条「编辑你的日程：」的消息\')">编辑</button>' +
       '<button class="btn sm ghost" onclick="toast(\'删除后不可撤销\')">删除</button></div></div></div>';
   }).join('');
 }
@@ -1305,7 +1305,7 @@ function openDrawer(){
   $('drawerHead').innerHTML = av(b) + '<div style="min-width:0"><div style="font-size:14px;font-weight:600">' + esc(b.name) + '</div>' +
     '<div style="font-size:11.5px;color:var(--dsw-alias-label-tertiary)">' + esc(b.role) + '</div></div>' +
     '<button class="icon-btn" onclick="closeDrawer()">✕</button>';
-  var caps = ['文件读写','终端','浏览器(ego)','技能 6','班次 3','记忆','档案'];
+  var caps = ['文件读写','终端','浏览器(ego)','技能 6','日程 3','记忆','档案'];
   $('drawerCaps').innerHTML = caps.map(function(c){ return '<span class="chip2 on">' + c + '</span>'; }).join('');
   $('drawerStats').textContent = '会话 12 个 · 最近活跃 2 分钟前 · 本周用量 21.4M tokens';
   $('drawer').classList.add('show');
@@ -1394,7 +1394,7 @@ function renderPal(q){
     { l:'切到 Work 模式', r:function(){ setMode('work'); } },
     { l:'切到 Bot 模式', r:function(){ setMode('bot'); } },
     { l:'新建 Bot', r: openNew },
-    { l:'打开班次', r:function(){ showView('routines'); } },
+    { l:'打开日程', r:function(){ showView('routines'); } },
     { l:'打开技能', r:function(){ showView('skills'); } },
     { l:'编辑审批规则', r:function(){ showView('approvals'); } },
     { l:'查看用量', r:function(){ showView('usage'); } }

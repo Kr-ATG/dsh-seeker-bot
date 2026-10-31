@@ -41,6 +41,9 @@ import { readFileSync, statSync } from 'node:fs'
 import { resolve, sep, extname } from 'node:path'
 import { applyScreenshot } from './shot/index.ts'
 import { applyBotHost } from './bot/routes.ts'
+import { applyBotPrompt } from './bot/prompt.ts'
+import { applyBotModelPrefs } from './bot/models.ts'
+import { startProactiveScheduler } from './bot/proactive.ts'
 import { admitSpillPath, spillRoots } from './spill/index.ts'
 import { MATERIALIZE_ROUTE, handleMaterialize, parseGeneratedResult } from './spill/materialize.ts'
 import { applyDownloadRoutes, applyDownloadTool } from './download/index.ts'
@@ -53,7 +56,8 @@ import { applyMotionRoutes } from './motion/index.ts'
 import { applyTriadHost } from './triad/host.ts'
 import { applyProviderHub, providerHubServices } from './provider/index.ts'
 import { applyMailHost } from './mail/index.ts'
-import { applyToolsGate } from './tools-gate/index.ts'
+import { applyToolsGate, setGateDefaultEnabled } from './tools-gate/index.ts'
+import { getUiMode } from './bot/state.ts'
 import { applyBrowserOnDemand } from './browser-on-demand/index.ts'
 import { applyBrowserActivity } from './browser-activity/index.ts'
 import { applyRunningApps } from './running-apps/index.ts'
@@ -297,6 +301,23 @@ export function apply(ctx: Record<string, any>, config?: { mail?: Record<string,
   // 组件开关：登记宿主 context（host 各模块在 apply 期用 hostFeatureEnabled
   // 读 loader 行状态），再注册 /api/chat-flow/components 只读路由。
   initializeFeatures(ctx)
+
+  // ── Bot 岗位注入与模型偏好 ───────────────────────────────────────────
+  // 岗位段走 system-prompt/assemble 出口追加；模型偏好监听 session/created 并
+  // 在 Bot 会话创建时写入。两块都自带 try/catch，缺服务时静默降级。
+  try { applyBotPrompt(ctx as never) } catch (error) {
+    ctx.logger?.warn?.('[dsh-seeker-bot] bot prompt injection failed to mount: ' + String(error))
+  }
+  try { applyBotModelPrefs(ctx as never) } catch (error) {
+    ctx.logger?.warn?.('[dsh-seeker-bot] bot model prefs failed to mount: ' + String(error))
+  }
+  // 主动找我：60s 一轮，只在 Bot 开启 proactive 且出现新事件时通过
+  // sessionController.prompt 发一条消息（默认关闭，不会打扰）。
+  try {
+    ctx.effect(() => startProactiveScheduler(ctx as never), 'dsh-seeker-bot: proactive scheduler')
+  } catch (error) {
+    ctx.logger?.warn?.('[dsh-seeker-bot] proactive scheduler failed to mount: ' + String(error))
+  }
   ctx.inject(['webServer'], (webCtx: any) => {
     applyBotHost(webCtx)
     applyFeatureRoutes(webCtx)
@@ -460,7 +481,12 @@ export function apply(ctx: Record<string, any>, config?: { mail?: Record<string,
   // 冒出去，中断本插件后面所有 ctx.inject（triad 工作台全不挂）。模块内部
   // 已对缺失服务逐项自查，这里再加一层兜底，任何意外都只让闸门失效。
   try {
-    if (hostFeatureEnabled('input.tools-gate')) applyToolsGate(ctx as never, (config?.toolsGate ?? {}) as never)
+    if (hostFeatureEnabled('input.tools-gate')) {
+      applyToolsGate(ctx as never, (config?.toolsGate ?? {}) as never)
+      // Bot 模式下电脑操作默认开启（用户要求）；Work 模式保持默认全关。
+      // 运行时切模式由 /api/seeker-bot/ui/mode 再同步一次。
+      setGateDefaultEnabled('computer-use', getUiMode() === 'bot')
+    }
   } catch (error) {
     ctx.logger?.warn?.(
       `[dsh-seeker-bot] tools gate failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
