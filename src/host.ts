@@ -40,6 +40,7 @@
 import { readFileSync, statSync } from 'node:fs'
 import { resolve, sep, extname } from 'node:path'
 import { applyScreenshot } from './shot/index.ts'
+import { applyBotHost } from './bot/routes.ts'
 import { admitSpillPath, spillRoots } from './spill/index.ts'
 import { MATERIALIZE_ROUTE, handleMaterialize, parseGeneratedResult } from './spill/materialize.ts'
 import { applyDownloadRoutes, applyDownloadTool } from './download/index.ts'
