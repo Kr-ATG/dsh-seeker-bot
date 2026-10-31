@@ -44,6 +44,7 @@ import { applyBotHost } from './bot/routes.ts'
 import { applyBotPrompt } from './bot/prompt.ts'
 import { applyBotModelPrefs } from './bot/models.ts'
 import { startProactiveScheduler } from './bot/proactive.ts'
+import { applyBotAttention } from './bot/attention.ts'
 import { admitSpillPath, spillRoots } from './spill/index.ts'
 import { MATERIALIZE_ROUTE, handleMaterialize, parseGeneratedResult } from './spill/materialize.ts'
 import { applyDownloadRoutes, applyDownloadTool } from './download/index.ts'
@@ -317,6 +318,10 @@ export function apply(ctx: Record<string, any>, config?: { mail?: Record<string,
     ctx.effect(() => startProactiveScheduler(ctx as never), 'dsh-seeker-bot: proactive scheduler')
   } catch (error) {
     ctx.logger?.warn?.('[dsh-seeker-bot] proactive scheduler failed to mount: ' + String(error))
+  }
+  // 名册三态：会话 turn/start → working，turn/end → unread。
+  try { applyBotAttention(ctx as never) } catch (error) {
+    ctx.logger?.warn?.('[dsh-seeker-bot] bot attention failed to mount: ' + String(error))
   }
   ctx.inject(['webServer'], (webCtx: any) => {
     applyBotHost(webCtx)

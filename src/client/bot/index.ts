@@ -216,6 +216,10 @@ async function handleSelect(bot: BotRecord): Promise<void> {
   if (typeof existing === 'string' && existing !== '') {
     const outcome = openSessionById(existing)
     if (!outcome.ok) showStatus(outcome.reason ?? '打开会话失败', 'error')
+    // 打开即视为已读：把名册上的「未读」角标清掉。
+    if (fresh.status === 'unread' || fresh.status === 'needs-you') {
+      void patchBot(fresh.id, { status: 'idle' }).then(() => store.refresh())
+    }
     return
   }
   await createAndBind(fresh)
@@ -549,6 +553,13 @@ export function applyBotConsole(ctx?: unknown): void {
   const win = currentWindow()
   const unsubscribe = store.subscribe(() => { renderFromState() })
   const onRefresh = (): void => { void store.refresh() }
+  // 5s 轮询：host 由会话事件更新注意力状态，名册要能自己跟上（切回页面立即拉一次）。
+  const pollTimer = win === undefined ? 0 : win.setInterval(() => {
+    if (typeof document !== 'undefined' && document.hidden) return
+    void store.refresh()
+  }, 5000)
+  const onVisible = (): void => { if (typeof document !== 'undefined' && !document.hidden) void store.refresh() }
+  if (win !== undefined) win.addEventListener('visibilitychange', onVisible)
   if (win !== undefined) win.addEventListener('skb:refresh', onRefresh)
 
   let observer: MutationObserver | null = null
@@ -568,6 +579,8 @@ export function applyBotConsole(ctx?: unknown): void {
       unsubscribe()
       if (observer !== null) observer.disconnect()
       if (win !== undefined) win.removeEventListener('skb:refresh', onRefresh)
+      if (win !== undefined) win.removeEventListener('visibilitychange', onVisible)
+      if (pollTimer !== 0 && win !== undefined) win.clearInterval(pollTimer)
       if (statusTimer !== 0 && win !== undefined) win.clearTimeout(statusTimer)
     },
   }
