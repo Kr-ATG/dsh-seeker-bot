@@ -298,6 +298,7 @@ export function apply(ctx: Record<string, any>, config?: { mail?: Record<string,
   // 读 loader 行状态），再注册 /api/chat-flow/components 只读路由。
   initializeFeatures(ctx)
   ctx.inject(['webServer'], (webCtx: any) => {
+    applyBotHost(webCtx)
     applyFeatureRoutes(webCtx)
     // 生图画廊：spill 结果读取（exact 路由）。
     if (hostFeatureEnabled('host.generated-images')) {
