@@ -225,6 +225,46 @@ async function handleSelect(bot: BotRecord): Promise<void> {
   await createAndBind(fresh)
 }
 
+/**
+ * 首次使用自动建一个默认主 Bot。
+ *
+ * 产品口径：新装插件时侧栏不应该只有一句「还没有 Bot」；先给一个可改名的
+ * 「Seeker」，用户点开就能用。只做一次（localStorage 标记），用户删掉后不会
+ * 再被自动塞回来。创建失败会清掉标记，下次刷新还能重试。
+ */
+const DEFAULT_BOT_FLAG = 'skb-default-bot-seeded'
+
+async function ensureDefaultBot(): Promise<void> {
+  const win = currentWindow()
+  if (win === undefined) return
+  try {
+    if (win.localStorage.getItem(DEFAULT_BOT_FLAG) === '1') return
+  } catch { return }
+  const store = getBotConsoleStore()
+  const snapshot = store.getSnapshot()
+  if (!snapshot.ready) return
+  if (snapshot.bots.length > 0) {
+    try { win.localStorage.setItem(DEFAULT_BOT_FLAG, '1') } catch { /* ignore */ }
+    return
+  }
+  try { win.localStorage.setItem(DEFAULT_BOT_FLAG, '1') } catch { /* ignore */ }
+  const res = await createBot({
+    name: 'Seeker',
+    role: '主 Bot',
+    instructions: '你是「Seeker」，用户的主 Bot。先理解用户的目标，再决定自己做还是派给其他 Bot。',
+    shape: 'whale',
+    color: '#0f1115',
+  })
+  if (!res.ok) {
+    try { win.localStorage.removeItem(DEFAULT_BOT_FLAG) } catch { /* ignore */ }
+    return
+  }
+  await store.refresh()
+  const createdId = typeof res.data?.bot?.id === 'string' ? res.data.bot.id : ''
+  if (createdId !== '') store.select(createdId)
+  showStatus('已创建默认 Bot「Seeker」，点行尾齿轮可改名', 'notice')
+}
+
 async function submitNewBot(): Promise<void> {
   if (creating) return
   if (nameInputEl === null || roleInputEl === null || shapeSelectEl === null || colorInputEl === null) return
@@ -571,7 +611,7 @@ export function applyBotConsole(ctx?: unknown): void {
   }
 
   renderFromState()
-  void store.refresh()
+  void store.refresh().then(() => { void ensureDefaultBot() })
 
   holder[CONTROLLER_KEY] = {
     token,
