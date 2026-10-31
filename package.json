@@ -32,8 +32,6 @@
     "./packages/*": "./packages/*/index.js",
     "./packages/*/locale/zh.json": "./packages/*/locale/zh.json",
     "./packages/*/locale/en.json": "./packages/*/locale/en.json",
-    "./packages/*/icon.svg": "./packages/*/icon.svg",
-    "./packages/*/icon": "./packages/*/icon.svg",
     "./locale/zh.json": "./locale/zh.json",
     "./locale/en.json": "./locale/en.json",
     "./icon": "./icon.png"
