@@ -62,6 +62,7 @@ import { buildActivityGrid, activityColor, ACTIVITY_COLUMNS } from './triad/usag
 import { setClientCtx } from './client-ctx.ts'
 import { applyFeatureSwitches } from './features/index.tsx'
 import { applyModeSwitch } from './mode-switch/index.ts'
+import { applyPersonalAgent } from './personal/index.tsx'
 import { featureEnabledNow, featureMount } from './features/gate.tsx'
 
 /** 顶层服务依赖（client boot graph 用）。 */
@@ -180,6 +181,11 @@ export function apply(ctx: ClientContext): void {
   // 纯 DOM 模块：不请求任何 host 接口，模式记在 localStorage；Bot 模式下
   // 官方侧栏其余内容让位、只剩分段控件。见 mode-switch/index.ts 头注释。
   guarded(ctx, 'mode switch', () => { applyModeSwitch(ctx) })
+
+  // ── Personal Agent（Bot 模式的全屏应用）────────────────────────────────
+  // 挂载一个覆盖整个视口的 React 应用；Work 模式自动隐藏。数据与交互在本机
+  // localStorage，真实模型回复 / 期刊生图 / TTS / ASR 走 host /api/personal-agent。
+  guarded(ctx, 'personal agent', () => { applyPersonalAgent(ctx) })
 
   // ── 界面字体（最早应用）──────────────────────────────────────────────
   // 用户选中的字体必须**先于**其它一切挂载生效：它只改几个根 CSS 变量

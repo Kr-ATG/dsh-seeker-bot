@@ -13,6 +13,8 @@
 /** 客户端根上下文的最小可读面（避免 import 官方类型造成运行时依赖）。 */
 export interface ClientCtxLike {
   get?(name: string): any
+  /** DSH 客户端 Remote 命名空间（speech / settings / credentials 等）。 */
+  remote?: any
 }
 
 let registered: ClientCtxLike | null = null

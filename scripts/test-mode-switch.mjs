@@ -3,17 +3,16 @@
  *
  * 不启动浏览器：用最小 DOM 桩在 node 里跑真源码（esbuild 现场打包）。
  * 覆盖：
- *  1. 模式恒为 Work：默认 Work；即使 localStorage 里存过 bot，读回也是 work
- *     且那条旧记录被就地改写成 work（2026-10-31 用户要求「默认只能在 work」）；
+ *  1. 默认 Work；localStorage 存过 bot 时读回 bot（2026-11-01 Bot 模式重新启用）；
  *  2. 分段控件挂在品牌行之后，两个按钮 / 选中态 / aria-selected 正确；
- *  3. Bot 那一半是禁用按钮：disabled + aria-disabled + title 有说明，
- *     且**没有点击监听器** —— 用鼠标、键盘、或直接调 setUiMode('bot') 都改不了模式；
- *  4. 外部把 body 的 data-skb-mode 改成 bot 也会被下一次对账纠回 work；
+ *  3. Bot 按钮可点：点击后 body/data 模式、侧栏让位与落盘值都切到 bot；
+ *     setUiMode('work'/'bot') 可自由切换；
+ *  4. 外部把 body 的 data-skb-mode 篡改，下一次对账按当前模式纠正；
  *  5. 对账幂等：MutationObserver 回调连刷 100 次不再创建 / 移动任何节点
  *     （原 Bot 控制台就是在这里死循环的，必须钉死）；
  *  6. 官方侧栏重建后宿主能补挂回来；
  *  7. live reload 重复 apply 不会出现两份宿主，样式表只有一份；
- *  8. 源码守卫：不允许再出现 Bot 接口调用。
+ *  8. 源码守卫：mode-switch 本身不请求任何接口、不引用旧 src/client/bot。
  *
  * Usage: node scripts/test-mode-switch.mjs
  */
@@ -212,24 +211,21 @@ await build({
 })
 const mod = await import(pathToFileURL(outfile).href)
 
-/* ── 1. 模式恒为 Work（Bot 已关闭）───────────────────────────────────── */
-console.log('[mode-switch] 模式恒为 work')
+/* ── 1. 默认 Work / Bot 可切换（2026-11-01 Bot 模式重新启用）───────────── */
+console.log('[mode-switch] 默认 work / Bot 可切换')
 {
   check('默认模式是 work', mod.readUiMode() === 'work', mod.readUiMode())
-  /*
-   * 关键回归：早先版本可能已经把 bot 写进 localStorage。只返回 work 不够——
-   * 那条脏记录必须被就地改写，否则下一次启动仍会读到 bot 再"切回来"。
-   */
   storage.setItem('dsh-seeker-bot.ui-mode', 'bot')
-  check('存过 bot 后仍读回 work', mod.readUiMode() === 'work', mod.readUiMode())
-  check('脏记录被改写成 work', storage.getItem('dsh-seeker-bot.ui-mode') === 'work',
+  check('存过 bot 后读回 bot', mod.readUiMode() === 'bot', mod.readUiMode())
+  check('bot 记录保持原样', storage.getItem('dsh-seeker-bot.ui-mode') === 'bot',
     storage.getItem('dsh-seeker-bot.ui-mode'))
   check('存储键是 dsh-seeker-bot.ui-mode', storage.getItem('dsh-seeker-bot.ui-mode') !== null)
-  mod.writeUiMode('bot')
-  check('强行写 bot 也不影响读回', mod.readUiMode() === 'work', mod.readUiMode())
   mod.writeUiMode('work')
   check('写回 work 后读回 work', mod.readUiMode() === 'work')
-  check('Bot 模式开关是关闭的', mod.BOT_MODE_ENABLED === false, String(mod.BOT_MODE_ENABLED))
+  mod.writeUiMode('bot')
+  check('写 bot 后读回 bot', mod.readUiMode() === 'bot')
+  check('Bot 模式开关是打开的', mod.BOT_MODE_ENABLED === true, String(mod.BOT_MODE_ENABLED))
+  mod.writeUiMode('work')
 }
 
 /* ── 2. 挂载与分段结构 ───────────────────────────────────────────────── */
@@ -254,42 +250,32 @@ console.log('[mode-switch] 挂载与分段结构')
   check('样式表已注入', style !== null && style.textContent.includes('.skb-seg__thumb'))
 }
 
-/* ── 3. Bot 那一半点不动（2026-10-31 用户要求）───────────────────────── */
-console.log('[mode-switch] Bot 不可点')
+/* ── 3. Bot 那一半可点（2026-11-01 重新启用）────────────────────────── */
+console.log('[mode-switch] Bot 可点')
 {
   const host = doc.getElementById('skb-bot-console-host')
   const buttons = host.querySelectorAll('.skb-seg__btn')
   const botBtn = buttons[1]
 
-  check('Bot 按钮 disabled', botBtn.disabled === true, String(botBtn.disabled))
-  check('Bot 按钮 aria-disabled', botBtn.getAttribute('aria-disabled') === 'true',
-    String(botBtn.getAttribute('aria-disabled')))
-  check('Bot 按钮有悬浮说明', typeof botBtn.title === 'string' && botBtn.title.includes('Work'),
-    String(botBtn.title))
-  /*
-   * 最关键的一条：禁用按钮**不注册点击监听器**。只靠 disabled 属性的话，
-   * 别处一旦冒出一个程序化的 button.click() 或换了别的前端 shell，模式照样能被切走；
-   * 没有监听器才是物理上不可达。
-   */
-  check('Bot 按钮没有点击监听器', (botBtn.listeners.get('click') ?? []).length === 0,
-    String((botBtn.listeners.get('click') ?? []).length))
-
-  // 真点一次：模式、属性、落盘值一个都不许变。
+  check('Bot 按钮可点', botBtn.disabled !== true && (botBtn.listeners.get('click') ?? []).length > 0)
   storage.setItem('dsh-seeker-bot.ui-mode', 'work')
   botBtn.click()
-  check('点 Bot 后 body 仍是 work', doc.body.getAttribute('data-skb-mode') === 'work',
+  check('点 Bot 后 body 变为 bot', doc.body.getAttribute('data-skb-mode') === 'bot',
     String(doc.body.getAttribute('data-skb-mode')))
-  check('点 Bot 后品牌行没让位', !logo.hasAttribute('data-skb-native-hide'))
-  check('点 Bot 后工作区行没让位', !workspaces.hasAttribute('data-skb-native-hide'))
-  check('点 Bot 后工作台导航没让位', !navSections.hasAttribute('data-skb-native-hide'))
-  check('点 Bot 后分段仍在 work', host.querySelector('.skb-seg').getAttribute('data-mode') === 'work')
-  check('点 Bot 后模式没落盘成 bot', storage.getItem('dsh-seeker-bot.ui-mode') !== 'bot',
+  check('点 Bot 后品牌行让位', logo.hasAttribute('data-skb-native-hide'))
+  check('点 Bot 后工作区行让位', workspaces.hasAttribute('data-skb-native-hide'))
+  check('点 Bot 后工作台导航让位', navSections.hasAttribute('data-skb-native-hide'))
+  check('点 Bot 后分段在 bot', host.querySelector('.skb-seg').getAttribute('data-mode') === 'bot')
+  check('点 Bot 后模式落盘成 bot', storage.getItem('dsh-seeker-bot.ui-mode') === 'bot',
     String(storage.getItem('dsh-seeker-bot.ui-mode')))
 
-  // 绕过 UI 直接调 setUiMode('bot')：第二道闸也要拒。
+  // 直接调 setUiMode 也能切回 / 切走（不再有第二道闸）。
+  mod.setUiMode('work')
+  check('setUiMode(work) 生效', mod.currentUiMode() === 'work')
+  check('setUiMode(work) 后 body 恢复 work', doc.body.getAttribute('data-skb-mode') === 'work')
   mod.setUiMode('bot')
-  check('setUiMode(bot) 被拒绝', mod.currentUiMode() === 'work', mod.currentUiMode())
-  check('setUiMode(bot) 后 body 仍是 work', doc.body.getAttribute('data-skb-mode') === 'work')
+  check('setUiMode(bot) 生效', mod.currentUiMode() === 'bot')
+  mod.setUiMode('work')
 }
 
 /* ── 4. 外部把 body 属性改成 bot，对账纠回 work ──────────────────────── */

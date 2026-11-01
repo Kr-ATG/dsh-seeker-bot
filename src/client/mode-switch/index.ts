@@ -1,22 +1,14 @@
 /**
- * dsh-seeker-bot — 侧栏 Work / Bot 模式切换（Bot 功能已移除，只保留这枚控件）。
+ * dsh-seeker-bot — 侧栏 Work / Bot 模式切换。
  *
- * ## 为什么只剩这一个文件
+ * ## 当前行为（2026-11-01 起 Bot 模式重新开放）
  *
- * 原「Bot 控制台」整块能力（名册 / 新建 Bot / 欢迎卡 / 详情抽屉 / 右栏面板 /
- * 日程 / 主动找我 / 岗位提示词注入 / 模型偏好 / host /api/seeker-bot 路由）已按
- * 用户要求全部删除。侧栏顶部那枚 Work / Bot 分段控件不随功能一起删——它是产品
- * 外壳的一部分，现在只负责切换侧栏形态，不承载任何 Bot 数据，也不发任何请求。
- *
- * ## 现在的行为（2026-10-31 用户要求：Bot 不可点、默认只能停留在 Work）
- *
- *  · 分段控件原样显示，但 **Bot 那一半被禁用**：置灰、不可聚焦、点它没有任何
- *    反应，悬浮提示写明原因。控件留着是因为它是产品外壳的一部分（用户没有要求
- *    删掉它），只是不再可达。
- *  · 模式**恒为 Work**：启动时不读回 bot（旧版本存下的 bot 记录当场改写成 work，
- *    避免刷新后侧栏闪一下空白），切换入口对 bot 全部拒绝，body 上的
- *    `data-skb-mode` 只会是 work。
- *  · 官方侧栏因此在任何时刻都保持原样；不请求任何 host 接口。
+ *  · 分段控件在品牌行下方：Work 回到官方工作台，Bot 打开本插件的全屏
+ *    Personal Agent（左侧 Bot 名册 + 中部聊天 + 右侧详情）。
+ *  · 模式写入 localStorage 的 `dsh-seeker-bot.ui-mode`，刷新后保持。
+ *  · body 上的 `data-skb-mode` 是唯一判据：Work 时官方侧栏原样显示；Bot 时
+ *    官方侧栏内容让位（全屏应用会覆盖整个视口）。
+ *  · 本控件本身不请求任何 host 接口。
  *
  * ## 结构安全（沿用原 Bot 控制台踩过的坑）
  *
@@ -42,14 +34,13 @@ export const UI_MODE_KEY = 'dsh-seeker-bot.ui-mode'
 export const MODE_ATTR = 'data-skb-mode'
 
 /**
- * Bot 模式是否还可达。
+ * Bot 模式开关（2026-11-01 重新开放 Personal Agent 后为 true）。
  *
- * 2026-10-31 用户要求「把这个 bot 不让点击，默认只能在 work 界面」——所以这里
- * 是**硬关闭**，不是默认值：{@link setUiMode} 对 bot 直接拒绝、{@link readUiMode}
- * 无论存过什么都返回 work。将来要重新开放时把它改回 true 即可，其余代码不用动
- * （Bot 模式的分段/隐藏样式都还在）。
+ * 置为 false 会回到「Bot 不可点、模式恒为 Work」的旧行为：{@link setUiMode}
+ * 对 bot 直接拒绝、{@link readUiMode} 无论存过什么都返回 work。Bot 模式的分段
+ * 与侧栏让位样式始终保留，改常量即可切换，不影响其它代码。
  */
-export const BOT_MODE_ENABLED = false
+export const BOT_MODE_ENABLED = true
 
 /** Bot 按钮的悬浮说明（禁用态下告诉用户为什么点不动）。 */
 const BOT_DISABLED_TITLE = 'Bot 模式暂不可用，当前固定在 Work'

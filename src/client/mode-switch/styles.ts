@@ -28,15 +28,29 @@ body[data-skb-mode="work"] #skb-bot-console-host {
   display: block !important;
   flex: 0 0 auto;
 }
+/*
+ * 水平内边距交给 .skb-seg 的 margin：Work 侧栏根有 8px padding，段再留 6px，
+ * 左边距正好 14px —— 与 Bot 侧栏的 .pa-mode-seg（margin 14px）对齐，
+ * 切换模式时分段不会左右跳。
+ */
 body[data-skb-mode="work"] .skb-console {
   height: auto;
-  padding: 8px 10px 2px;
+  padding: 8px 0 2px;
   background: transparent;
   overflow: visible;
 }
 
 /* ── Bot 模式：官方侧栏子元素让位，只留这枚分段控件（侧栏空白）──────── */
 body[data-skb-mode="bot"] [data-skb-native-hide="true"] { display: none !important; }
+/*
+ * Bot 模式下降级态（Personal Agent 没渲染出来时，侧栏里只剩这枚分段）：
+ * 顶部留出与 .pa-sidebar__top 等高的 66px，分段仍落在 y=74，
+ * 与 Bot 应用内的分段、以及 Work 模式的分段三处对齐，不会突然贴顶。
+ */
+body[data-skb-mode="bot"] .skb-console {
+  /* 侧栏根有 6px padding，再补 68px，分段顶边落在 74 —— 与另两处一致。 */
+  padding: 68px 0 10px;
+}
 
 /*
  * Bot 模式下顺带把对话增强（kr-chat）的人物卡头藏掉（2026-10-31 补）。
@@ -79,49 +93,63 @@ body[data-skb-mode="bot"] [data-slot="sidebar"] .hHd-Xa_root {
   -webkit-font-smoothing: antialiased;
 }
 
-/* ── Work / Bot 分段控件（白底选中 + 1px 边框 + 轻阴影）──────────────── */
+/*
+ * ── Work / Bot 分段控件 ──────────────────────────────────────────────
+ *
+ * 规格与 Bot 侧栏的 .pa-mode-seg（src/client/personal/base.css.ts）逐项对齐：
+ * 容器 padding 4 / 圆角 13 / gap 3，按钮高 34 / 圆角 10 / 字号 14，
+ * 深色槽 #2a2b2e + 深色滑块 #0b0b0c，浅色槽 #dfe2e7 + 白色滑块。
+ * 改这里记得同步改那边，反之亦然 —— 两个界面切来切去不能有视觉差。
+ *
+ * 结构沿用滑块（thumb）而不是给按钮上底色：位移有过渡动画，切换更顺；
+ * 视觉结果与 .pa-mode-seg 的选中块一致。
+ */
 .skb-seg {
   position: relative;
   display: flex;
   flex: none;
+  gap: 3px;
   margin: 0 6px 4px;
-  padding: 3px;
+  padding: 4px;
   box-sizing: border-box;
-  border-radius: 10px;
-  background: var(--dsw-alias-interactive-bg-hover, #F2F2F2);
+  border-radius: 13px;
+  background: #2a2b2e;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .035);
 }
 .skb-seg__thumb {
   position: absolute;
-  top: 3px;
-  bottom: 3px;
-  left: 3px;
-  width: calc(50% - 3px);
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  /* 容器内宽 = 100% - 8px(padding)；两半各 (100% - 8px - 3px) / 2 */
+  width: calc(50% - 5.5px);
   box-sizing: border-box;
-  border: 1px solid var(--dsw-alias-border-l2, #E6E6E6);
-  border-radius: 7px;
-  background: var(--dsw-alias-bg-base, #FFFFFF);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .06);
+  border-radius: 10px;
+  background: #0b0b0c;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .55), inset 0 1px 0 rgba(255, 255, 255, .07);
   transition: transform .22s cubic-bezier(.22, .8, .24, 1);
   pointer-events: none;
 }
-.skb-seg[data-mode="bot"] .skb-seg__thumb { transform: translateX(100%); }
+.skb-seg[data-mode="bot"] .skb-seg__thumb { transform: translateX(calc(100% + 3px)); }
 .skb-seg__btn {
   position: relative;
   z-index: 1;
   flex: 1;
-  height: 30px;
+  height: 34px;
   padding: 0;
   border: 0;
-  border-radius: 7px;
+  border-radius: 10px;
   background: transparent;
-  color: var(--dsw-alias-label-secondary, #8C8C8C);
+  color: #a1a4aa;
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: .01em;
   cursor: pointer;
-  transition: color .16s ease;
+  transition: color .15s ease;
 }
-.skb-seg__btn:hover { color: var(--dsw-alias-label-primary, #1F1F1F); }
-.skb-seg__btn.on { color: var(--dsw-alias-label-primary, #1F1F1F); font-weight: 500; }
+.skb-seg__btn:hover { color: #d8dade; }
+.skb-seg__btn.on { color: #ffffff; }
 
 /*
  * 禁用态（2026-10-31 用户要求「Bot 不让点击」）。
@@ -132,28 +160,36 @@ body[data-skb-mode="bot"] [data-slot="sidebar"] .hHd-Xa_root {
  * 但写在前面，不钉就会被 hover 拉亮，看起来又能点了。
  */
 .skb-seg__btn:disabled {
-  color: var(--dsw-alias-label-tertiary, #ADADAD);
+  color: var(--dsw-alias-label-tertiary, #6b7280);
   cursor: not-allowed;
   transition: none;
 }
-.skb-seg__btn:disabled:hover { color: var(--dsw-alias-label-tertiary, #ADADAD); }
-body[data-ds-dark-theme] .skb-seg__btn:disabled,
-body[data-ds-dark-theme] .skb-seg__btn:disabled:hover {
-  color: var(--dsw-alias-label-tertiary, #6B7280);
+.skb-seg__btn:disabled:hover { color: var(--dsw-alias-label-tertiary, #6b7280); }
+
+/* ── 浅色主题：槽变浅灰、滑块变白（与 .pa-mode-seg 的 light 覆盖同值）────── */
+body:not([data-ds-dark-theme]) .skb-seg {
+  background: #dfe2e7;
+  box-shadow: none;
+}
+body:not([data-ds-dark-theme]) .skb-seg__thumb {
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .12);
+}
+body:not([data-ds-dark-theme]) .skb-seg__btn { color: #5d6269; }
+body:not([data-ds-dark-theme]) .skb-seg__btn:hover { color: #14161a; }
+body:not([data-ds-dark-theme]) .skb-seg__btn.on { color: #14161a; }
+body:not([data-ds-dark-theme]) .skb-seg__btn:disabled,
+body:not([data-ds-dark-theme]) .skb-seg__btn:disabled:hover {
+  color: var(--dsw-alias-label-tertiary, #adadad);
 }
 
-/* ── 暗色主题：同一层级关系切换到 #1B1B1C / #1C1F24 / #E6E7E9 ─────── */
+/* ── 暗色主题：Bot 模式侧栏底色（分段配色已是深色基准，这里只收底色）──── */
 body[data-ds-dark-theme][data-skb-mode="bot"] [data-slot="sidebar"] .hHd-Xa_root {
   background: #1B1B1C;
 }
 body[data-ds-dark-theme] .skb-console {
   background: #1B1B1C;
   color: var(--dsw-alias-label-primary, #E6E7E9);
-}
-body[data-ds-dark-theme] .skb-seg { background: var(--dsw-alias-interactive-bg-hover, #1F2228); }
-body[data-ds-dark-theme] .skb-seg__thumb {
-  background: var(--dsw-alias-bg-base, #262A31);
-  border-color: var(--dsw-alias-border-l2, #333842);
 }
 `
 

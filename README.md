@@ -48,6 +48,7 @@ bundles 层，不用手改配置文件。
 | 换机后账号密码 / 记忆 / 技能 / MCP / 供应商与密钥一起跟过来 | 工作台**[同步设置](#同步设置)** → 勾选要漫游的资产，推自己的 GitHub 私库（端侧加密） |
 | 管 API Key / 代理 / 生图模型 | 官方设置弹窗 → **供应商** |
 | 搜索额度打满了，自动换一家继续搜 | [网页搜索降级链](#网页搜索降级链额度没了自动换一家)（AnySearch → Tavily → DeepSeek） |
+| 想要一整个 Personal Agent 团队：主 Bot + 子 Bot + 群聊 + 日记 + 通话 | 侧栏顶部 **Work / Bot** 切到 Bot → [Personal Agent](#personal-agentbot-模式) |
 
 ---
 
@@ -380,15 +381,157 @@ blur(10px) 显影、下面一层点阵同步淡出），不是硬切。回合收
 ### 顶部的 Work / Bot 分段控件
 
 品牌行下面那枚「Work | Bot」分段控件来自本插件（`src/client/mode-switch/`）。
+2026-11-01 起 **Bot 模式重新开放**：点 Bot 会切到全屏 Personal Agent（见下一节），
+点应用里的 Work 回到官方工作台。模式记在 `localStorage` 的 `dsh-seeker-bot.ui-mode`，
+刷新后保持。
 
-**2026-10-31 起 Bot 那一半是关着的**：按钮置灰、`cursor: not-allowed`、悬浮提示
-写着「Bot 模式暂不可用，当前固定在 Work」，点它没有任何反应，键盘也聚焦不到。
-模式因此**恒为 Work**——启动时不读回 bot（localStorage 里若存着早先版本留下的
-bot 记录，当场改写成 work），`setUiMode('bot')` 也会被直接拒绝。官方侧栏在任何
-时刻都保持原样，插件也不为这枚控件请求任何 host 接口。
+这枚控件与 Bot 应用左侧栏里的 `.pa-mode-seg` 是**同一套视觉规格**（容器 4px 内边距 /
+13px 圆角 / 3px 缝，按钮 34px 高 / 10px 圆角 / 14px 字），位置也钉在同一处：
+左边距 14px、顶边 y=74（品牌行 66px 底 + 8px 间距）。两个模式来回切时，分段不会
+跳尺寸也不会跳位置；改一边记得同步另一边。
 
-要重新开放时，把 `src/client/mode-switch/index.ts` 里的 `BOT_MODE_ENABLED` 改成
-`true` 即可——Bot 模式的分段态与侧栏让位样式都还在，其余代码不用动。
+---
+
+## Personal Agent（Bot 模式）
+
+Bot 模式是一个覆盖整个 DSH Web 视口的自绘应用，参考截图逐项复刻：
+左侧 248px 的 Bot 名册、中间微信式聊天、右侧 300px 的 Bot 详情栏。
+
+**首次进入只有主 Bot**：不再预置任何演示子 Bot、群聊、消息、记忆、例行任务或期刊；
+旧版本留在 localStorage 里的七个演示 Bot 与示例数据会在第一次加载时自动迁移清理，
+只保留主 Bot 和用户自己创建的内容。
+
+![Personal Agent 主界面](docs/shots/personal-agent-home.png)
+
+### 布局与交互
+
+| 区域 | 内容 |
+|---|---|
+| 左侧栏 | 顶部「+」（新建 Bot）→ Work/Bot 切换器 → 主 Bot（48px 头像 + 在线点）→ 子 Bot 分组 → 群聊 → 底部「期刊日记 / 设置」 |
+| 聊天区 | 会话头（44px 头像 / 名称 / 角色 / 电话呼叫 / 更多）、消息流、输入框（附件 / 粘贴图片 / 白色圆形语音或发送键；录音时整块切换成语音条） |
+| 右侧栏 | 详情 / 资料库 / 电脑三个 tab：任务卡、工具权限、主动询问、例行任务、主 Bot 的子 Bot 管理（有子 Bot 时才出现）；记忆检索；文件树 + 终端 |
+| 弹层 | 新建 Bot、群聊设置、新建群聊、例行任务、设置、期刊阅读器、通话卡片 |
+
+- **自适应主题**：默认「跟随」DSH 当前主题（读 `body[data-ds-dark-theme]` 与
+  body 实际底色，系统深浅切换也会同步）；设置里可强制「深色 / 浅色」。所有面板、
+  气泡、输入框、弹窗与右栏都有对应浅色 token，不是只换背景色。
+- **主 Bot 控制子 Bot**：主 Bot 右栏「子 Bot 管理」可暂停/启用、改名、移动分组、删除；
+  子 Bot 可自主在各自会话里主动询问、跑例行任务、维护独立记忆。
+- **分组**：设置弹窗里可新建 / 改名 / 删除分组；每个子 Bot 行悬浮 `...` 可移动到任一分组。
+- **群聊**：左侧「群聊」标题旁的 + 新建群聊（选成员 + 起名）；群内可 `@成员`，
+  成员用各自模型回复并以发送者头像/名字标记；群聊设置支持「跟随各自 Bot / 全组统一模型」。
+- **主动询问**：每个 Bot 右栏「主动询问」可开关；点「现在问一次」立即发一条带选项的询问；
+  新建 Bot 创建后由真实模型按岗位发第一条自我介绍与问题。
+- **例行任务**：每个 Bot 都可新建（每天 / 每 2 小时 / 每周一）、启停、立即运行、删除；
+  页面开着时每 30 秒检查到期任务并真实发消息。
+- **记忆隔离**：每个 Bot 的「资料库」只列自己的记忆；主 Bot 的资料库列出全部 Bot 的记忆并标注来源。
+- **期刊日记**：到达第二天 0:00–8:00 且连续 30 分钟没有任何用户主动对话时自动生成前一天的
+  总结日记；期刊为米白纸张 + 衬线标题 + 16:9 宽幅配图（调用生图模型，失败回退程序化封面）。
+  侧栏「期刊日记」可翻期、查看规则、立即检查或模拟 07:30 触发。
+
+  ![期刊日记](docs/shots/personal-agent-journal.png)
+- **语音输入（与 Work 模式同链路）**：输入框麦克风不是 `webkitSpeechRecognition`，
+  而是 MediaRecorder 录音 → 16 kHz 单声道 WAV → `ctx.remote.speech.transcribe`
+  （本机 SenseVoice，与 Work 模式同一条 ASR）。录音时整块输入框换成一条语音条：
+  左「X」取消、中间一排实时音量波形（静音时是点阵基线，说话时跟着起伏）、
+  右「停止方块 + 发送箭头」；停止后先转写（「正在转写…」），转写完成即**收起语音条**
+  并把文字并入输入框——不自动发送，确认后用输入框的发送键发出；点 X 随时丢弃。
+
+  ![语音输入条](docs/shots/personal-agent-voice-bar.png)
+- **图片输入**：输入框里直接 Ctrl+V 粘贴截图（或点「+」选图片）→ 缩略图预览 → 随消息发出。
+  图片先经 `POST /api/personal-agent/upload` 落盘到 bot 工作区的 `uploads/`，消息里只存
+  同源 URL（`/file?path=…`），刷新、重开都还在；宿主会把图片路径写进这一轮的 user 消息
+  提示，bot 需要看内容时自己 `read_image`。支持 PNG / JPEG / GIF / WebP，单张上限 12MB。
+
+  ![图片输入](docs/shots/personal-agent-image-input.png)
+- **通话是真实链路**：麦克风录音 → DSH ASR → 该 Bot 配置的真实模型回复（宿主
+  `/api/personal-agent/reply`）→ Edge TTS 播放；弹窗里能看到「正在思考」、逐条转写，
+  也可直接打字作为麦克风不可用时的兜底。最小化收起到右栏顶部，挂断后写一条默认折叠的
+  「语音通话」消息到该 Bot 会话，展开可见来源、发生时间、最终时长与逐条转写。
+- **对话内交互 UI**：选项 / 按钮 / 表单卡片可直接操作；提交后追加用户消息、Bot 继续回复，
+  部分表单会真实创建例行任务；卡片标记「已提交」防重复。
+- **动效**：每条消息上滑入场（`pa-rise` 260ms）、弹窗缩放淡入、通话呼吸波纹、列表选中态 120ms。
+
+### 回复形态：Bot 是聊天，不是工作台
+
+Bot 跑的是宿主完整的 agent loop（工具、技能、MCP 全都在），但**输出形态按对话设计**，
+和 Work 模式刻意不一样：
+
+- **正文精炼**：1–3 句、最多两小段，先结论后补充；不用加粗伪标题、多级清单、表格、
+  代码块，不贴文件路径 / 命令 / 参数（用户明确说「详细说 / 报告 / 清单 / 代码」才展开）。
+- **过程不进正文**：工具调用块在 Bot 消息里默认不渲染（`generate_image` 例外，出图卡直接
+  落在对话流里），正文最多一句「我看了下」——过程属于界面，不属于消息。
+- **Work 专属提示段被摘掉**：每个 Bot 的 agent 作用域里会过滤 `team:policy`（Agent Teams
+  协作纪律）、`ui:deliverable-file-references`（present / 文件路径链接规则）、
+  `app:web-surface`（Web GUI 与 HMR 说明）、`harness:source`（实现 checkout 位置）。
+  实现在 `src/host/personal/agent.ts` 的 `trimWorkOnlyPrompt()`：全局段用同名空 section
+  覆盖，`team:policy` 走 `system-prompt/assemble` waterfall 过滤（它是 agent 作用域注册的，
+  同名覆盖会撞注册表，实测会把建会话流程带崩）。实测 bot 的系统提示从 ~8.7k 字符降到 ~4.3k。
+- **一份契约两个入口**：契约写在 `buildBotPrompt()`；agent 不可用时的降级路径
+  （`/reply` 的 chat 补全）用同一份措辞，避免「同一个 bot 换个入口就换了语气」。
+
+### 撤回一条消息（连上下文和记忆一起）
+
+用户消息气泡 hover / 触屏常显「↺ 撤回」，确认后同时做三件事：
+
+1. **删本地消息**：这条用户消息 + 它之后到下一条用户消息之前的全部消息（含 pending、
+   群聊里同轮多个 Bot 的回复），原位置插一条「你撤回了一条消息」系统提示；
+2. **删记忆**：该时间窗口内、这一轮参与 Bot 记下的记忆条目（`MemoryEntry`）；
+3. **撤上下文**：`POST /api/personal-agent/recall` → `src/host/personal/recall.ts` 在
+   agent 会话的 surface 上追加一条 `replace` 事件，把该轮所有节点（用户消息 + 注入上下文
+   + assistant 回复 + 工具结果）整体遮蔽。日志保留，之后的模型请求重建历史时看不到它们。
+
+实现要点（踩过的坑都写在代码注释里）：
+
+- Session 日志 append-only，但 surface 支持 `replace`（compaction 同一机制）；
+  遮蔽区间必须覆盖每一个 surface 节点（`sourceEventSeqs`），否则宿主校验拒绝。
+- 找目标消息只认 `source.kind === 'user'`：宿主会往 user 角色塞注入上下文
+  （agent-instructions / runtime-context / system-reminder），按它们切区间会把撤回缩成一条。
+- 撤回节点是 `developer/message`，`source.kind` 必须写成 `plugin:dsh-seeker-bot`；
+  v3 的 `plugin` 包装会被 v4 落盘校验拒绝，表现为「当场生效、重启后又想起来了」。
+- append 后必须 `sessions.flush()`：不落盘的话，下一次 turn 会被 pre-step 判成 blocked。
+
+> 语义边界：撤回只影响**之后的模型上下文**。模型在产生那条回复的那一步已经看过原文，
+> 这里保证的是「后续对话不再带着它」。
+
+### 数据与真实能力
+
+- 前端状态持久化在 `localStorage` 的 `pa:state:v1`（Bot / 群聊 / 消息 / 记忆 / 任务 / 期刊）。
+- Host 路由 `/api/personal-agent` 提供九项真实能力（任一项失败都自动回退本地引擎）：
+  - `POST /reply`：用宿主 `ctx.llm.stream` 按该 Bot 配置的 provider/model 生成回复；
+  - `POST /reply/stream`：同一条回复的 SSE 流（`text` / `tool` / `error` / `done`），
+    Bot 对话据此实时显示正文与工具进度（生图 / 生视频占位卡靠它出现）；
+  - `POST /journal/image`：调用当前生图模型生成 16:9 期刊配图，落盘到
+    `~/.dsh/storages/dsh-seeker-bot/personal-agent/journals/`；
+  - `POST /tts`：本机 `edge-tts` 生成 mp3（Edge 在线语音）；
+  - `POST /asr`：宿主 `speechController`（本机 SenseVoice）转写；
+  - `GET /file`：bot 工作区里的媒体文件（生图 / 生视频落盘产物与正文里的文件）。相对
+    路径以 bot 工作区为基准，图片 24MB、其它媒体 256MB；视频 / 音频支持 HTTP Range
+    （`206` + `content-range`，浏览器可拖动进度条），`mov` 按 `video/mp4` 声明。
+  - `GET /office/info|page|pdf`：Office / PDF 预览（复用 `src/office` 的 LibreOffice
+    页图与 PDF 转换），准入与 `/file` 同一套工作区闸门。
+- **生图 / 生视频实时卡（与 Work 模式一致）**：bot 调 `generate_image` 时，对话流里先出现
+  按本次图片比例 / 张数呼吸的点阵占位；工具结果一回来（含被 spill 的大结果——host
+  会读回全文、把 base64 解码落盘到 `<bot 工作区>\_tmp\generated-images\`），同位置
+  换成真实图片，点开是大图。`generate_video` 同理：生成中显示「正在生成视频」点阵 +
+  实时秒数 + 提示词；结果里有视频 URL / b64 就落盘到 `_tmp\generated-media\` 并内嵌
+  `<video>` 播放，网关返回异步任务时显示「视频任务已创建」（id + 状态）。
+- **视频与 Office 产出物**：模型最终回复里写到的本地文件（`_tmp/report.docx`、
+  `D:\...\x.pdf`、`_tmp/demo.mp4` 等，markdown 链接或裸路径都认）会渲染成产出物卡：
+  图标 + 文件名 + 类型 + 大小 + 预览 / 下载。PDF 直接内嵌浏览器查看器，Office 先出首页
+  页图、展开后转 PDF 预览，视频 / 音频用原生 `<video>` / `<audio>`；工具结果里识别到的
+  文件（`present` 的 path、pwsh / run_code 落盘）也会以同样卡片出现。正文已经贴了图片
+  时工具卡不再重复显示同一张图，图片过期（`_tmp` 被清理）则显示「图片已过期」而不是裂图。
+- 独立演示页（不依赖 DSH，数据存 localStorage）：
+
+```bash
+npm run build:personal-demo
+# 打开 dist/personal-agent/index.html
+```
+
+> 独立演示页没有 DSH 宿主：模型回复/ASR/TTS 会回退到本地演示引擎，界面与交互仍可完整体验；
+> 需要真实模型、语音识别与通话语音时，请在 DSH 应用内使用 Bot 模式（并刷新一次页面）。
+> 参考素材里没有给出新建 Bot / 通话 / 期刊三种界面的原图，这三块按截图同一套设计语言延伸实现。
 
 ### 二级菜单：手风琴
 

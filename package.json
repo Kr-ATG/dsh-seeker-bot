@@ -1,7 +1,7 @@
 {
   "name": "dsh-seeker-bot",
   "version": "0.1.0",
-  "description": "DeepSeek Harness 的对话体验增强套件：思考折叠、工具调用聚合、html/iu 卡片、对话截图与下载，外加供应商中心、记忆/技能/连接器/用量/画廊/档案八个工作台与侧栏 Work/Bot 模式切换。",
+  "description": "DeepSeek Harness 的对话体验增强套件：思考折叠、工具调用聚合、html/iu 卡片、对话截图与下载，外加供应商中心、记忆/技能/连接器/用量/画廊/档案八个工作台与 Personal Agent（主 Bot/子 Bot/群聊/期刊日记/通话）。",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -73,7 +73,7 @@
   "scripts": {
     "build": "node build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "smoke": "node scripts/smoke-client.mjs && node scripts/smoke-host.mjs && node scripts/smoke-triad-client.mjs && node scripts/smoke-triad-host.mjs && node scripts/test-session-isolation.mjs && node scripts/test-browser-on-demand.mjs && node scripts/test-html-card-width.mjs && node scripts/test-settings-card.mjs && node scripts/test-running-apps.mjs && node scripts/test-at-guard.mjs && node scripts/test-turn-input-images.mjs && node scripts/test-prompt-optimize-clean.mjs && node scripts/test-vault.mjs && node scripts/test-vault-http.mjs && node scripts/test-system-prompt.mjs && node scripts/test-scrollbar-autohide.mjs && node scripts/test-usage-hours.mjs && node scripts/test-feature-switches.mjs && node scripts/test-published-reasoning.mjs && node scripts/test-echo-viewport.mjs && node scripts/test-mode-switch.mjs && node scripts/test-bot-install.mjs",
+    "smoke": "node scripts/smoke-client.mjs && node scripts/smoke-host.mjs && node scripts/smoke-triad-client.mjs && node scripts/smoke-triad-host.mjs && node scripts/test-session-isolation.mjs && node scripts/test-browser-on-demand.mjs && node scripts/test-html-card-width.mjs && node scripts/test-settings-card.mjs && node scripts/test-running-apps.mjs && node scripts/test-at-guard.mjs && node scripts/test-turn-input-images.mjs && node scripts/test-prompt-optimize-clean.mjs && node scripts/test-vault.mjs && node scripts/test-vault-http.mjs && node scripts/test-system-prompt.mjs && node scripts/test-scrollbar-autohide.mjs && node scripts/test-usage-hours.mjs && node scripts/test-feature-switches.mjs && node scripts/test-published-reasoning.mjs && node scripts/test-echo-viewport.mjs && node scripts/test-mode-switch.mjs && node scripts/test-bot-install.mjs && node scripts/test-personal-agent.mjs",
     "test:mode-switch": "node scripts/test-mode-switch.mjs",
     "test:install": "node scripts/test-bot-install.mjs",
     "smoke:client": "node scripts/smoke-client.mjs",
@@ -101,7 +101,9 @@
     "test:scrollbar-autohide": "node scripts/test-scrollbar-autohide.mjs",
     "test:usage-hours": "node scripts/test-usage-hours.mjs",
     "test:feature-switches": "node scripts/test-feature-switches.mjs",
-    "test:published-reasoning": "node scripts/test-published-reasoning.mjs"
+    "test:published-reasoning": "node scripts/test-published-reasoning.mjs",
+    "build:personal-demo": "node scripts/build-personal-demo.mjs",
+    "test:personal-agent": "node scripts/test-personal-agent.mjs"
   },
   "engines": {
     "node": ">=22"

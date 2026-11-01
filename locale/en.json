@@ -2,5 +2,16 @@
   "meta": {
     "title": "dsh-seeker-bot",
     "description": "Chat enhancements: thinking cards, tool aggregation, inline path linking and per-session prompt channels."
+  },
+  "personal": {
+    "recall": {
+      "action": "Recall",
+      "title": "Recall message",
+      "lead": "Recall this message?",
+      "hint": "This message and the replies that follow it, up to the next message, will be removed together with whatever the bot memorized from this turn. This cannot be undone.",
+      "cancel": "Cancel",
+      "confirm": "Recall",
+      "done": "You recalled a message"
+    }
   }
 }

@@ -335,10 +335,12 @@ else pass('deferred webServer callback executed')
 //     echo-viewport/space-frame 会话工作空间抓帧）。
 // 27 = 26 + 1（2026-10-30 的 git-commit-message 只读路由），再减掉 2026-10-31
 // 随「任务动画」一起删掉的 /api/chat-flow/motion —— 净额仍是 27。
+// 28 = 27 + 1（2026-11-01 Personal Agent：prefix /api/personal-agent ——
+//   模型回复 / 期刊生图 / Edge TTS / ASR 四条子路由共用一个 prefix）。
 // 这些路由漏注册的表现全是静默的：胶囊不出现、通知不弹、录屏面板只剩整屏 ——
 // 只有计数与路径断言能钉住它们。
-if (registered.length !== 27) {
-  fail(`expected exactly 27 route registrations, got ${registered.length}: ${JSON.stringify(registered)}`)
+if (registered.length !== 28) {
+  fail(`expected exactly 28 route registrations, got ${registered.length}: ${JSON.stringify(registered)}`)
 } else {
   const exacts = registered.filter(spec => spec?.kind === 'exact')
   const prefix = registered.filter(spec => spec?.kind === 'prefix')

@@ -405,9 +405,12 @@ const expectedStyles = [
   // 全局动画节流（页面不可见时暂停全页 CSS 动画），与 KR 开关无关，始终注入。
   'dsh-anim-pause',
   // 侧栏 Work / Bot 分段控件（src/client/mode-switch/styles.ts）：Bot 功能已按
-  // 要求整块删除，只留这枚切换控件；2026-10-31 起 Bot 那一半被禁用（置灰 +
-  // cursor:not-allowed），模式恒为 Work。applyModeSwitch 在 apply 阶段同步注入。
+  // 要求整块删除，只留这枚切换控件；2026-11-01 起 Bot 模式重新启用并挂载
+  // Personal Agent 全屏应用。applyModeSwitch 在 apply 阶段同步注入。
   'dsh-seeker-bot-mode-switch',
+  // Personal Agent 全屏应用（src/client/personal/）：基础设计系统 + 左侧栏/右栏
+  // + 聊天 + 通话 + 期刊五张独立样式表，由 applyPersonalAgent 按顺序注入。
+  'pa-base-styles', 'pa-shell-styles', 'pa-chat-styles', 'pa-call-styles', 'pa-journal-styles',
   // 侧栏文档预览面板样式（src/client/sidebar-doc/index.tsx）。8b1db4b 引入时
   // 漏登本表，导致 smoke 一直报 unexpected extra styles —— 补录。
   'dsh-sdp-styles',

@@ -64,6 +64,8 @@ import { applyEchoViewport, ECHO_VIEWPORT_FRAME_ROUTE, handleEchoViewportFrameRo
 import { applySystemPromptInspector } from './system-prompt/index.ts'
 import { applyGitStatusRoutes, GIT_STATUS_ROUTE, collectGitStatus, handleGitStatusRoute } from './git-status/index.ts'
 import { applyFeatureRoutes, hostFeatureEnabled, initializeFeatures } from './features/store.ts'
+import { applyPersonalAgentHost } from './host/personal/index.ts'
+export { applyPersonalAgentHost } from './host/personal/index.ts'
 export { applyDownloadRoutes, downloadTool, readDownloadState, watchShellDownload } from './download/index.ts'
 export { applyFontRoutes, FONT_ROUTE } from './fonts/index.ts'
 export {
@@ -289,6 +291,14 @@ export function apply(ctx: Record<string, any>, config?: { toolsGate?: Record<st
   // 组件开关：登记宿主 context（host 各模块在 apply 期用 hostFeatureEnabled
   // 读 loader 行状态），再注册 /api/chat-flow/components 只读路由。
   initializeFeatures(ctx)
+
+  // Personal Agent（Bot 模式）：真实模型回复 / 期刊生图 / Edge TTS / ASR。
+  // 全部路由自带降级；任一项服务缺失都不影响其它能力与前端本地引擎。
+  try {
+    applyPersonalAgentHost(ctx)
+  } catch (error) {
+    console.warn('[dsh-seeker-bot] personal-agent host 未挂载：', error instanceof Error ? error.message : String(error))
+  }
 
   ctx.inject(['webServer'], (webCtx: any) => {
     applyFeatureRoutes(webCtx)

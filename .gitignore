@@ -20,3 +20,7 @@ _probe-entry.ts
 
 # client source map 不入库（8MB，仅为 DevTools 调试，构建可重建）
 lib/client.js.map
+
+# Personal Agent 独立演示页是构建产物（npm run build:personal-demo 生成，
+# 单文件 770KB 内联了全部样式与脚本），按「产物可重建」原则不入库。
+dist/
