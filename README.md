@@ -45,8 +45,9 @@ bundles 层，不用手改配置文件。
 | 让 AI 记住我的偏好和身份 | 工作台**记忆** |
 | 存账号密码 / 卡 / 证件照片，还要能自动进上下文 | 工作台**[档案](#档案)** |
 | 存 Clash 订阅 / 配置文件 / 证书，换机也不丢 | 工作台**[档案](#档案)** → 记录详情「文件」区（随云同步上传） |
-| 换机后账号密码 / 记忆 / 技能 / MCP 配置一起跟过来 | 工作台**[同步设置](#同步设置)** → 勾选要漫游的资产，推自己的 GitHub 私库（端侧加密） |
+| 换机后账号密码 / 记忆 / 技能 / MCP / 供应商与密钥一起跟过来 | 工作台**[同步设置](#同步设置)** → 勾选要漫游的资产，推自己的 GitHub 私库（端侧加密） |
 | 管 API Key / 代理 / 生图模型 | 官方设置弹窗 → **供应商** |
+| 搜索额度打满了，自动换一家继续搜 | [网页搜索降级链](#网页搜索降级链额度没了自动换一家)（AnySearch → Tavily → DeepSeek） |
 
 ---
 
@@ -439,6 +440,54 @@ ctx.effect(() => navSection({
 
 ---
 
+## 网页搜索降级链：额度没了自动换一家
+
+宿主 `ctx.web` 的 seam 只会选**一个**搜索后端，失败就是失败——`WebRuntime.search()` 是
+`selectSearchProvider().search()` 一行，`web.searchProvider` 的注释还写明它「不是隐藏优先级链」，
+registry 也是私有 `Map`（插件枚举不到别的后端）。所以「额度打满自动切」只能长在插件这一侧：
+本包注册单入口 `anysearch-auto`，在**自己拥有的三个实现**之间按失败类别降级，宿主永远只看到一个 provider。
+
+| 顺序 | 后端 | 说明 |
+|---|---|---|
+| 1 | `anysearch` | 复用原 AnySearch 实例，已有端点 / key / 条数配置零迁移 |
+| 2 | `tavily` | 需要凭据 `TAVILY_API_KEY`；没有时预检直接跳过，不报错也不白打 |
+| 3 | `deepseek-official` | 走 Anthropic 兼容 Messages + 原生 `web_search_20250305`，最贵（每次一个模型 turn），所以放最后 |
+
+**什么情况才切**（判定在 `src/provider/modules/web-search-failure.ts`，实测报文形状写在文件头）：
+
+| 失败 | 归类 | 行为 |
+|---|---|---|
+| HTTP 402 / 432 / 433、报文含 quota/额度/欠费 | `WEB_QUOTA_EXCEEDED` | 切下一家，该环冷却 30 分钟 |
+| HTTP 429 / 434 | `WEB_RATE_LIMITED` | 切，冷却听 `Retry-After`（封顶 15 分钟），没有就 60 秒 |
+| HTTP 401 / 403 | `WEB_AUTH_FAILED` | 切，冷却 10 分钟（等你换 key） |
+| HTTP 5xx、连不上、响应体读不动 | `WEB_UNAVAILABLE` | 切，但**不冷却**——下次仍先试它（它结果最好） |
+| 没配 key | `WEB_PROVIDER_CREDENTIAL_MISSING` | 切，不冷却；链还会先用 `ready()` 预检，省掉一次必败往返 |
+| HTTP 400 这类查询本身有问题 | `WEB_PROVIDER_ERROR` | **不切**——换一家也必败，只会白烧一次额度 |
+| 用户停止生成 | `WEB_ABORTED` | **不切**，原样上抛。把取消误判成故障会导致停止后继续往下几家猛打 |
+
+两处反锁死兜底：全部环都在冷却时忽略冷却重走一遍；全部环凭据预检不过时照样试——
+`available()` 是同步的、读不到异步凭据库，不能让预检变成否决权。
+
+启用与回退（profile 的 `cordis.patch.yml`）：
+
+```yaml
+- id: web
+  name: '@deepseek-ai/dsh-web'
+  config:
+    searchProvider: anysearch-auto   # 改回 anysearch 即回退到单体，无需改代码
+    fetchProvider: http
+```
+
+链的顺序、额度冷却时长、两个后备后端的端点与凭据引用都在 settings 命名空间 `web-search-auto`
+（默认 `order: anysearch,tavily,deepseek`、`quotaCooldownMinutes: 30`）。**注意目前没有专门的设置页
+卡片**：宿主「网页搜索」页只认 `web-search-deepseek` / `web-deepseek-api` / `web` 三个命名空间，
+不改这些时用的是上面的默认值。
+
+一个诚实的限制：`WebSearchResult` 只有 `sources` / `content` / `truncated`，没有字段携带「这次实际
+用了哪家」，所以实际后端只进日志（`[hub/web-search-auto]` 前缀），对话卡片上的来源标签不变。
+
+---
+
 ## 八个工作台
 
 侧边栏工作台，每页独立：
@@ -588,8 +637,26 @@ gutter 10 → 14px，缩略图与占位图标同步加法，格子仍是 1:1 正
 | 3 | **列表响应里敏感值是掩码**（八个星号），明文只经 `POST /reveal` 单字段取一次并写审计 | 否则「打开档案页」就等于「整库明文进浏览器内存」 |
 | 4 | **提交回来的掩码不会被当成新值** | 一次保存就把真密码写成六个星号，且不可逆 |
 
-模型那侧只有 3 个工具（`vault_search` / `vault_get` / `vault_remember`），
+模型那侧默认只有 3 个工具（`vault_search` / `vault_get` / `vault_remember`），
 **查得到「有没有这个账号」，拿不到密码**。要明文必须用户自己在页面上点眼睛。
+
+#### 凭据代用：能用，但看不见
+
+密码锁在档案里、模型拿不到，很多事就帮不上忙。2026-11-01 起新增**凭据代用**（`vault_run`）：
+在「操作间 → 档案 → 代用」里开启并配置程序白名单后，模型可以让宿主用某条记录的某个
+加密字段执行白名单里的本机程序（sshpass / curl / psql 这类），全程看不到密码：
+
+- 密码只在宿主进程内解密，注入子进程的 `DSH_VAULT_SECRET` 环境变量（默认）或 stdin；
+- **不经过 shell**，参数逐个传递；密码不写进 argv（进程列表与 shell history 里都没有）；
+- 返回值里密码的原文 / URL 编码 / base64 / hex 变体一律替换成 `********`；
+- 每次代用写 `audit.jsonl`（记录 / 字段 / 程序 / 参数摘要 / 退出码 / 耗时 / 用途），
+  与「人点眼睛看明文」同一本账，可在档案页的「代用」设置里看最近记录；
+- **默认关闭，白名单默认空**；程序名只接受纯名字（不能带路径或分隔符）。
+
+> ⚠ 边界：白名单程序本身如果提供「读环境变量并变形输出」的能力（`node -e`、`powershell`、
+> `curl` 的变量展开、`ssh` 的 `ProxyCommand` 等），模型仍可能绕过文本脱敏。所以白名单
+> 只应放**用途固定**的专用程序；不要添加能执行任意代码的程序。脱敏是最后一道网，
+> 真正的第一道是用户签发的白名单。
 
 #### 谁来写：主 agent 当场写，后台抽取兜底
 
@@ -652,7 +719,7 @@ gutter 10 → 14px，缩略图与占位图标同步加法，格子仍是 1:1 正
 离开本机的只有密文；同步口令与 GitHub 令牌用本机硬件密钥加密落盘，插件里不出现任何
 私库名或 Token（公开仓库会被硬拦，不是提示）。
 
-同步范围四项，各自可关：
+同步范围五项，各自可关：
 
 | 资产 | 收的是什么 |
 |---|---|
@@ -660,8 +727,6 @@ gutter 10 → 14px，缩略图与占位图标同步加法，格子仍是 1:1 正
 | 长期记忆 | `entries.json`、状态元数据、各工作区 `meta.json` |
 | 自定义技能 | `~/.dsh/skills/` 下的技能包与 `SKILL.md`（技能开关写在 frontmatter 里，跟着走） |
 | MCP 配置 | `cordis.patch.yml` 里的 `mcp-client` 条目（服务配置 + `disabled` 开关） |
+| 供应商与密钥 | `cordis.patch.yml` 里的 `llm-pi-ai` / `llm-deepseek` / `agent-default-model`、`~/.dsh/.credentials.yaml` 里的 API 密钥 `refs`、`model-capabilities.json`（模型能力）与 `network-proxy.json`（网络代理） |
 
-MCP 这一项只收 `name: @deepseek-ai/dsh-mcp-client` 的条目，**文本级读写**：注释、其它插件
-条目与行尾风格原样保留。拉取时同名条目覆盖、本机缺失的新增，**本机独有的条目不会因为云端包
-而消失**；写前自动备份 `cordis.patch.yml.bak-before-sync`。条目里若写了访问令牌，同样只以
-密文离开本机。
+MCP 与供应商配置均为**文本级增量读写**：注释、其它插件条目与行尾风格原样保留。拉取时同名条目/同名 Key 覆盖、本机缺失的新增，**本机独有的条目与私有 API 密钥绝不会因为云端包而丢失**；写前自动备份 `*.bak-before-sync`。条目与凭据均在端侧强加密后离开本机。
