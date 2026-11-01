@@ -16,8 +16,6 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { getKrChatStore } from './kr-chat-store.ts'
 import { getPanelSettingsStore } from './panel-settings-store.ts'
-import { getMailDrawerStore } from './mail-drawer-store.ts'
-import { mountMailDrawer } from './mail-drawer.tsx'
 import { syncSeekerHeroHead } from './SeekerHeroHead.tsx'
 import { isCurrentTurnRunning, resolveLatestTurn } from './turn-state.ts'
 import { KrAgentPanel } from './KrAgentPanel.tsx'
@@ -156,12 +154,11 @@ function syncKrTab(tablist: HTMLElement): void {
   // 让人以为右栏是可选的。收起/展开相关代码（syncKrPanelToggle、KR_PANEL_ICON、
   // store.panelOpen 与 .kr-panel-toggle 样式）一并删干净。
   /*
-   * ── 齿轮与邮箱按钮**已搬到操作面板卡头右上角**（2026-10-25）──────────────
+   * ── 齿轮按钮**已搬到操作面板卡头右上角**（2026-10-25）────────────────────
    *
-   * 用户原话：「这两个图标都移动到操作面板的右上角去」。它们现在由
+   * 用户原话：「这两个图标都移动到操作面板的右上角去」。它现在由
    * KrPlainTimelineCard 以 React 直接渲染（见 .kr-plain-head__tools），
-   * 开合仍走 panel-settings-store / mail-drawer-store 这两个跨 bundle 共享 store，
-   * 所以抽屉那边一行都不用改。
+   * 开合仍走 panel-settings-store 这个跨 bundle 共享 store，所以抽屉那边一行都不用改。
    *
    * 这里保留一句**清理**：热重载或旧 bundle 残留的顶栏按钮必须摘掉，否则页面上
    * 会出现两组一模一样的图标（一组在顶栏、一组在卡头），点哪个都开同一个抽屉，
@@ -175,9 +172,9 @@ function syncKrTab(tablist: HTMLElement): void {
 }
 
 /**
- * 摘掉旧版注入在**顶栏标签行**里的两枚按钮（幂等，找不到就是没事）。
+ * 摘掉旧版注入在**顶栏标签行**里的按钮（幂等，找不到就是没事）。
  *
- * ⚠ 判据必须是「它在不在顶栏里」，不能只看 id —— 新按钮沿用同一对 id
+ * ⚠ 判据必须是「它在不在顶栏里」，不能只看 id —— 新按钮沿用同一 id
  * （e2e 按 id 找节点），单纯 getElementById 会把**刚渲染好的新按钮**一起删掉，
  * 表现为「卡头右上角什么都没有」。
  *
@@ -185,15 +182,13 @@ function syncKrTab(tablist: HTMLElement): void {
  * tablist 的，而新按钮在右栏卡头里，永远匹配不上。
  */
 function removeLegacyHeaderButtons(): void {
-  for (const id of ['kr-panel-settings-btn', 'kr-mail-btn']) {
-    try {
-      const el = document.getElementById(id)
-      if (el === null) continue
-      if (el.closest('header [role="tablist"]') === null) continue
-      el.remove()
-    } catch {
-      /* 节点已被别处摘走：无事可做 */
-    }
+  try {
+    const el = document.getElementById('kr-panel-settings-btn')
+    if (el === null) return
+    if (el.closest('header [role="tablist"]') === null) return
+    el.remove()
+  } catch {
+    /* 节点已被别处摘走：无事可做 */
   }
 }
 
@@ -364,16 +359,6 @@ export function mountKrChatController(): void {
   const store = getKrChatStore()
   store.setActiveTab('kr')
 
-  /*
-   * 邮箱卡片挂到 body 级容器上（KR 对话控制器生命周期内挂一次，幂等）。
-   *
-   * 为什么不挂在右栏 .kr-split__side 里（设置抽屉就在那儿）：邮箱卡片是全视口
-   * 模态，比右栏宽得多，且右栏在空白会话里整块不渲染 —— 挂进去就会出现「顶栏有
-   * 邮箱按钮、点了却什么都没出来」。body 级 fixed 浮层与右栏的布局 / 裁剪 / 滚动
-   * 完全解耦（理由详见 mail-drawer.tsx 的文件头注释）。
-   */
-  try { mountMailDrawer() } catch { /* 卡片挂不出来不影响其余控制器能力 */ }
-
   /** 本实例是否仍是当前生效的控制器（旧实例经此让位，不再写 DOM）。 */
   const owns = (): boolean => {
     const current = holder[CONTROLLER_GLOBAL_KEY] as KrControllerHandle | undefined
@@ -383,13 +368,13 @@ export function mountKrChatController(): void {
   const disposers: Array<() => void> = []
 
   /*
-   * 齿轮与邮箱按钮的「打开态即时跟随」两段订阅**已删除**（2026-10-25）。
+   * 齿轮按钮的「打开态即时跟随」订阅**已删除**（2026-10-25）。
    *
-   * 它们服务的对象是顶栏那两枚裸 DOM 按钮 —— 按钮不在 React 树里，只能靠订阅
-   * store 手动改 data-open 属性。现在这两枚按钮搬到了操作面板卡头、由 React
+   * 它服务的对象是顶栏那枚裸 DOM 按钮 —— 按钮不在 React 树里，只能靠订阅
+   * store 手动改 data-open 属性。现在这枚按钮搬到了操作面板卡头、由 React
    * 直接渲染，开合态走 useSyncExternalStore，React 自己保证同步。
    *
-   * 留着这两段只会每 250ms 去 getElementById 一个已经不存在的节点。
+   * 留着这段只会每 250ms 去 getElementById 一个已经不存在的节点。
    */
 
   // 全局事件委托：监听原生「对话」与「轨迹」按钮的点击事件，同步 activeTab 状态

@@ -8,6 +8,11 @@
  * 所以这里只有一份轮询器 + 一份快照，会话行标记从它读 —— 切会话、增删行都不
  * 产生新请求。
  *
+ * ⚠ 「一份轮询器」**不等于**「一份状态」：回包与快照都是按会话存的
+ * （sessionId → 条目），消费端必须用**当前会话 id** 去查（getBrowserFlagEntry /
+ * sessionSeenBrowser）。任何「任意会话有活动就亮」的判据都会让两个会话同时亮着
+ * 同一个浏览器状态 —— 2026-11-01 修的就是这个（见 sessionSeenBrowser）。
+ *
  * ## 为什么失败一律当「无活动」，不重试也不报错
  *
  * host 半身可能没装、没重启、或版本对不上（路由 404）。这类失败每次都一样，
@@ -228,6 +233,174 @@ export function browserFlagTitle(entry: BrowserActivitySession | null | undefine
   return tool === '' ? '浏览器操作中' : `浏览器操作中 · ${tool}`
 }
 
+// ── 会话级「见过浏览器活动」记忆 ─────────────────────────────────────────
+
+/**
+ * 本会话是否出现过**真实**浏览器活动（按会话隔离，刷新后仍记得）。
+ *
+ * ## 为什么需要这份记忆
+ *
+ * 操作面板卡头那枚浏览器图标是「本会话在操作浏览器」的状态灯。它必须按会话
+ * 隔离：只有真的跑过浏览器工具的那个会话才亮，切到别的会话必须熄灭。
+ *
+ * 2026-11-01 用户报「两个会话同时亮着同一个浏览器状态」。根因不在数据面
+ * （路由回包本来就带 sessionId，快照也按会话存），而在**消费端那两个跨会话
+ * 判据**：
+ *
+ *  1. `hasBrowserHistory`：拿步骤文案做子串匹配（`open-` / `workspace` /
+ *     `taskspace`…）。任何会话只要读过 `open-preview.ts`、搜过
+ *     `workspaceHints` 这类字眼，就被判成「碰过浏览器」—— 而时间线里那一步
+ *     不会消失，于是这个误判是**永久**的。
+ *  2. `isRememberedSession`：把上面那个误判写进 sessionStorage 的**同一个 key**
+ *     （所有会话共用一个数组），写入后永不清理。
+ *
+ * 「误报一次 = 永久常亮」，两个都误报过的会话就同时亮着同一个状态。
+ *
+ * 现在这份记忆只由**真实活动数据**驱动：快照里出现某个会话的条目（active > 0
+ * 或尾迹）时才把它记下来。语义仍是「本会话曾经用过浏览器」（用户 2026-10-31
+ * 要求：本会话打开过工作空间后，即便轮次结束也要能看见入口），但判据从
+ * 「文案像不像」换成了「host 真的观测到过」。
+ *
+ * ## 为什么还要落 sessionStorage
+ *
+ * 刷新页面后内存快照会重建，而 host 侧的活动可能早就结束了（一次 ego 操作
+ * 只有几秒）。不落盘的话用户刷新一下就再也找不到那个工作区入口。落盘键按
+ * **会话 id** 存成数组，读取时按当前会话查 —— 不存在「所有会话共用一份状态」。
+ *
+ * 键名换成新的：旧键 `dsh.chat_plus.workspace_sessions` 里躺着被误判污染的
+ * 会话，继续读它等于把 bug 一起继承下来，所以启动时就地清掉。
+ */
+const SESSION_SEEN_STORAGE_KEY = 'dsh.seeker.browser_seen_sessions'
+
+/** 旧键（被步骤文案匹配污染过）：只删不读，避免把历史误判带进新实现。 */
+const LEGACY_SESSION_SEEN_STORAGE_KEY = 'dsh.chat_plus.workspace_sessions'
+
+/** 落盘上限：一个标签页里同时开着的会话不会太多，50 足够且不会无限长。 */
+const SESSION_SEEN_STORAGE_LIMIT = 50
+
+/**
+ * 会话记忆的存活时长：12 小时。
+ *
+ * 为什么必须有上限：这份记忆的键来自 host 的会话归因，而 host 的最后一条兜底是
+ * `exec.arguments.sessionId`（模型可以自己传的参数）。一次误归因就会把浏览器活动
+ * 记到**别的会话**名下 —— 没有过期时间的话，那枚图标会永久亮在错误的会话上，
+ * 用户既清不掉也解释不了（本次 bug 的另一半正是「误判一次 = 永久常亮」）。
+ *
+ * 12 小时覆盖「一次人类浏览器操作」的全部合理时长；过期后重新有活动就会再记。
+ */
+const SESSION_SEEN_TTL_MS = 12 * 60 * 60 * 1000
+
+/** 落盘节流：轮询每秒一次，没必要每次都写 sessionStorage。 */
+const SESSION_SEEN_PERSIST_MS = 30_000
+
+/** sessionId → 最后一次见到浏览器活动的时刻（ms）。 */
+const seenAtBySession = new Map<string, number>()
+let seenLoaded = false
+let lastPersistAt = 0
+
+/**
+ * 取 sessionStorage。
+ *
+ * 隐私模式 / 沙箱 iframe 下**访问本身就会抛** SecurityError（不是返回
+ * undefined），所以整个取用过程包在 try 里；拿不到就退化成纯内存记忆 ——
+ * 刷新后丢记忆只是少一个入口，绝不能让图标逻辑把界面搞崩。
+ */
+function seenStorage(): Storage | null {
+  try {
+    const storage = (globalThis as { sessionStorage?: Storage }).sessionStorage
+    return storage === undefined ? null : storage
+  } catch {
+    return null
+  }
+}
+
+/** 首次访问时从 sessionStorage 载入（同时清掉被污染的旧键）。 */
+function loadSeenSessions(): void {
+  if (seenLoaded) return
+  seenLoaded = true
+  const storage = seenStorage()
+  if (storage === null) return
+  try {
+    storage.removeItem(LEGACY_SESSION_SEEN_STORAGE_KEY)
+    const raw = storage.getItem(SESSION_SEEN_STORAGE_KEY)
+    if (raw === null || raw === '') return
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return
+    const now = Date.now()
+    for (const item of parsed) {
+      // 新格式 { id, at }；旧格式是裸字符串（本实现发布前的中间版本）——
+      // 当成「刚刚见到」保留，避免升级即丢记忆。
+      if (typeof item === 'string' && item !== '') {
+        seenAtBySession.set(item, now)
+        continue
+      }
+      if (item === null || typeof item !== 'object') continue
+      const id = (item as { id?: unknown }).id
+      const at = (item as { at?: unknown }).at
+      if (typeof id !== 'string' || id === '') continue
+      if (typeof at !== 'number' || !Number.isFinite(at)) continue
+      seenAtBySession.set(id, at)
+    }
+  } catch {
+    // 脏数据 / 配额异常：一律当没有。图标少亮一次，好过亮错一个会话。
+  }
+}
+
+/**
+ * 把会话记忆写进 sessionStorage。
+ *
+ * @param force 跳过节流（首次见到某会话 / 功能开关关闭时必须立刻落盘）。
+ */
+function persistSeenSessions(force = false): void {
+  const now = Date.now()
+  if (!force && now - lastPersistAt < SESSION_SEEN_PERSIST_MS) return
+  lastPersistAt = now
+  const storage = seenStorage()
+  if (storage === null) return
+  try {
+    const rows = [...seenAtBySession.entries()]
+      .sort((left, right) => left[1] - right[1])
+      .slice(-SESSION_SEEN_STORAGE_LIMIT)
+      .map(([id, at]) => ({ id, at }))
+    storage.setItem(SESSION_SEEN_STORAGE_KEY, JSON.stringify(rows))
+  } catch {
+    // 配额满 / 隐私模式：只影响刷新后的记忆，不影响当前这次会话。
+  }
+}
+
+/**
+ * 记下「这个会话真的跑过浏览器」，并把时间戳刷新到现在。
+ *
+ * @returns 本次是否**从不可见变成可见**（只有这种转变才需要广播：订阅方要重算
+ *          图标；单纯刷新时间戳不影响可见性，不必让整棵树重渲染）。
+ */
+function markSessionSeen(sessionId: string): boolean {
+  if (sessionId === '') return false
+  loadSeenSessions()
+  const now = Date.now()
+  const previous = seenAtBySession.get(sessionId)
+  const wasVisible = previous !== undefined && now - previous <= SESSION_SEEN_TTL_MS
+  seenAtBySession.set(sessionId, now)
+  // 首次见到要立刻落盘；之后只是刷新时间戳，走节流即可（轮询每秒一次）。
+  persistSeenSessions(!wasVisible)
+  return !wasVisible
+}
+
+/**
+ * 本会话是否出现过真实浏览器活动（会话级，刷新后仍记得）。
+ *
+ * @param sessionId 会话 id。空 / null / undefined 一律 false —— **绝不能退回成
+ *                  「任意会话有活动就算」**，那正是这次要修掉的 bug。
+ */
+export function sessionSeenBrowser(sessionId: string | null | undefined): boolean {
+  if (typeof sessionId !== 'string' || sessionId === '') return false
+  loadSeenSessions()
+  const at = seenAtBySession.get(sessionId)
+  if (at === undefined) return false
+  // 过期即视为没有：误归因留下的记忆最多存活 12 小时，不会永久点亮错误的会话。
+  return Date.now() - at <= SESSION_SEEN_TTL_MS
+}
+
 // ── 快照与订阅 ───────────────────────────────────────────────────────────
 
 let snapshot: BrowserFlagSnapshot = EMPTY_SNAPSHOT
@@ -291,9 +464,27 @@ function sameSessions(
   return true
 }
 
-/** 发布一张新会话表（没变化就什么都不做）。 */
-function publishSessions(next: ReadonlyMap<string, BrowserActivitySession>): void {
-  if (snapshot.preview === previewActive && sameSessions(snapshot.bySession, next)) return
+/**
+ * 发布一张新会话表（没变化就什么都不做）。
+ *
+ * @param next 新的会话表。
+ * @param remember 是否把表里的会话记进「见过浏览器」的会话级记忆。真实轮询传
+ *   true；window 预览入口传 false —— 演示数据不该在用户切到那个会话时点亮一枚
+ *   无从解释的图标。
+ */
+function publishSessions(next: ReadonlyMap<string, BrowserActivitySession>, remember = true): void {
+  /*
+   * 先记会话级记忆：只记**各自的 sessionId**，绝不产生「全局一份」的状态
+   * （见 sessionSeenBrowser 的注释）。
+   */
+  let marked = false
+  if (remember) {
+    for (const sessionId of next.keys()) {
+      if (markSessionSeen(sessionId)) marked = true
+    }
+  }
+  // marked 也必须触发广播：订阅方靠这次通知重算 sessionSeenBrowser。
+  if (!marked && snapshot.preview === previewActive && sameSessions(snapshot.bySession, next)) return
   snapshot = { bySession: next, preview: previewActive }
   notify()
 }
@@ -322,7 +513,8 @@ export function ingestPreviewSessions(payload: unknown): number {
   const parsed = parseBrowserActivity({ ok: true, sessions: payload })
   if (parsed === null) return snapshot.bySession.size
   previewActive = true
-  publishSessions(toSessionMap(parsed))
+  // 预览数据不写「见过浏览器」的会话记忆：它只是调试/演示灌进来的假活动。
+  publishSessions(toSessionMap(parsed), false)
   return parsed.length
 }
 
@@ -438,7 +630,26 @@ export function stopBrowserActivityPolling(): void {
 }
 
 /**
- * 清空活动快照（功能总开关关闭时用）。
+ * 只清**内存**（快照 + 会话记忆），**保留落盘**。
+ *
+ * 给「卸载 / 热重载」用：下次加载（新的模块实例）会从 sessionStorage 把会话记忆
+ * 读回来 —— 否则作者每改一次插件、热重载一次，所有「本会话用过浏览器」的记忆就
+ * 全丢了，图标在该亮的时候不亮。
+ *
+ * 功能开关关闭不走这里：那种场景用户要的是**彻底**清掉（见
+ * {@link resetBrowserActivitySnapshot}）。
+ */
+export function clearBrowserActivitySnapshot(): void {
+  previewActive = false
+  seenAtBySession.clear()
+  snapshot = { bySession: new Map(), preview: false }
+  // 无条件广播：即使快照本来就是空的，会话记忆也可能刚被清掉 —— 订阅方
+  // （操作面板卡头）需要这次通知才能把已经亮着的图标熄掉。
+  notify()
+}
+
+/**
+ * 彻底清空（功能总开关关闭时用）：内存快照 + 会话记忆 + 落盘。
  *
  * 只停轮询不够：快照里最后一批活动会让操作面板卡头的浏览器图标继续亮着，
  * 看起来像「开关拨了没反应」。清空并通知订阅者，图标立刻熄灭。
@@ -446,7 +657,12 @@ export function stopBrowserActivityPolling(): void {
  */
 export function resetBrowserActivitySnapshot(): void {
   previewActive = false
-  publishSessions(new Map())
+  loadSeenSessions()
+  seenAtBySession.clear()
+  // force：开关关闭时必须立刻落盘，不能等节流窗口过去。
+  persistSeenSessions(true)
+  snapshot = { bySession: new Map(), preview: false }
+  notify()
 }
 
 /**

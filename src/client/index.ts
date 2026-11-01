@@ -52,7 +52,6 @@ import { injectTtftFlatStyles } from './stats-ttft/styles.ts'
 import { KR_CHAT_ENABLED } from './kr-chat/enabled.ts'
 import { applyTriadClient } from './triad/index.ts'
 import { applyProviderClient } from './provider/index.ts'
-import { applyToolsGateClient } from './tools-gate/index.tsx'
 import { applyBrowserFlagClient } from './browser-flag/index.ts'
 import { applySidebarDocument } from './sidebar-doc/index.tsx'
 import { applyUiFont } from './ui-font/index.ts'
@@ -68,7 +67,7 @@ import { featureEnabledNow, featureMount } from './features/gate.tsx'
 /** 顶层服务依赖（client boot graph 用）。 */
 // 并集 = 原 dsh-seeker-bot 的 slots + 原 dsh-triad 的 locale/inputTriggers/sessions
 // （四工作台融合后由本插件统一提供，少了哪个哪个工作台就不挂载）
-// + layout：2026-10-04 起记忆/能力/邮箱三个工作台改挂官方 `main` 页座位，
+// + layout：2026-10-04 起记忆/能力等工作台改挂官方 `main` 页座位，
 //   开合走 `ctx.layout.selectPanel`（与官方 ui-sidebar / ui-schedule 同一依赖）。
 // 原 dsh-provider-hub 的服务（modelDirectories / remote / configForms）**不写进
 // 这里**：顶层 inject 是硬依赖，少一个整插件都不 apply，融合后会把对话增强一起
@@ -386,13 +385,9 @@ export function apply(ctx: ClientContext): void {
     applyProviderClient(ctx)
   })
 
-  // ── 工具闸门胶囊（computer-use / browser-use 按需开关）────────────────
-  // 与 host 半身配对：host 默认把这两组工具挡在每轮请求外（实测占全部工具
-  // 定义 74.7%），这里给输入栏工具行右侧一个看得见、点得到的开关。状态与
-  // `/computer-use`、`/browser-use` 命令读写同一张 host 状态表，无第二套真相。
-  guarded(ctx, 'tools gate chips', () => {
-    applyToolsGateClient(ctx)
-  })
+  // 工具闸门胶囊（输入框左侧那两个开关）已按用户要求整块移除（2026-11）。
+  // host 半身的闸门**保留**（默认仍把 computer-use / browser-use 挡在请求外），
+  // 只是不再有可视开关：需要打开时用 /computer-use on、/browser-use on。
 
   // ── 浏览器操作标志（2026-10-20）────────────────────────────────────────
   // 有浏览器工具正在某个会话里跑时，在**该会话行的右端**亮一枚会呼吸的小图标。
@@ -444,13 +439,6 @@ export { buildActivityGrid, activityColor, ACTIVITY_COLUMNS }
 export { collectModels, collectProviders, filterDaysByScope, providerOfModel } from './triad/usage/dashboard/aggregate.ts'
 export { toPlainStep, plainToolName, siteOf, isMetaTool, spawnsSubagents, humanIssue } from './kr-chat/plain-language.ts'
 export { buildPlainTimeline, condenseSteps } from './kr-chat/plain-timeline.ts'
-/**
- * 工具闸门菜单图标的判据（纯函数）：供 smoke 直接钉住「哪些菜单行该补图标」。
- *
- * 这条判据错了不会报错，只会让菜单里多出几个错的图标（描述里提到命令名的普通
- * 行被误标），必须能被测试直接断言，不能只靠看代码。
- */
-export { gateIconForRow, decorateGateMenuRows, GATE_ICON_ATTR, GATE_ICON_COMMANDS } from './tools-gate/menu-icons.ts'
 /**
  * 产出物点击分流判据（2026-10-22）：**侧栏能正常展示的走侧栏，其余走系统默认**。
  *
@@ -628,10 +616,17 @@ export {
   getBrowserFlagSnapshot,
   subscribeBrowserFlag,
   getBrowserFlagEntry,
+  /**
+   * 会话级「见过浏览器活动」记忆：按 sessionId 查，**不许**退回成「任意会话」。
+   * 冒烟要能钉住「两个会话互不串亮」这条判据（2026-11-01 用户报的 bug）。
+   */
+  sessionSeenBrowser,
   ingestPreviewSessions,
   mountBrowserFlagPreview,
   startBrowserActivityPolling,
   stopBrowserActivityPolling,
+  resetBrowserActivitySnapshot,
+  clearBrowserActivitySnapshot,
 } from './browser-flag/store.ts'
 export {
   BROWSER_FLAG_ROW_ATTR,

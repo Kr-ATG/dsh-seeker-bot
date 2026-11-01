@@ -116,6 +116,37 @@ const SKILL_ZH: Record<string, string> = {
   searchPlaceholder: '搜索技能包 / 技能名 / 分类…', searchClear: '清空搜索', searchResult: '命中 {n} 个技能', refresh: '刷新',
   enabledRatio: '{on}/{total} 已启用',
   addSkillsTitle: '添加技能',
+  // 技能包 / Git 导入渠道（「添加技能包」按钮 + 添加技能弹窗里的 Git tab）
+  addBundleTitle: '添加技能包',
+  addTabLocal: '本地上传', addTabGit: 'Git 链接',
+  gitTitle: '从 Git 仓库导入',
+  gitHint: '填仓库地址，插件会扫描其中的 SKILL.md 并逐个装成技能；私有仓库请用带 token 的地址。',
+  gitUrlLabel: '仓库链接', gitUrlPlaceholder: 'https://github.com/owner/repo',
+  gitRefLabel: '分支 / tag（可选）', gitRefPlaceholder: 'main',
+  gitSubdirLabel: '子目录（可选）', gitSubdirPlaceholder: '例如 skills',
+  gitImport: '导入', gitImporting: '导入中…',
+  gitImported: '已从 Git 导入 {n} 个技能：{names}',
+  gitImportEmpty: '仓库里没找到 SKILL.md',
+  gitImportSkipped: '跳过 {n} 个：{reasons}',
+  // Git 来源（定时自动更新）：只有 Git 链接导入的技能参与，自建技能不显示来源
+  srcTitle: 'Git 来源',
+  srcExpand: '展开 Git 来源', srcCollapse: '收起 Git 来源',
+  srcAutoUpdate: '自动更新', srcInterval: '更新周期', srcIntervalHours: '每 {n} 小时',
+  srcCheckUpdates: '检查更新', srcChecking: '检查中…',
+  srcCheckHasUpdate: '{n} 个来源有更新', srcCheckAllFresh: '全部已是最新', srcCheckFailed: '{n} 个来源检查失败',
+  srcUpdate: '更新', srcUpdating: '更新中…', srcUpdateAll: '全部更新',
+  srcUpdatedOne: '已更新「{name}」：{n} 个技能，{commit}',
+  srcUpdateAllOk: '已更新 {n} 个来源',
+  srcUpdateAllPartial: '更新 {ok} 个来源，{failed} 个失败',
+  srcUpdateAllEmpty: '没有可更新的来源',
+  srcAuto: '自动', srcRemove: '移除',
+  srcRemoveConfirmTitle: '移除 Git 来源',
+  srcRemoveConfirmBody: '移除「{url}」？只删这条导入记录，已装的技能仍留在本地，但之后不再跟着仓库更新。',
+  srcRemoveDone: '已移除 Git 来源「{name}」',
+  srcNever: '从未', srcJustNow: '刚刚',
+  srcMinutesAgo: '{n} 分钟前', srcHoursAgo: '{n} 小时前', srcDaysAgo: '{n} 天前',
+  srcDefaultBranch: '默认分支', srcLastCheck: '检查 {when}', srcLastUpdate: '更新 {when}',
+  gitBadge: 'Git',
   dropHere: '拖拽文件到此处', dropFormat: '支持 .zip .skill 等格式', browseImport: '浏览并导入',
   // 快速上手指南卡
   // SKILL / MCP 顶层 tab
@@ -174,6 +205,9 @@ const UNCATEGORIZED = '\u0000none'
 /** 一个技能包最多挂几个分类（与 host 的 CATEGORY_MAX_PER_BUNDLE 对齐）。 */
 const MAX_BUNDLE_CATEGORIES = 8
 
+/** Git 来源的自动更新周期档位（小时）：只给四档，手填小时数在这里没有使用场景。 */
+const SRC_INTERVAL_CHOICES = [1, 6, 12, 24]
+
 /** 分类不做逐类配色：一个面板只有主题蓝一把刷子（彩虹色板实测太吵，已否）。 */
 
 /** 分类名单排序：按挂载的包数从多到少，同数按名字。 */
@@ -218,6 +252,57 @@ async function skillRequest<T>(path: string, options?: RequestInit): Promise<T> 
 type InstallInput =
   | { archive: string; description: string; bundleId?: string }
   | { skillName: string; description: string; bundleId?: string; files: Array<{ path: string; data: string }> }
+
+/**
+ * Git 链接导入的响应（POST /import-git）。
+ *
+ * host 只回「装成功的」与「跳过的」两份清单：前端要拿 installed 拼成功回执
+ * （数量 + 名字），拿 skipped 说明哪些目录为什么没装（没 SKILL.md / 重名冲突等）。
+ */
+interface GitImportResult {
+  ok: true
+  url: string
+  /** 没指定分支时 host 回 null（它只回「实际用的 ref」，不回空串）。 */
+  ref: string | null
+  commit: string
+  installed: Array<{ name: string; dir: string; description: string; fileCount: number; overwritten?: boolean }>
+  skipped: Array<{ path: string; reason: string }>
+}
+
+/**
+ * 一条 Git 来源（导入记录）。
+ *
+ * 只有「Git 链接导入」产生的技能才有来源；本地拖放/自建技能永远不出现在这里，
+ * 也就不会被自动更新覆盖 —— 这正是用户要的边界。
+ */
+interface GitSource {
+  id: string
+  url: string
+  /** 分支 / tag；null = 跟随仓库默认分支。 */
+  ref: string | null
+  subdir: string | null
+  bundleId: string
+  /** 当前落盘对应的 commit（全哈希，面板只显示前 7 位）。 */
+  commit: string
+  /** 这条来源装进来的技能名：技能卡片据此打「Git」徽标。 */
+  skills: string[]
+  /** 单条来源的自动更新开关（总开关关掉时全部不生效）。 */
+  auto: boolean
+  lastCheck: number | null
+  lastUpdate: number | null
+  lastError: string | null
+}
+
+/** 自动更新设置（GET /sources 的 settings）。 */
+interface GitSourceSettings {
+  autoUpdate: boolean
+  intervalHours: number
+}
+
+interface GitSourceSnapshot {
+  settings: GitSourceSettings
+  sources: GitSource[]
+}
 
 /** 技能开关状态(/api/skill-toggles/status 响应)。 */
 interface ToggleStatus {
@@ -271,6 +356,28 @@ const skillApi = {
     skillRequest(`/skills/${encodeURIComponent(name)}`, { method: 'DELETE', headers: { accept: 'application/json' } }),
   installSkill: (input: InstallInput): Promise<{ name?: string; dir?: string; renamed?: boolean }> =>
     skillRequest('/skills', { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  /** 从 Git 仓库导入：host 侧 clone 后按目录扫描 SKILL.md，一次可能装进多个技能。 */
+  importFromGit: (input: { url: string; bundleId?: string; ref?: string; subdir?: string }): Promise<GitImportResult> =>
+    skillRequest<GitImportResult>('/import-git', { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  /** Git 来源列表 + 自动更新设置（「Git 来源」区块的唯一数据源）。 */
+  listSources: (): Promise<GitSourceSnapshot> => skillRequest<GitSourceSnapshot>('/sources', { headers: { accept: 'application/json' } }),
+  /** 检查远端有没有新 commit：只比对不落盘，updates[].hasUpdate 决定要不要提示。 */
+  checkSources: (input?: { id?: string }): Promise<{ checked: number; updates: Array<{ id: string; url: string; currentCommit: string; remoteCommit: string; hasUpdate: boolean; error?: string }> }> =>
+    skillRequest('/sources/check', { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(input ?? {}) }),
+  /** 更新单条来源（重新 clone 并覆盖落盘的技能）。 */
+  updateSource: (id: string): Promise<{ ok: true; installed: Array<{ name: string }>; skipped: Array<{ path: string; reason: string }>; commit: string }> =>
+    skillRequest(`/sources/${encodeURIComponent(id)}/update`, { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify({}) }),
+  /** 全部更新：host 逐条跑，失败的单条进 failed，不打断整批。 */
+  updateAllSources: (): Promise<{ updated: Array<{ id: string; installed: number; commit: string }>; failed: Array<{ id: string; error: string }> }> =>
+    skillRequest('/sources/update-all', { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify({}) }),
+  /** 自动更新设置：只传要改的字段（另一个字段 host 保持原值）。 */
+  setSourceSettings: (input: { autoUpdate?: boolean; intervalHours?: number }): Promise<GitSourceSettings> =>
+    skillRequest('/sources/settings', { method: 'PATCH', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  /** 单条来源的自动更新开关。 */
+  setSourceAuto: (id: string, auto: boolean): Promise<GitSource> =>
+    skillRequest(`/sources/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify({ auto }) }),
+  deleteSource: (id: string): Promise<{ ok: true }> =>
+    skillRequest(`/sources/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { accept: 'application/json' } }),
   /** 技能目录健康检查：只读扫描（缺 SKILL.md / frontmatter 无效 / 名称不一致 / 账本悬挂引用）。 */
 }
 
@@ -428,6 +535,27 @@ const css = {
   installHint: 'skm-install-hint',
   tagStatus: 'skm-tag-status',
   tagBuiltin: 'skm-tag-builtin',
+  // Git 来源区块（技能包列表上方）
+  srcSection: 'skm-src-section',
+  srcHead: 'skm-src-head',
+  srcToggle: 'skm-src-toggle',
+  srcCount: 'skm-src-count',
+  srcGrow: 'skm-src-grow',
+  srcSwitch: 'skm-src-switch',
+  srcInterval: 'skm-src-interval',
+  srcList: 'skm-src-list',
+  srcRow: 'skm-src-row',
+  srcMain: 'skm-src-main',
+  srcUrl: 'skm-src-url',
+  srcMeta: 'skm-src-meta',
+  srcCommit: 'skm-src-commit',
+  srcSep: 'skm-src-sep',
+  srcError: 'skm-src-error',
+  srcActions: 'skm-src-actions',
+  srcBtn: 'skm-src-btn',
+  srcRemove: 'skm-src-remove',
+  // 技能名前的「Git」来源徽标
+  skillGit: 'skm-skill-git',
 }
 
 const STYLE_ID = 'dsh-skill-manager-styles'
@@ -777,6 +905,52 @@ const SHEET = `.skm-modal-body{overflow:hidden;display:flex;flex-direction:colum
 .skm-main-scroll>.skm-status{flex:none}
 .skm-hub-section{display:flex;flex-direction:column;min-width:0}
 .skm-no-result{padding:18px 4px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-tertiary,#81858c)}
+
+/* ── Git 来源区块（技能包列表上方，可折叠） ───────────────────────
+   只出现在「有 Git 链接导入记录」时；本地拖放 / 自建技能不参与，所以整块可以不存在。 */
+.skm-src-section{flex:none;margin:8px 0 2px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.14));border-radius:12px;background:var(--dsw-alias-bg-layer-1,#1c1f26);overflow:hidden}
+.skm-src-head{display:flex;align-items:center;gap:10px;padding:7px 12px;flex-wrap:wrap}
+.skm-src-toggle{display:inline-flex;align-items:center;gap:6px;border:0;background:none;padding:0;font-family:inherit;font-size:12.5px;font-weight:600;color:var(--dsw-alias-label-primary,#e8e8e8);cursor:pointer}
+.skm-src-toggle svg{transition:transform .18s ease}
+/* 收起时箭头转 -90°：与技能包行的开合箭头同一套语言 */
+.skm-src-section:not([data-open='true']) .skm-src-toggle svg{transform:rotate(-90deg)}
+.skm-src-count{font-style:normal;font-size:10px;line-height:1.5;padding:0 5px;border-radius:99px;
+  background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#3d6be5) 14%,transparent);
+  color:var(--dsw-alias-state-business-primary,#3d6be5);font-variant-numeric:tabular-nums}
+.skm-src-grow{flex:1}
+.skm-src-switch{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--dsw-alias-label-tertiary,#8b8b8b);cursor:pointer;user-select:none;white-space:nowrap}
+.skm-src-switch input{width:13px;height:13px;margin:0;cursor:pointer;accent-color:var(--dsw-alias-state-business-primary,#3d6be5)}
+.skm-src-interval{height:24px;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.18));border-radius:6px;
+  background:var(--dsw-alias-bg-base,#16181d);color:var(--dsw-alias-label-secondary,#b9b9b9);font-family:inherit;font-size:11.5px;padding:0 4px;cursor:pointer}
+.skm-src-list{list-style:none;margin:0;padding:0;border-top:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.14))}
+.skm-src-row{display:flex;align-items:flex-start;gap:12px;padding:8px 12px}
+.skm-src-row + .skm-src-row{border-top:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.1))}
+.skm-src-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+/* 地址是这一行唯一的身份信息：单行省略，全文交给 title */
+.skm-src-url{font-family:ui-monospace,"Cascadia Mono","SF Mono",Consolas,monospace;font-size:12px;line-height:17px;
+  color:var(--dsw-alias-label-primary,#e8e8e8);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.skm-src-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#8b8b8b)}
+.skm-src-commit{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;color:var(--dsw-alias-label-secondary,#b9b9b9)}
+/* 分隔点：2px 圆点，比竖线轻（一行里要隔五段信息，竖线会读成表格） */
+.skm-src-sep{flex:none;width:2px;height:2px;border-radius:50%;background:currentColor;opacity:.4}
+.skm-src-error{margin:2px 0 0;font-size:11px;line-height:16px;color:var(--dsw-alias-state-error-primary,#e0434b);word-break:break-word}
+.skm-src-actions{flex:none;display:flex;align-items:center;gap:6px;padding-top:1px}
+.skm-src-btn{flex:none;height:24px;box-sizing:border-box;padding:0 8px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.24));border-radius:6px;
+  background:transparent;color:var(--dsw-alias-label-secondary,#b9b9b9);font-family:inherit;font-size:11.5px;cursor:pointer;
+  transition:color .16s ease,border-color .16s ease}
+.skm-src-btn:hover:not(:disabled){color:var(--dsw-alias-state-business-primary,#3d6be5);border-color:var(--dsw-alias-state-business-primary,#3d6be5)}
+.skm-src-btn:disabled{opacity:.45;cursor:default}
+.skm-src-remove{flex:none;display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0;
+  border:1px solid transparent;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary,#8b8b8b);cursor:pointer;
+  transition:color .16s ease,background .16s ease}
+.skm-src-remove:hover{color:var(--dsw-alias-state-error-primary,#e0434b);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#e0434b) 10%,transparent)}
+/* 技能名前的「Git」徽标：来源标记，不是按钮 —— 细边框 + 主色字，不给底块 */
+.skm-skill-git{display:inline-block;margin-right:5px;padding:0 3px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-business-primary,#3d6be5) 45%,transparent);
+  border-radius:3px;font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:9px;font-weight:600;line-height:12px;
+  letter-spacing:.02em;color:var(--dsw-alias-state-business-primary,#3d6be5);vertical-align:1px}
+/* 工具条按钮禁用态（「检查更新」在没有来源时禁用） */
+.skm-bar-btn:disabled{opacity:.4;cursor:default}
+.skm-bar-btn:disabled:hover{color:var(--dsw-alias-label-tertiary,#7b818a)}
 
 /* ── 归入技能包弹窗（卡片化，与技能卡片同语言） ─────────────── */
 .skm-assign-modal{width:min(560px,calc(100vw - 48px))}
@@ -1247,13 +1421,18 @@ function CategoryEditor({ value, onChange, label }: {
   )
 }
 
-function SkillCard({ skill, bundleId, bundleName, enabled, scopeLabel, index, onToggle, onView, onAssign, onRemove, onDelete }: {
+function SkillCard({ skill, bundleId, bundleName, enabled, scopeLabel, index, gitUrl, onToggle, onView, onAssign, onRemove, onDelete }: {
   skill: SkillInfo
   bundleId: string | null
   bundleName: string | null
   enabled: boolean
   /** 作用域 pill 文案：技能开关落在 SKILL.md frontmatter，恒为全局层。 */
   scopeLabel: string
+  /**
+   * 这条技能所属的 Git 来源仓库地址（自建 / 本地导入的技能为 undefined）。
+   * 有值时名字前挂一枚「Git」小徽标：一眼区分「会跟着仓库更新的」与「自己写的」。
+   */
+  gitUrl?: string
   /** 网格序号：入场错峰动画延时。 */
   index: number
   onToggle: (skill: SkillInfo, enabled: boolean) => void
@@ -1323,6 +1502,8 @@ function SkillCard({ skill, bundleId, bundleName, enabled, scopeLabel, index, on
           title={skill.name}
           onClick={() => { onView(skill) }}
         >
+          {/* 徽标放名字**前面**：标题是单行省略，放后面会被省略号一起吃掉。 */}
+          {gitUrl !== undefined && <span className={css.skillGit} title={gitUrl}>{skillT('gitBadge')}</span>}
           {skill.name}
         </button>
       </div>
@@ -1488,6 +1669,41 @@ function frontmatterName(text: string): string | null {
   return null
 }
 
+/** Git 导入回执里的技能名单：超过 5 个只列前 5 个 + 「等」，否则一条 toast 会被名字撑爆。 */
+function briefList(names: string[]): string {
+  const head = names.slice(0, 5)
+  return names.length > head.length ? `${head.join('、')} 等` : head.join('、')
+}
+
+/** 跳过原因去重后拼成一行（同一原因往往重复出现，逐个列读不完）。 */
+function skipReasons(skipped: Array<{ path: string; reason: string }>): string {
+  const reasons = [...new Set(skipped.map((item) => item.reason))]
+  return reasons.slice(0, 3).join('；')
+}
+
+/** 仓库短名：toast / 确认文案里用（完整 URL 太长，一条回执塞不下）。 */
+function repoName(url: string): string {
+  const trimmed = url.replace(/\/+$/, '').replace(/\.git$/i, '')
+  const tail = trimmed.split('/').pop() ?? trimmed
+  return tail === '' ? url : tail
+}
+
+/**
+ * 相对时间：来源行显示「3 小时前」。
+ *
+ * null 单独给「从未」—— 刚导入还没检查过时，显示「56 年前」这类换算结果只会让人困惑。
+ * 超过 30 天直接给日期：那时「N 天前」已经没有信息量了。
+ */
+function relativeAgo(ts: number | null): string {
+  if (ts === null) return skillT('srcNever')
+  const delta = Date.now() - ts
+  if (delta < 60_000) return skillT('srcJustNow')
+  if (delta < 3_600_000) return skillT('srcMinutesAgo', { n: Math.floor(delta / 60_000) })
+  if (delta < 86_400_000) return skillT('srcHoursAgo', { n: Math.floor(delta / 3_600_000) })
+  if (delta < 2_592_000_000) return skillT('srcDaysAgo', { n: Math.floor(delta / 86_400_000) })
+  return new Date(ts).toLocaleDateString()
+}
+
 export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void; embedded?: boolean }): JSX.Element {
   ensureStyles()
   const [state, setState] = useState<PanelState>({ status: 'loading' })
@@ -1522,6 +1738,32 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
   const [installing, setInstalling] = useState(false)
   const [installError, setInstallError] = useState<string | null>(null)
   /**
+   * 添加技能弹窗的渠道切换：本地上传（原有拖放/表单）与 Git 链接导入。
+   * 两个渠道各存各的表单状态，来回切不丢已填内容（用户常先试本地再换 Git）。
+   */
+  const [addTab, setAddTab] = useState<'local' | 'git'>('local')
+  const [gitBundleId, setGitBundleId] = useState<string | undefined>(undefined)
+  const [gitUrl, setGitUrl] = useState('')
+  /** 分支 / tag 与子目录都是可选项：空串表示不传，交给 host 用默认分支 + 仓库根。 */
+  const [gitRef, setGitRef] = useState('')
+  const [gitSubdir, setGitSubdir] = useState('')
+  const [gitImporting, setGitImporting] = useState(false)
+  const [gitError, setGitError] = useState<string | null>(null)
+  /**
+   * Git 来源区块（技能包列表上方）。null = 还没拉到 / host 没注册该接口，
+   * 两种情况都不渲染：老版本 host 上这块直接消失，不会多出一片空白。
+   */
+  const [sources, setSources] = useState<GitSourceSnapshot | null>(null)
+  /** 来源区块折叠态（默认展开：新功能得先让人看见，用熟了再收）。 */
+  const [sourcesOpen, setSourcesOpen] = useState(true)
+  /** 检查更新 / 全部更新进行中。两者都要跑 git，互斥，避免同时开两个 clone。 */
+  const [sourcesBusy, setSourcesBusy] = useState(false)
+  /** 正在单条更新的来源 id（行内按钮据此显示「更新中…」并禁用）。 */
+  const [updatingId, setUpdatingId] = useState<string | null>(null)
+  const [savingSettings, setSavingSettings] = useState(false)
+  /** 移除来源的二次确认目标（走现有 ConfirmDialog）。 */
+  const [sourceConfirm, setSourceConfirm] = useState<GitSource | null>(null)
+  /**
    * 面板级提示条。旧实现把所有失败都塞进 installError，而它只在「添加技能」弹窗里
    * 渲染 —— 于是删除技能、归组、改名、开关失败时面板上什么都不显示，用户只看到
    * 「点了没反应」。成败反馈统一走这里。
@@ -1553,6 +1795,20 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
     }, () => { if (current) setInstallMetaName(null) })
     return () => { current = false }
   }, [install])
+  /**
+   * 每次打开「添加技能」弹窗都回到「本地上传」渠道。
+   * 否则上次停在 Git tab 时，从任何入口点「添加技能」都会直接看到一屏 URL 输入框，
+   * 与按钮文案对不上；顺手清掉上一次的失败提示，免得一打开就顶着红字。
+   */
+  useEffect(() => {
+    if (!addOpen) return undefined
+    setAddTab('local')
+    setGitError(null)
+    // 从空技能包的「上传技能到此包」进来时带着目标包：Git 渠道也预选它，
+    // 免得切到 Git 后还要再选一次包（用户点的是那个包，意图已经明确）。
+    setGitBundleId(installBundleId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addOpen])
   const [dropActive, setDropActive] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
   // 技能/技能包开关状态（skillName → enabled；bundleId → enabled）
@@ -1590,6 +1846,8 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
         : { status: 'ready', snapshot })
     }, () => { /* 保持当前显示 */ })
     void skillApi.toggleStatus().then((status) => { setToggles(status) }, () => { /* 保持当前显示 */ })
+    // 自动更新是后台跑的：这里跟着轮询，「上次更新」和 commit 不会一直停在旧值。
+    void skillApi.listSources().then((snapshot) => { setSources(snapshot) }, () => { /* 保持当前显示 */ })
   }
 
   /** 自动同步机制：面板打开期间 30s 轮询 + 页面重新可见/聚焦立即刷新（不闪烁）。 */
@@ -1629,6 +1887,11 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
     void skillApi.toggleStatus().then(
       (status) => { if (current) setToggles(status) },
       () => { /* 开关接口也不可用时保持空状态（开关仍可操作,失败会提示）。 */ },
+    )
+    // 来源列表失败就静默：host 没注册 /sources 时，面板其余部分必须照常可用。
+    void skillApi.listSources().then(
+      (snapshot) => { if (current) setSources(snapshot) },
+      () => { /* 保持 null：来源区块不渲染 */ },
     )
     return () => { current = false }
     // reload 拆分为变化键；open 恒 true（本组件在打开时才渲染）
@@ -1845,6 +2108,188 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
     }
   }
 
+  /** 清空 Git 表单：导入成功 / 取消后调用，免得下次打开还留着上次的链接。 */
+  const resetGitForm = (): void => {
+    setGitUrl('')
+    setGitRef('')
+    setGitSubdir('')
+    setGitBundleId(undefined)
+    setGitError(null)
+  }
+
+  /** 关闭「添加技能」弹窗并复位两个渠道：安装/导入进行中不许关（请求回来会 setState 到已关的表单上）。 */
+  const closeAddDialog = (): void => {
+    if (installing || gitImporting) return
+    setAddOpen(false)
+    setInstall(null)
+    setDropActive(false)
+    resetGitForm()
+  }
+
+  /**
+   * Git 链接导入。
+   * 与本地安装的区别：一次可能装进多个技能，所以成功回执要带数量与名字；
+   * 一个都没装成（仓库里没有 SKILL.md）时不关弹窗 —— 多半是子目录填错了，就地改再试。
+   */
+  const submitGitImport = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault()
+    const url = gitUrl.trim()
+    if (gitImporting || url === '') return
+    setGitImporting(true)
+    setGitError(null)
+    try {
+      const ref = gitRef.trim()
+      const subdir = gitSubdir.trim()
+      const result = await skillApi.importFromGit({
+        url,
+        ...(gitBundleId === undefined ? {} : { bundleId: gitBundleId }),
+        // 空串表示「用默认分支 / 仓库根」，别把空串塞给 host 当成显式参数。
+        ...(ref === '' ? {} : { ref }),
+        ...(subdir === '' ? {} : { subdir }),
+      })
+      const names = result.installed.map((item) => item.name)
+      if (names.length === 0) {
+        setGitError(t('gitImportEmpty'))
+        if (result.skipped.length > 0) {
+          pushToast('err', t('gitImportSkipped', { n: result.skipped.length, reasons: skipReasons(result.skipped) }))
+        }
+        return
+      }
+      pushToast('ok', t('gitImported', { n: names.length, names: briefList(names) }))
+      if (result.skipped.length > 0) {
+        pushToast('err', t('gitImportSkipped', { n: result.skipped.length, reasons: skipReasons(result.skipped) }))
+      }
+      // 成功才关弹窗并复位（这里不能走 closeAddDialog：它会把「导入中」当成不许关）。
+      setAddOpen(false)
+      setInstall(null)
+      setDropActive(false)
+      resetGitForm()
+      refresh()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      // host 对「仓库里没有 SKILL.md」是抛 400 而不是回空列表，这里翻成中文：
+      // 否则中文界面里只剩一句 no SKILL.md found in repository，用户不知道下一步改什么。
+      // 失败留在弹窗内：toast 会飘走，用户还要照着错误信息改链接。
+      setGitError(/no .*SKILL\.md found/i.test(message) ? t('gitImportEmpty') : message)
+    } finally {
+      setGitImporting(false)
+    }
+  }
+
+  /* ── Git 来源：检查 / 更新 / 自动更新设置 / 移除 ───────────────────────── */
+
+  /** 检查更新：只比对不落盘；有更新就把来源区展开（用户下一步就是点「更新」）。 */
+  const checkSourceUpdates = async (): Promise<void> => {
+    if (sourcesBusy) return
+    setSourcesBusy(true)
+    try {
+      const result = await skillApi.checkSources()
+      const stale = result.updates.filter((item) => item.hasUpdate)
+      const broken = result.updates.filter((item) => typeof item.error === 'string' && item.error !== '')
+      if (stale.length > 0) {
+        pushToast('ok', t('srcCheckHasUpdate', { n: stale.length }))
+        setSourcesOpen(true)
+      } else if (broken.length > 0) {
+        // 全都没查成时不能说「已是最新」——那等于把网络故障说成好消息。
+        pushToast('err', t('srcCheckFailed', { n: broken.length }))
+      } else {
+        pushToast('ok', t('srcCheckAllFresh'))
+      }
+      // 检查会刷新 lastCheck，重拉一次让「上次检查」跟着变。
+      void skillApi.listSources().then((snapshot) => { setSources(snapshot) }, () => { /* 保持当前显示 */ })
+    } catch (error) {
+      failToast('检查更新', error)
+    } finally {
+      setSourcesBusy(false)
+    }
+  }
+
+  /** 全部更新：host 逐条跑，失败的单条不打断整批，回执按「成功 / 失败」两段报。 */
+  const updateAllSources = async (): Promise<void> => {
+    if (sourcesBusy || updatingId !== null) return
+    setSourcesBusy(true)
+    try {
+      const result = await skillApi.updateAllSources()
+      if (result.failed.length > 0) {
+        pushToast('err', t('srcUpdateAllPartial', { ok: result.updated.length, failed: result.failed.length }))
+      } else if (result.updated.length > 0) {
+        pushToast('ok', t('srcUpdateAllOk', { n: result.updated.length }))
+      } else {
+        pushToast('ok', t('srcUpdateAllEmpty'))
+      }
+      refresh()
+    } catch (error) {
+      failToast('全部更新', error)
+    } finally {
+      setSourcesBusy(false)
+    }
+  }
+
+  /** 单条更新：成功后 refresh()，让技能卡片上的描述 / 文件数跟着变。 */
+  const updateOneSource = async (source: GitSource): Promise<void> => {
+    if (updatingId !== null || sourcesBusy) return
+    setUpdatingId(source.id)
+    try {
+      const result = await skillApi.updateSource(source.id)
+      pushToast('ok', t('srcUpdatedOne', {
+        name: repoName(source.url),
+        n: result.installed.length,
+        commit: result.commit.slice(0, 7),
+      }))
+      refresh()
+    } catch (error) {
+      failToast('更新 Git 来源', error)
+    } finally {
+      setUpdatingId(null)
+    }
+  }
+
+  /** 单条来源的自动更新开关：先乐观翻，失败回滚（等一个往返才动会像卡住）。 */
+  const toggleSourceAuto = async (source: GitSource, auto: boolean): Promise<void> => {
+    const apply = (next: (item: GitSource) => GitSource): void => {
+      setSources((current) => current === null ? current : {
+        ...current,
+        sources: current.sources.map((item) => item.id === source.id ? next(item) : item),
+      })
+    }
+    apply((item) => ({ ...item, auto }))
+    try {
+      const updated = await skillApi.setSourceAuto(source.id, auto)
+      apply(() => updated)
+    } catch (error) {
+      apply((item) => ({ ...item, auto: !auto }))
+      failToast('切换自动更新', error)
+    }
+  }
+
+  /** 自动更新设置（总开关 / 周期）：同样乐观改，失败回滚到点之前的值。 */
+  const patchSourceSettings = async (input: { autoUpdate?: boolean; intervalHours?: number }): Promise<void> => {
+    const before = sources?.settings
+    if (before === undefined || savingSettings) return
+    setSavingSettings(true)
+    setSources((current) => current === null ? current : { ...current, settings: { ...current.settings, ...input } })
+    try {
+      const settings = await skillApi.setSourceSettings(input)
+      setSources((current) => current === null ? current : { ...current, settings })
+    } catch (error) {
+      setSources((current) => current === null ? current : { ...current, settings: before })
+      failToast('保存自动更新设置', error)
+    } finally {
+      setSavingSettings(false)
+    }
+  }
+
+  /** 移除来源：只删导入记录，已装技能留着（确认文案里写明了，别让用户以为连技能一起删）。 */
+  const removeSource = async (source: GitSource): Promise<void> => {
+    try {
+      await skillApi.deleteSource(source.id)
+      pushToast('ok', t('srcRemoveDone', { name: repoName(source.url) }))
+      refresh()
+    } catch (error) {
+      failToast('移除 Git 来源', error)
+    }
+  }
+
   const submitNewBundle = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault()
     if (creatingBundle || newBundleName.trim() === '') return
@@ -1966,6 +2411,16 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
 
   const bundles = state.status === 'ready' ? state.snapshot.bundles : []
   const loose = state.status === 'ready' ? state.snapshot.loose : []
+  /** Git 来源列表：null（还没拉到 / 接口不存在）与空数组都不渲染区块。 */
+  const sourceList = sources?.sources ?? []
+  /**
+   * 技能名 → 来源仓库地址。技能卡片据此打「Git」徽标：
+   * 查不到的技能就是本地拖放 / 自建技能，不显示徽标，也不会被自动更新覆盖。
+   */
+  const gitSkillSource = new Map<string, string>()
+  for (const source of sourceList) {
+    for (const name of source.skills) gitSkillSource.set(name, source.url)
+  }
   /** 卡片上的作用域 pill 文案：技能开关落在 SKILL.md frontmatter，恒为全局层。 */
   const scopeLabel = t('scopeAll')
 
@@ -2067,8 +2522,8 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
       : (
         <PopoverShell
           onClose={() => {
-            // 安装/确认进行中禁止关闭；二级弹窗（新建/添加/确认/查看器/归组）打开时 Esc 归二级弹窗。
-            if (installing || confirming) return
+            // 安装/导入/确认进行中禁止关闭；二级弹窗（新建/添加/确认/查看器/归组）打开时 Esc 归二级弹窗。
+            if (installing || gitImporting || confirming) return
             if (newBundleOpen || addOpen || confirm !== null || viewer !== null || assignTarget !== null || catTarget !== null) return
             onClose()
           }}
@@ -2154,6 +2609,30 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
               <IconRefreshOutline14 size={13} aria-hidden="true" />
               <span>{t('refresh')}</span>
             </button>
+            {/* 建包入口从「技能包行更多菜单」提到页头：新用户第一件事往往是先建包再装技能，
+                藏在二级菜单里点不到。 */}
+            <button
+              type="button"
+              className={css.barBtn}
+              style={{
+                height: '32px',
+                padding: '0 12px',
+                borderRadius: '8px',
+                border: '1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.24))',
+                background: 'transparent',
+                color: 'var(--dsw-alias-label-secondary,#b9b9b9)',
+                cursor: 'pointer',
+                fontSize: '12.5px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+              }}
+              onClick={() => { setNewBundleName(''); setNewBundleCats([]); setNewBundleOpen(true) }}
+              title={t('addBundleTitle')}
+            >
+              <IconPlusOutline16 size={13} aria-hidden="true" />
+              <span>{t('addBundleTitle')}</span>
+            </button>
             <button
               type="button"
               className={css.barAdd}
@@ -2191,22 +2670,22 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
           overflow: 'hidden',
           background: 'var(--dsw-alias-border-l1,rgba(127,127,127,.14))',
         }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 16px', background: 'var(--dsw-alias-bg-base,#1b1b1c)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 16px', background: 'var(--dsw-alias-bg-base,#16181d)' }}>
             <span style={{ fontSize: '11px', color: 'var(--dsw-alias-label-tertiary,#8b8b8b)', userSelect: 'none' }}>技能包数量</span>
             <span style={{ fontFamily: 'var(--ds-font-family-code,ui-monospace,monospace)', fontSize: '18px', fontWeight: 640, color: 'var(--dsw-alias-label-primary,#e8e8e8)', fontVariantNumeric: 'tabular-nums' }}>{bundles.length}</span>
             <span style={{ fontSize: '11px', color: 'var(--dsw-alias-label-tertiary,#8b8b8b)' }}>编目组</span>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 16px', background: 'var(--dsw-alias-bg-base,#1b1b1c)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 16px', background: 'var(--dsw-alias-bg-base,#16181d)' }}>
             <span style={{ fontSize: '11px', color: 'var(--dsw-alias-label-tertiary,#8b8b8b)', userSelect: 'none' }}>技能总数</span>
             <span style={{ fontFamily: 'var(--ds-font-family-code,ui-monospace,monospace)', fontSize: '18px', fontWeight: 640, color: 'var(--dsw-alias-label-primary,#e8e8e8)', fontVariantNumeric: 'tabular-nums' }}>{totalSkills}</span>
             <span style={{ fontSize: '11px', color: 'var(--dsw-alias-label-tertiary,#8b8b8b)' }}>已索引工具能力</span>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 16px', background: 'var(--dsw-alias-bg-base,#1b1b1c)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 16px', background: 'var(--dsw-alias-bg-base,#16181d)' }}>
             <span style={{ fontSize: '11px', color: 'var(--dsw-alias-label-tertiary,#8b8b8b)', userSelect: 'none' }}>已启用技能</span>
             <span style={{ fontFamily: 'var(--ds-font-family-code,ui-monospace,monospace)', fontSize: '18px', fontWeight: 640, color: 'var(--dsw-alias-label-primary,#e8e8e8)', fontVariantNumeric: 'tabular-nums' }}>{enabledSkills}</span>
             <span style={{ fontSize: '11px', color: 'var(--dsw-alias-label-tertiary,#8b8b8b)' }}>{totalSkills > 0 ? Math.round((enabledSkills / totalSkills) * 100) : 0}% 激活率</span>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 16px', background: 'var(--dsw-alias-bg-base,#1b1b1c)' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 16px', background: 'var(--dsw-alias-bg-base,#16181d)' }}>
             <span style={{ fontSize: '11px', color: 'var(--dsw-alias-label-tertiary,#8b8b8b)', userSelect: 'none' }}>分类覆盖</span>
             <span style={{ fontFamily: 'var(--ds-font-family-code,ui-monospace,monospace)', fontSize: '18px', fontWeight: 640, color: 'var(--dsw-alias-label-primary,#e8e8e8)', fontVariantNumeric: 'tabular-nums' }}>{categoryList.length}</span>
             <span style={{ fontSize: '11px', color: 'var(--dsw-alias-label-tertiary,#8b8b8b)' }}>业务场景分类</span>
@@ -2277,6 +2756,25 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
             }}>
             <IconRefreshOutline14 size={13} aria-hidden="true" />
           </button>
+          {/* 检查更新：只比对远端 commit，不动本地文件；没有来源时禁用，
+              否则点了只会弹出「全部已是最新」，等于骗人。 */}
+          <button type="button" className={css.barBtn}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+            data-spin={sourcesBusy || undefined}
+            disabled={sourcesBusy || sourceList.length === 0}
+            title={t('srcCheckUpdates')}
+            onClick={() => { void checkSourceUpdates() }}>
+            <IconRefreshOutline14 size={13} aria-hidden="true" />
+            {sourcesBusy ? t('srcChecking') : t('srcCheckUpdates')}
+          </button>
+          {/* 与页头同一入口：工具条是视线停留处，建包不该只能回页头找。 */}
+          <button type="button" className={css.barBtn}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+            title={t('addBundleTitle')}
+            onClick={() => { setNewBundleName(''); setNewBundleCats([]); setNewBundleOpen(true) }}>
+            <IconPlusOutline16 size={12} aria-hidden="true" />
+            {t('addBundleTitle')}
+          </button>
           <button type="button" className={css.barAdd}
             onClick={() => { setInstall(null); setInstallError(null); setAddOpen(true) }}>
             <IconPlusOutline16 size={12} aria-hidden="true" />
@@ -2296,6 +2794,103 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
                 <Button variant="outline" onClick={refresh}><IconRefreshOutline14 /> {t('retry')}</Button>
               </div>
             ) : null}
+
+            {/* ── Git 来源 ────────────────────────────────────────────────────
+                只列「Git 链接导入」产生的记录：本地拖放 / 自建技能没有来源，
+                也就不会被自动更新覆盖。放在技能包列表上方、筛选条之下 ——
+                它讲的是「这些技能从哪来、要不要跟新」，属于目录的上游信息，
+                混进技能卡片之间只会打断浏览。 */}
+            {sources !== null && sourceList.length > 0 && (
+              <section className={css.srcSection} data-open={sourcesOpen ? 'true' : undefined} aria-label={t('srcTitle')}>
+                <header className={css.srcHead}>
+                  <button
+                    type="button"
+                    className={css.srcToggle}
+                    aria-expanded={sourcesOpen}
+                    title={sourcesOpen ? t('srcCollapse') : t('srcExpand')}
+                    onClick={() => { setSourcesOpen((value) => !value) }}
+                  >
+                    <IconChevronDownOutline14 size={12} aria-hidden="true" />
+                    <span>{t('srcTitle')}</span>
+                    <i className={css.srcCount}>{sourceList.length}</i>
+                  </button>
+                  <span className={css.srcGrow} />
+                  <label className={css.srcSwitch} title={t('srcAutoUpdate')}>
+                    <input
+                      type="checkbox"
+                      checked={sources.settings.autoUpdate}
+                      onChange={(event) => { void patchSourceSettings({ autoUpdate: event.currentTarget.checked }) }}
+                    />
+                    <span>{t('srcAutoUpdate')}</span>
+                  </label>
+                  <label className={css.srcSwitch} title={t('srcInterval')}>
+                    <span className={css.visuallyHidden}>{t('srcInterval')}</span>
+                    <select
+                      className={css.srcInterval}
+                      value={String(sources.settings.intervalHours)}
+                      onChange={(event) => { void patchSourceSettings({ intervalHours: Number(event.currentTarget.value) }) }}
+                    >
+                      {SRC_INTERVAL_CHOICES.map((hours) => (
+                        <option key={hours} value={String(hours)}>{t('srcIntervalHours', { n: hours })}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <button type="button" className={css.srcBtn} disabled={sourcesBusy || updatingId !== null}
+                    onClick={() => { void updateAllSources() }}>
+                    {sourcesBusy ? t('srcUpdating') : t('srcUpdateAll')}
+                  </button>
+                </header>
+                {sourcesOpen && (
+                  <ul className={css.srcList}>
+                    {sourceList.map((source) => {
+                      const updatingThis = updatingId === source.id
+                      return (
+                        <li key={source.id} className={css.srcRow}>
+                          <div className={css.srcMain}>
+                            {/* 地址是这一行唯一的身份信息：单行省略，全文放 title */}
+                            <span className={css.srcUrl} title={source.url}>{source.url}</span>
+                            <div className={css.srcMeta}>
+                              <span>{source.ref || t('srcDefaultBranch')}</span>
+                              <span className={css.srcSep} aria-hidden="true" />
+                              <code className={css.srcCommit}>{source.commit.slice(0, 7)}</code>
+                              <span className={css.srcSep} aria-hidden="true" />
+                              <span>{t('skillsCount', { n: source.skills.length })}</span>
+                              <span className={css.srcSep} aria-hidden="true" />
+                              <span>{t('srcLastCheck', { when: relativeAgo(source.lastCheck) })}</span>
+                              <span className={css.srcSep} aria-hidden="true" />
+                              <span>{t('srcLastUpdate', { when: relativeAgo(source.lastUpdate) })}</span>
+                            </div>
+                            {/* 上次失败的原因：截到 80 字，全文留 title（长报错会把行撑成一坨） */}
+                            {source.lastError !== null && source.lastError !== '' && (
+                              <p className={css.srcError} role="alert" title={source.lastError}>
+                                {source.lastError.length > 80 ? source.lastError.slice(0, 80) + '…' : source.lastError}
+                              </p>
+                            )}
+                          </div>
+                          <div className={css.srcActions}>
+                            <button type="button" className={css.srcBtn}
+                              disabled={sourcesBusy || updatingId !== null}
+                              onClick={() => { void updateOneSource(source) }}>
+                              {updatingThis ? t('srcUpdating') : t('srcUpdate')}
+                            </button>
+                            <label className={css.srcSwitch} title={t('srcAuto')}>
+                              <input type="checkbox" checked={source.auto}
+                                onChange={(event) => { void toggleSourceAuto(source, event.currentTarget.checked) }} />
+                              <span>{t('srcAuto')}</span>
+                            </label>
+                            <button type="button" className={css.srcRemove} title={t('srcRemove')}
+                              aria-label={t('srcRemove')}
+                              onClick={() => { setSourceConfirm(source) }}>
+                              <IconTrashOutline16 size={12} aria-hidden="true" />
+                            </button>
+                          </div>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )}
+              </section>
+            )}
 
             {state.status === 'ready' && (
               noResults ? (
@@ -2428,6 +3023,7 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
                                     enabled={skillEnabledIn(skill.name)}
                                     scopeLabel={scopeLabel}
                                     index={index}
+                                    gitUrl={gitSkillSource.get(skill.name)}
                                     onToggle={toggleSkill}
                                     onView={openViewer}
                                     onRemove={(s) => { void removeFromBundle(bundle.id, s.name) }}
@@ -2551,6 +3147,7 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
                               enabled={skillEnabledIn(skill.name)}
                               scopeLabel={scopeLabel}
                               index={index}
+                              gitUrl={gitSkillSource.get(skill.name)}
                               onToggle={toggleSkill}
                               onView={openViewer}
                               onAssign={(s) => { setAssignTarget(s) }}
@@ -2618,16 +3215,29 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
       {/* 添加技能弹窗：先拖放/浏览选文件，再填表单安装 */}
       <Modal
         open={addOpen}
-        onClose={() => {
-          if (installing) return
-          setAddOpen(false)
-          setInstall(null)
-          setDropActive(false)
-        }}
+        onClose={closeAddDialog}
         closeLabel={t('close')}
         title={t('addSkillsTitle')}
       >
-        {install === null ? (
+        {/* 渠道切换：本地上传（原有逻辑，一行没动）/ Git 链接导入。
+            用面板筛选行同一套 filter tab（选中态是下划线），不再另造一套按钮。 */}
+        <div className={css.filterTabs} role="tablist" aria-label={t('addSkillsTitle')} style={{ marginBottom: '12px' }}>
+          {([['local', t('addTabLocal')], ['git', t('addTabGit')]] as const).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              className={css.filterTab}
+              data-active={addTab === value || undefined}
+              aria-selected={addTab === value}
+              disabled={installing || gitImporting}
+              onClick={() => { setAddTab(value); setGitError(null) }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {addTab === 'local' && (install === null ? (
           <div
             className={`${css.addCard} ${dropActive ? css.addCardActive : ''}`}
             role="button"
@@ -2702,6 +3312,43 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
               <Button variant="outline" type="button" disabled={installing} onClick={() => { setInstall(null); setAddOpen(false) }}>{t('installCancel')}</Button>
             </div>
             {installError !== null && <p className={css.error} role="alert">{installError}</p>}
+          </form>
+        ))}
+        {addTab === 'git' && (
+          <form className={css.stackForm} onSubmit={(event) => { void submitGitImport(event) }}>
+            <span style={{ fontSize: '12.5px', fontWeight: 600, color: 'var(--dsw-alias-label-primary,#e8e8e8)' }}>{t('gitTitle')}</span>
+            <p className={css.installHint} style={{ margin: 0 }}>{t('gitHint')}</p>
+            {/* 先选包再填链接：导入是「一次装一批」，归组得在发起前定下来（host 不回滚）。 */}
+            <label className={css.bundleSelect}>
+              <span className={css.visuallyHidden}>{t('installBundle')}</span>
+              <select value={gitBundleId ?? ''} disabled={gitImporting}
+                onChange={(event) => { setGitBundleId(event.currentTarget.value === '' ? undefined : event.currentTarget.value) }}>
+                <option value="">{t('installLoose')}</option>
+                {bundles.map((bundle) => <option key={bundle.id} value={bundle.id}>{bundle.name}</option>)}
+              </select>
+            </label>
+            <input className={css.inlineInput} type="url" value={gitUrl}
+              placeholder={t('gitUrlPlaceholder')} aria-label={t('gitUrlLabel')}
+              disabled={gitImporting} autoFocus
+              onChange={(event) => { setGitUrl(event.currentTarget.value) }} />
+            {/* 分支/tag 与子目录都可选：都留空 = 默认分支 + 仓库根；同一行放省高度。 */}
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input className={css.inlineInput} value={gitRef}
+                placeholder={t('gitRefPlaceholder')} aria-label={t('gitRefLabel')}
+                disabled={gitImporting}
+                onChange={(event) => { setGitRef(event.currentTarget.value) }} />
+              <input className={css.inlineInput} value={gitSubdir}
+                placeholder={t('gitSubdirPlaceholder')} aria-label={t('gitSubdirLabel')}
+                disabled={gitImporting}
+                onChange={(event) => { setGitSubdir(event.currentTarget.value) }} />
+            </div>
+            <div className={css.installActions}>
+              <Button variant="primary" type="submit" disabled={gitImporting || gitUrl.trim() === ''}>
+                {gitImporting ? t('gitImporting') : t('gitImport')}
+              </Button>
+              <Button variant="outline" type="button" disabled={gitImporting} onClick={closeAddDialog}>{t('installCancel')}</Button>
+            </div>
+            {gitError !== null && <p className={css.error} role="alert">{gitError}</p>}
           </form>
         )}
       </Modal>
@@ -2827,6 +3474,21 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
             </ul>
           )}
         </Modal>
+      )}
+
+      {/* 移除 Git 来源：只删导入记录、不删技能 —— 二次确认必须把这点写明白，
+          否则用户会以为要连技能一起删（那是另一条路：技能卡片上的删除）。 */}
+      {sourceConfirm !== null && (
+        <ConfirmDialog
+          open
+          title={t('srcRemoveConfirmTitle')}
+          message={t('srcRemoveConfirmBody', { url: sourceConfirm.url })}
+          confirmLabel={t('srcRemove')}
+          cancelLabel={t('cancel')}
+          danger
+          onConfirm={() => { void removeSource(sourceConfirm) }}
+          onClose={() => { setSourceConfirm(null) }}
+        />
       )}
     </>
   )

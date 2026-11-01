@@ -31,7 +31,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { VaultStore } from './store.js'
 import { isFieldSensitive, type VaultConfig, type VaultField, type VaultRecord } from './types.js'
 
-/** Minimal tools service view（与记忆库 / mail 同款契约：注册返回注销函数）。 */
+/** Minimal tools service view（与记忆库同款契约：注册返回注销函数）。 */
 declare module '@deepseek-ai/cordis' {
   interface Context {
     tools: {

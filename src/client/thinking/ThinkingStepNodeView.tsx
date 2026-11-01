@@ -55,8 +55,6 @@ import { useGeneratedImages } from '../generated-images/use-generated-images.ts'
 import { getKrChatStore } from '../kr-chat/kr-chat-store.ts'
 import { KR_CHAT_ENABLED } from '../kr-chat/enabled.ts'
 import { KrReasoningCard } from '../kr-chat/KrReasoningCard.tsx'
-import { collectAsks, KrAskCard } from '../kr-chat/KrAskCard.tsx'
-import { KR_ASK_CARD_VISIBLE } from '../kr-chat/enabled.ts'
 import { getOfficialAssistantNodeView } from '../index.ts'
 import { latestChatSnapshot, setLatestChatSnapshot } from '../tool-summary/TurnProcessShadowView.tsx'
 import { workspaceCwdOf } from '../client-ctx.ts'
@@ -391,7 +389,7 @@ export const ThinkingStepNodeView = memo(function ThinkingStepNodeView(
 ) {
   const { node, useTurnData, useChat, openFile, renderMessageImages, fileMentions, t } = props
   /*
-   * 功能开关（live）——对话流里的思考卡 / 问答卡 / 各类围栏卡片。
+   * 功能开关（live）——对话流里的思考卡 / 各类围栏卡片。
    *
    * ⚠ 一律在组件顶部无条件调用，不能写进下面的 JSX 条件或 `if (!pluginRenders)`
    * 之后：本组件同一个节点会在 reasoning / response 两份投影里各渲染一次，
@@ -399,7 +397,6 @@ export const ThinkingStepNodeView = memo(function ThinkingStepNodeView(
    * 消失，比「开关没生效」严重得多）。
    */
   const thinkingOn = useFeature('view.thinking')
-  const askOn = useFeature('view.panel-ask')
   const htmlCardOn = useFeature('card.html')
   const iuCardOn = useFeature('card.iu')
   const diagramCardOn = useFeature('card.diagram')
@@ -560,13 +557,12 @@ export const ThinkingStepNodeView = memo(function ThinkingStepNodeView(
    * 本轮工具节点：与 reasoningItems / firstReasoningStepKey **同一套两级取数**
    * （locations 优先，拿不到就扫全量节点）。
    *
-   * 原来只读 locations.getTurn：工具间隙与紧凑模式下官方会把节点从 locations
-   * 摘掉，于是 ask_user_question 那条调用读不到，审核轮次的「提问与回答」卡整块
-   * 消失 —— 这正是用户反馈"超时的提问没有办法显示出来"的一半成因（另一半是
-   * 状态机把超时判成了 waiting，见 ask-parse 的状态注释）。
+   * 只读 locations.getTurn 不够：工具间隙与紧凑模式下官方会把节点从 locations
+   * 摘掉，于是「还在跑的工具」（toolsRunning）与生图结果（generated）都读不到 ——
+   * 表现为活动卡提前收口、生图条不出现。
    *
    * 全量那路必须按 data.turn 过滤：nodes 是整场会话的节点池，不过滤会把上几轮
-   * 的提问一起捞进来。
+   * 的工具一起捞进来。
    */
   const toolNodes = useChat(snapshot => {
     if (turnNumber === undefined) return EMPTY_TOOLS
@@ -760,11 +756,11 @@ export const ThinkingStepNodeView = memo(function ThinkingStepNodeView(
    * 的结果」。回合完成后卡片迁到 response 投影、reasoning 投影重新被 member
    * 规则压回，重复才消失。
    *
-   * 修法与官方对齐：reasoning 投影只承载卡片（思考卡 / 问答卡），不渲染正文与
+   * 修法与官方对齐：reasoning 投影只承载卡片（思考卡），不渲染正文与
    * 画廊；正文一律由 response 投影（或无投影时的普通行）负责。
    *
    * ⚠ 声明位置必须早于**所有**使用点（gallery / showBody）：曾因声明晚于
-   * gallery 的求值触发 TDZ ReferenceError，整个座位渲染崩溃——思考卡、问答卡、
+   * gallery 的求值触发 TDZ ReferenceError，整个座位渲染崩溃——思考卡、
    * 正文一夜之间全部消失。smoke 的形状断言不执行组件，拦不住这类错误，
    * smoke-client.mjs 里有一条声明顺序断言专门钉它。
    */
@@ -1018,31 +1014,7 @@ export const ThinkingStepNodeView = memo(function ThinkingStepNodeView(
     )
     : undefined
 
-  /*
-   * 问答卡：**紧跟思考卡下方**，挂在同一个锚点上。
-   *
-   * 为什么贴在对话流里而不是右栏大盘：思考、提问、回答是同一件事的几段——
-   * 「模型想了什么 → 于是问你什么 → 你答了什么」。分两栏摆就得来回对照才读得
-   * 完整，这正是思考卡当年从右栏搬进对话流的理由，问答同理。
-   *
-   * 挂同一锚点（而不是挂在 ask 那条 tool-call 行上）有两个好处：
-   *  1. DOM 顺序天然就是「思考在上、问答在下」，不需要额外的排序；
-   *  2. 不必去占 tool.call.toolview 的座位，也就不必把官方那行问答行再委托回去
-   *     （少一处与官方抢座位的耦合）。
-   *
-   * 锚点缺失（回合刚开头、既没有 reasoning 也没有定型 step）时整卡不渲染——
-   * 那种时刻本来也还没有提问。
-   *
-   * 收起时机与思考卡完全一致：把同一个 `summarizing` 传下去，回复落定后两卡
-   * 一起收成标题行让位给正文（用户要求「回复完成后这个提问也收起」）。
-   */
-  const turnAsks = useMemo(() => collectAsks(toolNodes), [toolNodes])
-  const inlineAsk = askOn && KR_CHAT_ENABLED && KR_ASK_CARD_VISIBLE && isKrMode && projectionAllowsCard
-    && ownsReasoningCard && turnAsks.length > 0
-    ? <KrAskCard asks={turnAsks} inline summarizing={summarizing} />
-    : undefined
-
-  if (shown.length === 0 && inlineReasoning === undefined && inlineAsk === undefined && gallery === undefined) return null
+  if (shown.length === 0 && inlineReasoning === undefined && gallery === undefined) return null
 
   return (
     <div
@@ -1052,7 +1024,6 @@ export const ThinkingStepNodeView = memo(function ThinkingStepNodeView(
     >
       <div className="dtt__assistant-body">
         {inlineReasoning}
-        {inlineAsk}
         {shown.length > 0 && (variant !== undefined
           ? <FlowCard variant={variant} interrupted={interrupted}>{shown}{gallery}</FlowCard>
           : <>{shown}{gallery}</>)}

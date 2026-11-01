@@ -274,7 +274,7 @@ if (!Array.isArray(mod.inject)) fail('factory did not export inject[]')
 else pass(`factory exports inject[] = [${mod.inject.join(', ')}]`)
 // inject[] 取并集：原 dsh-seeker-bot 的 slots + 原 dsh-triad 的
 // locale / inputTriggers / sessions（四个工作台的服务面）+ layout（2026-10-04 起
-// 记忆/能力/邮箱三个工作台改挂官方 main 页座位，开合走 ctx.layout.selectPanel）。
+// 记忆/能力两个工作台改挂官方 main 页座位，开合走 ctx.layout.selectPanel）。
 if (JSON.stringify(mod.inject) !== JSON.stringify(['slots', 'locale', 'inputTriggers', 'sessions', 'layout'])) {
   fail(`expected inject = ['slots','locale','inputTriggers','sessions','layout'], got [${mod.inject.join(', ')}]`)
 } else {
@@ -404,9 +404,6 @@ const expectedStyles = [
   'dsh-triad-responsive-styles',
   // 全局动画节流（页面不可见时暂停全页 CSS 动画），与 KR 开关无关，始终注入。
   'dsh-anim-pause',
-  // 工具闸门胶囊（src/client/tools-gate/styles.ts）：computer-use / browser-use
-  // 按需开关的滑块、扫光、抖动。纯 CSS 动效，带 prefers-reduced-motion 兜底。
-  'dsh-tools-gate-style',
   // 侧栏 Work / Bot 分段控件（src/client/mode-switch/styles.ts）：Bot 功能已按
   // 要求整块删除，只留这枚切换控件；2026-10-31 起 Bot 那一半被禁用（置灰 +
   // cursor:not-allowed），模式恒为 Work。applyModeSwitch 在 apply 阶段同步注入。
@@ -967,9 +964,9 @@ if (!code.includes('data-dsh-anim-paused') || !code.includes('animation-play-sta
 }
 
 // 十三枚槽位：对话增强六枚（turn-process / assistant-step keyed / 截图按钮 /
-// download toolview / kr-todo-bridge / tools-gate 胶囊）+ 融合工作台五枚
-// （记忆 / 能力 / 邮箱三个工作台各两枚：main 页 + sidebar.panellist 菜单行，
-// 共 6；
+// download toolview / kr-todo-bridge）+ 融合工作台若干枚
+// （记忆 / 能力两个工作台各两枚：main 页 + sidebar.panellist 菜单行，共 4；
+// 统一工作台页两枚（main + sidebar.panellist）；
 // skill toolview 一枚）+ 供应商设置页一枚（settings.section / provider-hub，
 // 2026-10-05 从工作台 Tab 撤回官方设置弹窗）
 // + 首 token 平均平铺桥一枚（input.dock / dsh-stats-ttft-flat，只做 DOM 追认）。
@@ -987,10 +984,12 @@ const cell = (key) => registeredSlots.find((s) => s?.slot === 'conversation.chat
 // 按用户要求删除，槽位从 12 → 11。它的开关能力仍在 Seeker 右栏「大盘设置」抽屉里。
 // 2026-10-25：ui-font 通用设置行（settings.general.item / order 12）随「界面字体」
 // 功能恢复而回归，槽位从 11 → 12。
-if (registeredSlots.length !== 27) {
-  fail(`expected 27 slot registrations, got ${registeredSlots.length}: ${JSON.stringify(registeredSlots)}`)
+// 2026-11：工具闸门卡片（conversation.input.left / dsh-tools-gate）按用户要求整块移除，
+// 槽位从 27 → 26。host 半身的闸门仍在，只是不再有可视开关。
+if (registeredSlots.length !== 26) {
+  fail(`expected 26 slot registrations, got ${registeredSlots.length}: ${JSON.stringify(registeredSlots)}`)
 } else {
-  pass('registered 27 seats (12 原有 + 15 对话胶囊：5 overlay + 1 sidebar.footer.action + 9 settings.general.item)')
+  pass('registered 26 seats (11 原有 + 15 对话胶囊：5 overlay + 1 sidebar.footer.action + 9 settings.general.item)')
 }
 
 // 对话完成胶囊（2026-10-28 自 dsh-companion 移植）：15 个座位一个都不能少。
@@ -1035,122 +1034,13 @@ if (!code.includes('.dsh-done-pill-shell')) {
   pass('对话胶囊样式表与 shell-hot 类名契约齐全')
 }
 
-// 工具闸门卡片：挂在输入栏工具行**左端**（与记忆注入开关同一排），order 100。
-// 曾经挂在 input.right / order 6 —— 那里紧邻模型选择器，实测两枚胶囊的文字与
-// 模型名重叠（用户实机截图确认）。左端才是「输入区能力开关」的既有座位。
-const gateSeat = registeredSlots.find((s) => s?.slot === 'conversation.input.left' && s?.id === 'dsh-tools-gate')
-if (gateSeat === undefined) {
-  fail(`missing tools-gate seat (conversation.input.left / dsh-tools-gate)，实得 ${JSON.stringify(registeredSlots.filter(s => s?.id === 'dsh-tools-gate'))}`)
-} else if (gateSeat.order !== 100) {
-  fail(`tools-gate 座位 order 应为 100（排在记忆开关 98/99 之后），实得 ${gateSeat.order}`)
+// 工具闸门可视开关（输入框左侧 computer-use / browser-use 那两个开关）已于
+// 2026-11 按用户要求整块移除。host 半身的闸门**保留**（仍默认把这两组工具挡在
+// 每轮请求之外），只是不再有 UI —— 需要打开时走 /computer-use on、/browser-use on。
+if (/dsh-gate-card|dsh-gate-item|dsh-gate-chip|dsh-tools-gate|dsh-gate-icon/.test(code)) {
+  fail('工具闸门可视开关已移除，client bundle 不该再含 dsh-gate-* 结构')
 } else {
-  pass('tools-gate 卡片座位：conversation.input.left / order 100')
-}
-// 卡片而非散落胶囊：一个容器装两个开关项。
-if (!code.includes('dsh-gate-card') || !code.includes('dsh-gate-item')) {
-  fail('client bundle 缺少工具闸门卡片结构（dsh-gate-card / dsh-gate-item）')
-} else if (code.includes('dsh-gate-chip')) {
-  fail('旧的独立胶囊样式（dsh-gate-chip）不该再出现')
-} else {
-  pass('工具闸门渲染为一张卡片（dsh-gate-card 内含 dsh-gate-item）')
-}
-// 布局硬约束（实机踩过，两次都表现为「页面上只剩一条竖线」，不报错）：
-//  1. 卡片必须 flex:none —— 槽位容器是 display:contents，真正定宽的是官方工具行
-//     （实测 234px 可用），可压缩的卡片会被压成 2px；
-//  2. 卡片上不能挂 container-type —— 容器查询基准是自身内容宽度，而宽度又由内容
-//     决定，被挤窄就触发「隐藏文字」规则，自噬到只剩图标。
-{
-  const cardRule = /\.dsh-gate-card\s*\{([^}]*)\}/.exec(code)?.[1] ?? ''
-  const itemRule = /\.dsh-gate-item\s*\{([^}]*)\}/.exec(code)?.[1] ?? ''
-  if (cardRule === '') fail('未找到 .dsh-gate-card 规则')
-  else if (!/flex:\s*none/.test(cardRule)) fail('.dsh-gate-card 必须 flex:none（否则被工具行压成 2px，页面上只剩一条竖线）')
-  else if (/container-type/.test(cardRule)) fail('.dsh-gate-card 不能挂 container-type（容器查询会自噬：变窄→隐藏文字→更窄）')
-  else if (!/width:\s*max-content/.test(cardRule)) fail('.dsh-gate-card 需要 width:max-content（内容定宽）')
-  else if (!/flex:\s*none/.test(itemRule)) fail('.dsh-gate-item 必须 flex:none')
-  else pass('工具闸门布局硬约束在位（卡片与开关项 flex:none、无容器查询、width:max-content）')
-  // 名称必须视觉隐藏但留在无障碍树里（工具行放不下中文标签）。
-  const labelRule = /\.dsh-gate-item__label\s*\{([^}]*)\}/.exec(code)?.[1] ?? ''
-  if (labelRule === '') fail('未找到 .dsh-gate-item__label 规则（名称需视觉隐藏但可被读屏念出）')
-  else if (!/clip-path/.test(labelRule) || !/position:\s*absolute/.test(labelRule)) {
-    fail('.dsh-gate-item__label 应为视觉隐藏（absolute + clip-path），而非 display:none（后者读屏也念不到）')
-  } else {
-    pass('工具闸门名称视觉隐藏但保留在无障碍树（读屏可念，鼠标说明走 title）')
-  }
-}
-// 契约：卡片与 /指令 读写同一路由；两条命令名与 host 侧分组 key 逐字一致。
-if (!code.includes('/api/chat-flow/tools-gate')) {
-  fail('client bundle 缺少 tools-gate 状态路由调用')
-} else {
-  pass('client bundle 调用 host 状态路由 /api/chat-flow/tools-gate')
-}
-for (const motion of ['dsh-gate-sheen', 'dsh-gate-shake', 'dsh-gate-pulse', 'dsh-gate-card-in', 'prefers-reduced-motion']) {
-  if (!code.includes(motion)) fail(`工具闸门动效缺失：${motion}`)
-}
-pass('工具闸门动效齐备（卡片入场 + 扫光 + 抖动 + 脉冲 + reduced-motion 兜底）')
-
-// `/` 菜单图标：宿主命令没有官方 icon 通道（candidates() 只认 6 个内置
-// definitionId），且同名 contribution 会抛 collides 把菜单炸掉。所以走
-// MutationObserver 打属性 + CSS mask。
-for (const piece of ['data-dsh-gate-icon', 'dsh-gate-icon-computer', 'dsh-gate-icon-browser', 'MutationObserver']) {
-  if (!code.includes(piece)) fail(`/ 菜单图标链路缺失：${piece}`)
-}
-pass('/ 菜单图标链路齐备（属性标记 + CSS mask 图标 + 观察器维持）')
-
-// 判据本身（真实实现，不是复刻）：按官方菜单行的 DOM 形状决定哪些行该补图标。
-// 判据错了不报错、只多几个错图标，所以必须直接断言。
-if (typeof mod.gateIconForRow !== 'function') {
-  fail('client 入口未导出 gateIconForRow（菜单图标判据无法被测试钉住）')
-} else {
-  // 造一行：children = [类名, 文本][]，firstElementChild 取第一个。
-  const mkRow = (children) => {
-    const kids = children.map(([cls, text]) => ({ className: cls, textContent: text }))
-    return {
-      firstElementChild: kids[0] ?? null,
-      attrs: {},
-      hasAttribute(k) { return k in this.attrs },
-      setAttribute(k, v) { this.attrs[k] = v },
-    }
-  }
-  const hit = []
-  for (const name of mod.GATE_ICON_COMMANDS) {
-    const got = mod.gateIconForRow(mkRow([['itemName', name], ['itemDescription', `开关（/${name} on|off）`]]))
-    if (got !== name) fail(`「${name}」行应命中，实得 ${JSON.stringify(got)}`)
-    else hit.push(name)
-  }
-  if (hit.length === mod.GATE_ICON_COMMANDS.length) {
-    pass(`命中两条指令行（${hit.join(', ')}）`)
-  }
-  // 官方命令行不被误标。
-  const others = ['goal', 'plan', 'compact', 'permission', 'export', 'feedback']
-  const wrong = others.filter((n) => mod.gateIconForRow(mkRow([['itemName', n], ['itemDescription', 'x']])) !== null)
-  if (wrong.length > 0) fail(`官方命令行被误标：${wrong.join(', ')}`)
-  else pass(`${others.length} 条官方命令行都不被误标`)
-  // 关键回归：描述里提到命令名的普通行不能被误标（判据必须是严格相等）。
-  const decoy = mkRow([['itemName', 'some-other-cmd'], ['itemDescription', '参考 /computer-use on|off 的写法']])
-  if (mod.gateIconForRow(decoy) !== null) {
-    fail('描述里提到命令名的普通行被误标 —— 判据必须严格相等而非包含')
-  } else {
-    pass('描述里提到命令名的普通行不被误标（严格相等判据）')
-  }
-  // 官方已给图标的行（第一个子元素是空 itemIcon）→ 不补，避免双图标。
-  if (mod.gateIconForRow(mkRow([['itemIcon', ''], ['itemName', 'computer-use']])) !== null) {
-    fail('官方已给图标的行不该再补（会出现双图标）')
-  } else {
-    pass('官方已给图标的行不重复补')
-  }
-  // 幂等：已标记的行不重复计数。
-  const rows = [
-    mkRow([['itemName', 'computer-use']]),
-    mkRow([['itemName', 'goal']]),
-    mkRow([['itemName', 'browser-use']]),
-  ]
-  const firstPass = mod.decorateGateMenuRows({ querySelectorAll: () => rows })
-  const secondPass = mod.decorateGateMenuRows({ querySelectorAll: () => rows })
-  if (firstPass !== 2 || secondPass !== 0) {
-    fail(`菜单图标幂等失败：首次 ${firstPass}（应 2）、二次 ${secondPass}（应 0）`)
-  } else {
-    pass('菜单图标幂等：首次标 2 行、二次标 0 行（观察器重复触发不反复改 DOM）')
-  }
+  pass('工具闸门可视开关已移除（client bundle 无 dsh-gate-* 残留）')
 }
 
 // 统一工作台页面：本体挂官方 `main`（key=workbench），侧边栏菜单行 `sidebar.panellist`（id=workbench）。
@@ -1388,7 +1278,7 @@ if (krEnabled) {
    *     否则总结期答案 step 的 reasoning 投影被思考卡放行规则带出来，正文同屏两份。
    *  2. isReasoningProjection 的**声明必须早于所有使用点**。曾因声明晚于 gallery
    *     求值触发 TDZ ReferenceError，assistant-step 座位整个渲染崩溃——思考卡、
-   *     问答卡、正文全部消失。本文件的形状断言不执行组件，拦不住这类运行时错误，
+   *     正文全部消失。本文件的形状断言不执行组件，拦不住这类运行时错误，
    *     只能把声明顺序本身钉死。
    */
   {
@@ -1398,7 +1288,7 @@ if (krEnabled) {
     if (declIdx < 0 || galleryIdx < 0 || bodyIdx < 0) {
       fail('reasoning 投影过滤缺失：gallery / showBody 都必须以 !isReasoningProjection 前置（总结期正文会重复两份）')
     } else if (!(declIdx < galleryIdx && declIdx < bodyIdx)) {
-      fail('isReasoningProjection 必须声明在 gallery / showBody 使用点之前（TDZ 会让整个 assistant-step 座位渲染崩溃，思考卡/问答卡/正文全消失）')
+      fail('isReasoningProjection 必须声明在 gallery / showBody 使用点之前（TDZ 会让整个 assistant-step 座位渲染崩溃，思考卡/正文全消失）')
     } else {
       pass('reasoning 投影过滤在位且声明先于使用点（防重复正文 + 防 TDZ 崩座）')
     }
@@ -1897,6 +1787,16 @@ if (krEnabled) {
        * 同一个状态再开一套 400ms 定时器是纯浪费（两倍 DOM 查询、两个来源可能不一致）。
        */
       fail('新对话页卡头必须接收 running prop（运行态由控制器 250ms 轮询传入，组件不自开定时器）')
+    } else if (!/useSyncExternalStore\(\s*subscribeLatestChatSnapshot/.test(
+      readFileSync(resolve(ROOT, 'src/client/kr-chat/SeekerHeroHead.tsx'), 'utf8'))) {
+      /*
+       * 会话身份必须**响应式**（2026-11-01 独立审查发现）。
+       *
+       * latestChatSessionId 是模块级变量，不是 React state：只读它的话，切到空白
+       * 新会话时组件不会自己重渲染，而首帧可能还挂着上一个会话的 id —— 上一会话
+       * 的浏览器图标会一直亮在这块卡头上（用户报的「所有会话共用」的另一半）。
+       */
+      fail('新对话页卡头的会话身份必须订阅 snapshot 总线（不能直读模块级 latestChatSessionId）')
     } else if (!/export function isCurrentTurnRunning/.test(
       readFileSync(resolve(ROOT, 'src/client/kr-chat/turn-state.ts'), 'utf8'))) {
       fail('回合状态判据必须抽成独立模块（turn-state.ts），否则 controller 与 Hero 卡头循环依赖')
@@ -1934,19 +1834,39 @@ if (krEnabled) {
        * 前两版：① 圆+发散线（那是太阳）；② 描边闭合 path（小尺寸下糊成一圈锯齿）。
        */
       fail('齿轮必须是实心（fill=currentColor + fillRule=evenodd），描边版在小尺寸下会糊')
-    } else if (!/const browserOn = browserActive \|\| \(running && browserSticky\)/.test(cardSrc)) {
+    } else if (!/const browserOn = browserActive \|\| \(running && browserSticky\) \|\| browserRemembered/.test(cardSrc)) {
       /*
-       * 「只要 ego 没收口就不要消失」（2026-10-25 用户要求）。
+       * 浏览器标志必须**按会话**亮（2026-11-01 用户：「操作面板的浏览器标识应该
+       * 绑定会话，而不是所有会话共用」—— 现象是两个会话同时亮着同一个浏览器状态）。
        *
-       * 只认 store 的 active/尾迹时，一次调用结束 1.5s 后图标就灭 —— 而浏览器
-       * 进程还开着，模型只是在两次调用之间思考。判据必须是**粘滞**：本轮出现过
-       * 浏览器活动，就一直亮到本轮收口。
+       * 三条判据缺一不可，且全部按会话：
+       *   · browserActive            —— 本会话此刻有进行中的浏览器调用；
+       *   · running && browserSticky —— 本会话本轮出现过活动，粘滞到本轮收口
+       *     （2026-10-25 用户：「只要 ego 没有收口就不要消失」）；
+       *   · browserRemembered        —— 本会话历史上真的跑过浏览器（会话级记忆）。
        *
        * ⚠ 别写成 browserActive || running：那会让每个正在跑的会话都亮图标，
        *   哪怕它根本没碰过浏览器。
        */
-      fail('浏览器标志必须粘滞到本轮收口（browserActive || (running && browserSticky)），'
+      fail('浏览器标志必须按会话判据（browserActive || (running && browserSticky) || browserRemembered），'
         + '不能只认单次调用，也不能无条件跟着 running 亮')
+    } else if (/hasBrowserHistory/.test(stripComments(cardSrc))) {
+      /*
+       * 旧判据 hasBrowserHistory 拿步骤文案做子串匹配（open- / workspace /
+       * taskspace）判「碰过浏览器」。任何会话只要读过 open-preview.ts、搜过
+       * workspaceHints，就会被**永久**点亮 —— 两个都误判过的会话于是同时亮着
+       * 同一个浏览器状态。这是 2026-11-01 那个 bug 的根因，不许回来。
+       */
+      fail('浏览器标志不许再用步骤文案子串匹配（hasBrowserHistory）判「碰过浏览器」')
+    } else if (/dsh\.chat_plus\.workspace_sessions/.test(stripComments(cardSrc))) {
+      /*
+       * 旧判据 isRememberedSession 把结果写进 sessionStorage 的**同一个 key**
+       * （所有会话共用一个数组），写入后永不清理：误判一次 = 永久常亮。现在会话
+       * 级记忆由 store 的 sessionSeenBrowser 按会话维护，卡片里不许再读它。
+       */
+      fail('浏览器标志不许再读跨会话共用的 sessionStorage 白名单（改用 store 的 sessionSeenBrowser）')
+    } else if (!/sessionSeenBrowser\(sessionId \?\? undefined\)/.test(cardSrc)) {
+      fail('浏览器标志的会话级记忆必须按当前会话 id 查（sessionSeenBrowser(sessionId)）')
     } else if (!/kr-plain-head__act/.test(seekerHeadSrc)) {
       fail('卡头必须有「当前动作」这一行')
     } else if (/\.kr-plain-view\b/.test(cardSrc)) {
@@ -2956,181 +2876,25 @@ if (krEnabled) {
     pass('outputs.ts：参数/结果两路工具集分离 + spill 排除 + 落盘说明闸门 + 交付路径优先 + run_code/媒体豁免 + 证据3 目录锚点')
   }
 }
-
-// 「提问与回答」卡。它存在的唯一理由是：KR 对话流只保留答案投影、工具明细整类
-// 隐藏，而 ask_user_question 走 tool-call 节点 —— 问答整段从对话流里消失，用户
-// 看不到自己答过什么。所以这张卡是问答的**唯一出口**，五件事缺一就静默失效：
-// 开关在、组件在、解析层在、样式在、挂在思考卡下方且在对话流里。
-/**
- * 内联卡左侧竖线是否按「伪元素细线 + 上下内缩」画。
- *
- * 只看命令式搜索不够：整份 styles.ts 里 top/bottom: 6px 到处都有（缩略图、按钮、
- * 浮层），全局命中等于没检查。这里把每张卡自己的 ::before 块切出来单独核对，
- * 顺便确认它**不再**用 border-left 画竖线（那会退回"贴边拉满 + 露出线头"的老形态）。
- *
- * @param css - 已剥注释的样式表正文。
- * @param card - 卡后缀（reasoning / ask）。
- */
-function railInsetOk(css, card) {
-  const block = new RegExp('\\.kr-card--' + card + '\\[data-inline\\]::before\\s*\\{([^}]*)\\}').exec(css)
-  if (block === null) return false
-  const body = block[1]
-  const insetTop = /top:\s*6px/.test(body)
-  const insetBottom = /bottom:\s*6px/.test(body)
-  const hairline = /width:\s*1\.5px/.test(body)
-  // 竖线本体若还带 border-left，说明旧实现没退干净（两套并存会画出双线）。
-  const leftoverBorder = /border-left:\s*\d/.test(body)
-  return insetTop && insetBottom && hairline && !leftoverBorder
-}
-
-if (krEnabled) {
-  const enabledSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/enabled.ts'), 'utf8')
-  const askCardVisible = /export const KR_ASK_CARD_VISIBLE = (true|false)/.exec(enabledSrc)?.[1] === 'true'
-  const askCardSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/KrAskCard.tsx'), 'utf8')
-  const askParseSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/ask-parse.ts'), 'utf8')
-  const thinkingSrc = readFileSync(resolve(ROOT, 'src/client/thinking/ThinkingStepNodeView.tsx'), 'utf8')
-  const panelSrc2 = readFileSync(resolve(ROOT, 'src/client/kr-chat/KrAgentPanel.tsx'), 'utf8')
-  // 断言打在**活代码**上：styles.ts 里留着「为什么删掉」的历史注释，直接正则整份
-  // 源码会被注释里的 kr-ask-row-in / kr-ask-pick-in 误伤（同仓库其它断言同理）。
-  const askCss = readFileSync(resolve(ROOT, 'src/client/kr-chat/styles.ts'), 'utf8')
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:])\/\/.*$/gm, '$1 ')
-  if (!askCardVisible) {
-    fail('KR_ASK_CARD_VISIBLE 必须默认 true（问答卡是问答在界面上的唯一出口）')
-  } else if (!code.includes('.kr-card--ask') || !code.includes('kr-ask-pick') || !code.includes('kr-ask-dot')) {
-    fail('client bundle 缺问答卡样式（.kr-card--ask / .kr-ask-pick / kr-ask-dot）')
-  } else if (askCardSrc.includes('kr-ask-opt') || askCardSrc.includes('kr-ask-row__options')) {
-    // 用户要求「直接显示回答了什么就行了，不需要每回答的也显示」：候选项整列不渲染，
-    // 答案就是 values 本身。列候选会让答案淹在没被选的项里，每次都要找哪条是亮的。
-    fail('问答卡不得再罗列候选项（kr-ask-opt / kr-ask-row__options）：'
-      + '只显示用户实际选中的答案，完整候选走官方「查看回答」面板')
-  } else if (!/kr-ask-row__answer/.test(askCardSrc) || !/kr-ask-pick/.test(askCardSrc)) {
-    fail('问答卡必须渲染答案行（.kr-ask-row__answer + .kr-ask-pick）')
-  } else if (!/kr-ask-verdict/.test(askCardSrc) || !/kr-ask-list/.test(askCardSrc)) {
-    // 2026-10-26 按用户给的样式重做展开版式：**先给结论、再列问题清单**。
-    // 之前展开后直接铺问题行，超时那次看起来与"正在等你答"一模一样——读者
-    // 得自己算这些问题到底答没答。结论行就是这个判断的唯一出口。
-    fail('问答卡展开后必须先给结论行（.kr-ask-verdict）再列问题清单（.kr-ask-list）')
-  } else if (!/export function askVerdict/.test(askParseSrc)
-    || !/export function splitAskQuestionText/.test(askParseSrc)
-    || !/export function askQuestionLead/.test(askParseSrc)) {
-    // 结论行措辞与题干分段都是纯函数：写在组件里就没法单测，
-    //「超时不得写成已跳过」这条口径也就没法钉住。
-    fail('ask-parse.ts 必须导出 askVerdict / splitAskQuestionText / askQuestionLead')
-  } else if (!/export function buildAskView/.test(askParseSrc)
-    || !/export function parseAskQuestions/.test(askParseSrc)
-    || !/export function pairAskAnswers/.test(askParseSrc)) {
-    fail('ask-parse.ts 必须导出 buildAskView / parseAskQuestions / pairAskAnswers')
-  } else if (!/else state = 'resumed'/.test(askParseSrc) || /state = 'closed'/.test(askParseSrc)) {
-    // 超时的提问显示不出来，根因就在这一行：调用结束又没有答案时，旧实现把它
-    // 判成 waiting，卡片于是一直转着等待动效、把一次早已作废的提问渲染成
-    // "正在等你回答"。结束且无答案必须落到 resumed，才有如实说明的余地。
-    fail('调用结束且没有答案时必须落到 resumed 状态（不得再判成 waiting / closed），'
-      + '否则超时的提问会被渲染成等待态')
-  } else if (!/KR_ASK_CARD_VISIBLE/.test(thinkingSrc)
-    || !/<KrAskCard asks=\{turnAsks\} inline summarizing=\{summarizing\} \/>/.test(thinkingSrc)) {
-    fail('问答卡必须由 ThinkingStepNodeView 以 inline 形态挂载并接收 summarizing'
-      + '（贴在对话流里 + 回复完成后跟着收起）')
-  } else if (!/if \(!inline \|\| !summarizing \|\| was\) return/.test(askCardSrc)
-    || !/useState\(!\(inline && summarizing\)\)/.test(askCardSrc)) {
-    // 用户要求「回复完成后这个提问也收起」：与思考卡**逐字同构**的收口收起。
-    //   · 只在 summarizing false→true 的那一次翻转上收起——写成持续态判据会
-    //     在用户手动展开历史轮次后被下一次重渲染立刻按回去；
-    //   · 初始态只看 summarizing——拿「等待回答」参与判定会在模型还在问的时候
-    //     就把卡折起来，用户根本看不到它在问什么。
-    fail('问答卡收口收起必须与思考卡同构（翻转触发 + 初始态只看 summarizing）')
-  } else if (!/role="button"[\s\S]{0,200}aria-expanded=\{open\}/.test(askCardSrc)) {
-    fail('问答卡收起后整行仍必须是可折叠按钮（点标题行 / Enter / 空格能再展开）')
-  } else if (!/\{\(bodyPresent \|\| open\) && \(/.test(askCardSrc)) {
-    // 折叠体与思考卡同一写法（KrReasoningCard 的 `(bodyPresent || open) &&`）：
-    // 收起动画播完才卸载，但收起途中又被展开要能立刻挂回，否则快速连点会出现空帧。
-    fail('问答卡折叠体必须用 (bodyPresent || open) 门控（同思考卡，防快速连点空帧）')
-  } else if (!/\{\.\.\.\(!open \? \{ inert: '' \} : \{\}\)\}/.test(askCardSrc)) {
-    // 压扁的内容仍留在 DOM 里（补间需要它），不加 inert 就能被 Tab 键聚焦进去。
-    fail('问答卡收起态必须叠加 inert（同思考卡，压扁内容不该被键盘聚焦）')
-  } else if (!/\.kr-ask-body:not\(\[data-open\]\)\s*\{[^}]*opacity:\s*0/.test(askCss)) {
-    // 高度补间由 useHeightAnimation 改 inline height；没有这层 opacity，收口那一下
-    // 会看到「字挤在 0 高度里闪一帧」。
-    fail('问答卡折叠体必须有 data-open 的 opacity 门控（淡入淡出，同 .kr-reasoning-list）')
-  } else if (!/\{inlineReasoning\}\s*\{inlineAsk\}/.test(thinkingSrc)) {
-    // 顺序就是需求本身：用户明确要求"放到思考的下方"。
-    fail('问答卡必须渲染在思考卡**下方**（inlineReasoning 之后才是 inlineAsk）')
-  } else if (panelSrc2.includes('KrAskCard')) {
-    fail('问答卡已搬进对话流，右栏大盘不该再挂它（会两处重复显示）')
-  } else if (!code.includes(':has(.kr-card--ask)')) {
-    // KR 对工具明细整类隐藏，而问答卡挂在 tool-call 节点上 ——
-    // 没有这条放行规则，卡片有盒模型但宽高是 0，等于没做。
-    fail('样式表必须有 :has(.kr-card--ask) 放行规则（否则卡片被 KR 的工具明细隐藏规则压成 0×0）')
-  } else if (!/\[hidden="until-found"\]:has\(\.kr-card--ask\)[^{]*\{[^}]*max-height:\s*none/.test(askCss)) {
-    // 用户报「agent 执行过程中点回答是在内部展开，结束后就正常了」。
-    // 根因：进行中卡片挂在**过程投影**里，落在官方折叠体 .O_Ebla_body 内，
-    // 而那个容器定死了 max-height: min(400px,50vh) + overflow-y: auto ——
-    // 卡片一长就被截断、要在这个小框里内部滚动。收口后卡片改挂**答案投影**，
-    // 那条链上没有这个折叠容器，所以显示正常（"结束后就正常了"的成因）。
-    // 修法：只给「含卡片」的那个折叠体解除限制（官方自己的折叠体里没有卡片，
-    // 所以 :has 的作用面精确等于含卡片的那一个），官方自己的 400px 折叠窗照旧。
-    fail('含卡片的折叠体必须解除 max-height（否则进行中卡片被官方的 400px '
-      + '折叠窗截断，表现为「在内部展开」；收口后换投影就正常了）')
-  } else if (!/\[hidden="until-found"\]:has\(\.kr-card--ask\)[^{]*\{[^}]*overflow:\s*visible/.test(askCss)) {
-    fail('含卡片的折叠体必须同时解除 overflow（只放 max-height 仍会内部滚动）')
-  } else if (askCss.includes('kr-ask-row-in') || askCss.includes('kr-ask-pick-in')) {
-    // 用户报「展开有点卡卡的」：原先每一行、每个被选中的选项各跑一个 translateY /
-    // scale 动画，与卡片入场、高度补间三层同时起跑 —— 十几个元素同帧提升合成层。
-    // 现在只留卡片入场（kr-card-in）与高度补间两次整体过渡。
-    fail('问答卡不得再逐行/逐项播入场动画（kr-ask-row-in / kr-ask-pick-in）：'
-      + '展开时只该有卡片入场与高度补间两次整体过渡')
-  } else if (!/\.kr-card--reasoning\[data-inline\]::before\s*\{[^}]*width:\s*1\.5px/.test(askCss)
-    || !/\.kr-card--ask\[data-inline\]::before\s*\{[^}]*width:\s*1\.5px/.test(askCss)) {
-    // 2026-10-26 用户要求「思考过程和提问左侧那条线优化下」。原先两卡都是
-    // border-left: 2px + border-l2（10% 黑）：一条实心灰杠贴着卡片上下边缘拉满，
-    // 折叠成一行时两端露出线头，展开成几百像素时又压过正文。改成 ::before 画的
-    // 1.5px 细线、上下各内缩 6px，线只陪着内容走。
-    fail('思考卡与提问卡的左侧竖线必须是 ::before 画的 1.5px 细线（上下内缩，不再贴边拉满）')
-  } else if (!railInsetOk(askCss, 'reasoning') || !railInsetOk(askCss, 'ask')) {
-    // 内缩量就是「线陪着内容」的那个量：贴边画（top/bottom 为 0）等于退回 border-left。
-    // 检查限定在每张卡自己的 ::before 块里 —— 整份样式表里别的元素也有 6px 的
-    // top/bottom（缩略图、按钮之类），只做全局 search 等于没检查。
-    fail('竖线必须上下各内缩 6px（贴边画等于退回 border-left，折叠态会露出线头）')
-  } else if (/kr-ask-breathe[^}]*border-left-color/.test(askCss)) {
-    // 等待态呼吸若动 border-left-color，会**每帧重绘整张卡的边框**（12px 圆角 +
-    // 多层嵌套），叠加高度补间就是"卡一下"的主因。现在呼吸走 ::after 的 opacity。
-    fail('等待呼吸必须动 opacity（合成器），不得动 border-left-color（每帧重绘整卡边框）')
-  } else if (/\.kr-ask-opt[^{]*\{[^}]*background:/.test(askCss)) {
-    // 简约化：选项是**已发生事实的记录**，不是待操作的问卷。画成带描边+底色的
-    // 可点控件既在骗人（点不动）又堆出一片框线噪声。
-    fail('选项必须是纯文本行（不得带底色/控件外观）：这张卡是已答事实的记录')
-  } else if (/\.kr-ask-opt/.test(askCss)) {
-    // 用户要求「直接显示回答了什么就行了，不需要每回答的也显示」——候选项整列不渲染，
-    // 组件里已无 .kr-ask-opt 渲染点，样式表里残留规则只会在下次改版时误导人。
-    fail('样式表不该再留 .kr-ask-opt 规则（组件已不渲染候选项，只显示选中的答案）')
-  } else {
-    pass('提问与回答卡：挂在思考卡下方 + 折叠窗解除 + 单层过渡 + 只显示答案 + 解析层 + 开关在位'
-      + ' + 结论行/问题清单 + 竖线细线内缩')
-  }
-}
-
 /*
- * ── 字号轴：两张对话流内联卡必须跟随官方「设置 → 字号」 ────────────────────
+ * ── 字号轴：对话流思考卡必须跟随官方「设置 → 字号」 ────────────────────────
  *
  * 用户要求（2026-10-09）：「seeker 的思考过程、提问需要跟随官方设置里的字号大小」。
  *
  * 官方把正文字号发布成 body 上的行内变量 --dsh-content-font-size（10..22，
- * 默认 14），派生 --dsh-content-font-delta，官方自己的组件一律读这条轴。这两张
+ * 默认 14），派生 --dsh-content-font-delta，官方自己的组件一律读这条轴。这张
  * 卡贴在对话流里、与正文同列，硬编码字号的结果是「正文调到 20px，卡片还停在
  * 12.5px」—— 同一条消息里两种字级。
  *
- * 六条一起钉（前两条是回退闸门，其余钉住"改全了"）：
- *  1. 档位变量声明在两张卡的根类上，且都从 --dsh-content-font-size 派生；
+ * 五条一起钉（前两条是回退闸门，其余钉住"改全了"）：
+ *  1. 档位变量声明在六张卡的根类上，且都从 --dsh-content-font-size 派生；
  *  2. **默认档逐像素还原**改造前的硬编码值（12.5 / 13 / 12 / 11.5 / 11）。
  *     这五行的括号与数字就是契约本身，按整行文本精确比对 —— 偏移改一位，
  *     用户不改设置也会看到字号变了；
  *  3. 卡片命名空间里不许再出现裸 px 的 font-size（将来新增元素也拦得住）；
  *  4. 思考视口的行高必须从当前字级算（写死会在放大档与真实行高脱钩，视口按
  *     旧行高算 max-height，卡片要么被撑破要么显示不全）；
- *  5. 标题行图标跟着 --dsh-content-font-delta 放大；
- *  6. 与字级联动的行高 / 尺寸也得跟：.kr-ask-row__tag 的行高、.kr-ask-dots 的
- *     3px 三点写死过一版，字号轴推到 22px 时前者行距小于字高（挤字）、后者
- *     相对缩成看不见的芝麻（等待态的唯一动效线索丢了）。
+ *  5. 标题行图标跟着 --dsh-content-font-delta 放大。
  */
 if (krEnabled) {
   const axisSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/styles.ts'), 'utf8')
@@ -3149,17 +2913,17 @@ if (krEnabled) {
     ['10', '9.5px', '14px', '4px', 10],
   ]
   /*
-   * 作用域必须覆盖**六个卡根类**：左栏两张（思考 / 问答）+ 右栏四张
-   * （任务概览 / 操作面板 / 子智能体 / 产出物）。
+   * 作用域必须覆盖**六个卡根类**：左栏思考卡 + 右栏五张
+   * （任务概览 / 操作面板 / 子智能体 / 产出物 / 工具调用）。
    *
    * 少一个的后果是静默的：那张卡拿不到 --kr-fs-*，规则里的 var 全部退回
    * fallback（= 改造前的硬编码值），看起来「样式是对的」，只是字号永远不跟。
-   * 所以逐个点名核对，而不是只要求「至少有这两个」。
+   * 所以逐个点名核对，而不是只要求「至少有这几个」。
    */
-  const REQUIRED_CARD_SCOPES = ['reasoning', 'ask', 'task', 'plain', 'subs', 'outputs']
-  const axisBlock = /\.kr-card--reasoning,\s*\.kr-card--ask[^{]*\{([^}]*)\}/.exec(axisSrc)
+  const REQUIRED_CARD_SCOPES = ['reasoning', 'task', 'plain', 'subs', 'outputs']
+  const axisBlock = /\.kr-card--reasoning,\s*\.kr-card--task[^{]*\{([^}]*)\}/.exec(axisSrc)
   if (axisBlock === null) {
-    axisReasons.push('缺「字号轴」档位变量声明块（.kr-card--reasoning, .kr-card--ask, … 上声明 --kr-fs-*）')
+    axisReasons.push('缺「字号轴」档位变量声明块（.kr-card--reasoning, .kr-card--task, … 上声明 --kr-fs-*）')
   } else {
     const scopeText = axisBlock[0].slice(0, axisBlock[0].indexOf('{'))
     for (const card of REQUIRED_CARD_SCOPES) {
@@ -3179,11 +2943,11 @@ if (krEnabled) {
     }
   }
 
-  // 3：六张卡的命名空间里都不许再有裸 px 的 font-size
+  // 3：六张卡（思考 + 右栏五张）的命名空间里都不许再有裸 px 的 font-size
   const nakedFonts = []
   for (const block of axisSrc.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
     const selector = block[1].trim().replace(/\s+/g, ' ')
-    if (!/kr-reasoning|kr-ask|kr-card--(reasoning|ask|task|plain|subs|outputs)|kr-task-|kr-plain-|kr-subs-|kr-out-/.test(selector)) continue
+    if (!/kr-reasoning|kr-card--(reasoning|task|plain|subs|outputs)|kr-task-|kr-plain-|kr-subs-|kr-out-/.test(selector)) continue
     const hit = /font-size:\s*[\d.]+px/.exec(block[2])
     if (hit !== null) nakedFonts.push(selector + ' → ' + hit[0])
   }
@@ -3203,20 +2967,8 @@ if (krEnabled) {
     axisReasons.push('六张卡的标题图标尺寸必须跟随 --dsh-content-font-delta')
   }
 
-  // 6：与字级联动的行高 / 尺寸也得跟
-  const tagBlock = /\.kr-ask-row__tag\s*\{([^}]*)\}/.exec(axisSrc)
-  if (tagBlock === null || /line-height:\s*\d+(\.\d+)?px/.test(tagBlock[1])
-    || !tagBlock[1].includes('--dsh-content-font-delta')) {
-    axisReasons.push('.kr-ask-row__tag 的行高不得写死 px（字号 20.5px 时行距小于字高会挤字），应随 --kr-fs-11 缩放')
-  }
-  const dotsBlock = /\.kr-ask-dots > i\s*\{([^}]*)\}/.exec(axisSrc)
-  if (dotsBlock === null || /(width|height):\s*3px/.test(dotsBlock[1])
-    || !dotsBlock[1].includes('--dsh-content-font-delta')) {
-    axisReasons.push('.kr-ask-dots 的三点不得写死 3px（放大档下会相对缩成看不见的芝麻），应随 --kr-fs-11-5 缩放')
-  }
-
   /*
-   * 7：右栏两张带**有界视口**的卡，视口高度必须从当前行高算。
+   * 6：右栏两张带**有界视口**的卡，视口高度必须从当前行高算。
    *
    * 操作面板列表的 max-height = 行数 × --kr-plain-row-h + 6px，而
    * `.kr-plain-step` 的 min-height 是同一个基准。写死 22px 时字号跟到 20px、
@@ -3334,261 +3086,6 @@ if (krEnabled) {
   if (!/hours\?: ObserveHourStat\[\]/.test(chartSrc)) reasons.push('ObserveChart 必须接受 hours?: ObserveHourStat[]')
   if (reasons.length > 0) fail('用量今日 24 小时契约被破坏：' + reasons.join(' / '))
   else pass('用量：默认今日 + 趋势图 24 小时（hours 通道）')
-}
-
-// ── 邮箱面板：纯查看（2026-10 入口搬迁 + 写操作 UI 全裁） ───────────────
-// 这一轮把邮件从「统一工作台第 6 个分类」搬成「Seeker 顶栏齿轮右侧的邮件按钮
-// + 只读浮层」（入口本体在 src/client/kr-chat/mail-drawer.tsx），同时把面板
-// 裁成**纯查看**：写邮件 / 回复 / 转发 / 移入回收站 / 永久删除全部删除。
-//
-// 旧契约（page 形态 / 无 open-closing-anchor / registerPanelSeat 座位）随搬迁
-// 整体作废：registerPanelSeat 那条装配路径（applyMailClient + MAIL_PANEL_ID）
-// 已删除，本文件不能再要求它存在，否则就是拿一把已经不用的尺子量。
-// 新契约两条：① 邮箱只剩**导出面**（浮层 import 它）+ 工作台里已无 mail 分类；
-// ② 面板是纯查看的（列表/搜索/读信/附件在位，写操作 UI 不存在）。
-{
-  const mailPanelSrc = readFileSync(resolve(ROOT, 'src/client/triad/mail/Panel.tsx'), 'utf-8')
-  const mailIndexSrc = readFileSync(resolve(ROOT, 'src/client/triad/mail/index.ts'), 'utf-8')
-  const hubSrc = readFileSync(resolve(ROOT, 'src/client/triad/hub/WorkbenchPanel.tsx'), 'utf-8')
-  const flyoutSrc = readFileSync(resolve(ROOT, 'src/client/triad/hub/row-flyout.tsx'), 'utf-8')
-
-  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/.*$/gm, '$1 ')
-  const hubClean = strip(hubSrc)
-  const flyoutClean = strip(flyoutSrc)
-  // 入口文件要剥注释后再判：注释里会提到 applyMailClient（说明它为什么被删），
-  // 那是叙述不是代码，拿它当命中会变成「越解释越违规」。
-  const indexClean = strip(mailIndexSrc)
-
-  const reasons = []
-  // ① 导出面：新入口（mail-drawer.tsx）靠这几个 export 装配面板。
-  if (!/export \{ MailPanel, MailIcon/.test(mailIndexSrc)) reasons.push('mail/index.ts 必须导出 MailPanel / MailIcon（新浮层入口 import 它）')
-  if (!/export \{ createMailApi, MailApiError \}/.test(mailIndexSrc)) reasons.push('mail/index.ts 必须导出 createMailApi')
-  // 死代码必须真删掉：留着等于「还有第二个入口」的错觉。
-  if (/applyMailClient/.test(indexClean)) reasons.push('applyMailClient 已是死代码，必须删除（否则让人以为还有注册的座位）')
-  if (/MAIL_PANEL_ID/.test(indexClean)) reasons.push('MAIL_PANEL_ID 只服务已删的座位装配，必须一并删除')
-  // ② 工作台里已无 mail 分类（类型 + 渲染分支 + 分类表 + 图标分支）。
-  if (/'mail'/.test(hubClean)) reasons.push('WorkbenchPanel 不得再有 mail 分类（联合类型 / 渲染分支都要清）')
-  if (/MailPanel|createMailApi/.test(hubClean)) reasons.push('WorkbenchPanel 不得再 import / 使用 MailPanel 与 createMailApi（死引用）')
-  if (/id:\s*'mail'/.test(flyoutClean)) reasons.push('row-flyout 的 WORKBENCH_TABS 不得再有 mail 一项')
-  if (/case 'mail':/.test(flyoutClean)) reasons.push('row-flyout 的分类图标不得再有 mail 分支')
-
-  if (reasons.length > 0) {
-    fail('邮箱入口搬迁：' + reasons.join('；'))
-  } else {
-    pass('邮箱入口搬迁：只剩导出面（无 applyMailClient / MAIL_PANEL_ID）+ 工作台已无 mail 分类')
-  }
-}
-
-// ── 邮箱面板纯查看：查看能力在位 + 写操作 UI 不存在 ────────────────────
-{
-  const raw = readFileSync(resolve(ROOT, 'src/client/triad/mail/Panel.tsx'), 'utf-8')
-  const src = raw.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/.*$/gm, '$1 ')
-
-  const viewReasons = []
-  // ── 查看能力必须全在位（删写操作时最容易误伤的就是这几处）──
-  if (!/css\.topSearch/.test(src) || !/css\.topInput/.test(src)) viewReasons.push('顶栏搜索框必须保留')
-  if (!/css\.listCol/.test(src) || !/css\.listScroll/.test(src)) viewReasons.push('邮件列表（中栏）必须保留')
-  if (!/onClick=\{\(\) => \{ setPane\(\{ kind: 'read', id: message\.message_id \}\) \}\}/.test(src)) viewReasons.push('点列表项必须进 read 分支（查看详情）')
-  if (!/function ReadPane\(/.test(src)) viewReasons.push('ReadPane 读信区必须保留')
-  if (!/sandbox="allow-same-origin"/.test(src) || /allow-scripts/.test(src)) viewReasons.push('HTML 正文必须走 iframe sandbox 且不给 allow-scripts')
-  if (!/css\.attachItem/.test(src) || !/css\.attachAlt/.test(src) || !/onDownloadAlt/.test(src)) viewReasons.push('附件行必须保留「下载」与「另选位置」两个入口')
-  if (!/css\.navItem/.test(src) || !/FOLDERS\.map/.test(src)) viewReasons.push('文件夹导航（收件箱/已发送/回收站/垃圾邮件）必须保留')
-  if (!/只看未读/.test(src) || !/只看附件/.test(src)) viewReasons.push('「只看未读 / 只看附件」两个过滤必须保留')
-  if (!/css\.topBtn/.test(src) || !/IconRefreshOutline16/.test(src)) viewReasons.push('刷新按钮必须保留')
-
-  // ── 写操作 UI 必须一个不剩（这是本轮的核心删除项）──
-  const writeReasons = []
-  for (const [needle, why] of [
-    [/ComposePane/, 'ComposePane 组件与调用'],
-    [/confirmState|ConfirmDialog/, '写操作确认弹层'],
-    [/写邮件/, '「写邮件」入口'],
-    [/>\s*回复\s*</, '读信区「回复」按钮'],
-    [/>\s*转发\s*</, '读信区「转发」按钮'],
-    [/移入回收站/, '「移入回收站」按钮'],
-    [/永久删除/, '「永久删除」按钮'],
-    [/api\.send\(|api\.forward\(|api\.trash\(|api\.remove\(/, '写操作 api 调用'],
-    [/api\.pending\(|css\.pendingBar/, '待确认警示条'],
-  ]) {
-    if (needle.test(src)) writeReasons.push(`${why} 必须已删除（命中 ${needle}）`)
-  }
-  if (!/kind: 'read'/.test(src) || /kind: 'compose'|kind: 'forward'/.test(src)) {
-    writeReasons.push("PaneMode 只能剩 { kind: 'read' }（compose / forward 分支要删干净）")
-  }
-  // ReadPane 的签名里不得再挂写操作回调。
-  for (const prop of ['onReply', 'onForward', 'onTrash', 'onDelete']) {
-    if (new RegExp(`${prop}\\s*[?:]`).test(src)) writeReasons.push(`ReadPane 的 props 不得再有 ${prop}`)
-  }
-  // host 侧写能力本轮**只裁 UI**：api.ts 的薄封装必须原样留着（另一侧工具数对账要用）。
-  const apiSrc = readFileSync(resolve(ROOT, 'src/client/triad/mail/api.ts'), 'utf-8')
-  if (!/send\(|reply\(|forward\(|trash\(|remove\(/.test(apiSrc)) {
-    writeReasons.push('mail/api.ts 的写方法本轮不得删除（那是 host 路由的薄封装，只裁 UI 调用点）')
-  }
-
-  if (viewReasons.length > 0) {
-    fail('邮箱纯查看面板：' + viewReasons.join('；'))
-  } else if (writeReasons.length > 0) {
-    fail('邮箱纯查看面板：' + writeReasons.join('；'))
-  } else {
-    pass('邮箱纯查看面板：列表/搜索/读信/附件/过滤全在位 + 写操作 UI（写邮件/回复/转发/回收站/删除/ComposePane/确认弹层）零残留')
-  }
-}
-
-// ── 邮箱窄栏：容器查询 + 列表↔详情切换 ────────────────────────────────
-// 面板宽度由外壳给（邮箱卡片最宽 1080px，窄窗口下被压小），**与视口宽度不是
-// 同一个数**：视口 1400px 时卡片可能只有 900px，视口媒体查询判的是另一回事。
-// 所以窄栏必须由容器查询驱动，量面板自己。
-// 另有一条踩过的坑要钉住：container-type 必须挂**有确定宽度的那个根**
-// （.dsh-mail-panel），挂到 display:contents 的官方 [data-slot="main"] 上
-// 不会有任何效果 —— 容器查询永远不匹配。
-{
-  const panelSrc = readFileSync(resolve(ROOT, 'src/client/triad/mail/Panel.tsx'), 'utf-8')
-  const stylesSrc = readFileSync(resolve(ROOT, 'src/client/triad/mail/styles.ts'), 'utf-8')
-  const sheet = stylesSrc.slice(stylesSrc.indexOf('const SHEET'))
-  const reasons = []
-
-  // ① container-type 挂在面板根（有确定宽度的盒子）上，且是 inline-size。
-  if (!/\.dsh-mail-panel\{[\s\S]*?container-type:inline-size/.test(sheet)) {
-    reasons.push('container-type:inline-size 必须挂在 .dsh-mail-panel 根上（挂到 display:contents 的祖先上容器查询永不命中）')
-  }
-  if (!/container-name:mailpanel/.test(sheet)) reasons.push('容器要有 container-name（@container 用得到）')
-  // ② 阈值必须是 620px：卡片宽 >620px 排三栏，压窄后落单栏范式。
-  if (!/@container\s+mailpanel\s+\(max-width:\s*620px\)/.test(sheet)) {
-    reasons.push('@container mailpanel (max-width: 620px) 必须存在（窄窗口 / 手机上落单栏范式）')
-  }
-  // ③ 明确不许用视口媒体查询做窄栏布局（面板宽度由外壳给，与视口不等同）。
-  if (/@media\s*\(max-width:\s*900px\)/.test(sheet)) {
-    reasons.push('窄栏不得用视口媒体查询（@media max-width:900px）——面板宽度由外壳给，与视口宽度不是同一个数')
-  }
-  // ④ 单栏切换：选中详情时列表让位，两栏都靠 data 属性驱动。
-  if (!/\.dsh-mail-panel \.dsh-mail-list-col\[data-has-selection='true'\]\{display:none\}/.test(sheet)) {
-    reasons.push("窄栏下选中邮件必须藏列表（.dsh-mail-list-col[data-has-selection='true']{display:none}）")
-  }
-  if (!/data-has-selection=/.test(panelSrc)) reasons.push('列表容器必须挂 data-has-selection 供窄栏 CSS 判定')
-  // ⑤ 文件夹竖列 → 顶部横条。
-  if (!/\.dsh-mail-panel \.dsh-mail-sidebar\{[\s\S]{0,300}?flex-direction:row/.test(sheet)) {
-    reasons.push('窄栏下文件夹必须从竖列改顶部横条（flex-direction:row）')
-  }
-  // ⑥ 「返回列表」按钮：真按钮（不是只靠 CSS 藏列表），且 read 态才给。
-  if (!/css\.back/.test(panelSrc) || !/返回列表/.test(panelSrc)) reasons.push('窄栏必须有明确的「返回列表」按钮')
-  if (!/\.dsh-mail-back\{display:none/.test(sheet)) reasons.push('返回列表按钮在宽栏必须默认隐藏（三栏时列表常驻，没有返回语义）')
-  if (!/\.dsh-mail-panel \.dsh-mail-back\{display:inline-flex\}/.test(sheet)) reasons.push('返回列表按钮必须在窄栏容器查询里显形')
-  // ⑦ 过渡动效 + reduced-motion 兜底（用户偏好动效，但关掉动画后内容仍要完整可见）。
-  if (!/@keyframes dsh-mail-pane-in/.test(sheet)) reasons.push('列表↔详情切换要有过渡动效（dsh-mail-pane-in）')
-  if (!/@media \(prefers-reduced-motion:reduce\)/.test(sheet)) reasons.push('必须有 prefers-reduced-motion 兜底')
-  // 兜底只能关动画：不得靠 opacity/visibility 藏内容（那样降级后内容会消失）。
-  const rm = sheet.slice(sheet.indexOf('@media (prefers-reduced-motion:reduce)'))
-  if (/visibility:hidden|opacity:0/.test(rm.slice(0, rm.indexOf('\n}')))) {
-    reasons.push('reduced-motion 兜底不得用 visibility:hidden / opacity:0 藏内容（动画关掉后内容要完整可见）')
-  }
-
-  if (reasons.length > 0) fail('邮箱窄栏布局：' + reasons.join('；'))
-  else pass('邮箱窄栏布局：容器查询(620px) + 文件夹横条 + 列表↔详情单栏切换 + 返回按钮 + 过渡动效与 reduced-motion 兜底')
-}
-
-// ── 邮箱附件保存位置（用户自选目录）───────────────────────────────────
-{
-  const panelSrc = readFileSync(resolve(ROOT, 'src/client/triad/mail/Panel.tsx'), 'utf-8')
-  const apiSrc = readFileSync(resolve(ROOT, 'src/client/triad/mail/api.ts'), 'utf-8')
-  const hostApiSrc = readFileSync(resolve(ROOT, 'src/mail/api.ts'), 'utf-8')
-  const serviceSrc = readFileSync(resolve(ROOT, 'src/mail/service.ts'), 'utf-8')
-
-  // 目录选择走官方 uiWorkspace.pickDirectory，不自己造选择器。
-  if (!/uiWorkspace/.test(panelSrc) || !/pickDirectory/.test(panelSrc)) {
-    fail('附件「另选位置」必须走官方 ctx.uiWorkspace.pickDirectory()，不要自造目录选择器')
-  } else if (!/verify-dir/.test(hostApiSrc) || !/verify-dir/.test(apiSrc)) {
-    fail('host 必须提供 /verify-dir 目录预检端点（保存前校验，别等下载时才撞 CLI 报错）')
-  } else if (!/\.dsh-mail-write-probe/.test(serviceSrc)) {
-    fail('目录校验必须真的试写探针文件（只查 existsSync 会把只读目录判成可用）')
-  } else if (!/downloadDir\s*!==\s*undefined\s*&&\s*patch\.downloadDir\.trim\(\)\s*===\s*''/.test(serviceSrc)) {
-    fail('updateConfig 必须支持「空串 = 清除覆盖回到默认目录」（否则恢复默认会留下空覆盖层）')
-  } else if (!/onDownloadAlt/.test(panelSrc)) {
-    fail('附件行必须同时提供「下载到默认目录」与「另选位置」两个入口')
-  } else {
-    pass('邮箱附件保存位置：原生选择器 + 保存前试写校验 + 恢复默认清覆盖 + 单附件另选位置')
-  }
-}
-
-// ── host 侧写能力原样保留（本轮只裁「模型可见的工具」与面板 UI）────────
-// 面板上的破坏性按钮删了，但 host 的 /api/dsh-mail 两阶段写链路**没删**：
-// service 的 trashNow/deleteNow、CLI 英文报错人话化、写后作废缓存都是 host 能力，
-// 删了会牵动 test-mail-two-phase.mjs。这里钉的就是「面板删了、能力还在」。
-{
-  const cliSrc = readFileSync(resolve(ROOT, 'src/mail/cli.ts'), 'utf-8')
-  const serviceSrc = readFileSync(resolve(ROOT, 'src/mail/service.ts'), 'utf-8')
-  const storeSrc = readFileSync(resolve(ROOT, 'src/mail/store.ts'), 'utf-8')
-  const panelSrc = readFileSync(resolve(ROOT, 'src/client/triad/mail/Panel.tsx'), 'utf-8')
-
-  // Agent Mail 的规则：+trash 只作用于非回收站邮件、+delete 只作用于回收站邮件。
-  // 旧故障：服务端按邮件真实归属判定，回 `Cannot delete message from this
-  // directory`（截图里那句英文）——面板曾因此给出注定失败的按钮。
-  if (!/Cannot delete message from this directory/i.test(cliSrc)) {
-    fail('CLI 的 Cannot delete message from this directory 必须翻成人话（否则用户只看到一句英文）')
-  } else if (!/not in trash/.test(cliSrc) || !/humanizeCliError/.test(cliSrc)) {
-    fail('CLI 英文报错必须翻译成人话（至少覆盖 not in trash 这条）')
-  } else if (!/async invalidateCache\(/.test(storeSrc) || !/invalidateCache\(\)/.test(serviceSrc)) {
-    fail('写操作成功后必须作废列表缓存（否则刚删掉的邮件还留在列表里，用户重复点）')
-  } else if (!/async trashNow\(/.test(serviceSrc) || !/async deleteNow\(/.test(serviceSrc)) {
-    fail('host 的 trashNow / deleteNow 必须保留（面板删了按钮，host 能力仍在）')
-  } else if (/inTrash|detail\.dir\?\.dir_name/.test(panelSrc)) {
-    fail('面板不得再保留破坏性按钮的 inTrash 判定分支（写操作 UI 已整体删除）')
-  } else {
-    pass('邮箱 host 写能力保留：trashNow/deleteNow + 写后作废缓存 + 英文报错人话化（面板侧判定分支已清）')
-  }
-}
-
-// ── 面板已无写操作：host 两阶段 chain 仍在（供 host 侧工具/测试用）────────
-{
-  const panelSrc = readFileSync(resolve(ROOT, 'src/client/triad/mail/Panel.tsx'), 'utf-8')
-  const entrySrc = readFileSync(resolve(ROOT, 'src/client/triad/mail/index.ts'), 'utf-8')
-  const serviceSrc = readFileSync(resolve(ROOT, 'src/mail/service.ts'), 'utf-8')
-  const typesSrc = readFileSync(resolve(ROOT, 'src/mail/types.ts'), 'utf-8')
-
-  // 真实故障：面板点「确认执行」→ CLI 报 `id required`。根因是面板从 CLI 的
-  // summary 里读 `id` 再拼一次请求，而 summary 里那个字段叫 `message_id`，
-  // 而且压根没有正文/附件路径 —— 参数根本重建不出来。
-  // 修法：第一阶段把完整参数落盘（replay），第二阶段由 host 原样重放。
-  //
-  // 本轮之后面板不再有任何写入口，但这套 host 链路**保留**（模型工具与
-  // test-mail-two-phase.mjs 都还在用）。断言因此分两半：host 那几条照旧钉死，
-  // 面板那几条改成「面板侧零写调用」。
-  if (!/^\s*replay:\s*WriteReplay/m.test(typesSrc) || !/export type WriteReplay/.test(typesSrc)) {
-    fail('待确认记录必须存下完整的 replay 参数（不能靠 CLI summary 反推）')
-  } else if (!/async confirmPending\(token: string\)/.test(serviceSrc)) {
-    fail('host 必须提供 confirmPending(token)：从落盘 replay 原样重放')
-  } else if (!/pending\/confirm/.test(readFileSync(resolve(ROOT, 'src/mail/api.ts'), 'utf-8'))) {
-    fail('必须提供 /pending/confirm 路由（模型工具的两阶段确认走它）')
-  } else if (!/async trashNow\(/.test(serviceSrc) || !/async deleteNow\(/.test(serviceSrc)) {
-    fail('host 的 now 变体必须保留（用户点击即许可，一次请求走完两阶段）')
-  } else if (!/confirmationToken/.test(serviceSrc.slice(serviceSrc.indexOf('async trash('), serviceSrc.indexOf('async trash(') + 420))) {
-    fail('trash() 必须把 confirmationToken 传进 writeCall（只收形参不往下传 = 第二阶段又拿新令牌，永远停在 pending）')
-  } else if (/api\.(send|reply|forward|trash|remove|pending)\(/.test(panelSrc) || /api\.(send|reply|forward|trash|remove|pending)\(/.test(entrySrc)) {
-    fail('面板/入口不得再有任何写操作（send/reply/forward/trash/remove）或待确认列表调用')
-  } else if (/preview\.id|preview\.body|preview\.subject/.test(panelSrc)) {
-    fail('面板不得从 preview 里读业务字段拼请求（summary 里没有正文/附件，字段名也不同）')
-  } else {
-    pass('面板零写操作（无 send/reply/forward/trash/remove/pending 调用）+ host 两阶段 replay/now 链路原样保留')
-  }
-}
-
-// ── 设置页「模型可用工具」收敛为 6 个只读工具（与 host 侧一一对应）────────
-// host 侧同时由另一名 teammate 删 5 个写工具，这里改的是同一事实的 client 侧：
-// 设置页的工具表留着一个不存在的工具名，等于对用户撒谎。
-{
-  const panelSrc = readFileSync(resolve(ROOT, 'src/client/triad/mail/Panel.tsx'), 'utf-8')
-  const reasons = []
-  for (const name of ['mail_account', 'mail_list', 'mail_search', 'mail_read', 'mail_download_attachment', 'mail_wait_code']) {
-    if (!new RegExp(`\\b${name}:`).test(panelSrc)) reasons.push(`TOOL_DESC 必须保留只读工具 ${name}`)
-  }
-  for (const name of ['mail_send', 'mail_reply', 'mail_forward', 'mail_trash', 'mail_delete']) {
-    if (new RegExp(`\\b${name}:`).test(panelSrc)) reasons.push(`TOOL_DESC 不得再有已删工具 ${name}`)
-  }
-  // 数量徽标读的是 config.tools ?? Object.keys(TOOL_DESC) —— 键只有 6 个时即 6。
-  const table = panelSrc.slice(panelSrc.indexOf('const TOOL_DESC'), panelSrc.indexOf('}', panelSrc.indexOf('const TOOL_DESC')))
-  const keys = (table.match(/^\s{2}(\w+):/gm) ?? []).length
-  if (keys !== 6) reasons.push(`TOOL_DESC 必须正好 6 项（实得 ${keys}）`)
-
-  if (reasons.length > 0) fail('邮箱设置页工具表：' + reasons.join('；'))
-  else pass('邮箱设置页工具表：6 个只读工具（写类 5 项零残留，数量徽标渲染为 6）')
 }
 
 // ── 任务/操作面板的取数与回填（2026-10-05 修「切换会话后两张卡就空了」）──────
@@ -3768,9 +3265,11 @@ if (krEnabled) {
   const tabIds = tabsBlock === null ? [] : [...tabsBlock[1].matchAll(/id: '([a-z]+)'/g)].map(m => m[1])
   // 「系统提示词」(prompt) 是 2026-10-27 新增的第六类：只读视图；
   // 「同步设置」(sync) 是新增的第七类：工作台资产云端双向同步。
-  // 它与前六类同源（都从 WORKBENCH_TABS 出），侧栏、浮层、⌘N 直切三处同步生效。
-  if (tabIds.join(',') !== 'memory,skills,usage,gallery,vault,prompt,sync') {
-    reasons.push(`WORKBENCH_TABS 必须是 memory/skills/usage/gallery/vault/prompt/sync 七项，实得 [${tabIds.join(', ')}]`)
+  // 「连接器」(connectors) 是 2026-11 新增的第八类：MCP 市场，排在 SKILL 之后
+  // （用户点名「在 skill 菜单下方增加一个连接器菜单」）。
+  // 八类同源（都从 WORKBENCH_TABS 出），侧栏、浮层、⌘N 直切三处同步生效。
+  if (tabIds.join(',') !== 'memory,skills,connectors,usage,gallery,vault,prompt,sync') {
+    reasons.push(`WORKBENCH_TABS 必须是 memory/skills/connectors/usage/gallery/vault/prompt/sync 八项，实得 [${tabIds.join(', ')}]`)
   }
   if (!/return 'memory'/.test(flyoutSrc)) {
     reasons.push("readWorkbenchTab 的非法值回落必须是 'memory'")
@@ -5934,7 +5433,7 @@ if (krEnabled) {
   }
 }
 
-// ── Seeker 右栏大盘「设置」抽屉（齿轮按钮 → 10 个开关）──────────────────
+// ── Seeker 右栏大盘「设置」抽屉（齿轮按钮 → 8 个开关）──────────────────
 //
 // 这组断言全部盯**静默失效**：齿轮位置写错（参与大盘 flex 流）会把右栏挤变形；
 // 类名与样式表对不上则整个抽屉是裸 DOM；把抽屉写成条件渲染就丢了退场动画；
@@ -6019,7 +5518,7 @@ if (krEnabled) {
       pass('大盘设置：复用同一套归一化口径 + 打开时重拉 host 状态')
     }
 
-    // 6) 开关逐一在位：7 条 host 通道（6 条注入 + 1 条按工作区的「工作区项目记忆记录」）
+    // 6) 开关逐一在位：6 条 host 通道（5 条注入 + 1 条按工作区的「工作区项目记忆记录」）
     //    + 3 条外观偏好。
     //    行数**从源码推导**（数 `<SettingsRow`），不写死数字：写死过一次，加了新行之后
     //    断言与常量就成了两个事实源，改一处漏一处只会得到一个「看起来在测、其实没测」
@@ -6027,25 +5526,26 @@ if (krEnabled) {
     //    后面的序号，错开浮现会两行同时冒出来，而这既不该报错也不会打日志。
     const hostWriters = [
       'setZhInjectState', 'setHtmlInjectState',
-      'setTeamInjectState', 'setTodoRuleInjectState', 'setTodoClosureState', 'setMailInjectState',
+      'setTeamInjectState', 'setTodoRuleInjectState', 'setTodoClosureState',
     ]
     const missingWriter = hostWriters.filter(name => !src.includes(name))
     const rowCount = (src.match(/<SettingsRow\b/g) ?? []).length
-    // 10 处 = 4（中文 / 交互卡片 / 团队 / 任务清单纪律）+ 2（邮箱「给开关 / 给角标」两分支）
-    //      + 1（自动收口）+ 3（展示组）。
+    // 8 处 = 3（中文 / 交互卡片 / 团队）+ 1（任务清单纪律）+ 1（自动收口）+ 3（展示组）。
     // 灵魂注入那一行 2026-10-21 随灵魂模块整块删除：通道没了，闸门也就没有意义。
-    // 邮箱那个三态行写两个分支是**刻意的**：省略 on 的那一支才是「不给拨不动的开关」。
+    // 2026-11-01「Agent 邮箱」整条功能移除，那一行（源码里两个分支）一并删掉 ——
+    // 源码计数与渲染行数从此一一对应。
     // 「工作区记忆」那一组 2026-10-18 改成了**逐工作区列表**（不再是固定的 SettingsRow），
     // 因此不计入这个数字 —— 它的判据在下面 6c。
-    const expectedRows = 10
-    // 10 个行序号（0..9）：邮箱两分支共用同一个 index（同一行的两种形态，不该占两个错开槽位）。
+    const expectedRows = 8
+    // 8 个行序号（0..7）。
     // 2026-10-25 由 9 变 10：step 纪律从提示词通道组挪进「任务清单」组，与
     // 「回合结束自动收口」并列 —— 用户要求「任务清单相关的全部归到一个组」。
     // 2026-10-28：step 纪律整条退役（用户要求「step 去掉，任务清单保留」），原先挂在
-    // 它第五节的任务清单纪律独立成通道、占同一个行位 —— 行数仍是 10。
+    // 它第五节的任务清单纪律独立成通道、占同一个行位。
+    // 2026-11-01：邮箱行删除后由 10 变 8。
     // 开关**没有合并**：两者作用机理相反（一个写提示词、一个改状态），绑成一个
     // 开关会强迫用户做无意义的交易（想关"末项转圈"就得连带关掉"少往返"）。
-    const expectedIndexes = 10
+    const expectedIndexes = 8
     const rowIndexes = [...src.matchAll(/index=\{(\d+)\}/g)].map(m => Number(m[1]))
     const distinctIndexes = [...new Set(rowIndexes)].sort((a, b) => a - b)
     const consecutive = distinctIndexes.length === expectedIndexes
@@ -6059,11 +5559,11 @@ if (krEnabled) {
     } else if (!/busy/.test(src)) {
       fail('host 写入缺少 busy 门控（写盘期间连点会出竞态，开关状态弹来弹去）')
     } else if (rowCount !== expectedRows) {
-      fail(`大盘设置应有 ${expectedRows} 处 <SettingsRow>（4 注入 + 邮箱 2 分支 + 自动收口 + 展示 3），实得 ${rowCount}`)
+      fail(`大盘设置应有 ${expectedRows} 处 <SettingsRow>（3 注入 + 任务清单纪律 + 自动收口 + 展示 3），实得 ${rowCount}`)
     } else if (!consecutive) {
       fail(`行序号 --row-i 必须从 0 起连续到 ${expectedIndexes - 1}（新增行要顺延后面的序号，否则两行同时浮现）：实得 ${JSON.stringify(distinctIndexes)}`)
     } else {
-      pass(`大盘设置：${expectedRows} 个开关行接线完整（6 条 host 通道 + 3 条外观偏好，邮箱两分支各占一行；--row-i 0..${expectedIndexes - 1} 连续，含 busy 门控）`)
+      pass(`大盘设置：${expectedRows} 个开关行接线完整（5 条 host 通道 + 3 条外观偏好；--row-i 0..${expectedIndexes - 1} 连续，含 busy 门控）`)
     }
 
     // 6c) 「工作区记忆」组（2026-10-18 改成逐工作区列表）：用户要求「显示出来所有工作区
@@ -6108,7 +5608,7 @@ if (krEnabled) {
     // 6b) 操作面板显隐（同族第三条）：抽屉里一行 + 大盘消费 + apply 初始化，
     //     三处缺一，用户拨了就没反应（而这既不报错也不打日志）。
     //
-    // 注意两处的文案来源**刻意不同**：抽屉里的行是硬编码中文（与它其余 9 行同款），
+    // 注意两处的文案来源**刻意不同**：抽屉里的行是硬编码中文（与它其余 7 行同款），
     // composer 侧走 i18n 键 plainTimelineLabel（键保留给别处复用/将来再入口）。
     // 断言要按各自的实际写法钉，不能拿 i18n 键去要求硬编码的那份。
     if (!/label="操作面板"/.test(src) || !/setPlainTimelineVisible\(!plainTimelineOn\)/.test(src)) {
@@ -6125,13 +5625,6 @@ if (krEnabled) {
       pass('大盘设置：操作面板开关三处在位（抽屉行 / 大盘消费 / apply 初始化）')
     }
 
-    // 7) 邮箱三态：模块没挂时**不许**渲染开关（拨不动的开关是骗人）。
-    if (!/mailAvailable/.test(src) || !/mailInjectBadge|不可用/.test(src)) {
-      fail('邮箱行缺「模块未挂 → 不给开关、只给不可用徽标」的分支')
-    } else {
-      pass('大盘设置：邮箱行三态分级（未挂载时不给拨不动的开关）')
-    }
-
     // 8) 定位硬约束（2026-10-18 卡片化后**整体反转**，改动前务必读完）：
     //
     //    遮罩与卡片现在 portal 到 document.body、position:fixed 铺满视口 ——
@@ -6140,8 +5633,8 @@ if (krEnabled) {
     //    那棵 flex 子树里根本没有它们，absolute 反而是错的（会相对 body 定位
     //    但又不跟随视口）。
     //
-    //    齿轮与邮箱按钮**已搬到操作面板卡头右上角**（2026-10-25 用户要求）。
-    //    它们不再是顶栏里的文档流节点，而是卡头内的绝对定位按钮组
+    //    齿轮按钮**已搬到操作面板卡头右上角**（2026-10-25 用户要求）。
+    //    它不再是顶栏里的文档流节点，而是卡头内的绝对定位按钮组
     //    （.kr-plain-head__tools）—— 见下面第 10 条那组断言。
     for (const cls of ['kr-settings__scrim', 'kr-settings']) {
       const rule = new RegExp('\\.' + cls + '\\s*\\{([^}]*)\\}').exec(code)?.[1] ?? ''
@@ -6158,20 +5651,20 @@ if (krEnabled) {
       fail('KrPanelSettings 必须 createPortal 到 body（留在右栏子树里卡片最宽只能盖住右栏，且被 overflow:hidden 裁掉）')
     }
     /*
-     * 齿轮/邮箱按钮的新位置（2026-10-25 用户：「这两个图标都移动到操作面板的
+     * 齿轮按钮的新位置（2026-10-25 用户：「这两个图标都移动到操作面板的
      * 右上角去」）。
      *
-     * 判据三条，缺一条就说明它们没真的搬过去：
+     * 判据三条，缺一条就说明它没真的搬过去：
      *  · .kr-plain-head__tools 存在且绝对定位（卡头是竖排居中，按钮不能参与竖排）；
      *  · 卡头本身是 position:relative（否则绝对定位会相对别处）；
-     *  · 两枚按钮共用 .kr-plain-head__tool（尺寸/悬停/打开态都挂在这个类上）。
+     *  · 按钮共用 .kr-plain-head__tool（尺寸/悬停/打开态都挂在这个类上）。
      */
     // .kr-plain-head__tools 有两条规则：基础那条（absolute）与 Hero 里的覆盖（right:0）。
     // 断言要的是**存在一条绝对定位的**，不能只取第一条。
     const toolsRules = [...code.matchAll(/\.kr-plain-head__tools\s*\{([^}]*)\}/g)].map((m) => m[1] ?? '')
     const headRule = /\.kr-plain-head\s*\{([^}]*)\}/.exec(code)?.[1] ?? ''
     if (toolsRules.length === 0) {
-      fail('未找到 .kr-plain-head__tools（齿轮与邮箱按钮没搬到卡头右上角）')
+      fail('未找到 .kr-plain-head__tools（齿轮按钮没搬到卡头右上角）')
     } else if (!toolsRules.some((rule) => /position:\s*absolute/.test(rule))) {
       fail('.kr-plain-head__tools 必须绝对定位（卡头是竖排居中，参与布局会把立绘挤偏）')
     } else if (!/position:\s*relative/.test(headRule)) {
@@ -6388,7 +5881,7 @@ if (krEnabled) {
       pass('大盘设置：组头右侧承载「整组共性」（提示词通道 / 展示 / 工作区记忆各一句），窄屏自动隐藏')
     }
 
-    // 10) 入口位置：齿轮与邮箱按钮在**操作面板卡头右上角**（2026-10-25 用户要求
+    // 10) 入口位置：齿轮按钮在**操作面板卡头右上角**（2026-10-25 用户要求
     //     「这两个图标都移动到操作面板的右上角去」）。
     //
     //     历史：2026-10-15 曾点名放到顶栏 Seeker 标签右侧，靠裸 DOM 注入 + 每 250ms
@@ -6396,10 +5889,10 @@ if (krEnabled) {
     //     那整套成本归零 —— 但**必须留一句清理**摘掉旧 bundle 残留的顶栏按钮，
     //     否则页面上会出现两组一样的图标。
     const ctrl = readFileSync(resolve(ROOT, 'src/client/kr-chat/kr-chat-controller.tsx'), 'utf8')
-    // 两枚按钮已随卡头抽到 SeekerHead.tsx（操作面板卡与新对话页共用）。
+    // 卡头按钮已随卡头抽到 SeekerHead.tsx（操作面板卡与新对话页共用）。
     const seekerHeadSrcHere = readFileSync(resolve(ROOT, 'src/client/kr-chat/SeekerHead.tsx'), 'utf8')
-    if (!/id="kr-panel-settings-btn"/.test(seekerHeadSrcHere) || !/id="kr-mail-btn"/.test(seekerHeadSrcHere)) {
-      fail('齿轮与邮箱按钮必须在 KrPlainTimelineCard 卡头里渲染（id 沿用旧版，e2e 按它找节点）')
+    if (!/id="kr-panel-settings-btn"/.test(seekerHeadSrcHere)) {
+      fail('齿轮按钮必须在 KrPlainTimelineCard 卡头里渲染（id 沿用旧版，e2e 按它找节点）')
     } else if (!/removeLegacyHeaderButtons/.test(ctrl)) {
       fail('controller 必须清理旧版顶栏按钮（热重载后会出现两组一样的图标）')
     } else if (!/closest\('header \[role="tablist"\]'\)/.test(ctrl)) {
@@ -6412,62 +5905,12 @@ if (krEnabled) {
     } else if (!/getPanelSettingsStore|panel-settings-store/.test(ctrl)) {
       fail('controller 必须经共享 store 与抽屉联动（否则点了不开/关不掉）')
     } else {
-      pass('大盘设置入口：齿轮+邮箱在操作面板卡头右上角（id 沿用）+ 旧顶栏按钮按位置清理')
+      pass('大盘设置入口：齿轮在操作面板卡头右上角（id 沿用）+ 旧顶栏按钮按位置清理')
     }
 
     /*
-     * 10b) 邮箱在齿轮**之前**（2026-10-28 用户要求「邮箱与设置图标对调」）。
-     *
-     * 这条只能按源码里的**声明顺序**钉：JSX 子节点的先后就是渲染顺序，而
-     * e2e（test-mail-drawer.mjs）钉的是浏览器里的真实 DOM 顺序。两边各管一段
-     * ——源码改了没重建、或重建了但 DOM 被别处重排，各自都能报出来。
-     *
-     * ⚠ 顺序判据必须用 indexOf 比大小，不能用「两者都在」这种弱断言：
-     * 对调正是「两个 id 都还在、只是前后换了」的改动，弱断言对它完全无感。
-     */
-    const mailIdx = seekerHeadSrcHere.indexOf('id="kr-mail-btn"')
-    const gearIdx = seekerHeadSrcHere.indexOf('id="kr-panel-settings-btn"')
-    if (mailIdx === -1 || gearIdx === -1) {
-      fail('SeekerHead 里必须同时有邮箱与齿轮按钮')
-    } else if (mailIdx > gearIdx) {
-      fail('邮箱按钮必须排在齿轮**之前**（2026-10-28 用户要求对调：邮箱 → 齿轮）')
-    } else {
-      pass('卡头右上角顺序：Git → 邮箱 → 齿轮（邮箱在齿轮之前，与用户要求的对调一致）')
-    }
-
-    /*
-     * 10c) 邮箱未读角标（2026-10-28 用户要求「邮箱要有自动提示未读条数」）。
-     *
-     * 四条一起才成立，缺一条都是「看起来做了、其实不会亮」：
-     *   1. SeekerHead 从 mail-unread-store 订阅未读数（不是自己 fetch）；
-     *   2. 角标只在 count > 0 时渲染（0 封时不能挂一个空红点）；
-     *   3. 三位数走 99+（否则宽角标会把相邻的齿轮挤开）；
-     *   4. **store 的 getSnapshot 必须返回稳定引用** —— 这条是踩过的坑：
-     *      每次现造对象会让 useSyncExternalStore 判定"永远在变"，右栏大盘直接
-     *      撞 React error #185（Maximum update depth exceeded），整块右栏消失，
-     *      控制台只有一条压缩过的报错。实测 2026-10-28 就是这么把右栏搞没的。
-     */
-    const unreadStoreSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/mail-unread-store.ts'), 'utf8')
-    if (!/getMailUnreadStore/.test(seekerHeadSrcHere)) {
-      fail('SeekerHead 必须从 mail-unread-store 订阅未读数（不要在组件里自己轮询接口）')
-    } else if (!/unreadCount > 0/.test(seekerHeadSrcHere)) {
-      fail('未读角标必须只在 count > 0 时渲染（0 封不该挂一个空红点）')
-    } else if (seekerHeadSrcHere.indexOf("'99+'") === -1) {
-      fail('未读角标必须把三位数折成 99+（否则会把相邻按钮挤开）')
-    } else if (!/kr-plain-head__badge/.test(seekerHeadSrcHere)) {
-      fail('未读角标必须有 .kr-plain-head__badge 类名（样式按它上色定位）')
-    } else if (unreadStoreSrc.indexOf('private _snapshot: MailUnreadSnapshot') === -1
-      || unreadStoreSrc.indexOf('return this._snapshot') === -1) {
-      fail('mail-unread-store.getSnapshot 必须返回**稳定引用**（每次现造对象会让 useSyncExternalStore 无限重渲染，右栏直接消失）')
-    } else if (!/refreshSnapshot/.test(unreadStoreSrc)) {
-      fail('mail-unread-store 的状态变更必须经 refreshSnapshot 重建快照（否则 React 拿不到新值）')
-    } else {
-      pass('邮箱未读角标：卡头订阅 mail-unread-store + 仅 >0 渲染 + 99+ 折叠 + 快照引用稳定（防 React #185）')
-    }
-
-    /*
-     * 10d) Git 角标（2026-10-29 用户要求「操作面板的这个 git 图标换图二，
-     *      并且提示有多少个需要提交的，跟邮箱的检查一样」）。
+     * 10b) Git 角标（2026-10-29 用户要求「操作面板的这个 git 图标换图二，
+     *      并且提示有多少个需要提交的」）。
      *
      * 2026-10-31 用户要求删除操作面板卡头上的「最近提交时间 + 待提交」两行微组件
      * （SeekerGitStatus）以及它打开的提交弹窗（GitCommitModal）。保留项四条：
@@ -6501,10 +5944,9 @@ if (krEnabled) {
     } else if (!/dirtyRepoCountOf/.test(gitRosterStoreSrc) || !/return this\._snapshot/.test(gitRosterStoreSrc)) {
       fail('git-roster-store 必须计算 dirtyRepoCountOf 且 getSnapshot 返回稳定引用')
     } else if (!/data-kind="git-dirty-repos"/.test(seekerHeadSrcHere)
-      || !/data-kind="mail-unread"/.test(seekerHeadSrcHere)
       || !/\.kr-plain-head__badge\[data-kind="git-dirty-repos"\]/.test(krStyleSrc)
       || !/\.kr-plain-head__badge\s*\{[\s\S]{0,900}?animation:\s*none/.test(krStyleSrc)) {
-      fail('邮箱与 Git 两个角标都必须用同一套简约样式（data-kind 区分色相、无弹入动画）')
+      fail('Git 角标必须用这套简约样式（data-kind 区分色相、无弹入动画）')
     } else {
       pass('Git 角标：卡头订阅 git-roster-store 的「有未提交改动项目数」 + 图标换 git-branch + 仅 >0 渲染 / 99+ 折叠 + 简约淡色变体 + 与大盘弹窗共用轮询（时间/待提交微组件已删除）')
     }

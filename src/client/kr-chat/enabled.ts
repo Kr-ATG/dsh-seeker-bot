@@ -114,24 +114,6 @@ export const KR_SUBAGENTS_CARD_VISIBLE = true
 export const KR_TOOL_CALLS_CARD_VISIBLE = true
 
 /**
- * KR「提问与回答」卡显隐开关。
- *
- * 这张卡回答的是「**模型问了什么、用户答了什么**」。它存在的唯一理由是：
- * KR 对话流只保留答案投影、工具明细整类隐藏，而 ask_user_question 走的是
- * tool-call 节点 —— 于是问答整段从对话流里消失，用户看不到自己答过什么。
- * 问答不是工具明细，是对话本身的一半，所以必须有地方显示。
- *
- * 位置：**贴在 KR 对话流里，紧跟思考过程卡下方**（挂在同一个 assistant-step
- * 锚点上，见 ThinkingStepNodeView）。理由与思考卡当年从右栏搬进对话流一样：
- * 思考、提问、回答是同一件事的几段，分两栏摆就得来回对照才读得完整。
- *
- * ⚠ 隐藏开关，不是删除：KrAskCard 组件、ask-parse.ts 解析层与 `.kr-card--ask`
- * / `.kr-ask-*` 那一套样式全部原样保留，改回 false 重新 build 即完整关闭
- * （关掉后问答在界面上没有任何出口，这是刻意的——它只该由这个开关决定）。
- */
-export const KR_ASK_CARD_VISIBLE = true
-
-/**
  * KR 界面上「这个正在干活的家伙」叫什么。
  *
  * 对话流那张活动卡（KrLiveActivityCard）与右侧大盘的进行中标题都用它拼文案：

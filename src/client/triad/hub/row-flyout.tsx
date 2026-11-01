@@ -19,9 +19,6 @@
  * 自动出现、滚轮顺序与 ⌘N 直切自动跟上。
  * ⚠ 千万不要为了加菜单另外手动 navMenuItem 一次 —— 那会出现两行同名菜单。
  *
- * 邮件分类（原第 6 格）已于 2026-10 摘除：入口搬到 Seeker 顶栏齿轮右侧的邮件
- * 按钮 + 居中只读卡片（src/client/kr-chat/mail-drawer.tsx）。
- *
  * 实现取舍：
  *  - **不碰官方行 DOM**：官方 SidebarRoot 渲染 button.panelRow，我们在 document
  *    上挂捕获期委托监听（mouseenter 不冒泡，必须捕获），按「行内含
@@ -66,6 +63,7 @@ export const WORKBENCH_TABS: readonly WorkbenchTabMeta[] = [
   // order 由本表下标推导（10 + index * 10），顺序即侧栏顺序。
   { id: 'memory', label: '记忆', desc: '条目 · 变更 · 修订' },
   { id: 'skills', label: 'SKILL', desc: '技能包与技能开关' },
+  { id: 'connectors', label: '连接器', desc: 'MCP 市场与已装连接' },
   { id: 'usage', label: '用量', desc: 'Token 消耗与活动热力' },
   { id: 'gallery', label: '画廊', desc: '图片 · 网页 · 文档产出' },
   { id: 'vault', label: '档案', desc: '账号 · 支付 · 证件' },
@@ -83,6 +81,7 @@ export const WORKBENCH_TABS: readonly WorkbenchTabMeta[] = [
 export const WORKBENCH_TAB_FEATURE: Readonly<Record<WorkbenchTab, string>> = {
   memory: 'work.memory',
   skills: 'work.skills',
+  connectors: 'work.connectors',
   usage: 'work.usage',
   gallery: 'work.gallery',
   vault: 'work.vault',
@@ -105,12 +104,13 @@ export function workbenchTabEnabled(tab: WorkbenchTab): boolean {
 export function useVisibleWorkbenchTabs(): readonly WorkbenchTabMeta[] {
   const memory = useFeature(WORKBENCH_TAB_FEATURE.memory)
   const skills = useFeature(WORKBENCH_TAB_FEATURE.skills)
+  const connectors = useFeature(WORKBENCH_TAB_FEATURE.connectors)
   const usage = useFeature(WORKBENCH_TAB_FEATURE.usage)
   const gallery = useFeature(WORKBENCH_TAB_FEATURE.gallery)
   const vault = useFeature(WORKBENCH_TAB_FEATURE.vault)
   const prompt = useFeature(WORKBENCH_TAB_FEATURE.prompt)
   const sync = useFeature(WORKBENCH_TAB_FEATURE.sync)
-  const enabled: Record<WorkbenchTab, boolean> = { memory, skills, usage, gallery, vault, prompt, sync }
+  const enabled: Record<WorkbenchTab, boolean> = { memory, skills, connectors, usage, gallery, vault, prompt, sync }
   return WORKBENCH_TABS.filter(tab => enabled[tab.id])
 }
 

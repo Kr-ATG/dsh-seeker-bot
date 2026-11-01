@@ -34,7 +34,7 @@ import type { VaultConfig } from './types.js'
 export const name = 'dsh-vault'
 
 /**
- * 本模块用到的 ctx 面（**刻意收窄**，与 mail/context.ts 同策略）。
+ * 本模块用到的 ctx 面（**刻意收窄**，与 browser-activity 等 host 模块同策略）。
  *
  * 理由：`@deepseek-ai/cordis` 的类型垫片对 `agent/pre-step` / `session/event`
  * / `tools` 都没有声明，直接用宽类型 `Context` 会在 typecheck 里报一串假错

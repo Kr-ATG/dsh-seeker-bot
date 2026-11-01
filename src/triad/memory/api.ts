@@ -13,7 +13,6 @@ import { compileAll } from './engine/compile.js'
 import { consolidateAll, consolidateScope } from './engine/consolidate.js'
 import { searchEntries } from './engine/retrieval.js'
 import { isWorkspacePathAlive, localDate, mergeTags, nowIso, projectHashOf, entryIdOf, summarize, type MemoryStore } from './engine/store.js'
-import { getMailStatusSource } from '../../mail/registry.js'
 
 /** Minimal service-shaped view of the webserver route register. */
 declare module '@deepseek-ai/cordis' {
@@ -287,11 +286,6 @@ async function handle(
       const todoClosureEnabled = await store.isTodoClosureEnabled(config.todoClosureDefaultEnabled !== false)
       // 任务清单纪律通道同理并进回包（同一理由：开关浮层一次 hover 要知道全部通道状态）。
       const todoRuleEnabled = await store.isTodoRuleInjectEnabled(config.todoRuleInjectDefaultEnabled !== false)
-      // Agent 邮箱（跨模块）也并进回包：卡片一 hover 就要显示它的状态，
-      // 另开一个 GET 等于把 composer 的轮询量翻倍（历史上打过一分钟 498 次）。
-      const mailSource = getMailStatusSource()
-      const mailSnapshot = mailSource === null ? null : mailSource.snapshot()
-      if (mailSource !== null) void mailSource.refresh().catch(() => undefined)
       /*
        * 工作区「项目记忆记录开关」一并回传（= 项目 meta 的 autoMemory，写入侧闸门）。
        *
@@ -323,17 +317,6 @@ async function handle(
         teamEnabled,
         todoClosureEnabled,
         todoRuleEnabled,
-        // mailEnabled 只跟**声明开关**走（injectEnabled），与工作台总开关解耦：
-        // 工作台关着时声明照常生效，只是注入文本改走 agently-cli 命令行。
-        // 相与是错的——那正是「用户开着声明、却被工作台吞掉」那个坑。
-        // 旧 host 不回这几个字段时 client 不显示该行（见 client api 的注释）。
-        mailEnabled: mailSnapshot === null ? false : mailSnapshot.injectEnabled,
-        mailAvailable: mailSnapshot !== null,
-        mailWorkbenchEnabled: mailSnapshot?.workbenchEnabled ?? false,
-        // toolsMounted 让卡片把副说明写成「走命令行」而不是假装工具还在。
-        mailToolsMounted: mailSnapshot?.toolsMounted ?? false,
-        mailAuthorized: mailSnapshot?.authorized === true,
-        mailAddress: mailSnapshot?.address ?? null,
       })
       return
     }
@@ -466,79 +449,6 @@ async function handle(
       const enabled = body.enabled !== false
       await store.setTodoRuleInjectEnabled(enabled)
       json(res, 200, { ok: true, enabled, builtin: true })
-      return
-    }
-
-    // ── Agent 邮箱能力声明的开关（跨模块：dsh-mail 的 mail.enabled / injectEnabled）──
-    //
-    // 这条通道由 dsh-mail 模块承载，状态也住在那边，本路由只是把它转出来给
-    // composer 那张卡片用（用户要求：不想每次都得进邮箱设置页去拨那个开关）。
-    //
-    // **两道开关是解耦的**（用户明确要求）：
-    //   · `injectEnabled`（声明开关）→ 决定 `enabled`：模型知不知道有这个邮箱；
-    //   · `enabled`（工作台总开关）  → 决定 `toolsMounted`：`mail_*` 工具注册不注册。
-    // 工作台关着、声明开着时**照常注入**，只是注入文本改走 `agently-cli` 命令行。
-    // 所以这里的 `enabled` 只跟 injectEnabled 走，绝不与工作台相与——相与正是
-    // 「用户开着声明、却被工作台吞掉」那个坑。
-    // workbenchEnabled / toolsMounted 一并回传，卡片才能在工具缺席时说清
-    // 「声明走命令行」，而不是假装工具还在。
-    if (method === 'GET' && rest === '/mail-inject-state') {
-      const source = getMailStatusSource()
-      if (source === null) {
-        // 邮箱模块没挂上（装配失败）：如实说「不可用」，而不是回一个
-        // enabled:false 让用户以为「关着、可以打开」。
-        json(res, 200, { available: false, enabled: false, workbenchEnabled: false, toolsMounted: false, authorized: false, address: null })
-        return
-      }
-      // 顺带触发一次后台探测（10 分钟节流，卡片 hover 不会打成请求风暴）。
-      void source.refresh().catch(() => undefined)
-      const snapshot = source.snapshot()
-      json(res, 200, {
-        available: true,
-        enabled: snapshot.injectEnabled,
-        workbenchEnabled: snapshot.workbenchEnabled,
-        injectEnabled: snapshot.injectEnabled,
-        toolsMounted: snapshot.toolsMounted,
-        authorized: snapshot.authorized === true,
-        address: snapshot.address,
-        builtin: true,
-      })
-      return
-    }
-    if (method === 'POST' && rest === '/mail-inject-state') {
-      const source = getMailStatusSource()
-      if (source === null) {
-        json(res, 200, { ok: false, available: false, error: '邮箱模块未挂载' })
-        return
-      }
-      const body = await readBody(req) as Record<string, unknown>
-      const patch: { enabled?: boolean; injectEnabled?: boolean } = {}
-      if (typeof body.enabled === 'boolean') patch.injectEnabled = body.enabled
-      // 工作台总开关单独一个字段：卡片上「工作台关着」那条提示带一个一键打开的动作。
-      if (typeof body.workbench === 'boolean') patch.enabled = body.workbench
-      if (Object.keys(patch).length === 0) {
-        json(res, 400, { ok: false, error: 'enabled or workbench required' })
-        return
-      }
-      try {
-        await source.updateConfig(patch)
-      } catch (error) {
-        json(res, 200, { ok: false, error: error instanceof Error ? error.message : String(error) })
-        return
-      }
-      await source.refresh().catch(() => undefined)
-      const snapshot = source.snapshot()
-      json(res, 200, {
-        ok: true,
-        available: true,
-        enabled: snapshot.injectEnabled,
-        workbenchEnabled: snapshot.workbenchEnabled,
-        injectEnabled: snapshot.injectEnabled,
-        toolsMounted: snapshot.toolsMounted,
-        authorized: snapshot.authorized === true,
-        address: snapshot.address,
-        builtin: true,
-      })
       return
     }
 

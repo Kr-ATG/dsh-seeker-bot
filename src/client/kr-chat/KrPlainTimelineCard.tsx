@@ -6,7 +6,7 @@
  * 2026-10-31 卡头的人物换成**插件头像**（用户：「操作面板的这个人物删除替换为
  * 我们的插件头像」—— 那张 64×114 的任务动画在这张卡里撤掉了，见 brand-avatar.ts）：
  *
- *     ┌ 头像  ┐  Seeker                [Git][邮件][齿轮]
+ *     ┌ 头像  ┐  Seeker                [Git][齿轮]
  *     │ 64×64 │  观月中 / ▶ 打开网页 携程旅行网 · 机票   ← 只有这一行，新动作把它顶掉
  *     └───────┘  ──────────────────────────────────────
  *                33 个动作                    展开时间线 ⌄
@@ -46,7 +46,7 @@ import { workspaceCwdOf } from '../client-ctx.ts'
 import { tryOpenInSidebar } from '../open-preview.ts'
 import { SeekerHead } from './SeekerHead.tsx'
 import { idlePhraseFor, THINKING_PHRASE, VIEWING_PHRASE } from './idle-phrase.ts'
-import { getBrowserFlagEntry, subscribeBrowserFlag } from '../browser-flag/store.ts'
+import { getBrowserFlagEntry, sessionSeenBrowser, subscribeBrowserFlag } from '../browser-flag/store.ts'
 
 /**
  * 「简要 / 详细」两档**已整块删除**（2026-10-24 用户点名：「点击就是详细不需要简要了」）。
@@ -366,18 +366,32 @@ export const KrPlainTimelineCard = memo(function KrPlainTimelineCard({
   const { ref: bodyRef, present: bodyPresent } = useHeightAnimation(open, motion)
 
   /*
-   * 浏览器操作标志：本会话此刻有没有在跑浏览器操作。
+   * 浏览器操作标志：**本会话**此刻 / 曾经有没有在操作浏览器。
    *
    * 数据面来自 browser-flag/store.ts（同一个 store、同一条轮询、同一份快照）。
    * 渲染交给 SeekerHead（卡头已抽成共享组件，新对话页也用同一份）。
    *
-   * 判据是**粘滞**的（2026-10-25 用户：「只要 ego 没有收口就不要消失」）：
-   * 本轮里只要出现过一次浏览器活动，就一直亮到本轮收口 —— 因为真实场景里
-   * 浏览器进程一直开着，模型在两次调用之间思考、读快照，那段空窗里图标闪灭再亮
-   * 读起来像「浏览器关了」。1.5s 的尾迹只缝得住相邻调用，缝不住「想了 5 秒」。
+   * 判据三条，**全部按会话**（2026-11-01 重写。用户原话：「操作面板的浏览器标识
+   * 应该绑定会话，而不是所有会话共用」）：
    *
-   * ⚠ 别写成 browserActive || running：那会让每个正在跑的会话都亮图标，
-   *   哪怕它根本没碰过浏览器。
+   *  1. `browserActive` —— 本会话此刻有进行中的浏览器调用（或 4s 尾迹）；
+   *  2. `browserSticky` —— 本会话**本轮**出现过浏览器活动，就一直亮到本轮收口
+   *     （2026-10-25 用户：「只要 ego 没有收口就不要消失」：两次调用之间模型在
+   *     思考、读快照，那段空窗里图标闪灭再亮读起来像「浏览器关了」，1.5s 的尾迹
+   *     缝不住「想了 5 秒」）；
+   *  3. `browserRemembered` —— 本会话历史上真的跑过浏览器（store 的会话级记忆，
+   *     刷新后仍在）。2026-10-31 用户要求「本会话打开过工作空间，即便轮次结束
+   *     也要能看见入口」。
+   *
+   * ⚠ 三条都不许退化成「全局有活动就亮」：
+   *   · 别写成 browserActive || running —— 那会让每个正在跑的会话都亮图标；
+   *   · **别再用步骤文案做子串匹配**（open- / workspace / taskspace）判「碰过
+   *     浏览器」：任何读过 `open-preview.ts`、搜过 `workspaceHints` 的会话都会
+   *     被**永久**点亮，两个都误判过的会话于是同时亮着同一个状态 —— 这正是本次
+   *     要修的 bug（旧实现在 hasBrowserHistory 里干这件事）；
+   *   · 别再用 sessionStorage 里那份**所有会话共用**的白名单（旧
+   *     isRememberedSession）：它的写入时机被上面那个误判污染，误写一次就再也
+   *     清不掉。
    */
   const browserEntry = useSyncExternalStore(
     subscribeBrowserFlag,
@@ -386,6 +400,9 @@ export const KrPlainTimelineCard = memo(function KrPlainTimelineCard({
   )
   const browserActive = browserEntry !== undefined
     && (browserEntry.active > 0 || browserEntry.lingering === true)
+
+  const steps = timeline.steps
+
   /*
    * 「本会话本轮用过浏览器」的粘滞标记。
    *
@@ -395,54 +412,27 @@ export const KrPlainTimelineCard = memo(function KrPlainTimelineCard({
    * 值记的是 sessionId 而不是布尔：切会话时不需要额外的清理 effect —— 比较
    * 「记的那个会话 === 当前会话」就自然把旧会话的账作废了。
    */
-  const steps = timeline.steps
-
-  /*
-   * 核心判据：本会话是否关联了处于活跃/待命状态的浏览器工作空间。
-   *
-   * 1. 历史步骤判据：当前会话中是否出现过打开网页、浏览器操作或相关脚本；
-   * 2. 活跃/粘滞标记：当前调用或本轮次曾经发生过浏览器工具调用；
-   * 3. 持久化记录：只要本会话打开了工作空间，在该会话中即便轮次结束处于「小憩中」，
-   *    右侧实时回显视口也持续稳定展示；而切换到从未碰过工作空间的会话时，完全隐藏！
-   */
-  const hasBrowserHistory = useMemo(() => {
-    return steps.some((step) => {
-      if (step.icon === 'globe') return true
-      if (step.icon === 'file' || step.icon === 'fileView' || step.icon === 'fileEdit') return false
-      const full = `${step.verb} ${step.detail ?? ''} ${step.filePath ?? ''}`.toLowerCase()
-      return full.includes('open-') || full.includes('taskspace') ||
-             full.includes('workspace') || full.includes('打开网页') ||
-             (full.includes('ego-browser') && !full.includes('规范') && !full.includes('skill'))
-    })
-  }, [steps])
-
   const [browserSeenSession, setBrowserSeenSession] = useState<string | null>(null)
   useEffect(() => {
-    if ((browserActive || hasBrowserHistory) && sessionId !== null && sessionId !== undefined) {
-      setBrowserSeenSession((prev) => (prev === sessionId ? prev : sessionId))
-      try {
-        const raw = sessionStorage.getItem('dsh.chat_plus.workspace_sessions')
-        const list = raw ? (JSON.parse(raw) as string[]) : []
-        if (!list.includes(sessionId)) {
-          list.push(sessionId)
-          sessionStorage.setItem('dsh.chat_plus.workspace_sessions', JSON.stringify(list.slice(-50)))
-        }
-      } catch {}
-    }
-  }, [browserActive, hasBrowserHistory, sessionId])
+    if (!browserActive) return
+    if (sessionId === null || sessionId === undefined || sessionId === '') return
+    setBrowserSeenSession((prev) => (prev === sessionId ? prev : sessionId))
+  }, [browserActive, sessionId])
 
-  const isRememberedSession = useMemo(() => {
-    if (!sessionId) return false
-    try {
-      const raw = sessionStorage.getItem('dsh.chat_plus.workspace_sessions')
-      if (!raw) return false
-      const list = JSON.parse(raw) as string[]
-      return Array.isArray(list) && list.includes(sessionId)
-    } catch { return false }
-  }, [sessionId])
+  /*
+   * 本会话历史上是否真的跑过浏览器（store 的会话级记忆，按 sessionId 查）。
+   *
+   * 订阅同一个 store：真实活动到达时它会顺带把会话记进记忆并广播，这里跟着重算。
+   * 传 null / undefined 一律 false —— 没有会话身份时不许退回成「任意会话」。
+   */
+  const browserRemembered = useSyncExternalStore(
+    subscribeBrowserFlag,
+    () => sessionSeenBrowser(sessionId ?? undefined),
+    () => sessionSeenBrowser(sessionId ?? undefined),
+  )
 
   const browserSticky = sessionId !== null && sessionId !== undefined && browserSeenSession === sessionId
-  const browserOn = browserActive || (running && browserSticky) || hasBrowserHistory || isRememberedSession
+  const browserOn = browserActive || (running && browserSticky) || browserRemembered
 
   /*
    * 子智能体目录**不在这里订阅**（2026-10-08 起）：数据由 KrAgentPanel 单点订阅

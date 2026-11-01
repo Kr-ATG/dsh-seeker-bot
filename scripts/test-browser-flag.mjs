@@ -316,6 +316,9 @@ const documentStub = {
 documentStub.head.appendChild = (child) => { headItems.push(child); return child }
 documentStub.body.appendChild = (child) => { return child }
 
+/** sessionStorage 的内存实现（会话级记忆的落盘断言用）。 */
+const sessionStore = new Map()
+
 const sandbox = {
   document: documentStub,
   console,
@@ -328,6 +331,12 @@ const sandbox = {
   fetch: async () => ({ ok: false, status: 599, json: async () => ({}) }),
   AbortController,
   localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+  // sessionStorage 用真内存桩：会话级记忆的「按会话落盘 / 旧键清理」要能被断言。
+  sessionStorage: {
+    getItem: (key) => (sessionStore.has(key) ? sessionStore.get(key) : null),
+    setItem: (key, value) => { sessionStore.set(key, String(value)) },
+    removeItem: (key) => { sessionStore.delete(key) },
+  },
   URL,
   URLSearchParams,
   matchMedia: () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }),
@@ -418,11 +427,24 @@ if (!forceSource && existsSync(CLIENT) && readFileSync(CLIENT, 'utf8').includes(
 }
 console.log('using ' + source + '\n')
 
+/*
+ * 会话级记忆的两个「历史环境」必须在**第一次 load 之前**布置好：
+ * loadSeenSessions 是一次性的（seenLoaded 置位后不再读盘），布置晚了就验证不到
+ * 清理与 TTL 判定 —— 那两条断言会变成恒真的假绿。
+ *   ① 旧键：上一版实现留下的、被步骤文案误判污染的会话白名单 → 必须被删且不继承；
+ *   ② 新键：一条 13 小时前的记录 → 超过 12 小时 TTL，必须判为不可见。
+ */
+sessionStore.set('dsh.chat_plus.workspace_sessions', JSON.stringify(['legacy-polluted']))
+sessionStore.set('dsh.seeker.browser_seen_sessions', JSON.stringify([
+  { id: 'expired-session', at: Date.now() - 13 * 60 * 60 * 1000 },
+]))
+
 // ── 0. 导出的契约名字（少一个就是接线断了）──────────────────────────────
 const EXPECTED_EXPORTS = [
   'BROWSER_ACTIVITY_ROUTE', 'BROWSER_FLAG_PREVIEW_KEY', 'FAST_POLL_MS', 'SLOW_POLL_MS',
   'IDLE_ROUNDS_BEFORE_SLOW', 'isBrowserToolName', 'parseBrowserActivity', 'sessionFlagVisible',
   'browserFlagToolLabel', 'browserFlagTitle', 'fetchBrowserActivity', 'getBrowserFlagSnapshot',
+  'sessionSeenBrowser', 'clearBrowserActivitySnapshot', 'resetBrowserActivitySnapshot',
   'subscribeBrowserFlag', 'ingestPreviewSessions', 'mountBrowserFlagPreview',
   'startBrowserActivityPolling', 'stopBrowserActivityPolling', 'BROWSER_FLAG_ROW_ATTR',
   'flagAttrValue', 'sessionIdOfRowKey', 'syncBrowserFlagRows', 'BROWSER_FLAG_STYLES',
@@ -838,6 +860,120 @@ need(mod.FAST_POLL_MS === 1000 && mod.SLOW_POLL_MS === 1500 && mod.IDLE_ROUNDS_B
   need(cleared === 0 && mod.getBrowserFlagSnapshot().bySession.size === 0, '预览入口：传 null 清空')
   mod.stopBrowserActivityPolling()
   timers.clear()
+}
+
+// ── 10. 会话级记忆：两个会话互不串亮 ─────────────────────────────────────
+/*
+ * 2026-11-01 用户报：「操作面板的浏览器标识应该绑定会话，而不是所有会话共用」，
+ * 现象是两个会话同时亮着同一个浏览器状态。根因是消费端那两个跨会话判据
+ * （步骤文案子串匹配 + sessionStorage 里所有会话共用的白名单），见
+ * store.ts 的 sessionSeenBrowser 注释。
+ *
+ * 这一节钉的是**数据面**的会话隔离：记忆按会话记、按会话查、按会话落盘；
+ * 预览灌入不写记忆；功能开关关闭时记忆与落盘一并清空。
+ */
+{
+  mod.stopBrowserActivityPolling()
+  timers.clear()
+
+  /*
+   * 先触发一次首次载入（一次性），再断言「旧键清理 / TTL」两条 —— 顺序反了这两条
+   * 会变成恒真的假绿（见文件上部的布置注释）。
+   */
+  need(mod.sessionSeenBrowser('probe-never-seen') === false, '会话记忆：没记录过的会话为 false')
+  need(!sessionStore.has('dsh.chat_plus.workspace_sessions'),
+    '会话记忆：被步骤文案误判污染的旧键已删除（不继承历史误报）')
+  need(mod.sessionSeenBrowser('legacy-polluted') === false,
+    '会话记忆：旧键里的会话不会被当成「用过浏览器」')
+  need(mod.sessionSeenBrowser('expired-session') === false,
+    '会话记忆：超过 12 小时 TTL 的记录判为不可见（误归因不会永久点亮）')
+
+  mod.resetBrowserActivitySnapshot()
+  sessionStore.clear()
+
+  need(mod.sessionSeenBrowser(null) === false && mod.sessionSeenBrowser(undefined) === false
+    && mod.sessionSeenBrowser('') === false,
+    '会话记忆：没有会话身份时一律 false（不许退回「任意会话有活动就亮」）')
+
+  const requests = []
+  let payload = {
+    ok: true,
+    now: 1,
+    sessions: [{ sessionId: 'sess-a', active: 1, service: 'ego', tool: 'nodejs', since: 1, lastAt: 1, lingering: false }],
+  }
+  sandbox.fetch = async (url) => {
+    requests.push(url)
+    return { ok: true, json: async () => payload }
+  }
+  const step = async () => {
+    const first = [...timers.entries()][0]
+    if (first === undefined) return null
+    const [id, timer] = first
+    timers.delete(id)
+    timer.fn()
+    await Promise.resolve()
+    await Promise.resolve()
+    await new Promise((r) => setImmediate(r))
+    return timer.delay
+  }
+
+  mod.startBrowserActivityPolling()
+  await step()
+  need(requests.length === 1, '会话记忆：走真实轮询路径（不是预览灌入）')
+  need(mod.sessionSeenBrowser('sess-a') === true, '会话记忆：真实活动到达后该会话被记住')
+  need(mod.sessionSeenBrowser('sess-b') === false, '会话记忆：另一个会话不受影响（不共用一份状态）')
+
+  payload = {
+    ok: true,
+    now: 2,
+    sessions: [{ sessionId: 'sess-b', active: 1, service: 'playwright-mcp', tool: 'browser_click', since: 2, lastAt: 2, lingering: false }],
+  }
+  await step()
+  need(mod.sessionSeenBrowser('sess-a') === true && mod.sessionSeenBrowser('sess-b') === true,
+    '会话记忆：两个会话各记各的（互不覆盖、也不互相点亮）')
+
+  const raw = sessionStore.get('dsh.seeker.browser_seen_sessions')
+  need(typeof raw === 'string' && raw.includes('sess-a') && raw.includes('sess-b'),
+    '会话记忆：按会话落 sessionStorage（刷新后仍记得，且不是所有会话共用一份状态）')
+
+  payload = { ok: true, now: 3, sessions: [] }
+  await step()
+  need(mod.getBrowserFlagSnapshot().bySession.size === 0, '会话记忆：无活动时快照清空')
+  need(mod.sessionSeenBrowser('sess-a') === true && mod.sessionSeenBrowser('sess-b') === true,
+    '会话记忆：快照清空不抹掉会话级记忆（轮次收口后入口仍在）')
+
+  mod.ingestPreviewSessions([{ sessionId: 'sess-preview', active: 1, service: 'ego', tool: 'x', since: 1, lastAt: 1, lingering: false }])
+  need(mod.sessionSeenBrowser('sess-preview') === false,
+    '会话记忆：window 预览灌入不写记忆（演示数据不该点亮别的会话）')
+  mod.ingestPreviewSessions(null)
+
+  /*
+   * 卸载 / 热重载：**只清内存、保留落盘**。
+   *
+   * 这条与下面的 reset 是两种不同语义：热重载后新的模块实例会从 sessionStorage
+   * 把记忆读回来，作者改插件时不会「用过浏览器的会话突然不亮了」；而功能开关
+   * 关闭要的是彻底清干净。走反了不会有任何报错，只会表现为图标时亮时不亮。
+   */
+  payload = {
+    ok: true,
+    now: 4,
+    sessions: [{ sessionId: 'sess-c', active: 1, service: 'ego', tool: 'x', since: 4, lastAt: 4, lingering: false }],
+  }
+  await step()
+  need(mod.sessionSeenBrowser('sess-c') === true, '会话记忆：sess-c 已被记住')
+  mod.clearBrowserActivitySnapshot()
+  need(mod.sessionSeenBrowser('sess-c') === false, '会话记忆：clear 清掉内存记忆（卸载时图标立刻熄灭）')
+  need(String(sessionStore.get('dsh.seeker.browser_seen_sessions')).includes('sess-c'),
+    '会话记忆：clear 保留落盘（热重载后还能恢复记忆）')
+
+  mod.stopBrowserActivityPolling()
+  timers.clear()
+  mod.resetBrowserActivitySnapshot()
+  need(mod.sessionSeenBrowser('sess-a') === false && mod.sessionSeenBrowser('sess-b') === false
+    && mod.sessionSeenBrowser('sess-c') === false,
+    '会话记忆：resetBrowserActivitySnapshot 清空记忆（开关关闭时图标立刻熄灭）')
+  need(sessionStore.get('dsh.seeker.browser_seen_sessions') === '[]',
+    '会话记忆：reset 同时清掉落盘（刷新后不复活）')
 }
 
 console.log('\n' + (process.exitCode ? 'TEST FAILED' : 'TEST PASSED') + ' — browser flag client half (' + source + ')')

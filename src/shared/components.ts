@@ -33,13 +33,13 @@ export type ComponentId =
   | 'done-pill'
   | 'memory'
   | 'skills'
+  | 'connectors'
   | 'usage'
   | 'gallery'
   | 'vault'
   | 'prompt'
   | 'sync'
   | 'provider'
-  | 'mail'
   | 'input'
   | 'host'
 
@@ -65,13 +65,13 @@ export const COMPONENTS: ReadonlyArray<ComponentDef> = [
   { id: 'done-pill', rowId: 'dsh-seeker-bot-done-pill', title: '对话完成胶囊', description: '回合完成提醒：左下角小横条 / 顶部悬浮胶囊、录屏、待机机器人与健康提醒。', defaultEnabled: true },
   { id: 'memory', rowId: 'dsh-seeker-bot-memory', title: '记忆工作台', description: '自动沉淀的长期记忆：按项目 / 全局分层、检索、置顶与按工作区开关。', defaultEnabled: true },
   { id: 'skills', rowId: 'dsh-seeker-bot-skills', title: 'SKILL 工作台', description: '技能（Skill）安装、停用、分类、查看说明与技能包管理。', defaultEnabled: true },
+  { id: 'connectors', rowId: 'dsh-seeker-bot-connectors', title: '连接器', description: 'MCP 连接器市场：精选目录、搜索分类与一键安装（写 cordis.patch.yml）。', defaultEnabled: true },
   { id: 'usage', rowId: 'dsh-seeker-bot-usage', title: '用量工作台', description: 'Token / 请求 / 缓存 / 输出速度的观测大盘与 52 周活动热力。', defaultEnabled: true },
   { id: 'gallery', rowId: 'dsh-seeker-bot-gallery', title: '画廊', description: '跨会话的图片 / 网页 / 视频 / 文档 / 表格产出物索引。', defaultEnabled: true },
   { id: 'vault', rowId: 'dsh-seeker-bot-vault', title: '档案', description: '账号密码 / 支付方式 / 联系方式 / 证件的加密档案与到期提醒。', defaultEnabled: true },
   { id: 'prompt', rowId: 'dsh-seeker-bot-prompt', title: '系统提示词', description: '查看本次会话真正发送给模型的系统提示词快照。', defaultEnabled: true },
   { id: 'sync', rowId: 'dsh-seeker-bot-sync', title: '同步设置', description: '工作台资产（档案 / 记忆 / 技能 / MCP 配置）的云端双向同步。', defaultEnabled: true },
   { id: 'provider', rowId: 'dsh-seeker-bot-provider', title: '供应商中心', description: '官方设置里的供应商页：API Key、网络代理、模型能力、生图 / 识图 / 生视频与 AnySearch。', defaultEnabled: true },
-  { id: 'mail', rowId: 'dsh-seeker-bot-mail', title: 'Agent 邮箱', description: '本 Agent 的专属邮箱：收件箱 / 读信 / 附件保存与每会话首步的能力声明。', defaultEnabled: true },
   { id: 'input', rowId: 'dsh-seeker-bot-input', title: '输入区增强', description: '供应商 / 模型选择器、推理强度、提示词优化、工具闸门、界面字体与 @ 运行中的程序。', defaultEnabled: true },
   { id: 'host', rowId: 'dsh-seeker-bot-host', title: '宿主支撑能力', description: '截图渲染引擎、Office / PDF 预览、字体与动画资产、文件打开、运行中程序采集等后台能力。', defaultEnabled: true },
 ]
@@ -125,7 +125,6 @@ export const FEATURE_COMPONENT: Readonly<Record<string, ComponentId>> = {
   'view.panel-outputs': 'seeker',
   'view.panel-memory': 'seeker',
   'view.panel-tool-calls': 'seeker',
-  'view.panel-ask': 'seeker',
   'view.panel-header': 'seeker',
   'view.hero-head': 'seeker',
   'view.git-status': 'seeker',
@@ -139,6 +138,7 @@ export const FEATURE_COMPONENT: Readonly<Record<string, ComponentId>> = {
   // ── 工作台（七个独立行）────────────────────────────────────────────
   'work.memory': 'memory',
   'work.skills': 'skills',
+  'work.connectors': 'connectors',
   'work.usage': 'usage',
   'work.gallery': 'gallery',
   'work.vault': 'vault',
@@ -148,11 +148,6 @@ export const FEATURE_COMPONENT: Readonly<Record<string, ComponentId>> = {
 
   // ── 供应商中心（provider）───────────────────────────────────────────
   'host.provider-hub': 'provider',
-
-  // ── Agent 邮箱（mail）───────────────────────────────────────────────
-  'view.mail': 'mail',
-  'prompt.mail': 'mail',
-  'host.mail': 'mail',
 
   // ── 输入区增强（input）──────────────────────────────────────────────
   'input.model-seats': 'input',

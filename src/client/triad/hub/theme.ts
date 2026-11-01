@@ -12,7 +12,7 @@
  * ── 主题同步（用户点名要求）──────────────────────────────────────────
  * 不写死任何绝对色。所有色值都是「官方 token → 深空表达」的映射：
  *  - 暗色：body[data-ds-dark-theme] 命中时走石墨底 #151517 + 白字阶；
- *  - 亮色：缺省分支走米白底 #F6F6F4 + 墨字阶，同一套 --wb2-* 短名；
+ *  - 亮色：缺省分支走白底 #FFFFFF + 墨字阶，同一套 --wb2-* 短名；
  *  - 官方切主题只改 body 属性，本表两套分支自动换，零 JS 监听。
  * 强调色统一为冷银蓝（暗 #B1B1B3 / 亮 #6F6F76）——与「档案」页同一套配色，
  * 用户 2026-10-29 要求操作间各功能页统一：不要米金/蓝，只留中性强调。
@@ -81,8 +81,8 @@ const SHEET = `
   --dsw-alias-state-business-primary: #56637A;
   --dsw-alias-state-info-primary: #56637A;
   --dsw-alias-state-violet-primary: color-mix(in srgb, #56637A 70%, #fff);
-  /* 浅色底也从官方纸白换成与档案页一致的米白（用户要求统一背景色） */
-  --dsw-alias-bg-base: #F6F6F4;
+  /* 浅色底更换为纯白 #FFFFFF（用户要求） */
+  --dsw-alias-bg-base: #FFFFFF;
   --dsw-shadow-lv1: 0 2px 10px color-mix(in srgb, var(--dsw-alias-label-primary, #111) 10%, transparent);
   --dsw-shadow-lv2: 0 8px 26px color-mix(in srgb, var(--dsw-alias-label-primary, #111) 14%, transparent);
   --dsw-shadow-lv3: 0 14px 44px color-mix(in srgb, var(--dsw-alias-label-primary, #111) 20%, transparent);
@@ -379,7 +379,7 @@ body[data-ds-dark-theme] .wb-root {
 .wb2-page-wrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; position: relative; overflow: hidden; }
 .wb2-page-wrap > *:last-child { flex: 1 1 auto; min-height: 0; }
 
-/* ══════════ 5 · 记忆 / 能力 / 画廊 / 邮件：版式向效果图靠拢 ══════════
+/* ══════════ 5 · 记忆 / 能力 / 画廊：版式向效果图靠拢 ══════════
    原则：只动版式与质感，不动各面板的 JSX 与状态机；做不到的交互形态
    （如画廊 Coverflow 轮播需要 JS 状态）不硬凑，留真数据视图。 */
 

@@ -186,12 +186,7 @@ const ctx = {
 // 第一个 await 就停了，于是下面 7 组路由断言会全部误报 FAIL（实测：同一个
 // bundle 等 400ms 后全部挂上）。这里轮询到 /api/dsh-memory 出现为止，最多 3s。
 try {
-  // 显式传 mail.enabled=true：邮箱总开关是**用户运行时偏好**（面板设置页会把它
-  // 写进 ~/.dsh/mail/dsh-mail/store/config.json），一旦用户关掉，下面的
-  // 「6 个 mail_* 工具都注册」断言就会跟着失败 —— 那是配置生效的正确行为，
-  // 不是缺陷。冒烟测的是「插件能不能把工具挂上」，所以这里把开关钉成 true，
-  // 让结果只取决于代码本身，不取决于跑测试时用户恰好把开关拨到哪边。
-  mod.apply(ctx, { mail: { enabled: true, injectEnabled: true } })
+  mod.apply(ctx)
   pass('apply(ctx) completed without throwing')
   /*
    * 等待条件必须覆盖**整条挂载链**，不能只等第一个出现的路由。
@@ -730,28 +725,6 @@ need(mod.BUILTIN_SOUL_PRESETS === undefined && mod.builtinPreset === undefined,
   'builtin soul presets gone (BUILTIN_SOUL_PRESETS / builtinPreset 不再导出)')
 need(listeners.has('agent/pre-step'), 'agent/pre-step injection hooked')
 need(listeners.has('session/event'), 'session/event capture hooked')
-// 邮箱工具：6 个 mail_* 全注册（只留查看类，写类已整块下线）。
-{
-  const MAIL_TOOLS = [
-    'mail_account', 'mail_list', 'mail_search', 'mail_read',
-    'mail_download_attachment', 'mail_wait_code',
-  ]
-  const missing = MAIL_TOOLS.filter(name => !tools.includes(name))
-  need(missing.length === 0, `mail tools registered (${MAIL_TOOLS.length} 个${missing.length > 0 ? `，缺 ${missing.join(', ')}` : ''})`)
-  // 写类不得再注册：模型这一侧必须没有写信能力，否则「裁剪」只是文案变化。
-  const WRITE_TOOLS = ['mail_send', 'mail_reply', 'mail_forward', 'mail_trash', 'mail_delete']
-  const leaked = WRITE_TOOLS.filter(name => tools.includes(name))
-  need(leaked.length === 0, `mail 写类工具不再注册（漏了 ${leaked.join(', ')}）`)
-}
-// CLI 英文报错必须翻成人话：这是「点永久删除却看到 Message does not exist or is
-// not in trash」那类故障的可读性底线（原文照旧附在括号里，翻译不吞信息）。
-{
-  const humanize = mod.humanizeCliError
-  const sample = typeof humanize === 'function' ? humanize('Message does not exist or is not in trash') : ''
-  const unmapped = typeof humanize === 'function' ? humanize('totally unmapped english error') : ''
-  need(typeof humanize === 'function' && /回收站/.test(sample), 'CLI 英文报错翻成人话（not in trash → 提示先移入回收站）')
-  need(unmapped === 'totally unmapped english error', '未映射的报错保留原文（翻译不吞信息）')
-}
 // 路由零撞车：融合进来的 8 组前缀与本插件 /api/chat-flow/* 无交集。
 need(![...routes.keys()].some(p => p.startsWith('/api/chat-flow/') && p.includes('dsh-memory')),
   'no route collision between chat-plus and the merged workbenches')
@@ -1040,7 +1013,7 @@ need(![...routes.keys()].some(p => p.startsWith('/api/chat-flow/') && p.includes
    * 这些开关的承载组件。
    *
    * 2026-10-15：用户要求删掉 composer 的「内置提示词通道」卡、把设置挪到 Seeker
-   * 旁边，于是 team / 收口 / 邮箱三组开关的**客户端承载者**从
+   * 旁边，于是 team / 收口两组开关的**客户端承载者**从
    * `triad/memory/Toggle.tsx` 换成 `kr-chat/KrPanelSettings.tsx`。
    * 断言对象随之迁移 —— 判的是 host 端点 ↔ 客户端键名逐字对齐，与它在哪个组件里无关。
    * 抽屉里的文案是硬编码中文而非 t() 键，所以下面按「键名出现在抽屉里」判，
@@ -1381,176 +1354,6 @@ need(![...routes.keys()].some(p => p.startsWith('/api/chat-flow/') && p.includes
 }
 
 /*
- * ── Agent 邮箱通道（跨模块：dsh-mail 的声明 + 记忆卡片的开关）─────────────
- *
- * 这次修的是一个「两个开关套在一起、用户开的那个被吞掉」的静默失效：
- * 邮箱工作台总开关（mail.enabled）是启动期装配开关，用户关掉它之后，邮箱
- * 设置页里「对话里自动声明邮箱能力」照样显示成开，而注入一次都没跑过。
- * 用户的实际感受是「每次注册都要我提醒你用邮箱」。
- *
- * 三条断言各钉一个失效面：
- *  1. 注入器**必须现读闸门**（构造期拿一次布尔 = 拨开关不生效）；
- *  2. 声明文本必须写死「不要就邮箱向用户提问」（旧文案只写了「不要问用户要
- *     个人邮箱」，模型于是改问「你有邮箱吗」——对用户是同一个问题被反复问）；
- *  3. 工作台开关必须**运行时**可改（工具动态挂/卸），否则面板拨了要重启。
- */
-{
-  const mailInjectSrc = readFileSync(resolve(ROOT, 'src/mail/inject.ts'), 'utf8')
-  const mailIndexSrc = readFileSync(resolve(ROOT, 'src/mail/index.ts'), 'utf8')
-  const mailRegistrySrc = readFileSync(resolve(ROOT, 'src/mail/registry.ts'), 'utf8')
-
-  // ① 闸门现读：注入器拿的是回调而不是构造期布尔。
-  need(/isEnabled:\s*\(\)\s*=>/.test(mailIndexSrc) || /isEnabled\s*\(\s*\)/.test(mailIndexSrc),
-    'mail 注入器的闸门是回调（现读配置），不是构造期布尔——否则拨开关不生效')
-  need(/gate\.isEnabled\(\)/.test(mailInjectSrc),
-    '注入器在每次 pre-step 现读闸门（构造期拿一次 = 运行中改配置不生效）')
-
-  /*
-   * ①b **声明与工具解耦**（用户明确要求）。
-   *
-   * 关掉邮箱工作台往往只是想省下那些 mail_* 工具每轮占的 schema，不该因此让模型
-   * 忘掉自己有个邮箱——那样每次注册又要用户提醒一遍，正是这次要修的痛点。
-   * 所以闸门只能读 `injectEnabled`，**绝不能**把 `enabled` 也相与进来。
-   * 这条断言钉的就是那个相与（它曾经真的写在那里）。
-   */
-  // 2026-10-28：功能开关改造在闸门前面加了 hostFeatureEnabled('prompt.mail') 的
-  // 运行时门（只影响「用户有没有关掉这条通道」，与邮箱工作台总开关 enabled 无关）。
-  // 核心判据不变：isEnabled 必须读 injectEnabled；下面的反向断言继续禁止与 enabled 相与。
-  need(/isEnabled:\s*\(\)\s*=>[\s\S]{0,160}?service\.getConfig\(\)\.injectEnabled/.test(mailIndexSrc),
-    '注入闸门只读 injectEnabled（与工作台总开关解耦）')
-  need(!/isEnabled:\s*\(\)\s*=>\s*\{[\s\S]{0,200}?&&[\s\S]{0,80}?injectEnabled/.test(mailIndexSrc),
-    '注入闸门不得把 enabled 与 injectEnabled 相与（那会让工作台一关、声明跟着哑掉）')
-  // 工具缺席时注入文本必须换一份（走 agently-cli），否则声明了却无能力可用。
-  need(/MAIL_CLI_FALLBACK_RULE/.test(mailInjectSrc),
-    '工具缺席时注入文本走 agently-cli 命令行版本（否则声明了却让模型去调不存在的工具）')
-  need(/toolsAvailable/.test(mailInjectSrc) && /toolsAvailable:\s*\(\)\s*=>/.test(mailIndexSrc),
-    '注入器按「工具在不在」二选一文本（toolsAvailable 回调）')
-  // CLI 命令必须是本机实测过的那几条（写错一条模型就跑不通），且**只有只读命令**：
-  // 写类工具已下架，兜底说明里再出现发信命令 = 又给了模型一条写信路。
-  for (const [needle, why] of [
-    ['agently-cli message +list', '列邮件命令（实测可用）'],
-    ['agently-cli message +read --id', '读邮件命令'],
-    ['绝不臆造验证码', '轮询收码时的诚实底线'],
-  ]) {
-    need(mailInjectSrc.includes(needle), `CLI 兜底声明必须写清「${why}」（缺 ${needle}）`)
-  }
-  for (const [needle, why] of [
-    ['message +send', '发信'],
-    ['message +reply', '回信'],
-    ['message +forward', '转发'],
-    ['--confirmation-token', '两阶段确认第二段'],
-    ['--confirmed', '两阶段确认跳过'],
-  ]) {
-    need(!mailInjectSrc.includes(needle), `CLI 兜底声明不得再出现「${why}」（${needle}）`)
-  }
-
-  // ② 声明强度：必须点名「不要就邮箱向用户提问」，并给出例外（用户指定了自己的邮箱）。
-  //    只写「不要问用户要个人邮箱」时，模型会改问「你有邮箱吗 / 要不要用你的邮箱注册」，
-  //    用户体感仍是同一个问题被反复问。
-  for (const [needle, why] of [
-    ['不要就「用哪个邮箱」向用户提问', '禁止就邮箱征求许可（旧文案只禁「要个人邮箱」，模型改问「你有邮箱吗」）'],
-    ['你有邮箱吗', '把模型会改口的那几种问法逐一点名'],
-    ['要不要用你的邮箱注册', '同上（这是实测里最像的一句）'],
-    ['用户当轮明确说了', '给出唯一例外：用户指定了自己的邮箱'],
-  ]) {
-    need(mailInjectSrc.includes(needle), `邮箱声明必须写清「${why}」（缺 ${needle}）`)
-  }
-
-  // ③ 工作台开关运行时生效：service 要有配置变更订阅，装配层要订阅它。
-  need(/onConfigChange/.test(readFileSync(resolve(ROOT, 'src/mail/service.ts'), 'utf8')),
-    'MailService 提供 onConfigChange（工具动态挂/卸的订阅口）')
-  need(/service\.onConfigChange\(/.test(mailIndexSrc),
-    '装配层订阅配置变更（不订阅 = 面板拨总开关要重启 DSH 才生效）')
-  need(/registerMailTools\(ctx, service\)/.test(mailIndexSrc) && /toolsDispose\?\.\(\)/.test(mailIndexSrc),
-    '工具随 enabled 动态注册与注销（只注册不注销 = 关掉后模型仍能调 mail_*）')
-  /*
-   * `ctx.effect(cb)` 是**立即执行** cb、拿返回值当 disposer。写成
-   * `ctx.effect(() => { toolsDispose?.(); toolsDispose = null })` 会在注册的
-   * 下一行就把刚挂上的工具全注销 —— 而且是静默的（模型看不见 mail_*，路由却
-   * 一切正常）。这个 bug 本次真的写出来过，由「mail_* 都注册」那条断言
-   * 当场抓到，所以在这里再钉一道静态防线：注销必须包在内层函数里。
-   */
-  need(/ctx\.effect\(\(\)\s*=>\s*\(\)\s*=>\s*\{[^}]*toolsDispose/.test(mailIndexSrc),
-    'ctx.effect 的注销回调必须包一层（外层立即执行，裸写会在注册下一行就把工具注销掉）')
-  /*
-   * 2026-10-18 反向断言：「新邮件实时监听」整块删掉后不得复活。
-   *
-   * 那条能力跑起来是一个 agently-cli message +watch 常驻长轮询进程，产出只有
-   * 「面板开着时弹一个 toast」，面板一关什么都没有；而且事件缓冲从不清空，
-   * 每次打开面板都会把历史事件当新邮件误报一遍。删掉是用户点名的决定（方案 A），
-   * 所以这里钉死：源码里不该再出现 watcher / watchEnabled / 事件缓冲。
-   */
-  need(!/MailWatcher|watchEnabled|mountedWatch|startWatch/.test(mailIndexSrc),
-    '邮箱装配层不得再有 watch（新邮件实时监听已整块下线，别复活常驻长轮询进程）')
-  need(!/listEvents|pushEvent|clearEvents/.test(readFileSync(resolve(ROOT, 'src/mail/store.ts'), 'utf8')),
-    'MailStore 不得再有新邮件事件缓冲（它从不清空，是「每次开面板误报新邮件」的根因）')
-  // 必须剥注释再判：文件头注释里**叙述**了「删掉 /events 与 /watch」，那是
-  // 解释不是代码，拿全文匹配会变成「越解释越违规」。
-  const mailApiClean = readFileSync(resolve(ROOT, 'src/mail/api.ts'), 'utf8')
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:])\/\/.*$/gm, '$1 ')
-  need(!/rest === '\/events|rest === '\/watch/.test(mailApiClean),
-    '邮箱路由不得再挂 /events 与 /watch（功能下线了，路由留着就是给不存在的能力开后门）')
-
-  // ④ 跨模块状态槽位：记忆卡片读邮箱状态不能走 ctx 赋值（cordis 会 throw）。
-  need(/setMailStatusSource/.test(mailIndexSrc) && /clearMailStatusSource/.test(mailIndexSrc),
-    'mail 模块装配时写入状态槽位、卸载时清空')
-  need(/getMailStatusSource/.test(readFileSync(resolve(ROOT, 'src/triad/memory/api.ts'), 'utf8')),
-    '记忆路由经槽位读邮箱状态（不这样做就得把实例挂 ctx，cordis 会 throw）')
-  need(!/ctx\.(mailStatusSource|mailStatus)\s*=/.test(mailRegistrySrc + mailIndexSrc),
-    '不得把邮箱实例挂到 ctx 属性上（未 declare 的属性赋值会让插件树 boot 失败）')
-
-  // ⑤ 端点语义：`enabled` 只跟声明开关走，与工作台总开关**解耦**。
-  const mailRoute = routes.get('/api/dsh-memory')
-  if (mailRoute !== undefined) {
-    const callMail = async (method, url) => {
-      const captured = { status: 0, body: null }
-      const res = {
-        writeHead: (status) => { captured.status = status },
-        end: (payload) => { try { captured.body = JSON.parse(payload) } catch { captured.body = null } },
-      }
-      const req = { method, url, socket: { remoteAddress: '127.0.0.1' }, headers: { host: '127.0.0.1:3080' } }
-      mailRoute.handler(req, res)
-      await new Promise((r) => setTimeout(r, 80))
-      return captured
-    }
-    const got = await callMail('GET', '/api/dsh-memory/mail-inject-state')
-    need(got.status === 200, `GET /mail-inject-state answers 200（实得 ${got.status}）`)
-    // 冒烟把 mail.enabled 与 injectEnabled 都钉成 true，所以这里应为真。
-    need(got.body?.enabled === true, `声明默认生效（实得 ${JSON.stringify(got.body)}）`)
-    // 解耦的**行为**证据：enabled 必须与 injectEnabled 逐字一致，而不是与
-    // 「工作台 && 声明」一致。把两者相与正是要修的那个坑。
-    need(got.body?.enabled === got.body?.injectEnabled,
-      'enabled 必须等于 injectEnabled（与工作台总开关解耦，不是两者相与）')
-    need(typeof got.body?.workbenchEnabled === 'boolean', '回传工作台总开关状态')
-    need(typeof got.body?.toolsMounted === 'boolean', '回传 toolsMounted（卡片据此说「走命令行」）')
-    // inject-state 合并回包也要带上，否则卡片一次 hover 拿不到邮箱状态。
-    const is = await callMail('GET', '/api/dsh-memory/inject-state?sessionId=smoke-mail')
-    need(typeof is.body?.mailEnabled === 'boolean', 'GET /inject-state 顺带回传 mailEnabled')
-    need(typeof is.body?.mailAvailable === 'boolean', 'GET /inject-state 顺带回传 mailAvailable（区分「关着」与「没挂」）')
-    need(typeof is.body?.mailToolsMounted === 'boolean', 'GET /inject-state 顺带回传 mailToolsMounted')
-  }
-  // client 侧：解耦后的消费点必须都在。
-  //
-  // 2026-10-15：邮箱那一行的承载者从 Toggle.tsx 换到 KrPanelSettings.tsx，
-  // 且抽屉里的副说明是**硬编码中文**（含地址插值），不走 t() 键。断言按实际写法钉：
-  // 「工具缺席 → 走命令行」这一分支必须真实存在（画成关/逼用户开工作台都是错的）。
-  const clientMailCarrier = readFileSync(resolve(ROOT, 'src/client/kr-chat/KrPanelSettings.tsx'), 'utf8')
-  const mailLocales = readFileSync(resolve(ROOT, 'src/client/triad/memory/locales.ts'), 'utf8')
-  for (const key of ['mailInjectLabel', 'mailInjectHint', 'mailInjectHintCli', 'mailInjectUnavailable', 'mailInjectUnauthorized']) {
-    need(mailLocales.includes(`${key}:`), `locales 定义 ${key}`)
-  }
-  // 工作台关着时副说明必须换成「走命令行」那一版，而不是把开关画成关。
-  need(/mailToolsMounted/.test(clientMailCarrier) && /agently-cli 命令行收发/.test(clientMailCarrier),
-    '工具缺席时副说明换「走命令行」版（画成关/逼用户开工作台都是错的）')
-  need(!/mailInjectWorkbenchOff|mailInjectEnableWorkbench/.test(clientMailCarrier),
-    '不再有「工作台关着 → 声明不注入」的旧文案与「打开工作台」按钮（两者已解耦）')
-  // 邮箱在抽屉里的那一行必须只有「声明」一个写入点（不信「工作台」那条死路径）。
-  need(/setMailInjectState/.test(clientMailCarrier),
-    '抽屉写邮箱声明走 setMailInjectState（跨模块落 dsh-mail 的 injectEnabled）')
-}
-
-/*
  * ── 工作区「项目记忆记录开关」（项目 meta 的 autoMemory）经 /inject-state 读写 ──
  *
  * 这个开关是**写入侧**的，不是注入（读取）侧：关掉它，该工作区不再自动提取记忆
@@ -1614,8 +1417,8 @@ need(![...routes.keys()].some(p => p.startsWith('/api/chat-flow/') && p.includes
     need(none.status === 200, `GET /inject-state（无 cwd）answers 200（实得 ${none.status}）`)
     need(none.body?.projectHash === null && none.body?.projectPath === null && none.body?.projectMemoryEnabled === null,
       `无 cwd 时 project* 三件套全 null（实得 ${JSON.stringify({ h: none.body?.projectHash, p: none.body?.projectPath, e: none.body?.projectMemoryEnabled })}）`)
-    need(typeof none.body?.enabled === 'boolean' && typeof none.body?.defaultEnabled === 'boolean' && typeof none.body?.mailEnabled === 'boolean',
-      '新增字段不挤掉既有回包字段（enabled / defaultEnabled / mailEnabled 仍在）')
+    need(typeof none.body?.enabled === 'boolean' && typeof none.body?.defaultEnabled === 'boolean',
+      '新增字段不挤掉既有回包字段（enabled / defaultEnabled 仍在）')
 
     // ② 带 cwd 读：hash 是 12 位 hex、path 原样回显、开关默认开（meta 还不存在）。
     const fresh = await callJson('GET', `/api/dsh-memory/inject-state?sessionId=smoke-projmem&cwd=${encodeURIComponent(WORKSPACE)}`)

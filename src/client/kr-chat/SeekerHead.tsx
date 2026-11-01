@@ -6,8 +6,8 @@
  * 2026-10-25 用户要求：「新对话页面的上面放上我们这个东西」—— 新对话（空白 Hero
  * 态）也要有这张卡头，让用户在发第一条消息之前就能看到"她在这儿"。
  *
- * 但卡头不能复制两份：它包含头像、浏览器标志、按钟点轮换的空闲文案、Git / 邮箱 /
- * 齿轮三枚动作按钮（还带着 e2e 依赖的 id）。两份必然分叉 —— 改一处忘了另一处，
+ * 但卡头不能复制两份：它包含头像、浏览器标志、按钟点轮换的空闲文案、Git /
+ * 齿轮两枚动作按钮（还带着 e2e 依赖的 id）。两份必然分叉 —— 改一处忘了另一处，
  * 表现是"新对话页的图标是旧的"这类没人会想到去查的 bug。
  *
  * 所以把卡头抽成这个组件，操作面板卡与新对话页共用同一份。
@@ -26,7 +26,7 @@
  *
  * ## 它不负责什么
  *
- * 不订阅任何数据源：浏览器标志、齿轮/邮箱的开合、当前动作/空闲文案，全部由调用方
+ * 不订阅任何数据源：浏览器标志、齿轮的开合、当前动作/空闲文案，全部由调用方
  * 通过 props 传进来。这样同一个组件既能用在操作面板卡里（那里本来就有一整套数据），
  * 也能用在新对话页（那里只需要一个"她在这儿"的静态卡头）。
  *
@@ -40,10 +40,10 @@ import { activateBrowserWindow } from '../browser-flag/activate.ts'
 import { browserFlagTitle } from '../browser-flag/store.ts'
 import type { BrowserActivitySession } from '../browser-flag/store.ts'
 import { getPanelSettingsStore } from './panel-settings-store.ts'
-import { getMailDrawerStore } from './mail-drawer-store.ts'
-import { getMailUnreadStore } from './mail-unread-store.ts'
 import { getGitRosterStore, useGitRosterSnapshot } from './git-roster-store.ts'
 import { GitRosterModal } from './GitRosterModal.tsx'
+import { getCapabilitiesStore, useCapabilitiesSnapshot } from './capabilities-store.ts'
+import { CapabilitiesModal } from './CapabilitiesModal.tsx'
 import { useFeature } from '../features/gate.tsx'
 
 /** 一行状态：要么是一个动作，要么是空闲文案。 */
@@ -90,10 +90,10 @@ export interface SeekerHeadProps {
   /** 紧凑骨架底部摘要里的动作条数（操作面板传 timeline.steps.length；Hero 不传）。 */
   readonly stepCount?: number
   /**
-   * 是否渲染右上角那三枚动作按钮（Git / 邮箱 / 齿轮）。默认 true。
+   * 是否渲染右上角那两枚动作按钮（Git / 齿轮）。默认 true。
    *
    * **新对话页必须传 false**（2026-10-25 修）：那两枚按钮带固定 id
-   * （`kr-panel-settings-btn` / `kr-mail-btn`），而新对话页的 Hero 卡头是**常驻
+   * （`kr-git-roster-btn` / `kr-panel-settings-btn`），而新对话页的 Hero 卡头是**常驻
    * DOM** 的 —— 控制器收起它时只设 `style.display = 'none'`，节点并没有被移除。
    * 于是同一个页面上会同时存在两组同 id 按钮：`getElementById` 只返回第一个，
    * 而它恰好是隐藏的那个（尺寸 0×0），e2e 与任何按 id 取节点的代码都会拿到
@@ -101,7 +101,7 @@ export interface SeekerHeadProps {
    *
    * 为什么不是「收起时把节点移除」：Hero 卡头要保留 running 状态、避免每次进出
    * 空白页都重建 React 根（重建会闪一下）。少渲染两枚按钮更简单 —— 它们在
-   * 新对话页本来也没有意义（那时还没有大盘可设置、也没有邮箱要开）。
+   * 新对话页本来也没有意义（那时还没有大盘可设置）。
    */
   readonly chrome?: boolean
 }
@@ -130,16 +130,15 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
 
   /*
    * 功能开关（live）——卡头是「右栏操作面板」与「新对话页 Hero」共用的唯一一份，
-   * 所以 Git / 邮箱两个开关都在这里统一判，两处自然一致，不需要各写一遍。
+   * 所以 Git 开关在这里统一判，两处自然一致，不需要各写一遍。
    *
    * 同样必须顶层无条件调用：卡头经常随面板每 250ms 重渲染，条件调 hook 会让
    * 组件树直接崩。
    */
   const gitStatusOn = useFeature('view.git-status')
-  const mailOn = useFeature('view.mail')
 
   /*
-   * 两枚动作按钮的开合态。必须**订阅**而不是读一次：按钮的 data-open 决定它亮不亮，
+   * 齿轮按钮的开合态。必须**订阅**而不是读一次：按钮的 data-open 决定它亮不亮，
    * 读一次的话点了之后要等下一次重渲染才变色（而且可能是几十秒后）。
    *
    * 用 useSyncExternalStore 而不是 useState + effect：store 本身就是这个 hook 的
@@ -151,42 +150,10 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
     () => settingsStore.open,
     () => settingsStore.open,
   )
-  const mailStore = getMailDrawerStore()
-  const mailOpen = useSyncExternalStore(
-    (cb) => mailStore.subscribe(cb),
-    () => mailStore.open,
-    () => mailStore.open,
-  )
-  const unreadStore = getMailUnreadStore()
-  /*
-   * view.mail 关闭时**不能订阅 unreadStore**：它的 `subscribe()` 内部会调用
-   * `ensureAutoPoll()`，一订阅就启动 45s 轮询 + visibility / focus 监听。
-   * Agent Mail 有 10 次/分的硬限额，关掉的按钮不该还在后台打请求。
-   *
-   * 做法是给 useSyncExternalStore 换一个**空订阅函数**（订阅动作本身不能条件
-   * 跳过，hook 必须无条件调用）；开关重新打开时 mailOn 变化会让它重新用真
-   * 订阅，store 那边的 `ensureAutoPoll` 若从未启动过就会在这一刻启动。
-   */
-  const unreadSubscribe = useCallback(
-    (cb: () => void): (() => void) => (mailOn ? unreadStore.subscribe(cb) : () => {}),
-    [mailOn, unreadStore],
-  )
-  const unreadSnapshot = useSyncExternalStore(
-    unreadSubscribe,
-    () => unreadStore.getSnapshot(),
-    () => unreadStore.getSnapshot(),
-  )
-  const { count: unreadCount, hasMore: unreadHasMore } = unreadSnapshot
-
-  useEffect(() => {
-    // view.mail 关闭：连这一次首帧静默检查也不发（订阅层同理，见上）。
-    if (!mailOn) return
-    void unreadStore.checkUnread(false)
-  }, [mailOn, unreadStore])
 
   /*
-   * Git 未提交项目角标（2026-10-29 用户要求：Git 图标要像邮箱按钮一样提示
-   * 「有多少个 Git 项目没有提交」）。
+   * Git 未提交项目角标（2026-10-29 用户要求：Git 图标要提示「有多少个 Git
+   * 项目没有提交」）。
    *
    * 数字取 **Git 大盘里有未提交改动的仓库个数**（工作区 + 自制插件）：
    * 一个仓库改了 11 个文件也只算 1，不是文件条数。当前工作区本身不是 Git
@@ -201,6 +168,9 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
   const gitDirtyRepoCount = gitRosterSnapshot.dirtyRepoCount
   const gitRosterOpen = gitRosterSnapshot.open
   const gitRosterStore = getGitRosterStore()
+
+  const capSnapshot = useCapabilitiesSnapshot()
+  const capStore = getCapabilitiesStore()
 
   /*
    * 点浏览器标志 → 把那个窗口拉到前台（2026-10-25 用户要求）。
@@ -378,7 +348,7 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
        *
        * stopPropagation：卡头整块可能是折叠热区，点齿轮不该顺带展开时间线。
        * 用真 button 而不是 span：键盘可达、自带 :active / :focus-visible。
-       * id 沿用顶栏那版 —— e2e（test-settings-card / test-mail-drawer）按它找节点。
+       * id 沿用顶栏那版 —— e2e（test-settings-card）按它找节点。
        *
        * ⚠ 这组按钮**只能渲染一处**（chrome=false 时不渲染）：它们带固定 id，而
        * 新对话页的 Hero 卡头是常驻 DOM（收起时只 display:none，节点还在）。两处
@@ -388,12 +358,52 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
       {chrome && (
       <>
       {/*
-       * 三枚按钮各自受功能开关控制：Git（view.git-status）、邮箱（view.mail）可以
-       * 单独关掉，齿轮设置按钮（大盘设置）不属于这几个 id，保持常驻。
+       * 两枚按钮各自受功能开关控制：Git（view.git-status）可以单独关掉，齿轮设置
+       * 按钮（大盘设置）不属于这个 id，保持常驻。
        * 关掉 Git 时连 git-roster 的 45s 轮询与 GitRosterModal 一起摘掉——
        * 只藏按钮不卸载组件等于还在后台每 45 秒请求一次 /git-roster。
        */}
       <div className="kr-plain-head__tools">
+        {/*
+         * MCP 与 Skill 能力调用统计胶囊（位于 Git 标识左侧，2026-11-01）：
+         * 统计本会话与本会话的所有子代理中，真正被调用的 MCP 工具与 Skill 技能数量。
+         * 用专属的插头连接器图标与闪电图标代表 MCP 和 Skill。
+         * 点击弹出与 Git 大盘同风格的卡片，展示所有被调用的清单与明细。
+         */}
+        <button
+          type="button"
+          id="kr-capabilities-btn"
+          className="kr-plain-head__tool kr-plain-head__tool--capabilities"
+          title={`本会话与子代理已调用 ${capSnapshot.mcpCount} 个 MCP · ${capSnapshot.skillCount} 个 Skill（点击查看明细）`}
+          aria-label={`本会话与子代理已调用 ${capSnapshot.mcpCount} 个 MCP，${capSnapshot.skillCount} 个 Skill，点击查看明细`}
+          aria-expanded={capSnapshot.open}
+          data-open={capSnapshot.open || undefined}
+          data-active={capSnapshot.mcpCount > 0 || capSnapshot.skillCount > 0 || undefined}
+          onClick={(event) => {
+            event.stopPropagation()
+            capStore.toggle()
+          }}
+        >
+          <span className="kr-cap-badge">
+            {/* MCP 图标 + 数字 */}
+            <span className="kr-cap-badge__item kr-cap-badge__item--mcp" title={`已调用 ${capSnapshot.mcpCount} 个 MCP`}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="kr-cap-badge__icon">
+                <path d="M12 22v-5" />
+                <path d="M9 8V2" /><path d="M15 8V2" />
+                <path d="M18 8v3a6 6 0 0 1-12 0V8Z" />
+              </svg>
+              <span className="kr-cap-badge__num">{capSnapshot.mcpCount}</span>
+            </span>
+            <span className="kr-cap-badge__sep">·</span>
+            {/* Skill 图标 + 数字 */}
+            <span className="kr-cap-badge__item kr-cap-badge__item--skill" title={`已调用 ${capSnapshot.skillCount} 个 Skill`}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" className="kr-cap-badge__icon">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+              </svg>
+              <span className="kr-cap-badge__num">{capSnapshot.skillCount}</span>
+            </span>
+          </span>
+        </button>
         {gitStatusOn && (
         <button
           type="button"
@@ -420,37 +430,6 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
           {gitDirtyRepoCount > 0 && (
             <span className="kr-plain-head__badge" data-count={gitDirtyRepoCount} data-kind="git-dirty-repos" aria-hidden="true">
               {gitDirtyRepoCount > 99 ? '99+' : gitDirtyRepoCount}
-            </span>
-          )}
-        </button>
-        )}
-        {mailOn && (
-        <button
-          type="button"
-          id="kr-mail-btn"
-          className="kr-plain-head__tool"
-          title={unreadCount > 0 ? `邮箱 · ${unreadCount}${unreadHasMore ? '+' : ''} 封未读` : '邮箱'}
-          aria-label={unreadCount > 0 ? `邮箱，${unreadCount}${unreadHasMore ? '+' : ''} 封未读` : '邮箱'}
-          aria-expanded={mailOpen}
-          data-open={mailOpen || undefined}
-          data-unread={unreadCount > 0 || undefined}
-          onClick={(event) => {
-            event.stopPropagation()
-            mailStore.toggle()
-          }}
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <rect x="1.6" y="3.2" width="12.8" height="9.6" rx="1.6" />
-            <path d="M2.2 4.4 8 8.6l5.8-4.2" />
-          </svg>
-          {unreadCount > 0 && (
-            <span
-              className="kr-plain-head__badge"
-              data-count={unreadCount}
-              data-kind="mail-unread"
-              aria-hidden="true"
-            >
-              {unreadCount > 99 ? '99+' : unreadCount}{unreadHasMore && unreadCount <= 99 ? '+' : ''}
             </span>
           )}
         </button>
@@ -484,6 +463,7 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
         </button>
       </div>
       {gitStatusOn && <GitRosterModal />}
+      <CapabilitiesModal />
       </>
       )}
     </div>

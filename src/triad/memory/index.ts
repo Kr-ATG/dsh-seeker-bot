@@ -5,8 +5,8 @@
  * - ticker → 每 N 轮增量编译 / 会话结束 final 编译 / 每日编译（衰减+折叠+滚出+daily）
  * - agent/pre-step → 记忆注入（带来源 user message，绝不写 system prompt）
  *   外带三条内置通道：zh 中文偏好 / html+iu 卡片规范 / team 团队协作
- *   （另有第四条 Agent 邮箱声明，由 dsh-mail 模块自己注册 pre-step，不在本文件内；
- *    diagram 流程图通道已于 2026-10-09 随图形 iu kind 上线整体移除）
+ *   （diagram 流程图通道已于 2026-10-09 随图形 iu kind 上线整体移除；
+ *    Agent 邮箱声明通道已于 2026-11 随邮箱功能整体移除）
  * - tools → memory_search / memory_remember / memory_pin / memory_tag / memory_forget
  * - webServer → /api/dsh-memory/*（面板数据 + 裁决操作）
  */

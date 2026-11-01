@@ -4,7 +4,7 @@
  * ## 它解决什么
  *
  * 2026-10-25 用户要求：「新对话页面的上面放上我们这个东西」—— 附图是操作面板卡头
- * 那张（鲸鱼娘 + Seeker + 状态 + 右上角齿轮/邮箱）。空白新会话里右侧大盘整体不
+ * 那张（鲸鱼娘 + Seeker + 状态 + 右上角齿轮）。空白新会话里右侧大盘整体不
  * 显示（没内容可看），于是这张卡头也跟着消失，用户在新对话页看不到她。
  *
  * ## 为什么不复用整个大盘
@@ -28,10 +28,9 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 import type { ReactElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { SeekerHead } from './SeekerHead.tsx'
-import { getBrowserFlagEntry, subscribeBrowserFlag } from '../browser-flag/store.ts'
-import { latestChatSessionId } from '../tool-summary/TurnProcessShadowView.tsx'
+import { getBrowserFlagEntry, sessionSeenBrowser, subscribeBrowserFlag } from '../browser-flag/store.ts'
+import { latestChatSessionId, subscribeLatestChatSnapshot } from '../tool-summary/TurnProcessShadowView.tsx'
 import { getPanelSettingsStore } from './panel-settings-store.ts'
-import { getMailDrawerStore } from './mail-drawer-store.ts'
 import { idlePhraseFor, THINKING_PHRASE } from './idle-phrase.ts'
 import { featureEnabledNow } from '../features/gate.tsx'
 
@@ -72,13 +71,42 @@ function SeekerHeroHead({ running }: { readonly running: boolean }): ReactElemen
     return () => { window.clearInterval(timer) }
   }, [])
 
+  /*
+   * 会话身份必须**响应式**（2026-11-01 修，独立审查发现）。
+   *
+   * latestChatSessionId 是模块级变量，不是 React state。只读它的话，组件在
+   * 「切到空白新会话」之后不会自己重渲染 —— 而新对话页首帧可能还挂着上一个
+   * 会话的 id（控制器注释自承「空白新会话点开的那一瞬会话 id 可能还没登记」），
+   * 于是上一会话的浏览器图标会一直亮在这块卡头上，直到下一次 running 变化。
+   *
+   * 订阅 snapshot 总线：setLatestChatSessionId / leaveCurrentChatSession 都会
+   * scheduleNotify，切会话时这里立刻拿到新身份（或 null）并重算。
+   */
+  const sessionId = useSyncExternalStore(
+    subscribeLatestChatSnapshot,
+    () => latestChatSessionId,
+    () => latestChatSessionId,
+  )
   const browserEntry = useSyncExternalStore(
     subscribeBrowserFlag,
-    () => getBrowserFlagEntry(latestChatSessionId ?? undefined),
-    () => getBrowserFlagEntry(latestChatSessionId ?? undefined),
+    () => getBrowserFlagEntry(sessionId ?? undefined),
+    () => getBrowserFlagEntry(sessionId ?? undefined),
   )
-  const browserOn = browserEntry !== undefined
-    && (browserEntry.active > 0 || browserEntry.lingering === true)
+  /*
+   * 判据与操作面板卡头**同一口径**（2026-11-01）：只认本会话的浏览器活动，
+   * 外加 store 的会话级记忆（本会话历史上真的跑过浏览器）。
+   *
+   * 空白新会话里会话身份是 null，getBrowserFlagEntry / sessionSeenBrowser 都会
+   * 返回「没有」，图标不出现。这里刻意**不**退回成「任意会话有活动就亮」：
+   * 那正是用户报的「所有会话共用同一个浏览器标识」。
+   */
+  const browserRemembered = useSyncExternalStore(
+    subscribeBrowserFlag,
+    () => sessionSeenBrowser(sessionId ?? undefined),
+    () => sessionSeenBrowser(sessionId ?? undefined),
+  )
+  const browserOn = (browserEntry !== undefined
+    && (browserEntry.active > 0 || browserEntry.lingering === true)) || browserRemembered
 
   const thinking = running
   const idleLine = thinking ? THINKING_PHRASE : idlePhraseFor(new Date(clockTick))
@@ -90,10 +118,10 @@ function SeekerHeroHead({ running }: { readonly running: boolean }): ReactElemen
         thinking={thinking}
         browserEntry={browserEntry}
         browserOn={browserOn}
-        /* 不渲染齿轮/邮箱（chrome=false）：这两枚按钮带固定 id，而 Hero 卡头是
+        /* 不渲染齿轮（chrome=false）：这枚按钮带固定 id，而 Hero 卡头是
            常驻 DOM（收起时只 display:none）—— 与右栏那段同时渲染就会出现重复 id，
            getElementById 拿到隐藏的那个，表现为「齿轮在、点了没反应」。
-           新对话页本来也没有大盘可设置、没有邮箱要开，不渲染它们没有损失。 */
+           新对话页本来也没有大盘可设置，不渲染它没有损失。 */
         chrome={false}
       />
     </div>

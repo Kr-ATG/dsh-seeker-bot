@@ -1,0 +1,1365 @@
+{
+  "version": 1,
+  "generatedAt": "2026-11-01T03:48:39.295Z",
+  "counts": {
+    "total": 56,
+    "cn": 13,
+    "global": 43
+  },
+  "categories": [
+    {
+      "id": "办公协作",
+      "label": "办公协作",
+      "count": 5
+    },
+    {
+      "id": "开发工具",
+      "label": "开发工具",
+      "count": 6
+    },
+    {
+      "id": "文档知识",
+      "label": "文档知识",
+      "count": 4
+    },
+    {
+      "id": "数据库",
+      "label": "数据库",
+      "count": 5
+    },
+    {
+      "id": "云服务",
+      "label": "云服务",
+      "count": 3
+    },
+    {
+      "id": "搜索研究",
+      "label": "搜索研究",
+      "count": 4
+    },
+    {
+      "id": "浏览器",
+      "label": "浏览器",
+      "count": 4
+    },
+    {
+      "id": "设计创作",
+      "label": "设计创作",
+      "count": 2
+    },
+    {
+      "id": "项目管理",
+      "label": "项目管理",
+      "count": 4
+    },
+    {
+      "id": "地图出行",
+      "label": "地图出行",
+      "count": 3
+    },
+    {
+      "id": "内容媒体",
+      "label": "内容媒体",
+      "count": 5
+    },
+    {
+      "id": "电商购物",
+      "label": "电商购物",
+      "count": 2
+    },
+    {
+      "id": "支付金融",
+      "label": "支付金融",
+      "count": 3
+    },
+    {
+      "id": "生活服务",
+      "label": "生活服务",
+      "count": 1
+    },
+    {
+      "id": "数据表格",
+      "label": "数据表格",
+      "count": 2
+    },
+    {
+      "id": "文件处理",
+      "label": "文件处理",
+      "count": 2
+    },
+    {
+      "id": "客户支持",
+      "label": "客户支持",
+      "count": 1
+    }
+  ],
+  "entries": [
+    {
+      "id": "amap",
+      "name": "高德地图",
+      "nameEn": "Amap",
+      "tagline": "查地点、规划路线、搜索周边",
+      "description": "接入高德地图开放平台，让模型能搜地点、算路线、查周边 POI。需要高德开放平台 Key。",
+      "category": "地图出行",
+      "region": "cn",
+      "author": "高德",
+      "repo": "https://lbs.amap.com/api/mcp-server/summary",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@amap/amap-maps-mcp-server"
+        ],
+        "env": [
+          {
+            "name": "AMAP_MAPS_API_KEY",
+            "required": true,
+            "label": "高德开放平台 Key",
+            "url": "https://console.amap.com/dev/key/app"
+          }
+        ]
+      },
+      "featured": true,
+      "iconFile": "amap.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "baidu-map",
+      "name": "百度地图",
+      "nameEn": "Baidu Maps",
+      "tagline": "地点检索、路线规划、周边搜索",
+      "description": "百度地图官方 MCP，支持地理编码、路线规划、POI 检索。需要百度地图开放平台 AK。",
+      "category": "地图出行",
+      "region": "cn",
+      "author": "百度",
+      "repo": "https://lbsyun.baidu.com/faq/api?title=mcpserver",
+      "install": {
+        "type": "stdio",
+        "command": "uvx",
+        "args": [
+          "mcp-server-baidu-maps"
+        ],
+        "env": [
+          {
+            "name": "BAIDU_MAPS_API_KEY",
+            "required": true,
+            "label": "百度地图 AK",
+            "url": "https://lbsyun.baidu.com/apiconsole/key"
+          }
+        ]
+      },
+      "iconFile": "baidu-map.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "feishu",
+      "name": "飞书",
+      "nameEn": "Feishu / Lark",
+      "tagline": "读写飞书文档、消息与多维表格",
+      "description": "飞书官方 OpenAPI MCP，可读写云文档、发消息、操作多维表格。需要飞书自建应用 App ID 与 App Secret。",
+      "category": "办公协作",
+      "region": "cn",
+      "author": "飞书",
+      "repo": "https://open.feishu.cn/document/mcp",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@larksuiteoapi/lark-mcp",
+          "mcp",
+          "-a",
+          "{{APP_ID}}",
+          "-s",
+          "{{APP_SECRET}}"
+        ],
+        "env": [
+          {
+            "name": "APP_ID",
+            "required": true,
+            "label": "飞书 App ID",
+            "url": "https://open.feishu.cn/app"
+          },
+          {
+            "name": "APP_SECRET",
+            "required": true,
+            "label": "飞书 App Secret",
+            "secret": true
+          }
+        ]
+      },
+      "featured": true,
+      "iconFile": "feishu.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "dingtalk",
+      "name": "钉钉",
+      "nameEn": "DingTalk",
+      "tagline": "发消息、查日程、管理群",
+      "description": "钉钉 MCP 服务，支持消息发送、日程查询、群管理与通讯录读取。",
+      "category": "办公协作",
+      "region": "cn",
+      "author": "钉钉",
+      "repo": "https://github.com/aliyun/dingtalk-mcp",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "dingtalk-mcp@latest"
+        ],
+        "env": [
+          {
+            "name": "DINGTALK_APP_KEY",
+            "required": true,
+            "label": "AppKey"
+          },
+          {
+            "name": "DINGTALK_APP_SECRET",
+            "required": true,
+            "label": "AppSecret",
+            "secret": true
+          }
+        ]
+      },
+      "iconFile": "dingtalk.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "alipay",
+      "name": "支付宝",
+      "nameEn": "Alipay",
+      "tagline": "支付、账单与商户能力",
+      "description": "支付宝官方 MCP，支持创建支付订单、查询账单、退款等商户能力。",
+      "category": "支付金融",
+      "region": "cn",
+      "author": "支付宝",
+      "repo": "https://opendocs.alipay.com/open/",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@alipay/mcp-server-alipay"
+        ],
+        "env": [
+          {
+            "name": "ALIPAY_APP_ID",
+            "required": true,
+            "label": "应用 App ID"
+          },
+          {
+            "name": "ALIPAY_PRIVATE_KEY",
+            "required": true,
+            "label": "应用私钥",
+            "secret": true
+          }
+        ]
+      },
+      "iconFile": "alipay.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "train12306",
+      "name": "12306",
+      "nameEn": "China Railway 12306",
+      "tagline": "车票查询、余票与经停站",
+      "description": "查询 12306 车次、余票、票价与经停站信息。",
+      "category": "生活服务",
+      "region": "cn",
+      "author": "社区",
+      "repo": "https://github.com/Joooook/12306-mcp",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "12306-mcp"
+        ],
+        "env": []
+      },
+      "iconFile": "train12306.svg",
+      "iconMime": "image/svg+xml"
+    },
+    {
+      "id": "weread",
+      "name": "微信读书",
+      "nameEn": "WeRead",
+      "tagline": "搜书、查书评与阅读进度",
+      "description": "检索微信读书书库、查看书评与笔记、读取个人阅读进度。",
+      "category": "内容媒体",
+      "region": "cn",
+      "author": "社区",
+      "repo": "https://github.com/freestylefly/mcp-server-weread",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "mcp-server-weread"
+        ],
+        "env": [
+          {
+            "name": "WEREAD_COOKIE",
+            "required": true,
+            "label": "微信读书 Cookie",
+            "secret": true
+          }
+        ]
+      },
+      "iconFile": "weread.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "bilibili",
+      "name": "哔哩哔哩",
+      "nameEn": "Bilibili",
+      "tagline": "视频信息、弹幕与下载",
+      "description": "获取 B 站视频元信息、字幕、弹幕与评论，支持视频解析。",
+      "category": "内容媒体",
+      "region": "cn",
+      "author": "社区",
+      "repo": "https://github.com/xuanli199/mcp-server-bilibili",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "mcp-server-bilibili"
+        ],
+        "env": []
+      },
+      "iconFile": "bilibili.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "weibo",
+      "name": "微博",
+      "nameEn": "Weibo",
+      "tagline": "热搜、用户与内容检索",
+      "description": "抓取微博热搜榜、用户主页与博文内容。",
+      "category": "内容媒体",
+      "region": "cn",
+      "author": "社区",
+      "repo": "https://github.com/Selenium39/mcp-server-weibo",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "redfox-mcp-server-weibo@latest"
+        ],
+        "env": []
+      },
+      "iconFile": "weibo.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "jd",
+      "name": "京东",
+      "nameEn": "JD.com",
+      "tagline": "商品搜索、价格与榜单",
+      "description": "京东商品搜索、实时价格、销量榜单与秒杀信息。",
+      "category": "电商购物",
+      "region": "cn",
+      "author": "社区",
+      "repo": "",
+      "install": {
+        "type": "stdio",
+        "command": "uvx",
+        "args": [
+          "jd-selection-mcp==0.4.0"
+        ],
+        "env": []
+      },
+      "iconFile": "jd.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "taobao",
+      "name": "淘宝",
+      "nameEn": "Taobao",
+      "tagline": "商品搜索与优惠券",
+      "description": "淘宝商品搜索、精选榜单与优惠券查询。",
+      "category": "电商购物",
+      "region": "cn",
+      "author": "社区",
+      "repo": "",
+      "install": {
+        "type": "stdio",
+        "command": "uvx",
+        "args": [
+          "taobao-selection-mcp==0.3.0"
+        ],
+        "env": []
+      },
+      "iconFile": "taobao.ico",
+      "iconMime": "image/x-icon"
+    },
+    {
+      "id": "douyin",
+      "name": "抖音",
+      "nameEn": "Douyin",
+      "tagline": "视频解析与内容获取",
+      "description": "抖音视频解析、无水印下载与内容信息提取。",
+      "category": "内容媒体",
+      "region": "cn",
+      "author": "社区",
+      "repo": "",
+      "install": {
+        "type": "stdio",
+        "command": "uvx",
+        "args": [
+          "douyin-mcp-server"
+        ],
+        "env": []
+      },
+      "iconFile": "douyin.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "netease-music",
+      "name": "网易云音乐",
+      "nameEn": "NetEase Cloud Music",
+      "tagline": "搜索歌曲、歌单与播放",
+      "description": "网易云音乐歌曲搜索、歌单读取与播放控制。",
+      "category": "内容媒体",
+      "region": "cn",
+      "author": "社区",
+      "repo": "",
+      "install": {
+        "type": "stdio",
+        "command": "uvx",
+        "args": [
+          "cloudmusic-auto-player==1.0.2"
+        ],
+        "env": []
+      },
+      "iconFile": "netease-music.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "context7",
+      "name": "Context7",
+      "nameEn": "Context7",
+      "tagline": "库文档与代码示例实时检索",
+      "description": "按版本拉取准确的库文档与代码示例，减少 API 幻觉。远程 MCP，无需本地安装。",
+      "category": "开发工具",
+      "region": "global",
+      "author": "Upstash",
+      "repo": "https://github.com/upstash/context7",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.context7.com/mcp"
+      },
+      "featured": true,
+      "iconFile": "context7.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "notion",
+      "name": "Notion",
+      "nameEn": "Notion",
+      "tagline": "读写页面、数据库与评论",
+      "description": "搜索、创建和更新 Notion 页面与数据库条目。需要 OAuth 授权。",
+      "category": "文档知识",
+      "region": "global",
+      "author": "Notion",
+      "repo": "https://github.com/makenotion/notion-mcp-server",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.notion.com/mcp",
+        "auth": "oauth"
+      },
+      "featured": true,
+      "iconFile": "notion.ico",
+      "iconMime": "image/x-icon"
+    },
+    {
+      "id": "figma",
+      "name": "Figma",
+      "nameEn": "Figma",
+      "tagline": "读取设计稿与组件",
+      "description": "读取 Figma 文件、图层与组件信息，把设计稿转成代码。",
+      "category": "设计创作",
+      "region": "global",
+      "author": "Figma",
+      "repo": "https://github.com/figma/mcp-server-guide",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.figma.com/mcp",
+        "auth": "oauth"
+      },
+      "featured": true,
+      "iconFile": "figma.ico",
+      "iconMime": "image/x-icon"
+    },
+    {
+      "id": "slack",
+      "name": "Slack",
+      "nameEn": "Slack",
+      "tagline": "发消息、查频道与用户",
+      "description": "在 Slack 工作区里发消息、搜索历史、读取频道与用户信息。",
+      "category": "办公协作",
+      "region": "global",
+      "author": "Slack",
+      "repo": "",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.slack.com/mcp",
+        "auth": "oauth"
+      },
+      "iconFile": "slack.ico",
+      "iconMime": "image/x-icon"
+    },
+    {
+      "id": "gmail",
+      "name": "Gmail",
+      "nameEn": "Gmail",
+      "tagline": "收发邮件、搜索、标签管理",
+      "description": "读写 Gmail 邮件：搜索、发送、带附件、标签管理、标记已读与删除。首次使用要在终端跑一次 npx @gongrzhe/server-gmail-autoauth-mcp auth，按提示在浏览器里登录 Google 账号；授权后凭据存在 ~/.gmail-mcp/，之后不用再授权。",
+      "category": "办公协作",
+      "region": "global",
+      "author": "GongRzhe",
+      "repo": "https://github.com/GongRzhe/Gmail-MCP-Server",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@gongrzhe/server-gmail-autoauth-mcp"
+        ],
+        "env": []
+      },
+      "iconFile": "gmail.png",
+      "iconMime": "image/png",
+      "featured": true
+    },
+    {
+      "id": "supabase",
+      "name": "Supabase",
+      "nameEn": "Supabase",
+      "tagline": "数据库查询与项目管理",
+      "description": "查询 Supabase 数据库、管理表结构与边缘函数。",
+      "category": "数据库",
+      "region": "global",
+      "author": "Supabase",
+      "repo": "https://github.com/supabase-community/supabase-mcp",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.supabase.com/mcp",
+        "auth": "oauth"
+      },
+      "iconFile": "supabase.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "vercel",
+      "name": "Vercel",
+      "nameEn": "Vercel",
+      "tagline": "部署、日志与项目管理",
+      "description": "查看 Vercel 项目、部署记录与运行日志。",
+      "category": "云服务",
+      "region": "global",
+      "author": "Vercel",
+      "repo": "https://github.com/vercel/mcp-adapter",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.vercel.com",
+        "auth": "oauth"
+      },
+      "iconFile": "vercel.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "cloudflare",
+      "name": "Cloudflare",
+      "nameEn": "Cloudflare",
+      "tagline": "Workers、KV、R2 与 DNS",
+      "description": "管理 Cloudflare 的 Workers、KV、R2 存储与 DNS 记录。",
+      "category": "云服务",
+      "region": "global",
+      "author": "Cloudflare",
+      "repo": "https://github.com/cloudflare/mcp-server-cloudflare",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.cloudflare.com/mcp",
+        "auth": "oauth"
+      },
+      "iconFile": "cloudflare.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "atlassian",
+      "name": "Atlassian / Jira",
+      "nameEn": "Atlassian",
+      "tagline": "需求、缺陷与 Confluence",
+      "description": "读写 Jira 工单、冲刺与 Confluence 页面。",
+      "category": "项目管理",
+      "region": "global",
+      "author": "Atlassian",
+      "repo": "https://github.com/atlassian/atlassian-mcp-server",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.atlassian.com/v1/mcp/authv2",
+        "auth": "oauth"
+      },
+      "iconFile": "atlassian.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "asana",
+      "name": "Asana",
+      "nameEn": "Asana",
+      "tagline": "任务、项目与进度",
+      "description": "创建与更新 Asana 任务、项目与里程碑。",
+      "category": "项目管理",
+      "region": "global",
+      "author": "Asana",
+      "repo": "",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.asana.com/v2/mcp",
+        "auth": "oauth"
+      },
+      "iconFile": "asana.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "airtable",
+      "name": "Airtable",
+      "nameEn": "Airtable",
+      "tagline": "表格数据读写",
+      "description": "读写 Airtable 表格记录、字段与视图。",
+      "category": "数据表格",
+      "region": "global",
+      "author": "Airtable",
+      "repo": "",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.airtable.com/mcp",
+        "auth": "oauth"
+      },
+      "iconFile": "airtable.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "miro",
+      "name": "Miro",
+      "nameEn": "Miro",
+      "tagline": "白板与看板协作",
+      "description": "读写 Miro 白板内容，创建便签、图形与看板。",
+      "category": "设计创作",
+      "region": "global",
+      "author": "Miro",
+      "repo": "",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.miro.com/",
+        "auth": "oauth"
+      },
+      "iconFile": "miro.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "paypal",
+      "name": "PayPal",
+      "nameEn": "PayPal",
+      "tagline": "支付与账单",
+      "description": "查询 PayPal 交易、创建支付与退款。",
+      "category": "支付金融",
+      "region": "global",
+      "author": "PayPal",
+      "repo": "",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.paypal.com/mcp",
+        "auth": "oauth"
+      },
+      "iconFile": "paypal.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "zoom",
+      "name": "Zoom",
+      "nameEn": "Zoom",
+      "tagline": "会议与录制",
+      "description": "查询 Zoom 会议、录制与参会人信息。",
+      "category": "办公协作",
+      "region": "global",
+      "author": "Zoom",
+      "repo": "",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.zoom.us/mcp/zoom/streamable",
+        "auth": "oauth"
+      },
+      "iconFile": "zoom.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "todoist",
+      "name": "Todoist",
+      "nameEn": "Todoist",
+      "tagline": "任务清单",
+      "description": "创建、更新与检索 Todoist 任务与项目。",
+      "category": "项目管理",
+      "region": "global",
+      "author": "Todoist",
+      "repo": "",
+      "install": {
+        "type": "http",
+        "url": "https://ai.todoist.net/mcp",
+        "auth": "oauth"
+      },
+      "iconFile": "todoist.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "neon",
+      "name": "Neon",
+      "nameEn": "Neon",
+      "tagline": "无服务 Postgres",
+      "description": "管理 Neon 数据库、分支与 SQL 查询。",
+      "category": "数据库",
+      "region": "global",
+      "author": "Neon",
+      "repo": "https://github.com/neondatabase/mcp-server-neon",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.neon.tech/mcp",
+        "auth": "oauth"
+      },
+      "iconFile": "neon.ico",
+      "iconMime": "image/x-icon"
+    },
+    {
+      "id": "prisma",
+      "name": "Prisma",
+      "nameEn": "Prisma",
+      "tagline": "数据库 schema 与查询",
+      "description": "管理 Prisma 数据模型、迁移与查询。",
+      "category": "数据库",
+      "region": "global",
+      "author": "Prisma",
+      "repo": "https://github.com/prisma/mcp",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.prisma.io/mcp",
+        "auth": "oauth"
+      },
+      "iconFile": "prisma.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "gitlab",
+      "name": "GitLab",
+      "nameEn": "GitLab",
+      "tagline": "仓库、MR 与流水线",
+      "description": "读写 GitLab 仓库、合并请求与 CI 流水线。",
+      "category": "开发工具",
+      "region": "global",
+      "author": "GitLab",
+      "repo": "",
+      "install": {
+        "type": "http",
+        "url": "https://gitlab.com/api/v4/mcp",
+        "auth": "oauth"
+      },
+      "iconFile": "gitlab.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "aws-knowledge",
+      "name": "AWS Knowledge",
+      "nameEn": "AWS Knowledge",
+      "tagline": "AWS 文档与最佳实践",
+      "description": "检索 AWS 官方文档、架构指南与最佳实践。",
+      "category": "云服务",
+      "region": "global",
+      "author": "AWS",
+      "repo": "",
+      "install": {
+        "type": "http",
+        "url": "https://knowledge-mcp.global.api.aws"
+      },
+      "iconFile": "aws-knowledge.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "mslearn",
+      "name": "Microsoft Learn",
+      "nameEn": "Microsoft Learn",
+      "tagline": "微软官方文档检索",
+      "description": "检索 Microsoft Learn 上的官方文档与代码示例。",
+      "category": "文档知识",
+      "region": "global",
+      "author": "Microsoft",
+      "repo": "",
+      "install": {
+        "type": "http",
+        "url": "https://learn.microsoft.com/api/mcp"
+      },
+      "iconFile": "mslearn.ico",
+      "iconMime": "image/x-icon"
+    },
+    {
+      "id": "apify",
+      "name": "Apify",
+      "nameEn": "Apify",
+      "tagline": "网页抓取与爬虫市场",
+      "description": "调用 Apify 的爬虫与抓取 Actor，获取结构化网页数据。",
+      "category": "搜索研究",
+      "region": "global",
+      "author": "Apify",
+      "repo": "https://github.com/apify/actors-mcp-server",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.apify.com",
+        "auth": "oauth"
+      },
+      "iconFile": "apify.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "browserbase",
+      "name": "Browserbase",
+      "nameEn": "Browserbase",
+      "tagline": "云端浏览器",
+      "description": "在云端运行无头浏览器，抓取需要渲染的页面。",
+      "category": "浏览器",
+      "region": "global",
+      "author": "Browserbase",
+      "repo": "https://github.com/browserbase/mcp-server-browserbase",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.browserbase.com/mcp",
+        "auth": "oauth"
+      },
+      "iconFile": "browserbase.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "mapbox",
+      "name": "Mapbox",
+      "nameEn": "Mapbox",
+      "tagline": "地图与地理编码",
+      "description": "地理编码、路线规划与地图瓦片查询。",
+      "category": "地图出行",
+      "region": "global",
+      "author": "Mapbox",
+      "repo": "",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.mapbox.com/mcp",
+        "auth": "oauth"
+      },
+      "iconFile": "mapbox.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "posthog",
+      "name": "PostHog",
+      "nameEn": "PostHog",
+      "tagline": "产品分析与实验",
+      "description": "查询 PostHog 事件、漏斗、实验与用户画像。",
+      "category": "开发工具",
+      "region": "global",
+      "author": "PostHog",
+      "repo": "",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.posthog.com/mcp",
+        "auth": "oauth"
+      },
+      "iconFile": "posthog.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "exa",
+      "name": "Exa",
+      "nameEn": "Exa",
+      "tagline": "语义网页搜索",
+      "description": "面向 AI 的语义搜索，按意图检索网页内容。",
+      "category": "搜索研究",
+      "region": "global",
+      "author": "Exa",
+      "repo": "",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.exa.ai/mcp"
+      },
+      "iconFile": "exa.ico",
+      "iconMime": "image/x-icon"
+    },
+    {
+      "id": "intercom",
+      "name": "Intercom",
+      "nameEn": "Intercom",
+      "tagline": "客服会话",
+      "description": "查询 Intercom 会话、联系人与工单。",
+      "category": "客户支持",
+      "region": "global",
+      "author": "Intercom",
+      "repo": "",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.intercom.com/mcp",
+        "auth": "oauth"
+      },
+      "iconFile": "intercom.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "pagerduty",
+      "name": "PagerDuty",
+      "nameEn": "PagerDuty",
+      "tagline": "告警与值班",
+      "description": "查询 PagerDuty 告警、值班表与服务状态。",
+      "category": "开发工具",
+      "region": "global",
+      "author": "PagerDuty",
+      "repo": "",
+      "install": {
+        "type": "http",
+        "url": "https://mcp.pagerduty.com/mcp",
+        "auth": "oauth"
+      },
+      "iconFile": "pagerduty.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "github",
+      "name": "GitHub",
+      "nameEn": "GitHub",
+      "tagline": "仓库、Issue、PR",
+      "description": "读写 GitHub 仓库、Issue、PR 与代码检索。需要 Personal Access Token。",
+      "category": "开发工具",
+      "region": "global",
+      "author": "GitHub",
+      "repo": "https://github.com/github/github-mcp-server",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-github"
+        ],
+        "env": [
+          {
+            "name": "GITHUB_PERSONAL_ACCESS_TOKEN",
+            "required": true,
+            "label": "GitHub Token",
+            "secret": true,
+            "url": "https://github.com/settings/tokens"
+          }
+        ]
+      },
+      "featured": true,
+      "iconFile": "github.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "filesystem",
+      "name": "文件系统",
+      "nameEn": "Filesystem",
+      "tagline": "读写本地文件",
+      "description": "在指定目录内读写、搜索与整理文件。",
+      "category": "文件处理",
+      "region": "global",
+      "author": "MCP",
+      "repo": "https://github.com/modelcontextprotocol/servers",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "{{DIR}}"
+        ],
+        "env": [
+          {
+            "name": "DIR",
+            "required": true,
+            "label": "允许访问的目录"
+          }
+        ]
+      },
+      "iconFile": "filesystem.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "playwright",
+      "name": "Playwright",
+      "nameEn": "Playwright",
+      "tagline": "浏览器自动化",
+      "description": "用 Playwright 驱动真实浏览器：导航、点击、截图、抓取。",
+      "category": "浏览器",
+      "region": "global",
+      "author": "Microsoft",
+      "repo": "https://github.com/microsoft/playwright-mcp",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "@playwright/mcp@latest"
+        ],
+        "env": []
+      },
+      "featured": true,
+      "iconFile": "playwright.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "puppeteer",
+      "name": "Puppeteer",
+      "nameEn": "Puppeteer",
+      "tagline": "浏览器自动化",
+      "description": "Puppeteer 驱动的网页抓取与交互。",
+      "category": "浏览器",
+      "region": "global",
+      "author": "MCP",
+      "repo": "https://github.com/modelcontextprotocol/servers",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-puppeteer"
+        ],
+        "env": []
+      },
+      "iconFile": "puppeteer.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "chrome-devtools",
+      "name": "Chrome DevTools",
+      "nameEn": "Chrome DevTools",
+      "tagline": "调试与性能分析",
+      "description": "通过 Chrome DevTools 协议调试页面、分析性能与网络。",
+      "category": "浏览器",
+      "region": "global",
+      "author": "Google",
+      "repo": "https://github.com/ChromeDevTools/chrome-devtools-mcp",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "chrome-devtools-mcp@latest"
+        ],
+        "env": []
+      },
+      "iconFile": "chrome-devtools.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "desktop-commander",
+      "name": "Desktop Commander",
+      "nameEn": "Desktop Commander",
+      "tagline": "终端与文件操作",
+      "description": "执行终端命令、读写文件、管理本地进程。",
+      "category": "文件处理",
+      "region": "global",
+      "author": "Wonderwhy-er",
+      "repo": "https://github.com/wonderwhy-er/DesktopCommanderMCP",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@wonderwhy-er/desktop-commander@latest"
+        ],
+        "env": []
+      },
+      "iconFile": "desktop-commander.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "firecrawl",
+      "name": "Firecrawl",
+      "nameEn": "Firecrawl",
+      "tagline": "网页抓取转 Markdown",
+      "description": "把任意网页抓取并转成干净 Markdown，支持整站爬取。",
+      "category": "搜索研究",
+      "region": "global",
+      "author": "Firecrawl",
+      "repo": "https://github.com/mendableai/firecrawl-mcp-server",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "firecrawl-mcp"
+        ],
+        "env": [
+          {
+            "name": "FIRECRAWL_API_KEY",
+            "required": true,
+            "label": "Firecrawl API Key",
+            "secret": true,
+            "url": "https://firecrawl.dev"
+          }
+        ]
+      },
+      "iconFile": "firecrawl.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "perplexity",
+      "name": "Perplexity",
+      "nameEn": "Perplexity",
+      "tagline": "联网问答搜索",
+      "description": "调用 Perplexity 联网检索并返回带引用的答案。",
+      "category": "搜索研究",
+      "region": "global",
+      "author": "Perplexity",
+      "repo": "https://github.com/perplexityai/modelcontextprotocol",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@perplexity-ai/mcp-server"
+        ],
+        "env": [
+          {
+            "name": "PERPLEXITY_API_KEY",
+            "required": true,
+            "label": "Perplexity API Key",
+            "secret": true,
+            "url": "https://www.perplexity.ai/settings/api"
+          }
+        ]
+      },
+      "iconFile": "perplexity.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "stripe",
+      "name": "Stripe",
+      "nameEn": "Stripe",
+      "tagline": "支付、客户与账单",
+      "description": "创建支付、管理客户与订阅、查询账单。",
+      "category": "支付金融",
+      "region": "global",
+      "author": "Stripe",
+      "repo": "https://github.com/stripe/agent-toolkit",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@stripe/mcp"
+        ],
+        "env": [
+          {
+            "name": "STRIPE_SECRET_KEY",
+            "required": true,
+            "label": "Stripe Secret Key",
+            "secret": true,
+            "url": "https://dashboard.stripe.com/apikeys"
+          }
+        ]
+      },
+      "iconFile": "stripe.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "sentry",
+      "name": "Sentry",
+      "nameEn": "Sentry",
+      "tagline": "错误监控与性能",
+      "description": "查询 Sentry 错误事件、性能追踪与发布记录。",
+      "category": "开发工具",
+      "region": "global",
+      "author": "Sentry",
+      "repo": "https://github.com/getsentry/sentry-mcp",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@sentry/mcp-server"
+        ],
+        "env": [
+          {
+            "name": "SENTRY_ACCESS_TOKEN",
+            "required": true,
+            "label": "Sentry Token",
+            "secret": true
+          }
+        ]
+      },
+      "iconFile": "sentry.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "linear",
+      "name": "Linear",
+      "nameEn": "Linear",
+      "tagline": "需求与缺陷管理",
+      "description": "创建与检索 Linear 工单、项目与迭代。",
+      "category": "项目管理",
+      "region": "global",
+      "author": "Linear",
+      "repo": "https://github.com/tacticlaunch/mcp-linear",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@tacticlaunch/mcp-linear"
+        ],
+        "env": [
+          {
+            "name": "LINEAR_API_TOKEN",
+            "required": true,
+            "label": "Linear API Token",
+            "secret": true
+          }
+        ]
+      },
+      "iconFile": "linear.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "mongodb",
+      "name": "MongoDB",
+      "nameEn": "MongoDB",
+      "tagline": "数据库查询与运维",
+      "description": "查询 MongoDB 集合、聚合管道与数据库管理。",
+      "category": "数据库",
+      "region": "global",
+      "author": "MongoDB",
+      "repo": "https://github.com/mongodb-js/mongodb-mcp-server",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "mongodb-mcp-server"
+        ],
+        "env": [
+          {
+            "name": "MDB_MCP_CONNECTION_STRING",
+            "required": true,
+            "label": "连接串",
+            "secret": true
+          }
+        ]
+      },
+      "iconFile": "mongodb.ico",
+      "iconMime": "image/x-icon"
+    },
+    {
+      "id": "postgres",
+      "name": "PostgreSQL",
+      "nameEn": "PostgreSQL",
+      "tagline": "SQL 查询",
+      "description": "连接 PostgreSQL 执行 SQL 查询与读取表结构。",
+      "category": "数据库",
+      "region": "global",
+      "author": "MCP",
+      "repo": "https://github.com/modelcontextprotocol/servers",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-postgres",
+          "{{DATABASE_URL}}"
+        ],
+        "env": [
+          {
+            "name": "DATABASE_URL",
+            "required": true,
+            "label": "数据库连接串",
+            "secret": true
+          }
+        ]
+      },
+      "iconFile": "postgres.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "gdrive",
+      "name": "Google Drive",
+      "nameEn": "Google Drive",
+      "tagline": "云端文件检索",
+      "description": "搜索与读取 Google Drive 里的文件与文档。",
+      "category": "文档知识",
+      "region": "global",
+      "author": "MCP",
+      "repo": "https://github.com/modelcontextprotocol/servers",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-gdrive"
+        ],
+        "env": [
+          {
+            "name": "GDRIVE_CREDENTIALS_PATH",
+            "required": true,
+            "label": "凭据文件路径"
+          }
+        ]
+      },
+      "iconFile": "gdrive.png",
+      "iconMime": "image/png"
+    },
+    {
+      "id": "excel",
+      "name": "Excel",
+      "nameEn": "Excel",
+      "tagline": "表格读写与公式",
+      "description": "读写 Excel 工作簿、计算公式与生成图表。",
+      "category": "数据表格",
+      "region": "global",
+      "author": "社区",
+      "repo": "https://github.com/haris-musa/excel-mcp-server",
+      "install": {
+        "type": "stdio",
+        "command": "uvx",
+        "args": [
+          "excel-mcp-server",
+          "stdio"
+        ],
+        "env": []
+      },
+      "iconFile": "excel.ico",
+      "iconMime": "image/x-icon"
+    },
+    {
+      "id": "obsidian",
+      "name": "Obsidian",
+      "nameEn": "Obsidian",
+      "tagline": "笔记库检索",
+      "description": "检索与读写 Obsidian 笔记库内容。",
+      "category": "文档知识",
+      "region": "global",
+      "author": "社区",
+      "repo": "https://github.com/huangyihe/obsidian-mcp",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "@huangyihe/obsidian-mcp"
+        ],
+        "env": [
+          {
+            "name": "OBSIDIAN_VAULT_PATH",
+            "required": true,
+            "label": "笔记库路径"
+          }
+        ]
+      },
+      "iconFile": "obsidian.ico",
+      "iconMime": "image/x-icon"
+    }
+  ]
+}

@@ -37,8 +37,10 @@ import { apply as applySkillToggles } from './skill-toggles.js'
 import { applySkillHealth } from './skill-health.js'
 import { applyMcpRecommended } from './mcp-recommended.js'
 import { applyMcpStatus } from './mcp-status.js'
+import { applyMcpCatalog } from './mcp-catalog.js'
 import { applyGallery } from './gallery/index.ts'
 import { applySessionOutputs } from './session-outputs/index.ts'
+import { applySessionCapabilities } from './session-capabilities/index.ts'
 import { applyVault } from './vault/index.js'
 import { installBundledSkills } from './bundled-skills.js'
 import { applyWorkbenchSync } from './workbench-sync/index.js'
@@ -162,6 +164,14 @@ export async function applyTriadHost(ctx: Context, config: TriadConfig = {}): Pr
       `[dsh-seeker-bot] triad mcp status failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
     )
   }
+  try {
+    applyMcpCatalog(ctx)
+    ctx.logger?.info?.('[dsh-seeker-bot] triad mcp catalog mounted')
+  } catch (error) {
+    ctx.logger?.warn?.(
+      `[dsh-seeker-bot] triad mcp catalog failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+    )
+  }
 
   // ── 个人档案（结构化账号 / 支付 / 联系方式 / 证件，/api/dsh-vault/*）──
   // 与记忆库**互不隶属**：不受工作区 autoMemory / injectExcluded 两道闸门
@@ -205,6 +215,16 @@ export async function applyTriadHost(ctx: Context, config: TriadConfig = {}): Pr
   } catch (error) {
     ctx.logger?.warn?.(
       `[dsh-seeker-bot] session outputs route failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+    )
+  }
+
+  // ── 会话与子代理 MCP / Skill 能力调用查询（/api/chat-flow/session-capabilities）
+  try {
+    applySessionCapabilities(ctx)
+    ctx.logger?.info?.('[dsh-seeker-bot] session capabilities route mounted')
+  } catch (error) {
+    ctx.logger?.warn?.(
+      `[dsh-seeker-bot] session capabilities route failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
     )
   }
 

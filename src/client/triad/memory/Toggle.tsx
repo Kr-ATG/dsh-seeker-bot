@@ -26,9 +26,6 @@ import type { InjectStateView } from './api.js'
  * 用户以为能力没开。自动收口同此理：host 侧 config.todoClosureDefaultEnabled
  * 默认 true，兜底取 false 会让请求一失败就显示成关。
  *
- * 邮箱（mail*）四个字段一律按「不可用」兜底：它是跨模块能力，旧 host 不回
- * 这些字段，猜一个值出来只会误导。
- *
  * 工作区三个字段（project*）一律按 null 兜底：null 是「不知道/不适用」，
  * 而这三个字段的唯一消费者（大盘设置抽屉那行「工作区项目记忆记录」）正是靠
  * null 决定**不渲染开关**。兜底成 true/false 会让它在拿不到工作区时凭空长出一个
@@ -36,7 +33,6 @@ import type { InjectStateView } from './api.js'
  */
 export const FALLBACK_INJECT_STATE: InjectStateView = {
   enabled: true, defaultEnabled: true, explicit: false, zhEnabled: true, htmlEnabled: true, teamEnabled: false, todoClosureEnabled: true, todoRuleEnabled: true,
-  mailEnabled: false, mailAvailable: false, mailWorkbenchEnabled: false, mailToolsMounted: false, mailAuthorized: false, mailAddress: null,
   projectHash: null, projectPath: null, projectMemoryEnabled: null,
 }
 
@@ -69,13 +65,6 @@ export function normalizeInjectState(res: InjectStateView): InjectStateView {
     // 的话，client 已更新、host 还没重启的那段窗口里开关会显示成关，host 一重启
     // 又跳成开——同一个用户什么都没做，看到开关自己跳了一下。
     todoRuleEnabled: res.todoRuleEnabled !== false,
-    // 邮箱字段全是「缺字段即不可用/关」：跨模块回传，旧 host 没有。
-    mailEnabled: res.mailEnabled === true,
-    mailAvailable: res.mailAvailable === true,
-    mailWorkbenchEnabled: res.mailWorkbenchEnabled === true,
-    mailToolsMounted: res.mailToolsMounted === true,
-    mailAuthorized: res.mailAuthorized === true,
-    mailAddress: typeof res.mailAddress === 'string' ? res.mailAddress : null,
     /*
      * 工作区三字段与上面所有通道**刻意不同口径**：这里 null 是一个有意义的值
      * （「不知道 / 不适用」），不是缺失兜底。

@@ -24,6 +24,8 @@
       name: dsh-seeker-bot/packages/memory
     - id: dsh-seeker-bot-skills
       name: dsh-seeker-bot/packages/skills
+    - id: dsh-seeker-bot-connectors
+      name: dsh-seeker-bot/packages/connectors
     - id: dsh-seeker-bot-usage
       name: dsh-seeker-bot/packages/usage
     - id: dsh-seeker-bot-gallery
@@ -36,8 +38,6 @@
       name: dsh-seeker-bot/packages/sync
     - id: dsh-seeker-bot-provider
       name: dsh-seeker-bot/packages/provider
-    - id: dsh-seeker-bot-mail
-      name: dsh-seeker-bot/packages/mail
     - id: dsh-seeker-bot-input
       name: dsh-seeker-bot/packages/input
     - id: dsh-seeker-bot-host

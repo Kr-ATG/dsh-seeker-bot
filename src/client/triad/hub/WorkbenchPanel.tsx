@@ -13,11 +13,6 @@
  * 供应商与网络代理**不在这里**（2026-10-05 用户点名「还是把供应商配置和代理
  * 放在设置里面吧」）：两者都在官方「设置」弹窗的「供应商」页
  * （src/client/provider/webui/section.tsx，座位 settings.section / id provider-hub）。
- *
- * 邮件（原第 6 个分类）**也搬走了**（2026-10）：入口改到 Seeker 顶栏齿轮右侧的
- * 邮件按钮 + 居中只读卡片（src/client/kr-chat/mail-drawer.tsx），本工作台不再
- * 有 mail 分类 —— 邮箱被裁成纯查看，塞进统一工作台里既占一格又得跟整页三栏
- * 布局较劲。
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -25,6 +20,7 @@ import { ensureWorkbenchStyles } from './styles.js'
 import { ensureWorkbenchTheme } from './theme.js'
 import { MemoryPanel } from '../memory/Panel.js'
 import { SkillsPanel } from '../usage/dashboard/SkillsPanel.js'
+import { ConnectorsPanel } from '../connectors/Panel.js'
 import { UsagePanel } from '../usage/dashboard/UsagePanel.js'
 import { GalleryPanel } from '../gallery/GalleryPanel.js'
 import { VaultPanel } from '../vault/Panel.js'
@@ -50,7 +46,7 @@ import {
  * ⚠ DEFAULT_TAB 仍然是 'memory'：默认页是「上次看过的分类」（localStorage
  * 回填），首次安装落到记忆是既有约定。
  */
-export type WorkbenchTab = 'memory' | 'skills' | 'usage' | 'gallery' | 'vault' | 'prompt' | 'sync'
+export type WorkbenchTab = 'memory' | 'skills' | 'connectors' | 'usage' | 'gallery' | 'vault' | 'prompt' | 'sync'
 
 /**
  * 默认 Tab。
@@ -235,6 +231,12 @@ export function WorkbenchPanel({ onClose, initialTab = DEFAULT_TAB }: WorkbenchP
             </div>
           )}
 
+          {/* 连接器（2026-11）：MCP 市场，精选目录 + 搜索 + 一键安装。
+              自带页头（标题 + 搜索 + 分类条），所以不叠 PageHead。 */}
+          {effectiveTab === 'connectors' && (
+            <ConnectorsPanel key="connectors" onClose={onClose} embedded />
+          )}
+
           {effectiveTab === 'usage' && (
             <UsagePanel key="usage" onClose={onClose} embedded />
           )}
@@ -257,7 +259,7 @@ export function WorkbenchPanel({ onClose, initialTab = DEFAULT_TAB }: WorkbenchP
             <SystemPromptPanel key="prompt" onClose={onClose} embedded />
           )}
 
-          {/* 同步设置（2026-10-27）：工作台资产（档案、记忆、技能）双向漫游。 */}
+          {/* 同步设置：工作台资产（档案、记忆、技能、MCP 配置）双向漫游。 */}
           {effectiveTab === 'sync' && (
             <div key="sync" className="wb2-page-wrap">
               <SyncSettingsPanel onClose={onClose} embedded />

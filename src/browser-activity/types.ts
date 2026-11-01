@@ -113,7 +113,7 @@ export interface BrowserActivityLogger {
   debug?: (message: string) => void
 }
 
-/** webServer 服务面（与 tools-gate / mail 模块同形）。 */
+/** webServer 服务面（与 tools-gate 模块同形）。 */
 export interface BrowserActivityWebServer {
   register(route: {
     kind: 'exact' | 'prefix'

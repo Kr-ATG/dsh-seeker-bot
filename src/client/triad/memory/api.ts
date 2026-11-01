@@ -251,47 +251,9 @@ export interface InjectStateView {
    */
   todoRuleEnabled?: boolean
   /**
-   * Agent 邮箱（dsh-mail）能力声明是否生效。
-   *
-   * **只看声明开关 `mail.injectEnabled`**，与邮箱工作台总开关解耦：工作台关着
-   * 时这一项照样可以是 true，注入照常发生，只是文本改走 `agently-cli` 命令行
-   * （`mail_*` 工具此时没注册）。
-   *
-   * 旧 host 不回该字段 → undefined：不显示这一行（那版 host 没有这个跨模块
-   * 的回传），绝不猜一个值出来。
-   */
-  mailEnabled?: boolean
-  /**
-   * 邮箱是否已授权（能真的收发）。
-   *
-   * 未授权时注入会静默跳过（把「你有邮箱」说成假的比不说更糟），所以这一行
-   * 要能把「开关开着但没授权」讲清楚，而不是让用户对着一个开着却无作用的
-   * 开关发呆。undefined = 旧 host 没回该字段。
-   */
-  mailAuthorized?: boolean
-  /** 本 Agent 的邮箱地址（未授权/未探测到时为 null）。 */
-  mailAddress?: string | null
-  /**
-   * 邮箱模块是否挂上了（false/undefined = 该 host 没有这个跨模块回传）。
-   *
-   * 与 mailEnabled 分开：`mailEnabled:false` 可能是「模块在、但开关关着」，
-   * 也可能是「模块根本没挂」；前者该显示一个能拨的开关，后者该显示「不可用」。
-   */
-  mailAvailable?: boolean
-  /** 邮箱工作台总开关（`mail.enabled`）——决定 `mail_*` 工具注册不注册。 */
-  mailWorkbenchEnabled?: boolean
-  /**
-   * `mail_*` 工具当前是否已注册（= 工作台开着）。
-   *
-   * 与 mailEnabled **不是一回事**：声明可以开着而工具不在（那时注入文本走
-   * `agently-cli` 命令行）。卡片据此把副说明写成「走命令行」，而不是让用户
-   * 以为工具还在。
-   */
-  mailToolsMounted?: boolean
-  /**
    * 当前**工作区**（cwd）派生的项目 hash（12 位 hex）；拿不到工作区时为 null。
    *
-   * 与 `mail*` 那批同一路线：由 /inject-state 顺带回传，而不是另开一个新 GET。
+   * 由 /inject-state 顺带回传，而不是另开一个新 GET。
    * 这里的 null 语义是「不适用」而不是「关」——UI 据它决定要不要渲染那个
    * 「项目记忆记录」开关（拨不动的开关是骗人）。
    */
@@ -321,38 +283,6 @@ export interface ZhInjectStateView {
   /** 中文偏好记忆是否独立注入。 */
   enabled: boolean
   /** 恒为 true：该能力内置于插件，无卸载入口。旧 host 缺字段时按 true 兜底。 */
-  builtin?: boolean
-}
-
-/**
- * Agent 邮箱能力声明的开关状态（跨插件，全局单值）。
- *
- * 比 ZhInjectStateView 多带工作台与授权状态：这条通道的闸门是两道
- * （`mail.enabled && mail.injectEnabled`），只回一个 `enabled` 的话，用户看到
- * 开关是关的也无从知道该去动哪个——总开关关着时点这一行应该能把工作台打开。
- */
-export interface MailInjectStateView {
-  /** 声明是否生效（= `mail.injectEnabled`，与工作台总开关解耦）。 */
-  enabled: boolean
-  /**
-   * 邮箱模块是否挂上了。
-   *
-   * false = 该 host 没有这个跨模块回传（旧版），或邮箱模块装配失败。
-   * 与 enabled 分开：enabled:false 可能是「模块在、但开关关着」（该显示一个
-   * 能拨的开关），也可能是「模块根本没挂」（该显示「不可用」）。
-   */
-  available?: boolean
-  /** 邮箱工作台总开关（`mail.enabled`）。 */
-  workbenchEnabled: boolean
-  /** 声明开关（`mail.injectEnabled`）。 */
-  injectEnabled?: boolean
-  /** `mail_*` 工具当前是否已注册（= 工作台开着）。 */
-  toolsMounted?: boolean
-  /** 邮箱是否已授权（未授权时注入静默跳过）。 */
-  authorized: boolean
-  /** 本 Agent 的邮箱地址（未探测到时 null）。 */
-  address: string | null
-  /** 恒为 true：能力内置于插件，无卸载入口。 */
   builtin?: boolean
 }
 
@@ -514,17 +444,6 @@ export interface MemoryApi {
    */
   getTodoClosureState: () => Promise<ZhInjectStateView>
   setTodoClosureState: (enabled: boolean) => Promise<ZhInjectStateView & { ok: boolean }>
-  /**
-   * Agent 邮箱能力声明的开关（跨插件：写的是 dsh-mail 的 `mail.injectEnabled`）。
-   *
-   * 与其它内置通道不同，这条通道的闸门有两道（`mail.enabled && mail.injectEnabled`），
-   * 所以写它只改第二道；总开关关着时 host 会回 `enabled:false` 与工作台状态，
-   * 由卡片给用户一个「去打开工作台」的动作，而不是让开关假装生效。
-   */
-  getMailInjectState: () => Promise<MailInjectStateView>
-  setMailInjectState: (enabled: boolean) => Promise<MailInjectStateView & { ok: boolean }>
-  /** 打开/关闭邮箱工作台总开关（跨插件：写的是 `mail.enabled`）。 */
-  setMailWorkbench: (enabled: boolean) => Promise<MailInjectStateView & { ok: boolean }>
   consolidate: (scope?: 'all' | 'global' | 'project', projectHash?: string) => Promise<{ ok: boolean; results: ConsolidateResultView[] }>
   revisions: () => Promise<{ revisions: RevisionView[] }>
   rollback: (revisionId: string) => Promise<{ ok: boolean }>
@@ -625,9 +544,6 @@ export function createMemoryApi(): MemoryApi {
     setTodoClosureState: (enabled) => sendJson<ZhInjectStateView & { ok: boolean }>('/todo-closure-state', { enabled }),
     getTodoRuleInjectState: () => getJson<ZhInjectStateView>('/todo-rule-inject-state'),
     setTodoRuleInjectState: (enabled) => sendJson<ZhInjectStateView & { ok: boolean }>('/todo-rule-inject-state', { enabled }),
-    getMailInjectState: () => getJson<MailInjectStateView>('/mail-inject-state'),
-    setMailInjectState: (enabled) => sendJson<MailInjectStateView & { ok: boolean }>('/mail-inject-state', { enabled }),
-    setMailWorkbench: (enabled) => sendJson<MailInjectStateView & { ok: boolean }>('/mail-inject-state', { workbench: enabled }),
     consolidate: (scope = 'all', projectHash) => sendJson<{ ok: boolean; results: ConsolidateResultView[] }>('/consolidate', { scope, projectHash }),
     revisions: () => getJson<{ revisions: RevisionView[] }>('/revisions'),
     rollback: (revisionId) => sendJson<{ ok: boolean }>('/rollback', { revisionId }),

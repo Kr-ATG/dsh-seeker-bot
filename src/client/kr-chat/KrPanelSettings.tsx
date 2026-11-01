@@ -2,7 +2,7 @@
  * dsh-seeker-bot — Seeker「大盘设置」卡片（视口居中的模态弹层）。
  *
  * 为什么存在：这些开关原先分散在两处 —— composer 输入框那枚「内置提示词通道」悬浮卡
- * （triad/memory/Toggle.tsx 的 BuiltinToggle）与邮箱工作台设置页。用户真正要拨它们的
+ * （triad/memory/Toggle.tsx 的 BuiltinToggle）与散落在别处的几个开关。用户真正要拨它们的
  * 时刻，多半是盯着右栏大盘干活的时候：手得离开大盘、回到输入框、hover 展开、拨完再
  * 回来。于是把它们收敛成一块设置面板，composer 那张重复的卡整块删除。
  *
@@ -12,7 +12,7 @@
  * 2026-10-25 用户反馈「优化大盘设置布局，目前看起来拥挤，排版不合理」，
  * 再提「工作区记忆应该放在下方独立的空间」，于是内部结构变成：
  *
- *   ┌ 提示词通道 4 行 ────────┬ 展示 3 行 ────┐   ← 上方两栏
+ *   ┌ 提示词通道 3 行 ────────┬ 展示 3 行 ────┐   ← 上方两栏
  *   │                          │ 任务清单 2 行  │
  *   ├─────────────────────────┴───────────────┤   ← 发丝线
  *   │ 工作区记忆（通栏，逐工作区列表，限高可滚）  │   ← 下方独立区块
@@ -22,7 +22,7 @@
  *
  * 三条判据（都源于「拥挤」这个具体抱怨，不是审美偏好）：
  *  1. **每行只占一行**：说明压成一句短话（各行的**差异**那半句），全文挂 title
- *     与悬停展开。原来每行都被长说明撑成两三行，11 个开关实际占 22 行文字，
+ *     与悬停展开。原来每行都被长说明撑成两三行，10 个开关实际占 22 行文字，
  *     而其中「每会话首步注入一次」这类**共性**在好几种行里各抄了一遍——共性已
  *     提到组标题右侧，行里不该再重复。
  *  2. **开关排成一列**：行改成 grid（标签定宽 / 说明弹性 / 开关定宽）。原先是
@@ -34,7 +34,7 @@
  *     无歧义标识。
  *
  * 分组按**行为**划分，不按"看起来差不多"划分：
- *   · 提示词通道 —— 真的往提示词里注入文本的 4 条；
+ *   · 提示词通道 —— 真的往提示词里注入文本的 3 条；
  *   · 展示       —— 纯 localStorage 外观偏好，一个字都不进提示词；
  *   · 任务清单   —— 清单怎么写（任务清单纪律）、怎么收尾（自动收口）。
  *     这两行的**作用机理相反**（一个写提示词、一个由 host 改清单状态），所以
@@ -44,7 +44,7 @@
  * 为什么必须跳出右栏：抽屉的定位基准是 `.kr-split__side`（440px 上下），做成卡片后
  * 若仍留在那棵子树里，卡片最宽也只能盖住右栏 —— 那不是"居中弹卡片"，是"右栏里的
  * 一块大点的浮层"。所以用 createPortal 挂到 document.body，与右栏的布局 / 裁剪 /
- * overflow 彻底解耦（与邮箱卡片同一套做法）。
+ * overflow 彻底解耦。
  *
  * **入口不在本组件里**：齿轮按钮由 kr-chat-controller 以裸 DOM 注入顶栏标签行、
  * 紧邻 Seeker 标签（用户点名要求的位置）。本组件只负责卡片本体，开合读
@@ -52,7 +52,7 @@
  * createRoot 挂的树），props 传不过去，所以走共享 store 而不是组件内 state ——
  * 这是本文件相对上一版最大的结构变化（上一版齿轮与抽屉同在一个组件里）。
  *
- * 数据口径：6 条注入通道 + 1 条**工作区项目记忆记录**开关走 `/api/dsh-memory/*`
+ * 数据口径：5 条注入通道 + 1 条**工作区项目记忆记录**开关走 `/api/dsh-memory/*`
  * （后者顺带复用 `/inject-state` 的 cwd / projectMemory 两个新字段，不另开端点），
  * 3 条外观偏好是 localStorage；归一化复用 Toggle.tsx 导出的
  * `normalizeInjectState` / `FALLBACK_INJECT_STATE`，不另写一套。
@@ -275,36 +275,6 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
   }, [reload])
 
   /**
-   * 写 Agent 邮箱能力声明（跨模块，落在 dsh-mail 的 `mail.injectEnabled`）。
-   *
-   * 与上面几条**刻意不同**：这条通道的闸门是两道（工作台总开关 + 声明开关），回包里
-   * 带着 workbenchEnabled / toolsMounted / authorized / address，所以必须**整组替换**
-   * 而不是只改自己那一个字段 —— 只写 mailEnabled 的话，用户在工作台关着时拨这一行，
-   * 界面会显示成「已开启」而实际仍是哑的，那就是要修掉的那个假阳性。
-   *
-   * 也正因为要等回包才知道整组字段，这里**不做乐观置值**：猜一个 enabled 出来会与
-   * workbench 状态打架。busy 期间开关 disabled，用户看得到「正在写」。
-   */
-  const pushMail = useCallback((next: boolean): void => {
-    setBusy(true)
-    void api.setMailInjectState(next)
-      .then(res => {
-        setState(prev => ({
-          ...prev,
-          mailAvailable: res.available !== false,
-          mailEnabled: res.enabled === true,
-          mailWorkbenchEnabled: res.workbenchEnabled === true,
-          mailToolsMounted: res.toolsMounted === true,
-          mailAuthorized: res.authorized === true,
-          mailAddress: typeof res.address === 'string' ? res.address : null,
-        }))
-      })
-      .catch(reload)
-      .finally(() => { setBusy(false) })
-  }, [reload])
-
-
-  /**
    * 写某个工作区的两个开关（autoMemory / injectExcluded）。
    *
    * 为什么**逐行 busy** 而不是全局 busy：这是本轮新加的批量交互 —— 用户会连着拨
@@ -384,50 +354,6 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
   const todoClosureOn = state.todoClosureEnabled !== false
   // 任务清单纪律与 zh / 自动收口同口径（默认开）：缺字段按开。
   const todoRuleOn = state.todoRuleEnabled !== false
-  /*
-   * Agent 邮箱：唯一一条**跨模块**通道（承载在 dsh-mail），也是唯一一条会「不可用」的行。
-   *
-   * 两道开关解耦（与 composer 卡同口径）：这一行拨的是**声明**（injectEnabled），
-   * 工作台总开关只决定 `mail_*` 工具在不在。工作台关着不是错误状态 —— 注入照常发生，
-   * 只是文本改走 `agently-cli` 命令行，所以副说明如实交代，不把这一行画成关。
-   * 模块没挂（旧 host / 装配失败）时才不给开关：拨不动的开关是骗人。
-   */
-  const mailAvailable = state.mailAvailable === true
-  const mailOn = state.mailEnabled === true
-  const mailToolsMounted = state.mailToolsMounted === true
-  const mailAuthorized = state.mailAuthorized === true
-  const mailAddress = typeof state.mailAddress === 'string' && state.mailAddress !== '' ? state.mailAddress : null
-  const mailHint = !mailAvailable
-    ? '邮箱模块未挂载（本机没有可用的邮箱能力）'
-    : !mailAuthorized
-      ? '邮箱尚未授权：在本机终端跑 agently-cli auth login 扫码，授权后才会注入'
-      : mailToolsMounted
-        ? (mailAddress === null ? '注册第三方服务、收验证码时直接用本 Agent 的专属邮箱，不再问你'
-                                : `注册第三方服务、收验证码时直接用 ${mailAddress}，不再问你`)
-        : (mailAddress === null ? '注册第三方服务、收验证码时直接用本 Agent 的专属邮箱，不再问你。邮箱工作台关着，模型走 agently-cli 命令行收发'
-                                : `注册第三方服务、收验证码时直接用 ${mailAddress}，不再问你。邮箱工作台关着，模型走 agently-cli 命令行收发`)
-  /*
-   * 邮箱行的**短说明**（2026-10-25，与「每行只占一行」的排版改造同批）。
-   *
-   * 为什么另起一句而不是直接砍 mailHint：上面那串是**三态分支**里最长的一条
-   * （工作台开/关 × 有无地址 × 是否已授权，最坏情况 60 余字），常驻会让左栏
-   * 那一段鼓出一块，与相邻几行不在一个密度上——而它讲的其实只有一件事：
-   * 这个邮箱帮你收验证码，不必再问你。
-   *
-   * 完整说明没有丢：它挂在同一行的 title 上（原生 tooltip 是「截断后仍拿得到
-   * 全文」的最后一道保险，与 SettingsRow 的 hint 同一套兜底逻辑）。
-   *
-   * 短句里**刻意不提「工作台关着走命令行」**：那句话说的是「模型用哪个通道」，
-   * 而这一行管的是「要不要声明这个邮箱」——通道细节对拨这个开关的人没有决策
-   * 价值（拨不拨，地址都是这个地址）。要看的人悬停即有全文。
-   */
-  const mailHintShort = !mailAvailable
-    ? '本机没有可用的邮箱能力'
-    : !mailAuthorized
-      ? '尚未授权，需扫码登录'
-      : mailAddress === null
-        ? '用本 Agent 的专属邮箱，不必再问你'
-        : `用 ${mailAddress}，不必再问你`
 
   /*
    * 展示组两条：纯呈现偏好，状态在 localStorage（见 reply-card-chrome / tool-calls-visible）。
@@ -482,8 +408,8 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
         </div>
 
         <div className="kr-settings__body">
-          {/* 左栏：提示词通道。这一组每行都有一大段说明（团队协作 / Agent 邮箱那两条
-              尤其长），单列排下来要滚很久；卡片给到 960px 宽之后，把短的那两组挪到
+          {/* 左栏：提示词通道。这一组每行都有一大段说明（团队协作那条尤其长），
+              单列排下来要滚很久；卡片给到 960px 宽之后，把短的那两组挪到
               右栏，左栏独占整列高度，长说明不再被挤成窄条。 */}
           <div className="kr-settings__col kr-settings__col--main">
           <div className="kr-settings__group">
@@ -518,31 +444,6 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               busy={busy}
               onToggle={() => { pushChannel('teamEnabled', !teamOn) }}
             />
-            {/* 邮箱行：模块没挂时不给开关，只留 label + 「不可用」角标 + 说明。
-                hint 走 mailHintShort（一句短话），全文仍由 mailHint 挂在 title 上：
-                这一行的完整说明是三态分支里最长的（邮箱工作台开/关 × 有无地址），
-                常驻会让左栏那一段鼓出一块，与相邻几行不在一个密度上。 */}
-            {mailAvailable
-              ? (
-                <SettingsRow
-                  index={3}
-                  label="Agent 邮箱"
-                  hint={mailHintShort}
-                  title={mailHint}
-                  on={mailOn}
-                  busy={busy}
-                  onToggle={() => { pushMail(!mailOn) }}
-                />
-              )
-              : (
-                <SettingsRow
-                  index={4}
-                  label="Agent 邮箱"
-                  hint={mailHintShort}
-                  title={mailHint}
-                  tag="不可用"
-                />
-              )}
           </div>
           </div>
 
@@ -558,8 +459,8 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
                   `D:\AI\E…`，而路径恰恰是「哪个工作区」的唯一无歧义标识；
                 · 它和左栏「提示词通道」是**写入侧 vs 读取侧**的相反语义，并排
                   读起来像同一种能力的两半。
-              搬下去之后左栏 5 行 / 右栏 4 行（「回合结束自动收口」已另起「行为纪律」
-              组挪到右栏，见下面那段注释），两栏高度差收到约 37px —— 设置面板不是
+              搬下去之后左栏 3 行 / 右栏 5 行（「回合结束自动收口」已挪到右栏的
+              「任务清单」组，见下面那段注释），两栏高度差收到约 37px —— 设置面板不是
               表格，剩下的那点差不值得再为它调结构。 */}
           <div className="kr-settings__col kr-settings__col--aside">
 
@@ -576,7 +477,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               <span className="kr-settings__group-scope">本机浏览器 · 不进提示词</span>
             </div>
             <SettingsRow
-              index={5}
+              index={3}
               lead
               label="总结卡外框"
               hint="关掉后不留边框与阴影，退回纯正文"
@@ -589,7 +490,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               onToggle={() => { setReplyCardChromeEnabled(!chromeOn) }}
             />
             <SettingsRow
-              index={6}
+              index={4}
               label="工具调用卡"
               hint="关掉后右栏不显示技术台账"
               title="关掉后 Seeker 右栏不再显示技术向的「工具调用」台账（默认 5 行滚动窗口那张）；人话行动流不受影响。"
@@ -603,7 +504,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
                 人话的卡，关掉后右栏只剩技术台账，所以默认开、且 hint 要把这件事
                 说明白，免得用户关完发现"什么都不知道了"。 */}
             <SettingsRow
-              index={7}
+              index={5}
               label="操作面板"
               hint="关掉后右栏不显示人话行动流"
               title="关掉后 Seeker 右栏不再显示那张中文人话行动流（把工具调用翻译成「打开携程 · 机票」的卡）；工具调用台账与其余卡片不受影响。"
@@ -638,7 +539,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               <span className="kr-settings__group-scope">纪律 + 兜底</span>
             </div>
             <SettingsRow
-              index={8}
+              index={6}
               lead
               label="任务清单纪律"
               hint="开工先列、收尾清零"
@@ -648,7 +549,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               onToggle={() => { pushChannel('todoRuleEnabled', !todoRuleOn) }}
             />
             <SettingsRow
-              index={9}
+              index={7}
               label="回合结束自动收口"
               hint="兜底：残留的改回「未完成」"
               title="回合结束时把残留的「进行中」任务项改回「未完成」，右栏任务卡不再挂着没收尾的项。它不进提示词，由 host 在回合结束时直接改清单状态 —— 是上面那条纪律的兜底：模型没自己收拾干净时，这里替它收。"
@@ -848,7 +749,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
 /**
  * 卡片里的一行：左侧标签（可带角标）+ 副说明，右侧开关。
  *
- * `on` 省略 = 这一行**不给开关**（邮箱模块没挂时那种「拨不动的开关」）。
+ * `on` 省略 = 这一行**不给开关**（只展示，拨不动）。
  * `lead` 标出该组第一行：上方已经有组标题，不再叠一条分隔虚线。
  * `index` 是全局行序号（0 起），供 CSS 用 `--row-i` 做错开浮现。
  *
@@ -887,7 +788,7 @@ function SettingsRow({
   readonly onToggle?: () => void
 }): JSX.Element {
   // 悬停全文的取值顺序：显式 title > hint > label。最后那档是给「只有标签」的
-  // 行（邮箱未挂载分支）兜底的 —— 没有它，长标签被行宽截断后就没有第二出口。
+  // 行兜底的 —— 没有它，长标签被行宽截断后就没有第二出口。
   const fullText = title ?? hint ?? label
   return (
     <div

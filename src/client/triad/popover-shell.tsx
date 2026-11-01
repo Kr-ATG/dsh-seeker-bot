@@ -2,7 +2,7 @@
  * popover-shell — 面板外壳（三个工作台页 + 用量卡片共用）。
  *
  * 两种形态：
- *  - page（默认，能力 / 记忆 / 邮箱用）：**不 portal**，直接铺满官方 `main`
+ *  - page（默认，能力 / 记忆用）：**不 portal**，直接铺满官方 `main`
  *    槽位（`[data-slot="main"]` 是 `display:contents`，本根就是 centerCol 的
  *    直接 flex item），与官方「自动化任务」页同座位、同尺寸、同层级。
  *    入场只有 140ms 的 opacity 淡入——刻意不用 transform（动画的 transform 会

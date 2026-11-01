@@ -121,7 +121,7 @@ export interface GateHostContext {
   ): void
 }
 
-/** webServer 服务面（与 mail 模块同形）。 */
+/** webServer 服务面（与 browser-activity 等 host 模块同形）。 */
 export interface GateWebServer {
   register(route: {
     kind: 'exact' | 'prefix'

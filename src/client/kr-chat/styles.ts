@@ -83,29 +83,6 @@ body[data-dsh-kr-chat="true"] [hidden="until-found"]:has(.kr-card--reasoning) {
 }
 
 /*
- * 例外 2：**含问答卡的那条链也必须放行**。
- *
- * 问答卡（.kr-card--ask）挂在 ask_user_question 的 tool-call 节点上，而 KR 对
- * 工具明细是整类隐藏（上面 [data-chat-call-id] / [data-chat-anchor-key^="call:"]
- * 一条不落）。不放行就等于「模型问了一句、用户答了一句，对话流里什么都没留下」
- * —— 而问答不是工具明细，它是对话本身的一半。
- *
- * 祖先链与思考卡同构（实测一条 tool-call 行的祖先）：
- *   [data-chat-call-id]              调用行本身，KR 隐藏它
- *   [data-turn-process-member]       该 step 的投影行（flowItem）
- *   [hidden="until-found"]           O_Ebla_body（content-visibility:hidden）
- *   [data-step-process]              O_Ebla_root（整块 display:none）
- * 四层缺一不可：少放行任何一层，卡片有盒模型但量出来仍是 0×0。
- */
-body[data-dsh-kr-chat="true"] [data-step-process]:has(.kr-card--ask),
-body[data-dsh-kr-chat="true"] [data-turn-process-member]:has(.kr-card--ask),
-body[data-dsh-kr-chat="true"] [hidden="until-found"]:has(.kr-card--ask),
-body[data-dsh-kr-chat="true"] [data-chat-call-id]:has(.kr-card--ask),
-body[data-dsh-kr-chat="true"] [data-chat-anchor-key^="call:"]:has(.kr-card--ask) {
-  display: block !important;
-}
-
-/*
  * 含卡片的那条折叠链：**解除官方的折叠窗限制**。
  *
  * 这里一次解决两件事，因为它们作用在同一个元素上（官方的折叠体 .O_Ebla_body），
@@ -125,9 +102,8 @@ body[data-dsh-kr-chat="true"] [data-chat-anchor-key^="call:"]:has(.kr-card--ask)
  * 的卡片是**按回合常驻的内容**，不是可折叠的过程摘要：
  *
  *   进行中 —— 卡片挂在**过程投影**里（官方的答案投影那时还没生成），于是它落在
- *             这个 400px 的滚动窗内。卡片一长（问答卡三四个选项就 240px+、
- *             思考卡 16 行视口 300px+）就超出可视区，用户看到的是「卡片在一个
- *             小框里被截断、要在这个框里滚动」。
+ *             这个 400px 的滚动窗内。卡片一长（思考卡 16 行视口就 300px+）就
+ *             超出可视区，用户看到的是「卡片在一个小框里被截断、要在这个框里滚动」。
  *   收口后 —— 卡片改挂**答案投影**，那条链上**没有**这个折叠容器，所以显示正常。
  *             这正是用户报的"执行过程中在内部展开、结束后就正常了"，两者是同一
  *             个根因的两面。
@@ -148,8 +124,7 @@ body[data-dsh-kr-chat="true"] [data-chat-anchor-key^="call:"]:has(.kr-card--ask)
  * 「含卡片的那一个容器」。官方原生的折叠行为（点标题展开/收起、hidden 切换）
  * 一概不动，只是不再在高度上二次裁剪。
  */
-body[data-dsh-kr-chat="true"] [hidden="until-found"]:has(.kr-card--reasoning),
-body[data-dsh-kr-chat="true"] [hidden="until-found"]:has(.kr-card--ask) {
+body[data-dsh-kr-chat="true"] [hidden="until-found"]:has(.kr-card--reasoning) {
   content-visibility: visible !important;
   max-height: none !important;
   overflow: visible !important;
@@ -165,12 +140,8 @@ body[data-dsh-kr-chat="true"] [hidden="until-found"]:has(.kr-card--ask) {
  * 「执行了命令，已读取文件，已搜索代码等」同源）。容器一放行，它就跟着露到
  * 左侧对话流里 —— 收起的分组摘要本来该由插件自己的活动卡与右栏操作面板承接。
  * 所以把不含卡片的直接子元素压回去，容器里只剩卡片行。
- *
- * 两条 :not 都要写：同一 step 里思考卡与问答卡分处不同的直接子元素（思考在
- * assistant-step 上、问答在 tool-call 上），只认一种会把另一种的整条链压掉。
  */
-body[data-dsh-kr-chat="true"] [data-step-process]:has(.kr-card--reasoning) > *:not(:has(.kr-card--reasoning)):not(:has(.kr-card--ask)),
-body[data-dsh-kr-chat="true"] [data-step-process]:has(.kr-card--ask) > *:not(:has(.kr-card--reasoning)):not(:has(.kr-card--ask)) {
+body[data-dsh-kr-chat="true"] [data-step-process]:has(.kr-card--reasoning) > *:not(:has(.kr-card--reasoning)) {
   display: none !important;
 }
 
@@ -1408,11 +1379,11 @@ body[data-kr-resizing="true"] * {
   .kr-reasoning-more { transition: none; }
 }
 
-/* ══ 字号轴：对话流两张内联卡 + 右栏四张卡跟随官方「设置 → 字号」═════════
+/* ══ 字号轴：对话流思考卡 + 右栏五张卡跟随官方「设置 → 字号」═════════════
  *
  * 官方把正文字号发布成 body 上的行内变量 --dsh-content-font-size（10..22，
  * 默认 14），并派生 --dsh-content-font-delta。这两组卡片（对话流里的思考过程
- * 卡与提问与回答卡，右栏大盘里的任务概览 / 操作面板 / 子智能体 / 产出物）
+ * 卡，右栏大盘里的任务概览 / 操作面板 / 子智能体 / 产出物 / 工具调用）
  * 字号都必须跟着这条轴走——否则用户把字号调到 20，正文变大了，卡片还钉在
  * 12.5px，读起来像另一套界面。
  *
@@ -1432,13 +1403,12 @@ body[data-kr-resizing="true"] * {
  *   --kr-fs-12    12   / --kr-fs-11-5 11.5 / --kr-fs-11 11
  *   --kr-fs-10-5  10.5 / --kr-fs-10 10
  *
- * 作用域挂在**六个卡根类**上（右侧四张卡 + 左侧两张内联卡）：变量对该卡整棵
+ * 作用域挂在**六个卡根类**上（右侧五张卡 + 左侧思考卡）：变量对该卡整棵
  * 子树生效，规则里引用时仍带 fallback，任何一处单独改动都不会让整条 font-size
- * 失效。右栏四张卡与对话流那两张的档位不同源（窄栏一套、内容区一套），
+ * 失效。右栏五张卡与对话流那张的档位不同源（窄栏一套、内容区一套），
  * 但都从同一个官方变量派生，所以共用这一段声明。
  */
 .kr-card--reasoning,
-.kr-card--ask,
 .kr-card--task,
 .kr-card--plain,
 .kr-card--subs,
@@ -1464,7 +1434,7 @@ body[data-kr-resizing="true"] * {
  * 标题行与图标：覆盖**全部六张卡**。
  *
  * .kr-card__title / .kr-card__meta / .kr-card__icon 是各类卡片共用的基类。
- * 左栏两张（思考 / 问答）与右栏四张（任务概览 / 操作面板 / 子智能体 / 产出物）
+ * 左栏的思考卡与右栏五张（任务概览 / 操作面板 / 子智能体 / 产出物 / 工具调用）
  * 现在一起跟随字号轴；右栏余下那张「记忆」卡是 footer 里的钉底卡、高度与
  * 折叠口径自成一套，本次不动（它的标题仍吃基类的 13px）。
  *
@@ -1473,7 +1443,6 @@ body[data-kr-resizing="true"] * {
  * SVG 的 width / height 是呈现属性，CSS 声明优先，直接覆盖即可。
  */
 .kr-card--reasoning .kr-card__title,
-.kr-card--ask .kr-card__title,
 .kr-card--task .kr-card__title,
 .kr-card--plain .kr-card__title,
 .kr-card--subs .kr-card__title,
@@ -1495,7 +1464,6 @@ body[data-kr-resizing="true"] * {
 }
 
 .kr-card--reasoning .kr-card__icon,
-.kr-card--ask .kr-card__icon,
 .kr-card--task .kr-card__icon,
 .kr-card--plain .kr-card__icon,
 .kr-card--subs .kr-card__icon,
@@ -1512,23 +1480,13 @@ body[data-kr-resizing="true"] * {
   height: calc(16px + var(--dsh-content-font-delta, 0px));
 }
 
-.kr-card--ask .kr-card__icon svg {
-  width: calc(15px + var(--dsh-content-font-delta, 0px));
-  height: calc(15px + var(--dsh-content-font-delta, 0px));
-}
-
-/* 右栏四张卡的标题图标基准都是 14–15px，统一按 15px 起算。 */
+/* 右栏五张卡的标题图标基准都是 14–15px，统一按 15px 起算。 */
 .kr-card--task .kr-card__icon svg,
 .kr-card--plain .kr-card__icon svg,
 .kr-card--subs .kr-card__icon svg,
 .kr-card--outputs .kr-card__icon svg {
   width: calc(15px + var(--dsh-content-font-delta, 0px));
   height: calc(15px + var(--dsh-content-font-delta, 0px));
-}
-
-.kr-card--ask .kr-ask-chevron svg {
-  width: calc(12px + var(--dsh-content-font-delta, 0px));
-  height: calc(12px + var(--dsh-content-font-delta, 0px));
 }
 
 /* 标题行右端的跟随状态（跟随中 / 已暂停）：与标题同一档，跟着字级走。 */
@@ -1722,7 +1680,8 @@ body[data-ds-dark-theme] .kr-card--reasoning[data-inline] {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .kr-card--reasoning[data-inline] { transition: none; }
+  .kr-card--reasoning[data-inline],
+  .kr-card--reasoning[data-inline]::before { transition: none; }
 }
 
 /* 折叠 chevron 已删（2026-10-05 用户要求）：标题行右侧不再有箭头。
@@ -2430,12 +2389,12 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
 }
 
 /*
- * ══ 卡头右上角的两枚动作按钮（2026-10-25 用户要求搬到这里）════════════════
+ * ══ 卡头右上角的动作按钮（2026-10-25 用户要求搬到这里）════════════════
  *
- * 「大盘设置」齿轮与「邮箱」信封，原先由 kr-chat-controller / mail-drawer 以
- * 裸 DOM 注入**顶栏标签行**（紧贴 Seeker 标签右侧）。用户原话：「这两个图标都
- * 移动到操作面板的右上角去」—— 顶栏是全局导航（对话 / 轨迹 / 标签），这两枚
- * 都是**本大盘**的动作，放在大盘自己的卡头上才归位。
+ * 「大盘设置」齿轮与 Git 大盘按钮，原先由 kr-chat-controller 以裸 DOM 注入
+ * **顶栏标签行**（紧贴 Seeker 标签右侧）。用户原话：「这两个图标都移动到操作面板
+ * 的右上角去」—— 顶栏是全局导航（对话 / 轨迹 / 标签），这两枚都是**本大盘**的
+ * 动作，放在大盘自己的卡头上才归位。
  *
  * ## 为什么绝对定位
  *
@@ -2561,13 +2520,13 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
 }
 
 /*
- * 动作按钮右上角的数量角标（邮箱未读 / Git 未提交项目数共用）。
+ * 动作按钮右上角的数量角标（Git 未提交项目数）。
  *
  * 2026-10-29 用户两次反馈后统一成这套简约样式：
  *   · 11px 高的小圆片（不是 14px 药丸）、字号走 --kr-fs-10 档位；
  *   · 淡色底 + 同色数字，无白描边、无弹入动画，不跟图标抢注意力；
- *   · 色相按 data-kind 区分：邮箱未读用淡红（danger），Git 项目数用淡主色。
- * 两个角标只差颜色，尺寸、位置与排版完全一致，并排时读成同一套 UI。
+ *   · 色相按 data-kind 区分：Git 项目数用淡主色。
+ * 尺寸、位置与排版与按钮本身一致，不跟图标抢注意力。
  */
 .kr-plain-head__badge {
   position: absolute;
@@ -2591,7 +2550,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   animation: none;
 }
 
-/* Git 未提交项目数：同一套小圆片，只把色相换成主色（不是邮箱的红色）。 */
+/* Git 未提交项目数：同一套小圆片，只把色相换成主色。 */
 .kr-plain-head__badge[data-kind="git-dirty-repos"] {
   background: color-mix(in srgb, var(--kr-accent) 16%, transparent);
   color: var(--kr-accent);
@@ -3065,6 +3024,271 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
     transition: none !important;
     transform: none !important;
   }
+}
+
+/*
+ * ══ 操作面板卡头 MCP 与 Skill 能力调用统计胶囊与弹窗明细 ════════════════════
+ */
+.kr-plain-head__tool--capabilities {
+  width: auto;
+  min-width: 28px;
+  padding: 0 7px;
+  gap: 5px;
+  border-radius: 7px;
+  font-size: var(--kr-fs-10-5, 10.5px);
+  font-weight: 500;
+  line-height: 28px;
+  user-select: none;
+}
+
+.kr-cap-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kr-cap-badge__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--dsw-alias-label-secondary);
+  transition: color var(--kr-dur-tap) linear;
+}
+
+.kr-cap-badge__icon {
+  flex: none;
+  opacity: 0.85;
+}
+
+.kr-cap-badge__item--mcp .kr-cap-badge__icon {
+  color: #0ea5e9;
+}
+
+.kr-cap-badge__item--skill .kr-cap-badge__icon {
+  color: #8b5cf6;
+}
+
+.kr-cap-badge__num {
+  font-weight: 600;
+  font-size: var(--kr-fs-10-5, 10.5px);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.kr-plain-head__tool--capabilities[data-active="true"] .kr-cap-badge__item--mcp .kr-cap-badge__num {
+  color: var(--dsw-alias-label-primary);
+}
+
+.kr-plain-head__tool--capabilities[data-active="true"] .kr-cap-badge__item--skill .kr-cap-badge__num {
+  color: var(--dsw-alias-label-primary);
+}
+
+.kr-cap-badge__sep {
+  color: var(--dsw-alias-border-l1);
+  font-size: var(--kr-fs-10, 10px);
+  margin: 0 1px;
+}
+
+/* 弹窗指示灯额外颜色 */
+.kr-cap-stat--skill {
+  background: color-mix(in srgb, #8b5cf6 14%, transparent);
+  color: #8b5cf6;
+}
+
+/* 弹窗 MCP 服务分组容器 */
+.kr-cap-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+.kr-cap-group {
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--dsw-alias-bg-base) 96%, var(--dsw-alias-border-l2));
+  overflow: hidden;
+  transition: border-color var(--kr-dur-tap) linear;
+}
+
+.kr-cap-group:hover {
+  border-color: color-mix(in srgb, var(--dsw-alias-border-l1) 80%, transparent);
+}
+
+.kr-cap-group__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  background: transparent;
+  transition: background-color var(--kr-dur-tap) linear;
+}
+
+.kr-cap-group__header:hover {
+  background: var(--kr-hover-bg);
+}
+
+.kr-cap-group__left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.kr-cap-group__chevron {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  transition: transform 0.16s ease-out;
+}
+
+.kr-cap-group[data-collapsed="true"] .kr-cap-group__chevron {
+  transform: rotate(-90deg);
+}
+
+.kr-cap-group__icon {
+  flex: none;
+  color: #0ea5e9;
+}
+
+.kr-cap-group__icon--skill {
+  color: #8b5cf6;
+}
+
+.kr-cap-group__title {
+  font-size: var(--kr-fs-title, 12.5px);
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  white-space: nowrap;
+}
+
+.kr-cap-group__tag {
+  font-size: var(--kr-fs-10, 10px);
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--kr-accent) 12%, transparent);
+  color: var(--kr-accent);
+  font-weight: 500;
+  font-family: var(--dsw-font-mono, monospace);
+  flex: none;
+}
+
+.kr-cap-group__desc {
+  font-size: var(--kr-fs-10-5, 10.5px);
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-left: 4px;
+}
+
+.kr-cap-group__right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.kr-cap-group__badge {
+  font-size: var(--kr-fs-10, 10px);
+  font-weight: 500;
+  color: var(--dsw-alias-label-secondary);
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 7%, transparent);
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kr-cap-group__body {
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+}
+
+/* 弹窗列定义 */
+.kr-cap-col--func {
+  width: 260px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.kr-cap-tool-friendly {
+  font-size: var(--kr-fs-body, 12px);
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kr-cap-tool-raw {
+  font-family: var(--dsw-font-mono, monospace);
+  font-size: var(--kr-fs-10, 10px);
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kr-cap-col--type {
+  width: 65px;
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+
+.kr-cap-tag--mcp {
+  background: color-mix(in srgb, #0ea5e9 14%, transparent);
+  color: #0284c7;
+}
+
+.kr-cap-tag--skill {
+  background: color-mix(in srgb, #8b5cf6 14%, transparent);
+  color: #8b5cf6;
+}
+
+.kr-cap-col--count {
+  width: 80px;
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+
+.kr-cap-count-badge {
+  font-size: var(--kr-fs-10-5, 10.5px);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-secondary);
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 6%, transparent);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.kr-cap-col--status {
+  width: 85px;
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+
+.kr-cap-col--detail {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.kr-cap-args-text {
+  font-family: var(--dsw-font-mono, monospace);
+  font-size: var(--kr-fs-10, 10px);
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /*
@@ -3812,7 +4036,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
  * 现在的分工是：**文字负责"是什么"，竖线负责"还在跑"**。竖线只动 transform 与
  * opacity（合成器属性），不重绘文字；文字保持正常颜色与字重，随时可读。
  *
- * 竖线语言与右栏其它卡一致（思考卡、问答卡都是左竖线），但这里表达的是"活动"
+ * 竖线语言与右栏其它卡一致（思考卡也是左竖线），但这里表达的是"活动"
  * 而不是"分类"：只在进行中的那一行出现，且自带一次自上而下的脉冲。同时行底
  * 铺一层 5% 品牌蓝、行首图标转蓝——三重信号都很克制，谁也不抢文字。
  *
@@ -6420,474 +6644,6 @@ body[data-dsh-kr-chat="true"] [data-chat-flow-kind="plan"] {
 }
 
 
-/* ══ 提问与回答卡（对话流内联） ═════════════════════════════════════════════
- *
- * 与思考卡同一套内联语言：**左侧一条竖线，无投影、无描边、无底色**
- * （完整理由见 .kr-card--reasoning[data-inline] 那段注释）。两张卡在对话流里
- * 紧挨着出现（思考在上、问答在下），用同一种画法才读得作"同一列里的两块内容"，
- * 而不是"两种不同层级的浮层"。
- *
- * 唯一的差别是**竖线的颜色**：思考卡是中性灰，问答卡是品牌蓝 —— 问句是这一轮
- * 里唯一"等着你"的东西，该比思考更显眼一档。等待回答时整条竖线呼吸，回答落定
- * 后转回中性色，颜色本身承担了状态。
- *
- * 变量重声明与思考卡同理（理由见 .kr-card--reasoning[data-inline] 的注释）：
- * 卡片在主区，:root 上的 --kr-* 求值不到 body 上的 --dsw-alias-*，不重声明会
- * 静默走 fallback（深色下照样纯白）。
- */
-.kr-card--ask[data-inline] {
-  --kr-accent: var(--dsw-alias-state-business-primary, #4176e6);
-  --kr-card-bg: var(--dsw-alias-bg-layer-1, #ffffff);
-  --kr-card-border: var(--dsw-alias-border-l1, rgba(0, 0, 0, .06));
-  --kr-card-hover: var(--dsw-alias-border-l2, rgba(0, 0, 0, .16));
-  --kr-hover-bg: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, .06));
-  /* 竖线色与思考卡同一档（7% 中性），"等待回答"时由下面那条规则覆盖成品牌蓝。
-     理由见 .kr-card--reasoning[data-inline] 里 --kr-reasoning-rail 那段注释。 */
-  --kr-ask-rail: color-mix(in srgb, var(--dsw-alias-label-primary, #000) 7%, transparent);
-  font-family: var(--dsw-font-family, inherit);
-  /* 宽度口径与思考卡、总结卡一致：**占满整列，不随内容自适应**。
-     只写 stretch 不写 width:100%：卡片是 content-box（padding + 边框会外溢），
-     stretch 由 flex 分配 margin box，含内距刚好等于列宽。 */
-  align-self: stretch;
-  max-width: 100%;
-  box-shadow: none;
-  border: none;
-  /* 竖线改 ::before（同思考卡：border-left 会贴边拉满全高，见那边注释）。 */
-  position: relative;
-  border-radius: 0 12px 12px 0;
-  background: transparent;
-  padding: 8px 12px;
-  gap: 6px;
-  transition:
-    background-color .18s ease,
-    box-shadow var(--kr-dur-fade) var(--kr-ease-soft),
-    transform var(--kr-dur-fade) var(--kr-ease-soft);
-}
-
-/* 竖线本体：与思考卡逐项同参（上下内缩 6px、宽 1.5px），两张卡才读作同一列。 */
-.kr-card--ask[data-inline]::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 6px;
-  bottom: 6px;
-  width: 1.5px;
-  border-radius: 0 2px 2px 0;
-  background: var(--kr-ask-rail);
-  pointer-events: none;
-  transition: background-color .18s ease;
-}
-
-/*
- * 等待回答：竖线是品牌蓝，并且**呼吸**。
- *
- * ⚠ 呼吸动的是 ::after 伪元素的 opacity，**不是竖线自身的颜色**。
- *
- * 更早一版把呼吸写成 border-left-color 的颜色插值（42% ↔ 100%）。那是这张卡
- * 卡顿的主因：border 颜色变化会**每帧重绘整张卡的边框**，而这张卡带着 12px 圆角、
- * 多层嵌套（group / row / options / opt）、以及一行行文字 —— 一个 2.4s 的无限
- * 循环每帧触发一次整卡 paint，叠加高度补间就是用户报的"展开卡卡的"。
- *
- * 现在：竖线本体是静态的 ::before（只画一次，颜色不做动画），呼吸交给另一个
- * 绝对定位、与它逐像素重合的 ::after，只动 opacity —— 纯合成器属性，零重绘、
- * 零重排。（若把颜色动画挪到 ::before 上，重绘量一样，只是换了个伪元素。）
- */
-.kr-card--ask[data-inline][data-state="waiting"] {
-  --kr-ask-rail: var(--kr-accent);
-}
-
-/*
- * 呼吸覆盖层：与 ::before 的竖线**逐像素重合**（同样的 left/top/bottom/width/圆角），
- * 只叠一层 opacity 动画。几何一旦对不上，就会看见"一根线在另一根线里喘"。
- */
-.kr-card--ask[data-inline][data-state="waiting"]::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 6px;
-  bottom: 6px;
-  width: 1.5px;
-  border-radius: 0 2px 2px 0;
-  background: var(--kr-accent);
-  pointer-events: none;
-  animation: kr-ask-breathe 2.4s var(--kr-ease-loop) infinite;
-}
-
-@keyframes kr-ask-breathe {
-  0%, 100% { opacity: .42; }
-  50% { opacity: 1; }
-}
-
-/* hover：只加深竖线、不铺底色（同思考卡，理由见那边那段注释）。
-   两张卡在对话流里紧挨着出现，一个铺灰一个不铺会读成两种东西。 */
-.kr-card--ask[data-inline]:hover {
-  box-shadow: none;
-  transform: none;
-  background: transparent;
-}
-
-/* 与思考卡同款：hover 只把那一段线加深一档，不动别的。 */
-.kr-card--ask[data-inline]:hover::before {
-  background: color-mix(in srgb, var(--dsw-alias-label-primary, #000) 30%, transparent);
-}
-
-/* 折叠态只收上下内距，左右与展开态完全一致（同思考卡：左右一变标题会横向跳）。 */
-.kr-card--ask[data-inline]:not([data-open]) {
-  padding-top: 4px;
-  padding-bottom: 4px;
-}
-
-/* ── 卡头右侧的状态读数：等待时前面挂三点跳动 ─────────────────────────── */
-.kr-card--ask[data-inline] .kr-card__meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex: none;
-  /* 状态读数（等待回答 / 3/5 已回答）跟着官方字号轴走，见「字号轴」段。 */
-  font-size: var(--kr-fs-11-5, 11.5px);
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.kr-card--ask[data-inline][data-state="waiting"] .kr-card__meta {
-  color: var(--kr-accent);
-}
-
-/*
- * 三点跳动。三颗必须是三个独立元素（靠伪元素只能凑两颗，且 opacity 打在同一个
- * 元素上三颗会一起亮，错峰就没了）——同 .kr-agent-dots 的处理。
- */
-.kr-ask-dots {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.kr-ask-dots > i {
-  /*
-   * 三点随字级放大。写死 3px 的话，字号轴推到 22px 时标题行右侧的「已回答」已涨到
-   * 19.5px，三点还是 3px —— 等待态的信号相对缩成一颗几乎看不见的芝麻，而这三点
-   * 正是「模型在等你回答」的唯一动效线索。
-   *
-   * 写成「基线 + delta × 比例」而不是 calc(var(--kr-fs-11-5) * 3 / 11.5)：
-   * 后者在默认档会被浏览器的 calc 除法算出 2.99536px（浮点误差），而 delta 在
-   * 默认档恰好是 0，前一种写法在默认档**精确**回到 3px（实测过两种写法）。
-   * 比例 0.26 使字号 22 时三点约 5.08px，与字级同比例。
-   * 下限 2px 兜住最小档（字号 10 时三点不再继续缩小）。
-   */
-  width: max(2px, calc(3px + var(--dsh-content-font-delta, 0px) * 0.26));
-  height: max(2px, calc(3px + var(--dsh-content-font-delta, 0px) * 0.26));
-  border-radius: 50%;
-  background: currentColor;
-  animation: kr-ask-dot 1.05s var(--kr-ease-loop) infinite;
-}
-
-.kr-ask-dots > i:nth-child(2) { animation-delay: .14s; }
-.kr-ask-dots > i:nth-child(3) { animation-delay: .28s; }
-
-@keyframes kr-ask-dot {
-  0%, 60%, 100% { opacity: .28; transform: translateY(0); }
-  30% { opacity: 1; transform: translateY(-2px); }
-}
-
-/* 展开箭头：与思考卡那枚同款（内联卡收口后只剩标题一行，没有它用户不知道
-   点标题还能展开），跟着 data-open 转 180°。 */
-.kr-ask-chevron {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--dsw-alias-label-tertiary);
-  transition: transform var(--kr-dur-fade) var(--kr-ease-out), color var(--kr-dur-fade) linear;
-}
-
-.kr-card--ask[data-open] .kr-ask-chevron {
-  transform: rotate(180deg);
-}
-
-.kr-card__header:hover .kr-ask-chevron {
-  color: var(--dsw-alias-label-secondary);
-}
-
-/* ── 正文 ─────────────────────────────────────────────────────────────── */
-.kr-ask-body {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-width: 0;
-}
-
-/*
- * 结论行（展开后第一行）：**先说结果，再列问题**。
- *
- * 字号与正文同档而不是小一号：这一行是整张卡最重要的信息（答没答、超时了没），
- * 把它压成辅助字号等于让读者去读次要信息。颜色按语气分三档，与卡头读数同一套
- * 语义 —— 等待是品牌蓝、已回答是正文色、未回答是次级灰。
- */
-.kr-ask-verdict {
-  margin: 0;
-  font-size: var(--kr-fs-body, 12.5px);
-  line-height: 1.55;
-  color: var(--dsw-alias-label-secondary);
-}
-
-.kr-ask-verdict[data-tone="waiting"] {
-  color: var(--kr-accent);
-}
-
-.kr-ask-verdict[data-tone="answered"] {
-  color: var(--dsw-alias-label-primary);
-}
-
-.kr-ask-verdict[data-tone="unanswered"] {
-  color: var(--dsw-alias-label-tertiary);
-}
-
-/*
- * 问题清单：一条一项、圆点在前。
- *
- * 圆点由每项自己的 ::before 画在左侧栅格列里（grid-template-columns 的第一列），
- * 不用 • 字符：字符会被复制进剪贴板，换行时第二行也不会自动缩进对齐。
- * 用 list-style 也可以，但那样圆点的位置由浏览器决定，各主题下基线会漂；
- * 这里要的是「圆点与首行文字基线严格对齐」，所以自己画。
- */
-.kr-ask-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  min-width: 0;
-}
-
-/*
- * 收起/展开的**淡入淡出**与思考卡同款（见 .kr-reasoning-list:not([data-open])）：
- * 高度补间由 useHeightAnimation 用 WAAPI 改 inline height，这里只叠一层透明度——
- * 收口那一下内容在被压扁的同时淡掉，不会出现「字挤在 0 高度里闪一帧」。
- * data-open 同时是样式钩子与调试用的当前态读数。
- */
-/*
- * 收起/展开的**淡入淡出**与思考卡同款（见 .kr-reasoning-list:not([data-open])）：
- * 高度补间由 useHeightAnimation 用 WAAPI 改 inline height，这里只叠一层透明度——
- * 收口那一下内容在被压扁的同时淡掉，不会出现「字挤在 0 高度里闪一帧」。
- *
- * 时长故意比高度补间短（EXPAND_MS = 260ms，见 motion-utils）：先淡完再压扁，
- * 反过来（淡出慢于收缩）会让内容在高度归零后还残留一帧半透明，读起来像闪。
- * data-open 同时是样式钩子与调试用的当前态读数。
- */
-.kr-card--ask[data-inline] .kr-ask-body:not([data-open]) {
-  opacity: 0;
-  transition: opacity .18s ease;
-}
-
-.kr-card--ask[data-inline] .kr-ask-body[data-open] {
-  opacity: 1;
-}
-
-/* 同一次调用的多条问答之间比不同调用之间更紧一档。 */
-.kr-ask-group {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-width: 0;
-}
-
-.kr-ask-group + .kr-ask-group {
-  padding-top: 10px;
-  border-top: 1px solid var(--kr-hairline);
-}
-
-/*
- * 逐题**不再各自播入场动画**（2026-10-02 按用户反馈"展开有点卡卡的"）。
- *
- * 原先每一行（.kr-ask-row）和每个被选中的选项（.kr-ask-opt[data-picked]）
- * 都各跑一个 translateY / scale 动画，且带 animationDelay 错峰。展开的那一刻
- * 同时起跑的动画是三层叠加：
- *    kr-card-in（整卡 320ms）+ kr-ask-row-in（每行 340ms）
- *    + kr-ask-pick-in（选中项 360ms）
- * 而行/项是**同一帧内全部挂载**的，十几个元素各自触发一次合成层提升与位移，
- * 再加上高度补间同时在改 height（每帧重排整卡）—— 读起来就是"卡一下"。
- *
- * 现在只留**一次**整体过渡：卡片自己的 kr-card-in（入场）与高度补间（展开/收起）。
- * 行与选项只做静态呈现，不再有各自的动画。
- */
-/*
- * 一项 = 圆点 + 内容。
- *
- * 两列栅格：第一列是圆点（固定宽，不参与换行），第二列是题干与答案。圆点用
- * ::before 画成 4px 的小方块（圆角 50% 即圆点），宽度按字级缩放 —— 字号轴推到
- * 22px 时正文已经 20.5px，一个写死 4px 的圆点会缩成看不见的墨迹。
- * 用 border-radius 50% 的方块而不是 SVG：这是纯装饰，不该有独立元素与绘制层。
- */
-.kr-ask-row {
-  /* 圆点直径：跟随字号轴缩放（4px 基线）；写死会在放大档缩成看不见的墨迹。 */
-  --kr-ask-bullet: max(3px, calc(4px + var(--dsh-content-font-delta, 0px) * 0.2));
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  column-gap: 8px;
-  row-gap: 5px;
-  align-items: start;
-  min-width: 0;
-}
-
-.kr-ask-row::before {
-  content: '';
-  /*
-   * 圆点落在首行文字的**中线**上：首行行高 = 字级 × 1.6（见 .kr-ask-row__q），
-   * 中线即 0.8 个字级，减去半径把圆点中心对上那条线。写死 px 的话，字号一调
-   * 圆点就离文字基线越来越远。
-   */
-  margin-top: calc(var(--kr-fs-body, 12.5px) * .8 - var(--kr-ask-bullet) / 2);
-  width: var(--kr-ask-bullet);
-  height: var(--kr-ask-bullet);
-  border-radius: 50%;
-  /* 圆点比正文浅一档：它是段落标记，不是内容。 */
-  background: var(--dsw-alias-label-tertiary);
-}
-
-/*
- * 圆点所在列之后的每一段内容都要落在第二列 —— 否则标签、题干、答案会各自
- * 从第一列开始，一列圆点把整段内容劈成两半。
- */
-.kr-ask-row > * {
-  grid-column: 2;
-  min-width: 0;
-}
-
-/*
- * 全部答完的项，圆点转成品牌色：一列扫下来，"哪几条答了"一眼可见，
- * 不必逐条读下面的答案行。
- */
-.kr-ask-row[data-answered]::before {
-  background: var(--kr-accent);
-}
-
-.kr-ask-row__tag {
-  /*
-   * 小标现在**嵌在问句首行里**（不再单独占一行，见 KrAskCard 的注释）：
-   * 所以是 inline 的胶囊样式 + 右外边距，不是原来那个 align-self 的块级标签。
-   * 字号仍跟随官方字号轴（见「字号轴」段）。
-   */
-  display: inline-block;
-  margin-right: 6px;
-  font-size: var(--kr-fs-11, 11px);
-  /*
-   * 行高也必须跟着字级走，不能写死 16px。
-   *
-   * 写死的后果只在放大档才看得出来：字号轴推到 22px 时这枚小标是 19px，
-   * 行高却仍是 16px —— 行距小于字高，上下两行文字会贴到一起。
-   * 写成「基线 + delta × 比例」是为了默认档**精确**落在 16px：delta 在默认档
-   * 为 0，而用 calc(字级 * 16 / 11) 会被浏览器的分式求值引入浮点尾数。
-   * 比例 1.4545 来自改造前「11px 字号配 16px 行高」那一档（16/11）。
-   */
-  line-height: calc(16px + var(--dsh-content-font-delta, 0px) * 1.4545);
-  color: var(--dsw-alias-label-tertiary);
-}
-
-/* 问句字号与思考卡正文同档（对话流里两块内容同列，差一级会读成两种东西），
-   两处引用同一个变量，字号轴一变两卡一起变。 */
-.kr-ask-row__q {
-  font-size: var(--kr-fs-body, 12.5px);
-  line-height: 1.6;
-  color: var(--dsw-alias-label-primary);
-  overflow-wrap: anywhere;
-}
-
-/*
- * 题干里的前导关键词（冒号之前那截）：加粗但**不加色**。
- *
- * 加色会和"答案/等待"等状态色抢通道；只加字重，读起来是"这句话的重点"，
- * 不是"这句话有个不同的状态"。600 而不是 700：中文粗体的 700 在 12.5px 上
- * 会糊成一团墨，600 在多数中文字体里仍有明显对比。
- */
-.kr-ask-row__lead {
-  font-weight: 600;
-}
-
-/*
- * 括号里的补充说明：降一档灰。
- *
- * 保持与括号外同样的字号（缩小一级会让同一句话里出现两种字级，读者会以为
- * 括号里是脚注），只压颜色 —— 这是"注解"最轻的表达方式。
- */
-.kr-ask-row__note {
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.kr-ask-row__detail {
-  font-size: var(--kr-fs-12, 12px);
-  line-height: 1.55;
-  color: var(--dsw-alias-label-secondary);
-  white-space: pre-wrap;
-}
-
-.kr-ask-row__skip {
-  font-size: var(--kr-fs-11-5, 11.5px);
-  color: var(--dsw-alias-label-tertiary);
-}
-
-/* ── 答案：只显示用户**实际选了什么** ─────────────────────────────────
- *
- * 这张卡是**已经发生过的事实的记录**，不是一份可以重新选择的问卷。读者要看的是
- * 「当时问了什么、我答了什么」—— 把三个候选项全铺出来，答案就淹在另外两个没被选
- * 的里，每次都要在三条里找哪条是亮的，而"没被选的那两条"对读者是零信息。
- *
- * 想回看完整候选（含当时没选的），走卡片头上官方那行的「查看回答」面板。
- *
- * 呈现上：答案比问句**重一档**（主文字色 + 500），与上面那句问句形成"问-答"的
- * 层级；多条答案（多选、或"选了某项 + 又补了一句"）各占一行。
- */
-.kr-ask-row__answer {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.kr-ask-pick {
-  display: block;
-  /* 答案行与问句同档（同一变量），字号轴一变整卡同步。 */
-  font-size: var(--kr-fs-body, 12.5px);
-  line-height: 1.6;
-  color: var(--dsw-alias-label-primary);
-  font-weight: 500;
-  overflow-wrap: anywhere;
-}
-
-.kr-ask-fallback {
-  font-size: var(--kr-fs-12, 12px);
-  line-height: 1.6;
-  color: var(--dsw-alias-label-tertiary);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  /* 卡片入场与等待呼吸关掉后，状态由静态竖线色承担（底色不参与动画）。 */
-  .kr-card--ask[data-inline],
-  .kr-card--ask[data-inline][data-state="waiting"],
-  .kr-ask-dots > i {
-    animation: none !important;
-  }
-  .kr-card--ask[data-inline],
-  .kr-ask-chevron {
-    transition: none;
-  }
-  /* 高度补间关掉后，内容的显隐仍由 data-open 的 opacity 承担：
-     动画关闭时「展开有内容、收起没内容」照样成立，不靠动画撑可见性。 */
-  .kr-card--ask[data-inline] .kr-ask-body {
-    transition: none;
-  }
-  /* 三点不跳时保持常态不透明度（同 .kr-agent-dots：静止的点仍是"这里有活动"
-     的信号，整组抹掉反而丢信息）。 */
-  .kr-ask-dots > i { opacity: .55; }
-  /* 呼吸关掉后，等待态由静态竖线色承担（现在是 ::before 上的 background）。 */
-  .kr-card--ask[data-inline][data-state="waiting"]::before { background: var(--kr-accent); }
-  .kr-card--reasoning[data-inline]::before,
-  .kr-card--ask[data-inline]::before,
-  .kr-card--ask[data-inline][data-state="waiting"]::after {
-    transition: none;
-  }
-}
-
 /* ══ 大盘设置（顶栏齿轮 + 视口居中弹卡片）═══════════════════════════════════
  *
  * 两块分处不同容器，定位策略**刻意不同**：
@@ -6909,7 +6665,7 @@ body[data-dsh-kr-chat="true"] [data-chat-flow-kind="plan"] {
  *
  * ⚠️ 变量作用域：--kr-* 声明在 :root / .kr-split__side 上，body 级浮层拿不到
  * 那条 .kr-split__side 分支（--kr-card-bg 之类在深色下会静默变白）。所以卡片
- * 根上像邮箱卡片那样**重新声明一遍**，理由与 .kr-mail-drawer 那段同源。
+ * 根上**重新声明一遍**。
  */
 
 /* 顶栏「大盘设置」齿轮：坐在 Seeker 标签**右侧**（用户点名要求的位置）。
@@ -6985,8 +6741,7 @@ body[data-dsh-kr-chat="true"] [data-chat-flow-kind="plan"] {
   position: fixed;
   inset: 0;
   /* 低于本插件的全屏 iframe/图片预览（2147483000），高于官方弹层：
-     邮箱卡片是 2147482000/2147482001，这里与它同层但**不叠加使用**
-     （两个面板各自独立开合，同时打开时后打开的那个盖上面，语义可接受）。 */
+     取 2147482000，给本插件其它浮层留出同层位置。 */
   z-index: 2147482000;
   background: rgba(15, 17, 21, .16);
   opacity: 0;
@@ -7033,7 +6788,7 @@ body[data-ds-dark-theme] .kr-settings__scrim {
   overflow: hidden;
   /* 浮层必须刷不透明底色：--kr-card-bg 就是大盘卡片那层 layer-1，深浅两套
      主题都由 DSH token 给真值；透出底层内容会读不清。body 级浮层拿不到
-     .kr-split__side 那条变量分支，所以这里重新声明一遍（同 .kr-mail-drawer）。 */
+     .kr-split__side 那条变量分支，所以这里重新声明一遍。 */
   --kr-card-bg: var(--dsw-alias-bg-layer-1, #ffffff);
   --kr-card-border: var(--dsw-alias-border-l1, rgba(0, 0, 0, .06));
   --kr-hairline: var(--dsw-alias-border-l1, rgba(0, 0, 0, .06));
@@ -8054,7 +7809,7 @@ body[data-ds-dark-theme] .kr-settings {
   }
   /* 卡片这里**不能**写 transform:none —— 它的居中靠的就是
      translate(-50%, -50%)，抹掉就会贴到视口右下角去。只能抹掉「打开时
-     那一点点浮起」，居中照旧（同 .kr-mail-drawer 的处理）。 */
+     那一点点浮起」，居中照旧。 */
   .kr-settings,
   .kr-settings[data-open="true"] {
     transform: translate(-50%, -50%);
@@ -8079,233 +7834,6 @@ body[data-ds-dark-theme] .kr-settings {
   }
 }
 
-/* ══ 邮箱（顶栏按钮 + body 级居中弹卡片）═════════════════════════════════
- *
- * 2026-10-18 用户反馈「邮箱的页面我建议是弹卡片而不是抽屉」，于是外壳从
- * 「右侧全高滑入抽屉」换成「视口居中的模态卡片」。改的是**形态**：入口按钮、
- * 共享 store、三条关闭通路（面板关闭钮 / 点遮罩 / Esc）、aria-modal 只在打开
- * 时为真 —— 全部照旧，一行没动。
- *
- * 为什么卡片比抽屉合适（这是判据，不是审美偏好）：
- *  1. 邮件是「文件夹 + 列表 + 正文」三栏内容，抽屉只给 420px，面板自己的
- *     @container 620px 阈值永远命中不了，只能退化成一栏到底的移动端范式；
- *     卡片给到 1080px，面板直接进三栏，读信不用来回切。
- *  2. 邮箱是**只读查看**，不是与对话并行的常驻工作区 —— 抽屉从侧边挤进来会
- *     持续压缩对话宽度，卡片盖上去、看完就散，对话布局毫发不动。
- *
- * 与设置抽屉（.kr-settings）的关系：那张是右栏内的局部浮层，这张是 body 级的
- * 全视口模态，几何不同但**刻意复用同一套缓动与时长语言**，不发明第二套动效。
- *
- * z-index 取 2147482000：低于本插件的全屏 iframe/图片预览（2147483000），
- * 高于官方弹层与本插件其它浮层 —— 邮箱卡片开着时，官方弹窗不该盖住它。
- */
-
-/* 顶栏「邮箱」按钮：紧跟齿轮之后（kr-chat-controller 用 afterend 插入）。
- * 全部值对齐 .kr-panel-settings-btn。左边距这里写 -2px 只是**首帧兜底**：官方
- * tablist 自己的 flex gap（给文字标签用的 22px）会把两枚动作按钮撑开，读起来
- * 完全不像一对。所以真实间距由 mail-drawer.tsx 的 alignMailButtonToGear 在运行时
- * 量着实际几何反推、写成内联 marginLeft —— 官方改 gap 也跟得上，比在这里写死一个
- * 负值去赌官方数值稳。 */
-.kr-mail-btn {
-  position: relative;
-  align-self: center;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  flex: none;
-  margin: 0 2px 0 -2px;
-  border: 0;
-  border-radius: 7px;
-  padding: 0;
-  background: transparent;
-  color: var(--dsw-alias-label-tertiary);
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-  transition: background-color var(--kr-dur-tap) linear, color var(--kr-dur-tap) linear, transform var(--kr-dur-tap) var(--kr-ease-soft);
-}
-
-.kr-mail-btn:hover {
-  background: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, .06));
-  color: var(--dsw-alias-label-primary);
-}
-
-/* 按下时缩一档：与齿轮同一份物理感。 */
-.kr-mail-btn:active {
-  transform: scale(.92);
-}
-
-.kr-mail-btn svg {
-  width: 14px;
-  height: 14px;
-  transition: transform var(--kr-dur-card) var(--kr-ease-out);
-}
-
-/* 打开态：底色常亮 + 信封轻轻抬一下（齿轮那边是转 45°；信封转角没有语义，
- * 用「掀开一角」的位移表达同一件事：这枚按钮正是当前打开的那个面板的入口）。 */
-.kr-mail-btn[data-open="true"] {
-  background: var(--kr-hover-bg);
-  color: var(--dsw-alias-state-business-primary, #4176e6);
-}
-
-.kr-mail-btn[data-open="true"] svg {
-  transform: translateY(-1px) scale(1.06);
-}
-
-.kr-mail-btn:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--kr-accent) 35%, transparent);
-}
-
-/* 遮罩：铺满**整个视口**（fixed），只在打开时拦截指针。
- * 常驻 pointer-events:auto 会把整页点击吃掉 —— 卡片明明关着，页面上却点不动
- * 任何东西，是这类浮层最经典的 bug。点遮罩关闭靠的就是这一层。 */
-.kr-mail-drawer__scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 2147482000;
-  background: rgba(15, 17, 21, .18);
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transition: opacity .18s ease, visibility 0s linear .18s;
-}
-
-.kr-mail-drawer__scrim[data-open="true"] {
-  opacity: 1;
-  visibility: visible;
-  pointer-events: auto;
-  transition: opacity .18s ease, visibility 0s;
-}
-
-body[data-ds-dark-theme] .kr-mail-drawer__scrim {
-  background: rgba(0, 0, 0, .42);
-}
-
-/* 卡片本体：视口居中、上下留边。
- *
- * 开合全部由 data-open 这一个属性驱动（组件不做条件渲染），所以退场动画才有得播；
- * visibility 的延迟就是为它留的：关的时候等 240ms 过渡跑完再 hidden，否则退场
- * 会被立刻掐断。这套写法与 .kr-settings 逐字同源。
- *
- * 尺寸：宽 min(1080px, 100vw − 48px)，高 min(760px, 100vh − 64px)。
- *  - 宽给到 1080px 是为了越过邮件面板自己的 @container 620px 阈值 —— 过了才排
- *    三栏（文件夹 / 列表 / 正文），否则面板会退化成移动端单栏范式。
- *  - 高与宽都留边：卡片**不是**全屏模态，四周露出的遮罩既说明「这是浮层」，
- *    也留着「点外面关闭」这条通路（窄屏上尤其重要）。
- *  - 用 min() 而不是 max-width/max-height 两条：宽高比与视口一起缩，不需要
- *    第二条媒体查询兜底。 */
-.kr-mail-drawer {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  z-index: 2147482001;
-  display: flex;
-  flex-direction: column;
-  width: min(1080px, calc(100vw - 48px));
-  height: min(760px, calc(100vh - 64px));
-  height: min(760px, calc(100dvh - 64px));
-  box-sizing: border-box;
-  overflow: hidden;
-  /* body 上不在 .kr-split 变量作用域里，--kr-card-bg 之类取不到真值时走 fallback
-     （深色下会静默变白），所以这里重新声明一次：body 是 DSH token 的定义处，
-     在这里引用能拿到主题真值。理由同 .kr-agent-mini-shell 那段注释。 */
-  --kr-card-bg: var(--dsw-alias-bg-layer-1, #ffffff);
-  --kr-card-border: var(--dsw-alias-border-l1, rgba(0, 0, 0, .06));
-  --kr-hairline: var(--dsw-alias-border-l1, rgba(0, 0, 0, .06));
-  --kr-hover-bg: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, .06));
-  --kr-accent: var(--dsw-alias-state-business-primary, #4176e6);
-  --kr-card-shadow: 0 1px 2px rgba(15, 17, 21, .05), 0 6px 14px -8px rgba(15, 17, 21, .18);
-  background: var(--kr-card-bg);
-  border: 1px solid var(--kr-card-border);
-  border-radius: 16px;
-  box-shadow: var(--kr-card-shadow), 0 24px 60px -28px rgba(15, 17, 21, .38);
-  opacity: 0;
-  visibility: hidden;
-  /* 关闭态：略微下沉 + 收一点，打开时「浮上来」。transform 里带着居中的
-     translate(-50%, -50%)，所以位移量都写在它后面（追加而不是覆盖）。 */
-  transform: translate(-50%, -50%) translateY(10px) scale(.985);
-  pointer-events: none;
-  transition: opacity var(--kr-dur-row) var(--kr-ease-out), transform var(--kr-dur-row) var(--kr-ease-out), visibility 0s linear var(--kr-dur-row);
-}
-
-.kr-mail-drawer[data-open="true"] {
-  opacity: 1;
-  visibility: visible;
-  transform: translate(-50%, -50%);
-  pointer-events: auto;
-  transition: opacity var(--kr-dur-row) var(--kr-ease-out), transform var(--kr-dur-row) var(--kr-ease-out), visibility 0s;
-}
-
-/* 深色下浮层靠「更实的描边 + 更黑的落影」分层（浅色那套 4% 黑描边压在深底上
- * 等于没有）。与 .kr-settings 同一口径。 */
-body[data-ds-dark-theme] .kr-mail-drawer {
-  --kr-card-border: rgba(255, 255, 255, 0.09);
-  border-color: rgba(255, 255, 255, .09);
-  box-shadow: var(--kr-card-shadow), 0 26px 64px -30px rgba(0, 0, 0, .85);
-}
-
-/* 面板容器：铺满卡片。
- * flex:1 1 0 + min-height:0 是「滚动子级能在 flex 列里正常收缩」的固定写法 ——
- * 少了 min-height:0，自动最小尺寸会把容器顶到内容高度，面板内部不再滚动。 */
-.kr-mail-drawer__body {
-  flex: 1 1 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-/* 面板内容随卡片一起浮现：只动 opacity/transform，不参与布局（纯合成器属性）。
- * 动画**只挂在打开态**上，理由与 .kr-settings__row 那段完全一致：卡片是常驻 DOM，
- * 写在基础规则上会在挂载时就播完，等用户真点开时早已静止。 */
-.kr-mail-drawer[data-open="true"] .kr-mail-drawer__body {
-  animation: kr-mail-card-in var(--kr-dur-card) var(--kr-ease-soft) backwards;
-}
-
-@keyframes kr-mail-card-in {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  /* 新加的全部过渡与动画一律关掉。
-   * 关键：卡片与遮罩的可见性由 data-open 属性选择器直接决定（opacity / visibility /
-   * pointer-events），**不依赖任何动画末帧** —— 动画掐掉后内容是「打开即完整可见」，
-   * 不会出现停在半透明或浮到一半的中间态。 */
-  .kr-mail-btn,
-  .kr-mail-btn svg,
-  .kr-mail-drawer__scrim,
-  .kr-mail-drawer__scrim[data-open="true"],
-  .kr-mail-drawer,
-  .kr-mail-drawer[data-open="true"] {
-    transition: none;
-  }
-  /* 静态形变也要归位，否则按钮会永久停在按下被压扁 / 打开被抬起的中间态。
-   * 卡片这里**不能**写 transform:none —— 它的居中靠的就是
-   * translate(-50%, -50%)，抹掉就会贴到视口右下角去。只能抹掉「打开时的
-   * 那一点点浮起」，居中照旧。 */
-  .kr-mail-btn:active,
-  .kr-mail-btn[data-open="true"] svg {
-    transform: none;
-  }
-  .kr-mail-drawer,
-  .kr-mail-drawer[data-open="true"] {
-    transform: translate(-50%, -50%);
-  }
-  .kr-mail-drawer[data-open="true"] .kr-mail-drawer__body {
-    animation: none;
-    opacity: 1;
-    transform: none;
-  }
-}
 `
 
 /**

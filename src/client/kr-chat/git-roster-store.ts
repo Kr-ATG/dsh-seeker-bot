@@ -2,7 +2,7 @@
  * dsh-seeker-bot — Seeker 卡头「Git 大盘」开合状态与数据共享 Store。
  *
  * 最早这里只存一个 open 布尔值，负责让卡头 Git 按钮与 GitRosterModal 联动。
- * 2026-10-29 扩展：卡头 Git 图标要像邮箱按钮一样挂「待提交」角标，角标数字 =
+ * 2026-10-29 扩展：卡头 Git 图标要挂「待提交」角标，角标数字 =
  * **Git 大盘里有未提交改动的仓库个数**（工作区 + 自制插件：一个仓库改 11 个文件也只算 1）。
  *
  * 数据不能由角标单独轮询：/api/chat-flow/git-roster 会逐个仓库跑 git status，
@@ -10,7 +10,7 @@
  * store：卡头角标与 GitRosterModal 共用同一份数据、同一个 45 秒轮询；弹窗
  * 打开时立即强制刷新一次，关闭后仍跟着 45 秒节拍走（角标要持续可见）。
  *
- * 与 mail-unread-store 同款约束：
+ * 跨 bundle 共享 store 的三条硬约束：
  *   · getSnapshot 必须返回稳定引用（每次现造对象会让 useSyncExternalStore
  *     判定「永远在变」，右栏大盘直接撞 React error #185）；
  *   · 页面隐藏时暂停轮询，切回前台 / 窗口聚焦时补一次；
@@ -76,7 +76,7 @@ export interface GitRosterSnapshot {
 
 type Listener = () => void
 
-/** 自动轮询间隔（ms）：与邮箱未读检查同节奏（45 秒）；大盘要扫所有仓库，不宜更密。 */
+/** 自动轮询间隔（ms）：45 秒一档；大盘要扫所有仓库，不宜更密。 */
 const AUTO_POLL_INTERVAL_MS = 45_000
 
 /** 最小冷却（ms）：弹窗打开 / focus 不会把大盘扫描打成连发。 */

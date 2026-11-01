@@ -50,7 +50,6 @@ import { applyOfficePreview } from './office/index.ts'
 import { applyFontRoutes } from './fonts/index.ts'
 import { applyTriadHost } from './triad/host.ts'
 import { applyProviderHub, providerHubServices } from './provider/index.ts'
-import { applyMailHost } from './mail/index.ts'
 import { applyToolsGate, setGateDefaultEnabled } from './tools-gate/index.ts'
 import { applyBrowserOnDemand } from './browser-on-demand/index.ts'
 import { applyBrowserActivity } from './browser-activity/index.ts'
@@ -83,8 +82,6 @@ export {
 // 这三条（路径绝对化基准 / 可执行类型拒绝 / 浏览器命令解析）判错了都不会抛错，
 // 只会表现为「点了没反应」或「打开了不相干的东西」，只能断言。
 export { applyOpenFileRoutes, __test as openFileTest } from './open-file/index.ts'
-export { applyMailHost } from './mail/index.ts'
-export type { MailHostConfig, MailHostHandle } from './mail/index.ts'
 // 工具闸门（computer-use / browser-use 按需注入）：纯函数与分组表导出给 smoke，
 // 钉住「默认全关 → 每轮省掉那 80 个工具的 schema」这条主回归。
 export { applyToolsGate, __test as toolsGateTest, DEFAULT_GATE_GROUPS } from './tools-gate/index.ts'
@@ -156,13 +153,12 @@ export type {
   SessionResolution,
   SessionSource,
 } from './browser-activity/index.ts'
-// 纯函数再导出：供 smoke 直接断言「CLI 英文报错翻成人话」的映射表。
-export { humanizeCliError } from './mail/cli.ts'
 // 画廊的可测面（索引准入 / raw 路径解析纯函数）：供 smoke 对拍「相对路径按会话
 // cwd 解析」这条回归 —— 它正是「产出物卡点图片 403、侧栏却正常」的根因所在。
 export { __test as galleryTest } from './triad/gallery/index.ts'
 // 子会话产出物路由：供 smoke 钉住路由常量与「主会话汇总子代理产出」这条链路。
 export { applySessionOutputs, SESSION_OUTPUTS_ROUTE, __test as sessionOutputsTest } from './triad/session-outputs/index.ts'
+export { applySessionCapabilities, SESSION_CAPABILITIES_ROUTE, __test as sessionCapabilitiesTest } from './triad/session-capabilities/index.ts'
 // Office / PDF 预览的可测面：引擎解析、工作目录判据、路径准入纯函数，以及
 // 「用假 ctx 挂路由 + 真 HTTP 请求」这条端到端链路（见 scripts/smoke-host.mjs）。
 // 这三块错了都不会抛错 —— 引擎缺了只是退回下载、判据错了只是 403 —— 必须能
@@ -289,7 +285,7 @@ function handleGeneratedImages(ctx: Record<string, any>, req: any, res: any): vo
  * 且服务销毁时 webCtx.effect 注册的路由自动回收。与 packages/api/gateway
  * 的写法一致。
  */
-export function apply(ctx: Record<string, any>, config?: { mail?: Record<string, unknown>; toolsGate?: Record<string, unknown>; browserOnDemand?: Record<string, unknown>; browserActivity?: Record<string, unknown> }): void {
+export function apply(ctx: Record<string, any>, config?: { toolsGate?: Record<string, unknown>; browserOnDemand?: Record<string, unknown>; browserActivity?: Record<string, unknown> }): void {
   // 组件开关：登记宿主 context（host 各模块在 apply 期用 hostFeatureEnabled
   // 读 loader 行状态），再注册 /api/chat-flow/components 只读路由。
   initializeFeatures(ctx)
@@ -428,20 +424,6 @@ export function apply(ctx: Record<string, any>, config?: { mail?: Record<string,
     },
   )
 
-  // ── 邮箱工作台（Agent Mail）────────────────────────────────────────────
-  // 与三个工作台并列的独立能力：模型工具（mail_*）+ /api/dsh-mail/* 路由 +
-  // 每会话首步的「本 Agent 有专属邮箱」能力注入（浏览器自动化注册第三方服务
-  // 时不再需要问用户要邮箱）。只依赖 webServer + tools，任一缺失则整块不挂，
-  // 其余能力照常（延迟注入的天然降级）。
-  ctx.inject(['webServer', 'tools'], (mailCtx: any) => {
-    if (!hostFeatureEnabled('host.mail')) return
-    void applyMailHost(mailCtx, (config?.mail ?? {}) as never).catch((error: unknown) => {
-      mailCtx.logger?.warn?.(
-        `[dsh-seeker-bot] mail workbench failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
-      )
-    })
-  })
-
   // ── 工具闸门（computer-use / browser-use 按需注入）──────────────────────
   // 默认全关：电脑操作 56 个 + 浏览器操作 24 个工具（实测占全部工具定义
   // 74.7%、约 3.1 万 tok/请求）不再进入每轮请求；`/computer-use on`、
@@ -452,13 +434,16 @@ export function apply(ctx: Record<string, any>, config?: { mail?: Record<string,
   // 这一段**不能**放进 try/catch 之外就算完：延迟注入回调里抛错会从 apply
   // 冒出去，中断本插件后面所有 ctx.inject（triad 工作台全不挂）。模块内部
   // 已对缺失服务逐项自查，这里再加一层兜底，任何意外都只让闸门失效。
+  //
+  // 2026-11：输入框左侧那张开关卡片已按用户要求整块移除（截图那两个开关），
+  // 但**闸门本身保留** —— 它负责把 74.7% 的工具定义挡在请求之外，删掉会让
+  // computer-use / browser-use 的工具全部注入。现在只留命令行入口
+  // （/computer-use on、/browser-use on），不再有可视开关。
   try {
-    if (hostFeatureEnabled('input.tools-gate')) {
-      applyToolsGate(ctx as never, (config?.toolsGate ?? {}) as never)
-      // 电脑操作与浏览器操作一致：部署级默认全关，需要时用 /computer-use on
-      // 按会话打开（运行时不再有模式切换）。
-      setGateDefaultEnabled('computer-use', false)
-    }
+    applyToolsGate(ctx as never, (config?.toolsGate ?? {}) as never)
+    // 电脑操作与浏览器操作一致：部署级默认全关，需要时用 /computer-use on
+    // 按会话打开（运行时不再有模式切换）。
+    setGateDefaultEnabled('computer-use', false)
   } catch (error) {
     ctx.logger?.warn?.(
       `[dsh-seeker-bot] tools gate failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,

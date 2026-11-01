@@ -23,6 +23,7 @@ import { KrOutputsCard } from './KrOutputsCard.tsx'
 import { collectOutputs, collectSessionToolNodes, EMPTY_OUTPUTS, mergeOutputs, outputsFingerprint, type OutputsView } from './outputs.ts'
 import { useSubagentOutputs } from './use-subagent-outputs.ts'
 import { useSessionOutputs } from './use-session-outputs.ts'
+import { getCapabilitiesStore } from './capabilities-store.ts'
 import { KR_MEMORY_CARD_VISIBLE, KR_OUTPUTS_CARD_VISIBLE, KR_PLAIN_TIMELINE_CARD_VISIBLE, KR_SUBAGENTS_CARD_VISIBLE, KR_TOOL_CALLS_CARD_VISIBLE } from './enabled.ts'
 import { subscribeToolCallsVisible, toolCallsVisible } from '../tool-calls-visible.js'
 import { subscribePlainTimelineVisible, plainTimelineVisible } from '../plain-timeline-visible.js'
@@ -598,6 +599,20 @@ export const KrAgentPanel = memo(function KrAgentPanel({
     () => mergeOutputs(outputs, { items: persistedOutputs }, { items: subagentOutputs }),
     [outputs, persistedOutputs, subagentOutputs],
   )
+
+  /*
+   * 会话与子代理 MCP 与 Skill 能力调用统计同步（2026-11-01）：
+   * 将当前主会话、子代理列表及 live 工具节点同步到共享 Store，供卡头徽标与弹窗消费。
+   */
+  useEffect(() => {
+    const store = getCapabilitiesStore()
+    store.setSession(latestChatSessionId, subagentCatalog.rows)
+  }, [latestChatSessionId, subagentCatalog.rows])
+
+  useEffect(() => {
+    const store = getCapabilitiesStore()
+    store.setLiveToolNodes(sessionToolNodes)
+  }, [sessionToolNodes])
 
   /* ── 右栏挤压自适应 ─────────────────────────────────────────────────────
      记忆卡是滚动区之下的独立 flex footer（永远钉在右栏最下方，不可挤压），

@@ -170,6 +170,15 @@ function tabIcon(tab: (typeof WORKBENCH_TABS)[number]['id']): NavSectionIcon {
         )
       case 'skills':
         return (<svg {...common}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" /></svg>)
+      case 'connectors':
+        // 连接器 = 插头：语义是「把外部服务接到模型上」。
+        return (
+          <svg {...common}>
+            <path d="M12 22v-5" />
+            <path d="M9 8V2" /><path d="M15 8V2" />
+            <path d="M18 8v3a6 6 0 0 1-12 0V8Z" />
+          </svg>
+        )
       case 'usage':
         return (
           <svg {...common}>

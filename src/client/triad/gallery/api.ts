@@ -1,7 +1,7 @@
 /**
  * dsh-seeker-bot — 多媒体画廊 client API（/api/triad/gallery/*，loopback 同源）。
  *
- * 与记忆 / 邮箱 / 用量同款纯 fetch 封装。两条约定：
+ * 与记忆 / 用量同款纯 fetch 封装。两条约定：
  *  · 业务错误也走 HTTP 200 + { ok:false }，统一按 payload 判成败；
  *  · generated（生图/生视频）条目只有 spill 文件路径，b64 要再经既有的
  *    /api/chat-flow/generated-images 路由解析成可显示 URL —— 两步都封在这里。

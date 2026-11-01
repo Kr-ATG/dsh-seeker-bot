@@ -1,8 +1,9 @@
 // src/index.ts
+import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join, relative, resolve, sep } from "node:path";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { URL } from "node:url";
 import { inflateRawSync } from "node:zlib";
 var name = "skill-manager";
@@ -690,6 +691,708 @@ ${description}`;
     renamed: metaName !== "" && metaName !== skillName
   };
 }
+/*
+ * Git 一键导入（dsh-seeker-bot patch）：POST /import-git
+ *
+ * 用户要的是「粘一个 Git 地址就把技能包装进来」，所以后端得自己 clone、自己找
+ * 技能、自己落盘。三段各有各的坑：
+ *   · clone 段：地址来自用户输入，必须走参数白名单 + execFile（不经 shell），
+ *     否则「--upload-pack=...」这种地址能直接变成命令执行；
+ *   · 发现段：技能包仓库有三种常见布局（根 SKILL.md / skills 下一层 / 仓库下一层），
+ *     按顺序取第一个命中的规则 —— 合并处理会让 skills 目录下的技能被装两遍；
+ *   · 落盘段：目标目录名就是技能规范名，已存在则整体覆盖（先删再写）：半个覆盖
+ *     的目录比不装更糟，旧文件残留会让技能内容前后矛盾。
+ */
+var GIT_CLONE_TIMEOUT_MS = 180000;
+var GIT_IMPORT_MAX_SKILLS = 40;
+var GIT_IMPORT_MAX_FILES = 2000;
+var GIT_IMPORT_MAX_BYTES = 64 * 1024 * 1024;
+/** 复制时跳过的目录/文件名：版本库元数据、依赖、macOS 垃圾文件。 */
+var GIT_SKIP_NAMES = /* @__PURE__ */ new Set([".git", "node_modules", ".DS_Store"]);
+/** 本地地址（file:// 与绝对路径）只在显式打开测试开关时放行。 */
+function allowLocalGitUrl() {
+  return process.env.DSH_SKILL_GIT_ALLOW_LOCAL === "1";
+}
+/**
+ * 校验 Git 地址。
+ *
+ * 用白名单而不是「以 - 开头就拒」：git 的 transport 表里 ext::sh -c ... 能直接
+ * 执行命令，--upload-pack=... 又能改变 clone 的行为，只挡短横线挡不住这些。
+ * 这里只放行 https / http / git / ssh 与 scp 风格的 git@host:path；本地 file://
+ * 与绝对路径仅供测试（DSH_SKILL_GIT_ALLOW_LOCAL=1），生产环境一律拒绝。
+ */
+function checkedGitUrl(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (raw === "") throw new Error("url is required");
+  if (raw.startsWith("-")) throw new Error(`invalid git url: ${JSON.stringify(raw)}`);
+  // 空白/换行一律拒：空白可能让地址被拆成两个参数，换行是终端注入的老把戏。
+  if (/[\s\u0000-\u001f\u007f]/.test(raw)) throw new Error(`invalid git url: ${JSON.stringify(raw)}`);
+  const lower = raw.toLowerCase();
+  if (lower.startsWith("https://") || lower.startsWith("http://") || lower.startsWith("git://") || lower.startsWith("ssh://")) return raw;
+  if (/^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+$/.test(raw)) return raw;
+  if (allowLocalGitUrl() && (lower.startsWith("file://") || isAbsolute(raw))) return raw;
+  throw new Error(`unsupported git url: ${JSON.stringify(raw)}`);
+}
+/** ref：分支/tag（git clone --branch 只认这两种），拒绝以 - 开头与空白。 */
+function checkedGitRef(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (raw === "") return "";
+  if (raw.startsWith("-") || /[\s\u0000-\u001f\u007f]/.test(raw)) throw new Error(`invalid git ref: ${JSON.stringify(raw)}`);
+  return raw;
+}
+/** subdir：仓库内子目录，这里只做类型与空白校验，越界由 subdirSegments 挡。 */
+function checkedGitSubdir(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (raw === "") return "";
+  if (/[\u0000-\u001f]/.test(raw)) throw new Error(`invalid subdir: ${JSON.stringify(raw)}`);
+  return raw;
+}
+/**
+ * subdir → 路径段（顺带挡掉 ..）。
+ *
+ * 用户给的 subdir 是第三方输入，../../.. 能把「技能来源」指到 clone 目录之外
+ * （比如用户 home 下的其他目录），所以先拆成段再拼，不直接 resolve 用户原串。
+ */
+function subdirSegments(subdir) {
+  const segments = subdir.split("\\").join("/").split("/").filter((segment) => segment !== "" && segment !== ".");
+  if (segments.some((segment) => segment === "..")) throw new Error(`invalid subdir: ${JSON.stringify(subdir)}`);
+  return segments;
+}
+/** 子目录绝对路径（越界防护）：解析结果必须仍在 clone 目录内。 */
+function resolveRepoSubdir(cloneDir, segments, subdir) {
+  const target = resolve(cloneDir, ...segments);
+  const within = relative(resolve(cloneDir), target);
+  if (within !== "" && (within.startsWith("..") || within.includes(sep + ".."))) {
+    throw new Error(`invalid subdir: ${JSON.stringify(subdir)}`);
+  }
+  return target;
+}
+/** 临时目录名：取地址最后一段，只为让根技能的兜底目录名有意义（如 my-skill）。 */
+function repoDirName(url) {
+  const tail = url.replace(/\/+$/g, "").split(/[/:]/).pop() ?? "";
+  const cleaned = tail.replace(/\.git$/i, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return cleaned === "" ? "repo" : cleaned.slice(0, NAME_MAX);
+}
+/** 目录名 → 技能名（小写、非字母数字转 -、去首尾 -）。 */
+function normalizeSkillName(raw) {
+  return raw.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+/** stderr 摘要：git 的进度输出是多行 + 回车，压成一行再截 300 字。 */
+function summarizeGitOutput(text) {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  return collapsed.length > 300 ? `${collapsed.slice(0, 300)}...` : collapsed;
+}
+/**
+ * 跑一次 git。
+ *
+ * execFile 不经 shell：url / ref 全来自用户输入，拼进命令行就是命令注入；
+ * 每个参数原样进 argv，配合 clone 的 -- 分隔符，参数不会被当成选项。
+ */
+function runGit(args) {
+  return new Promise((resolvePromise, reject) => {
+    execFile("git", args, {
+      timeout: GIT_CLONE_TIMEOUT_MS,
+      windowsHide: true,
+      // GIT_TERMINAL_PROMPT=0：私有仓库/需要凭据时立刻失败，而不是挂在终端提示上
+      // 等到 180s 超时（宿主进程没有 TTY，等提示等于等死）。
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
+    }, (error, stdout, stderr) => {
+      if (error === null) {
+        resolvePromise({ stdout, stderr });
+        return;
+      }
+      const label = args[0] === "-C" ? args[2] ?? "git" : args[0] ?? "git";
+      const detail = String(stderr ?? "").trim();
+      if (detail !== "") {
+        reject(new Error(`git ${label} failed: ${summarizeGitOutput(detail)}`));
+        return;
+      }
+      if (error.killed === true) {
+        reject(new Error(`git ${label} timed out after ${String(GIT_CLONE_TIMEOUT_MS)}ms`));
+        return;
+      }
+      reject(new Error(`git ${label} failed: ${summarizeGitOutput(error.message)}`));
+    });
+  });
+}
+async function isRegularFile(path) {
+  try {
+    return (await stat(path)).isFile();
+  } catch {
+    return false;
+  }
+}
+/** 子目录名（排序，保证多技能导入顺序稳定、面板里显示顺序可预期）。 */
+async function childDirNames(dir) {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  const names = [];
+  for (const entry of entries) {
+    if (entry.isDirectory() && !GIT_SKIP_NAMES.has(entry.name)) names.push(entry.name);
+  }
+  return names;
+}
+/** 某个目录下「自己带 SKILL.md」的子目录。 */
+async function skillChildDirs(base, baseRel) {
+  const out = [];
+  for (const name of await childDirNames(base)) {
+    if (!(await isRegularFile(join(base, name, SKILL_FILE)))) continue;
+    out.push({ dir: join(base, name), rel: baseRel === "" ? name : `${baseRel}/${name}` });
+  }
+  return out;
+}
+/**
+ * 技能发现（按顺序取第一个命中的规则）：
+ *   a. base/SKILL.md      → 单技能（技能目录 = base）
+ *   b. base/skills/<x>/SKILL.md → 多技能（技能包仓库的主场景）
+ *   c. base/<x>/SKILL.md  → 多技能
+ * 规则之间是「第一个命中就停」而不是合并：skills 目录本身也可能带 SKILL.md，
+ * 合并会把同一批技能装两遍。
+ */
+async function discoverSkillDirs(base, baseRel) {
+  if (await isRegularFile(join(base, SKILL_FILE))) return [{ dir: base, rel: baseRel }];
+  const nestedRel = baseRel === "" ? "skills" : `${baseRel}/skills`;
+  const nested = await skillChildDirs(join(base, "skills"), nestedRel);
+  if (nested.length > 0) return nested;
+  return skillChildDirs(base, baseRel);
+}
+/**
+ * 递归收集技能目录下的普通文件（相对路径用 / 分隔，便于走 resolveSkillFile 校验）。
+ *
+ * 只收 isFile() 的普通文件：clone 出来的仓库里可能有符号链接（指向 /etc/passwd
+ * 这种），跟着链接复制等于把宿主机文件读进技能目录。
+ */
+async function collectSkillFiles(dir, prefix, out) {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of entries) {
+    if (GIT_SKIP_NAMES.has(entry.name)) continue;
+    const rel = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+    if (entry.isDirectory()) {
+      await collectSkillFiles(join(dir, entry.name), rel, out);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    try {
+      const info = await stat(join(dir, entry.name));
+      out.push({ path: rel, size: info.size });
+    } catch {
+    }
+  }
+}
+/**
+ * POST /import-git：把 Git 仓库里的技能装进 managedRoot()。
+ *
+ * 流程：校验入参 → clone 到 mkdtemp 临时目录（finally 必删）→ 取 HEAD → 发现技能
+ * → 逐个落盘（同名覆盖）→ 归组。单个技能失败不打断整批：进 skipped，让面板能把
+ * 「装了什么 / 没装什么、为什么」一起显示出来。
+ */
+async function importGitSkills(body) {
+  const payload = typeof body === "object" && body !== null ? body : {};
+  const url = checkedGitUrl(payload.url);
+  const ref = checkedGitRef(payload.ref);
+  const subdir = checkedGitSubdir(payload.subdir);
+  const bundleId = typeof payload.bundleId === "string" ? payload.bundleId : "";
+  const root = managedRoot();
+  await mkdir(root, { recursive: true });
+  // 归组目标先验证：等 clone 完、文件也写完了再报「技能包不存在」，用户会看到
+  // 技能已经装进来但请求是 400，面板刷新后状态对不上。
+  if (bundleId !== "") {
+    const ledger = await readBundles(root);
+    if (!ledger.bundles.some((bundle) => bundle.id === bundleId)) {
+      throw new Error(`bundle ${JSON.stringify(bundleId)} not found`);
+    }
+  }
+  const tmp = await mkdtemp(join(tmpdir(), "dsh-skill-git-"));
+  try {
+    const cloneDir = join(tmp, repoDirName(url));
+    /*
+     * core.longpaths=true：技能包仓库常把升级卡 / benchmark 夹具一起提交，深层
+     * 目录很容易越过 Windows 的 260 字符路径上限，此时 git 会报
+     * "unable to access '...'"，整个导入直接 400。git 的 longpaths 开关能绕过
+     * MAX_PATH（git for Windows 自带，不需要改系统注册表），代价为零。
+     */
+    const cloneArgs = ["-c", "core.longpaths=true", "clone", "--depth", "1", "--single-branch"];
+    if (ref !== "") cloneArgs.push("--branch", ref);
+    // -- 之后再放地址：即使地址长得像选项（--upload-pack=...），也只能当仓库参数。
+    cloneArgs.push("--", url, cloneDir);
+    await runGit(cloneArgs);
+    const commit = (await runGit(["-C", cloneDir, "rev-parse", "HEAD"])).stdout.trim();
+    let base = cloneDir;
+    let baseRel = "";
+    if (subdir !== "") {
+      const segments = subdirSegments(subdir);
+      base = resolveRepoSubdir(cloneDir, segments, subdir);
+      baseRel = segments.join("/");
+      try {
+        if (!(await stat(base)).isDirectory()) throw new Error("not a directory");
+      } catch {
+        throw new Error(`subdir ${JSON.stringify(subdir)} not found in repository`);
+      }
+    }
+    const candidates = await discoverSkillDirs(base, baseRel);
+    if (candidates.length === 0) {
+      throw new Error(`no ${SKILL_FILE} found in ${subdir === "" ? "repository" : `subdir ${JSON.stringify(subdir)}`}`);
+    }
+    const installed = [];
+    const skipped = [];
+    const taken = /* @__PURE__ */ new Set();
+    for (const candidate of candidates) {
+      const label = candidate.rel === "" ? "." : candidate.rel;
+      if (installed.length >= GIT_IMPORT_MAX_SKILLS) {
+        skipped.push({ path: label, reason: `import limit reached (max ${String(GIT_IMPORT_MAX_SKILLS)} skills)` });
+        continue;
+      }
+      let metaRaw;
+      try {
+        metaRaw = await readFile(join(candidate.dir, SKILL_FILE), "utf8");
+      } catch {
+        skipped.push({ path: label, reason: `cannot read ${SKILL_FILE}` });
+        continue;
+      }
+      const fields = parseFrontmatter(metaRaw);
+      const metaName = typeof fields.name === "string" ? fields.name.trim() : "";
+      // 名字优先 frontmatter（技能作者定的规范名），不可用时才用目录名兜底。
+      let skillName = NAME_PATTERN.test(metaName) && metaName.length <= NAME_MAX ? metaName : normalizeSkillName(basename(candidate.dir));
+      if (!NAME_PATTERN.test(skillName) || skillName.length > NAME_MAX) {
+        skipped.push({ path: label, reason: "cannot derive a valid skill name" });
+        continue;
+      }
+      if (taken.has(skillName)) {
+        skipped.push({ path: label, reason: `duplicate skill name ${JSON.stringify(skillName)}` });
+        continue;
+      }
+      const files = [];
+      await collectSkillFiles(candidate.dir, "", files);
+      if (files.length > GIT_IMPORT_MAX_FILES) {
+        skipped.push({ path: label, reason: `too many files (>${String(GIT_IMPORT_MAX_FILES)})` });
+        continue;
+      }
+      let totalBytes = 0;
+      for (const file of files) totalBytes += file.size;
+      if (totalBytes > GIT_IMPORT_MAX_BYTES) {
+        skipped.push({ path: label, reason: `too large (>${String(GIT_IMPORT_MAX_BYTES)} bytes)` });
+        continue;
+      }
+      const dest = join(root, skillName);
+      let overwritten = false;
+      try {
+        await stat(dest);
+        overwritten = true;
+      } catch {
+      }
+      // 整体覆盖：先删再写。只删不写会让面板里出现半个技能，先写不删会残留旧文件。
+      if (overwritten) await rm(dest, { recursive: true, force: true });
+      await mkdir(dest, { recursive: true });
+      for (const file of files) {
+        const target = resolveSkillFile(dest, file.path);
+        await mkdir(join(target, ".."), { recursive: true });
+        await copyFile(join(candidate.dir, ...file.path.split("/")), target);
+      }
+      taken.add(skillName);
+      installed.push({
+        name: skillName,
+        dir: skillName,
+        description: typeof fields.description === "string" ? fields.description : "",
+        fileCount: files.length,
+        ...(overwritten ? { overwritten: true } : {})
+      });
+    }
+    for (const entry of installed) await assignBundle(root, entry.name, bundleId);
+    // 记来源（dsh-seeker-bot patch）：只有 Git 导入会写账本，自建技能没有记录，
+    // 因此永远不会被自动更新碰到。账本写失败不该把已经装好的技能变成 400。
+    if (installed.length > 0) {
+      try {
+        await rememberSource({
+          url,
+          ref,
+          subdir,
+          bundleId,
+          commit,
+          skills: installed.map((entry) => entry.name)
+        });
+      } catch {
+      }
+    }
+    return { ok: true, url, ref: ref === "" ? null : ref, commit, installed, skipped };
+  } finally {
+    // 临时目录无论成败都要删：clone 下来的仓库可能有几十 MB，失败重试几次就能堆满盘。
+    try {
+      await rm(tmp, { recursive: true, force: true });
+    } catch {
+    }
+  }
+}
+/*
+ * 技能来源账本与定时自动更新（dsh-seeker-bot patch）
+ *
+ * 用户要的是「从 Git 装的技能能自动跟着仓库更新，自己建的技能别乱动」，所以：
+ *   · 只有 importGitSkills 成功时才会写一条来源记录 —— 自建技能没有 url，天然
+ *     不会被更新碰到；
+ *   · 检查更新用 git ls-remote（只读远端 ref、不 clone），几十个来源也就几秒；
+ *   · 定时器 60s 心跳、每拍自己算「到期没有」，这样 PATCH 改 intervalHours 下一拍
+ *     就生效，不用重建定时器，也不会出现两次更新重叠。
+ */
+var SOURCES_FILE = ".skill-sources.json";
+var SOURCE_VERSION = 1;
+var SOURCE_DEFAULT_INTERVAL_HOURS = 6;
+var SOURCE_TICK_MS = 60 * 1000;
+var SOURCE_FIRST_DELAY_MS = 2 * 60 * 1000;
+var SOURCE_MIN_INTERVAL_MS = 60 * 1000;
+var SOURCE_INTERVAL_MAX_HOURS = 24 * 30;
+/** 当前毫秒时间戳：面板按数字算「N 小时前」，用 ISO 字符串会让 Date.now() - ts 变成 NaN。 */
+function nowMs() {
+  return Date.now();
+}
+/** 账本里的时间字段归一化：老账本可能存过 ISO 字符串，读出来统一成毫秒数。 */
+function toEpoch(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+/** 来源去重键：同一个仓库 + 同一个 ref + 同一个子目录才算同一条来源。 */
+function sourceKey(url, ref, subdir) {
+  return `${String(url).trim()}\u0000${String(ref ?? "").trim()}\u0000${String(subdir ?? "").trim()}`;
+}
+function defaultSourceSettings() {
+  return { autoUpdate: true, intervalHours: SOURCE_DEFAULT_INTERVAL_HOURS };
+}
+/** settings 归一化：脏值回落到默认，面板不该因为一个坏字段整页打不开。 */
+function normalizeSourceSettings(input) {
+  const settings = defaultSourceSettings();
+  if (typeof input !== "object" || input === null) return settings;
+  if (typeof input.autoUpdate === "boolean") settings.autoUpdate = input.autoUpdate;
+  const hours = Number(input.intervalHours);
+  if (Number.isFinite(hours) && hours > 0) settings.intervalHours = Math.min(hours, SOURCE_INTERVAL_MAX_HOURS);
+  return settings;
+}
+/** 一条来源记录的归一化：缺字段补默认，类型不对就丢（账本可能被手改坏）。 */
+function normalizeSourceRecord(raw) {
+  if (typeof raw !== "object" || raw === null) return void 0;
+  const url = typeof raw.url === "string" ? raw.url.trim() : "";
+  if (url === "") return void 0;
+  return {
+    id: typeof raw.id === "string" ? raw.id.trim() : "",
+    url,
+    ref: typeof raw.ref === "string" && raw.ref.trim() !== "" ? raw.ref.trim() : null,
+    subdir: typeof raw.subdir === "string" ? raw.subdir.trim() : "",
+    bundleId: typeof raw.bundleId === "string" ? raw.bundleId : "",
+    commit: typeof raw.commit === "string" ? raw.commit : "",
+    skills: Array.isArray(raw.skills) ? raw.skills.filter((item) => typeof item === "string") : [],
+    auto: raw.auto !== false,
+    lastCheck: toEpoch(raw.lastCheck),
+    lastUpdate: toEpoch(raw.lastUpdate),
+    lastError: typeof raw.lastError === "string" ? raw.lastError : null
+  };
+}
+/**
+ * 读来源账本。
+ *
+ * 账本坏了（手改成非法 JSON、字段类型错）一律按空处理：这里读不出来时如果直接抛，
+ * GET /sources 会 400，面板整个来源区块都打不开 —— 比「列表为空」糟糕得多。
+ */
+async function readSourceLedger() {
+  let parsed;
+  try {
+    parsed = JSON.parse(await readFile(join(managedRoot(), SOURCES_FILE), "utf8"));
+  } catch {
+    parsed = void 0;
+  }
+  const settings = normalizeSourceSettings(parsed?.settings);
+  const sources = [];
+  const rawSources = Array.isArray(parsed?.sources) ? parsed.sources : [];
+  for (const raw of rawSources) {
+    const record = normalizeSourceRecord(raw);
+    if (record === void 0) continue;
+    if (record.id === "") record.id = `src-${String(sources.length + 1)}`;
+    if (sources.some((item) => item.id === record.id)) continue;
+    sources.push(record);
+  }
+  return { version: SOURCE_VERSION, settings, sources };
+}
+/** 写来源账本（临时文件 + rename，避免别的请求读到写了一半的 JSON）。 */
+async function writeSourceLedger(ledger) {
+  const root = managedRoot();
+  await mkdir(root, { recursive: true });
+  const target = join(root, SOURCES_FILE);
+  const temp = `${target}.tmp`;
+  await writeFile(temp, `${JSON.stringify({ version: SOURCE_VERSION, settings: ledger.settings, sources: ledger.sources }, null, 2)}\n`, "utf8");
+  await rename(temp, target);
+}
+function nextSourceId(sources) {
+  const taken = /* @__PURE__ */ new Set(sources.map((item) => item.id));
+  let index = sources.length + 1;
+  while (taken.has(`src-${String(index)}`)) index += 1;
+  return `src-${String(index)}`;
+}
+/**
+ * 导入成功后记来源（dsh-seeker-bot patch）。
+ *
+ * 只记「从 Git 装进来的」技能，自建技能永远不在账本里，也就永远不会被自动更新
+ * 碰到 —— 这正是用户要的「自建的不参与更新」。重复导入同一仓库只更新已有记录，
+ * auto / lastCheck 这些用户与历史状态原样保留。
+ */
+async function rememberSource(input) {
+  const ledger = await readSourceLedger();
+  const key = sourceKey(input.url, input.ref, input.subdir);
+  const existing = ledger.sources.find((item) => sourceKey(item.url, item.ref, item.subdir) === key);
+  if (existing === void 0) {
+    const record = {
+      id: nextSourceId(ledger.sources),
+      url: input.url,
+      ref: input.ref === "" ? null : input.ref,
+      subdir: input.subdir,
+      bundleId: input.bundleId,
+      commit: input.commit,
+      skills: input.skills,
+      auto: true,
+      lastCheck: null,
+      lastUpdate: nowMs(),
+      lastError: null
+    };
+    ledger.sources.push(record);
+    await writeSourceLedger(ledger);
+    return record;
+  }
+  existing.commit = input.commit;
+  existing.skills = input.skills;
+  if (input.bundleId !== "") existing.bundleId = input.bundleId;
+  existing.lastUpdate = nowMs();
+  existing.lastError = null;
+  await writeSourceLedger(ledger);
+  return existing;
+}
+/**
+ * 远端 commit（git ls-remote，不 clone）。
+ *
+ * 未指定 ref 时看 HEAD；指定 ref 时同时查 refs/heads 与 refs/tags —— tag 可能是
+ * annotated tag（ls-remote 直接给的是 tag 对象 SHA），必须优先取 ^{} 的 peeled
+ * commit，否则「有更新」会永远为真。
+ */
+async function remoteCommitOf(url, ref) {
+  const target = checkedGitUrl(url);
+  const wanted = typeof ref === "string" ? ref.trim() : "";
+  const args = ["-c", "core.longpaths=true", "ls-remote", "--", target];
+  if (wanted === "") {
+    args.push("HEAD");
+  } else {
+    args.push(`refs/heads/${wanted}`, `refs/tags/${wanted}`, `refs/tags/${wanted}^{}`);
+  }
+  const { stdout } = await runGit(args);
+  const refs = /* @__PURE__ */ new Map();
+  for (const line of String(stdout ?? "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed === "") continue;
+    const [sha, name] = trimmed.split(/\s+/);
+    if (sha !== void 0 && name !== void 0) refs.set(name, sha);
+  }
+  if (wanted === "") {
+    const head = refs.get("HEAD");
+    if (head === void 0) throw new Error("remote HEAD not found");
+    return head;
+  }
+  const found = refs.get(`refs/heads/${wanted}`) ?? refs.get(`refs/tags/${wanted}^{}`) ?? refs.get(`refs/tags/${wanted}`);
+  if (found === void 0) throw new Error(`ref ${JSON.stringify(wanted)} not found on remote`);
+  return found;
+}
+/** GET /sources：settings + 全部来源记录。 */
+async function listSources() {
+  const ledger = await readSourceLedger();
+  return { settings: ledger.settings, sources: ledger.sources };
+}
+/** POST /sources/check {id?}：只读远端 ref，不 clone；单个来源失败不影响其它来源。 */
+async function checkSources(body) {
+  const payload = typeof body === "object" && body !== null ? body : {};
+  const wantedId = typeof payload.id === "string" ? payload.id.trim() : "";
+  const ledger = await readSourceLedger();
+  const targets = wantedId === "" ? ledger.sources : ledger.sources.filter((item) => item.id === wantedId);
+  if (wantedId !== "" && targets.length === 0) throw new Error(`source ${JSON.stringify(wantedId)} not found`);
+  const updates = [];
+  for (const record of targets) {
+    const entry = { id: record.id, url: record.url, currentCommit: record.commit, remoteCommit: "", hasUpdate: false };
+    try {
+      const remoteCommit = await remoteCommitOf(record.url, record.ref ?? "");
+      entry.remoteCommit = remoteCommit;
+      entry.hasUpdate = remoteCommit !== "" && remoteCommit !== record.commit;
+      record.lastCheck = nowMs();
+      record.lastError = null;
+    } catch (error) {
+      entry.error = error instanceof Error ? error.message : String(error);
+      record.lastCheck = nowMs();
+      record.lastError = entry.error;
+    }
+    updates.push(entry);
+  }
+  await writeSourceLedger(ledger);
+  return { checked: targets.length, updates };
+}
+/**
+ * POST /sources/:id/update：按记录重新导入。
+ *
+ * 复用 importGitSkills 而不是自己 clone 一遍：落盘、整体覆盖、归组、来源记录刷新
+ * 全在那一处，两条路各写一套迟早分叉（比如一边记得排除 node_modules，另一边忘了）。
+ */
+async function updateSource(id) {
+  const wantedId = typeof id === "string" ? id.trim() : "";
+  const before = await readSourceLedger();
+  const existing = before.sources.find((item) => item.id === wantedId);
+  if (existing === void 0) throw new Error(`source ${JSON.stringify(wantedId)} not found`);
+  let result;
+  try {
+    result = await importGitSkills({
+      url: existing.url,
+      ref: existing.ref ?? "",
+      subdir: existing.subdir,
+      bundleId: existing.bundleId
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // 失败也落账：面板上「上次更新失败：xxx」比一个静默的红点有用得多。
+    const ledger = await readSourceLedger();
+    const record = ledger.sources.find((item) => item.id === wantedId);
+    if (record !== void 0) {
+      record.lastError = message;
+      await writeSourceLedger(ledger);
+    }
+    throw error;
+  }
+  // importGitSkills 内部已经 upsert 了来源记录，这里补 lastUpdate 并读回最新状态。
+  const ledger = await readSourceLedger();
+  const record = ledger.sources.find((item) => item.id === wantedId);
+  if (record !== void 0) {
+    record.lastUpdate = nowMs();
+    record.lastError = null;
+    await writeSourceLedger(ledger);
+  }
+  return {
+    ok: true,
+    source: record ?? existing,
+    id: record?.id ?? existing.id,
+    url: record?.url ?? existing.url,
+    commit: result.commit,
+    skills: record?.skills ?? [],
+    installed: result.installed,
+    skipped: result.skipped
+  };
+}
+/**
+ * POST /sources/update-all：只更新 auto 为 true 的来源（auto=false 是用户明确关掉的）。
+ *
+ * 必须先 ls-remote 比对、只对真有更新的来源 clone：定时任务每 6 小时跑一次，
+ * 无条件全量重装等于定期把每个技能包重新下载一遍 —— 磁盘和网络都白烧，
+ * 而且用户没改过的技能也会被整体覆盖。顺带把 lastCheck 写掉，
+ * 面板上的「上次检查」才跟得上定时任务的真实节奏。
+ */
+async function updateAllSources() {
+  const check = await checkSources({});
+  const byId = new Map((check.updates ?? []).map((entry) => [entry.id, entry]));
+  const ledger = await readSourceLedger();
+  const updated = [];
+  const failed = [];
+  const skipped = [];
+  for (const record of ledger.sources) {
+    if (record.auto !== true) continue;
+    const entry = byId.get(record.id);
+    if (entry !== void 0 && typeof entry.error === "string") {
+      failed.push({ id: record.id, url: record.url, error: entry.error });
+      continue;
+    }
+    if (entry !== void 0 && entry.hasUpdate !== true) {
+      skipped.push(record.id);
+      continue;
+    }
+    try {
+      const result = await updateSource(record.id);
+      updated.push({ id: result.id, url: result.url, commit: result.commit, skills: result.skills });
+    } catch (error) {
+      failed.push({ id: record.id, url: record.url, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return { updated, failed, skipped };
+}
+/** PATCH /sources/settings {autoUpdate?, intervalHours?}：只改传进来的字段。 */
+async function patchSourceSettings(body) {
+  const payload = typeof body === "object" && body !== null ? body : {};
+  const ledger = await readSourceLedger();
+  if (typeof payload.autoUpdate === "boolean") ledger.settings.autoUpdate = payload.autoUpdate;
+  if (payload.intervalHours !== void 0) {
+    const hours = Number(payload.intervalHours);
+    if (!Number.isFinite(hours) || hours <= 0) throw new Error("intervalHours must be a positive number");
+    ledger.settings.intervalHours = Math.min(hours, SOURCE_INTERVAL_MAX_HOURS);
+  }
+  await writeSourceLedger(ledger);
+  return { ok: true, settings: ledger.settings };
+}
+/** PATCH /sources/:id {auto?} */
+async function patchSource(id, body) {
+  const payload = typeof body === "object" && body !== null ? body : {};
+  const ledger = await readSourceLedger();
+  const record = ledger.sources.find((item) => item.id === id);
+  if (record === void 0) throw new Error(`source ${JSON.stringify(id)} not found`);
+  if (typeof payload.auto === "boolean") record.auto = payload.auto;
+  await writeSourceLedger(ledger);
+  return { ok: true, source: record };
+}
+/** DELETE /sources/:id：只删来源记录，技能目录原样留着（用户可能还在用）。 */
+async function deleteSource(id) {
+  const ledger = await readSourceLedger();
+  const sources = ledger.sources.filter((item) => item.id !== id);
+  if (sources.length === ledger.sources.length) throw new Error(`source ${JSON.stringify(id)} not found`);
+  await writeSourceLedger({ ...ledger, sources });
+  return { ok: true, id };
+}
+/** 自动更新间隔（毫秒）：settings 被改成 0/负数/NaN 时回落默认，且有下限防狂刷。 */
+function sourceIntervalMs(settings) {
+  const hours = Number(settings?.intervalHours);
+  const safeHours = Number.isFinite(hours) && hours > 0 ? hours : SOURCE_DEFAULT_INTERVAL_HOURS;
+  return Math.max(SOURCE_MIN_INTERVAL_MS, safeHours * 3600 * 1000);
+}
+/** 首次执行延迟（测试可用环境变量压到 0，省得真等两分钟）。 */
+function sourceFirstDelayMs() {
+  const raw = Number(process.env.DSH_SKILL_SOURCE_FIRST_DELAY_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : SOURCE_FIRST_DELAY_MS;
+}
+/** 调度器状态：进程内记启动时刻与上次运行时刻。 */
+var sourceScheduler = { startedAt: 0, lastRunAt: 0 };
+/**
+ * 定时器单拍：到点才真正跑 update-all。
+ *
+ * 用「固定 60s 心跳 + 自己算到期」而不是把 setInterval 直接设成 intervalHours：
+ * settings 随时会被 PATCH 改掉，固定周期的 setInterval 改不了；心跳法下一拍就按
+ * 新值判断，而且上一拍还在跑时 lastRunAt 已经更新，下一拍会直接跳过，天然防重叠。
+ */
+async function sourceSchedulerTick(now) {
+  const at = typeof now === "number" ? now : Date.now();
+  const ledger = await readSourceLedger();
+  if (ledger.settings.autoUpdate !== true) return { skipped: true, reason: "autoUpdate off", updated: [], failed: [] };
+  if (sourceScheduler.lastRunAt === 0 && at - sourceScheduler.startedAt < sourceFirstDelayMs()) {
+    return { skipped: true, reason: "first delay", updated: [], failed: [] };
+  }
+  if (sourceScheduler.lastRunAt !== 0 && at - sourceScheduler.lastRunAt < sourceIntervalMs(ledger.settings)) {
+    return { skipped: true, reason: "not due", updated: [], failed: [] };
+  }
+  // 先记运行时刻再跑：更新可能跑很久，期间来的下一拍必须看到「已经在跑了」。
+  sourceScheduler.lastRunAt = at;
+  const result = await updateAllSources();
+  return { skipped: false, ...result };
+}
+/**
+ * 读一个技能文件的文本内容。
+ *
+ * 二进制文件（图片 / 字体 / 压缩包…）**不再**强按 UTF-8 解码：那会把字节流变成
 /**
  * 读一个技能文件的文本内容。
  *
@@ -899,6 +1602,51 @@ async function handle(ctx, req, res) {
       json(res, 200, await installSkill(body));
       return;
     }
+    // Git 一键导入（dsh-seeker-bot patch）：粘一个仓库地址就把里面的技能装进来。
+    if (method === "POST" && rest === "/import-git") {
+      const body = await readBody(req);
+      json(res, 200, await importGitSkills(body));
+      return;
+    }
+    /*
+     * 技能来源路由（dsh-seeker-bot patch）。
+     *
+     * 静态路径（/sources/check、/sources/update-all、/sources/settings）必须排在
+     * /sources/:id 前面，否则 "check" 会被当成一个来源 id 吃掉。
+     */
+    if (method === "GET" && rest === "/sources") {
+      json(res, 200, await listSources());
+      return;
+    }
+    if (method === "POST" && rest === "/sources/check") {
+      const body = await readBody(req);
+      json(res, 200, await checkSources(body));
+      return;
+    }
+    if (method === "POST" && rest === "/sources/update-all") {
+      json(res, 200, await updateAllSources());
+      return;
+    }
+    if (method === "PATCH" && rest === "/sources/settings") {
+      const body = await readBody(req);
+      json(res, 200, await patchSourceSettings(body));
+      return;
+    }
+    const matchSourceUpdate = /^\/sources\/([^/]+)\/update$/.exec(rest);
+    if (method === "POST" && matchSourceUpdate !== null) {
+      json(res, 200, await updateSource(decodeURIComponent(matchSourceUpdate[1])));
+      return;
+    }
+    const matchSource = /^\/sources\/([^/]+)$/.exec(rest);
+    if (method === "PATCH" && matchSource !== null) {
+      const body = await readBody(req);
+      json(res, 200, await patchSource(decodeURIComponent(matchSource[1]), body));
+      return;
+    }
+    if (method === "DELETE" && matchSource !== null) {
+      json(res, 200, await deleteSource(decodeURIComponent(matchSource[1])));
+      return;
+    }
     const matchSkillDelete = /^\/skills\/([^/]+)$/.exec(rest);
     if (method === "DELETE" && matchSkillDelete !== null) {
       const result = await deleteSkill(decodeURIComponent(matchSkillDelete[1]));
@@ -943,6 +1691,24 @@ async function apply(ctx) {
       void handle(ctx, req, res);
     }
   }), "dsh-skill-manager: routes");
+  /*
+   * 定时自动更新（dsh-seeker-bot patch）。
+   *
+   * 60s 心跳、由 sourceSchedulerTick 自己算到期（见那里的注释）；首次执行延迟
+   * 2 分钟是为了避开宿主启动时的 IO 高峰（插件物化内置技能、扫技能根都在那几秒）。
+   * 任何一次失败都只写进账本 lastError —— 定时任务把宿主带崩是不可接受的。
+   */
+  ctx.effect(() => {
+    sourceScheduler.startedAt = Date.now();
+    sourceScheduler.lastRunAt = 0;
+    const timer = setInterval(() => {
+      void sourceSchedulerTick().catch(() => {
+      });
+    }, SOURCE_TICK_MS);
+    // 别让这个定时器把宿主进程钉住不退出。
+    if (typeof timer.unref === "function") timer.unref();
+    return () => clearInterval(timer);
+  }, "dsh-skill-manager: source auto update");
 }
 export {
   apply,

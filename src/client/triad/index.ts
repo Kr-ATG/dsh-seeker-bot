@@ -6,13 +6,12 @@
  *  - memory     → 官方 main 页 + sidebar.panellist 菜单行（composer 注入开关已全部下线）
  *  - usage      → 侧边栏导航行 + 用量紧凑卡片（唯一保留的自绘浮层入口）
  *  - skills     → 官方 main 页 + sidebar.panellist 菜单行 + `/` slash source + skill tool row
- *  - mail       → 官方 main 页 + sidebar.panellist 菜单行（Agent Mail 三栏工作台）
  *  - responsive → 窄屏全局覆盖样式
  *
  * 定时自动化（原 automation 模块）已于 2026-09-28 删除：官方
  * `@deepseek-ai/dsh-experimental-schedule-bundle` 提供了任务页与 schedule_* 工具。
  *
- * 2026-10-04 入口改版：记忆 / 能力 / 邮箱三个工作台原先都是「自绘侧边栏导航行
+ * 2026-10-04 入口改版：记忆 / 能力两个工作台原先都是「自绘侧边栏导航行
  * + createPortal 到 body 的浮层抽屉」，现已全部改走官方座位（`main` 页 +
  * `sidebar.panellist` 菜单行），与官方「自动化任务」页完全同座位——见
  * `./panel-seat.tsx`。用量因为点开的是贴入口的紧凑小卡而不是整页，仍保留

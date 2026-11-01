@@ -33,6 +33,7 @@
 
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import {
+  clearBrowserActivitySnapshot,
   mountBrowserFlagPreview,
   resetBrowserActivitySnapshot,
   unmountBrowserFlagPreview,
@@ -87,7 +88,15 @@ export function applyBrowserFlagClient(ctx: ClientContext): void {
     off()
     try {
       stopBrowserActivityPolling()
-      resetBrowserActivitySnapshot()
+      /*
+       * 卸载 / 热重载走**只清内存**的那条路：会话级记忆的落盘保留，下一次加载
+       * 还能读回来。走 reset 的话，作者每热重载一次就把「本会话用过浏览器」的
+       * 记忆连同落盘一起抹掉 —— 该亮的图标不亮，且没有任何报错可查。
+       *
+       * 功能开关关闭（上面 sync 的 else 分支）才用 reset：那种场景用户要的是
+       * 彻底清干净，连刷新后都不该复活。
+       */
+      clearBrowserActivitySnapshot()
       unmountBrowserFlagPreview()
     } catch { /* 卸载时静默 */ }
   }, 'dsh-seeker-bot: browser flag feature switch')
