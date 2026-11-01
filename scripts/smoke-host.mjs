@@ -87,6 +87,9 @@ const assembleListeners = []
 const providerRoutes = []
 const providerTools = []
 const providerNamespaces = []
+// ctx.web 的搜索后端注册名号：anysearch（单体）与 anysearch-auto（降级链）必须同时
+// 在场，宿主靠 web.searchProvider 二选一；少了 auto 就等于自动切换功能没挂上。
+const providerSearchProviders = []
 const liveRouteAgent = { id: 'route-session' }
 const providerCtx = {
   logger: { warn: () => {}, error: () => {}, info: () => {}, debug: () => {} },
@@ -108,7 +111,7 @@ const providerCtx = {
   fs: { resolve: async (p) => p, readText: async () => '{}', writeText: async () => {} },
   shell: { resolve: () => ({}), execute: async () => ({ stdout: '', stderr: '', exitCode: 0 }) },
   sandboxPolicy: { resolve: () => ({ mode: 'danger-full-access' }) },
-  web: { registerSearchProvider: () => {} },
+  web: { registerSearchProvider: (provider) => { providerSearchProviders.push(provider?.id) } },
 }
 const stubCtx = {
   // 老写法（apply 里直接 ctx.webServer.xxx）在这里拿不到该属性 → TypeError。
@@ -769,8 +772,14 @@ if (!providerToolNames.includes('generate_image') || !providerToolNames.includes
 } else {
   pass('provider hub tools registered: generate_image + generate_video')
 }
-for (const ns of ['network-proxy', 'model-capabilities', 'web-search-anysearch']) {
+for (const ns of ['network-proxy', 'model-capabilities', 'web-search-anysearch', 'web-search-auto']) {
   if (!providerNamespaces.includes(ns)) fail(`provider hub settings namespace missing: ${ns}`)
+}
+for (const id of ['anysearch', 'anysearch-auto']) {
+  if (!providerSearchProviders.includes(id)) fail(`provider hub search provider missing: ${id}`)
+}
+if (providerSearchProviders.length === 2) {
+  pass(`搜索后端注册就位：${providerSearchProviders.join(' / ')}（auto 为 AnySearch→Tavily→DeepSeek 降级链）`)
 }
 if (providerNamespaces.length >= 3) {
   pass(`provider hub settings namespaces preserved: ${providerNamespaces.join(', ')}`)

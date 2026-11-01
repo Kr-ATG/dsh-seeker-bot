@@ -91,8 +91,18 @@ function resolveOptions(ctx: Context, config: AnySearchSection): AnySearchSearch
 /**
  * 注册 `anysearch` 搜索 provider。settings 服务在即挂命名空间并把解析源
  * 指向 scope；服务缺席则回落组合入口，provider 照常可用。
+ *
+ * 返回构造出的实例，给 `anysearch-auto` 链复用：链不能再挂一次
+ * `web-search-anysearch` 命名空间（会撞 settings 的重复注册），只能共用这个实例；
+ * 共用同时意味着用户已有的端点 / key / maxResults 配置零迁移。
+ *
+ * 注册失败不再向上抛：唯一现实的失败原因是 `WEB_DUPLICATE_PROVIDER`（别处已注册了
+ * 同名 provider），那既不影响本模块，也不该连带废掉降级链里这一环。记一条 warn
+ * 足够，实例照样归链使用。
+ * @param ctx - 插件上下文。
+ * @returns provider 实例；构造本身失败时 undefined。
  */
-export function applyAnySearch(ctx: Context): void {
+export function applyAnySearch(ctx: Context): AnySearchSearchProvider | undefined {
   const entry = AnySearchSectionSchema({})
   let current: () => AnySearchSection = () => entry
   try {
@@ -112,10 +122,17 @@ export function applyAnySearch(ctx: Context): void {
   } catch (error) {
     ctx.logger?.warn?.(`[hub/web-search] 设置命名空间挂载失败，走默认配置：${String(error)}`)
   }
+  let provider: AnySearchSearchProvider
   try {
-    ctx.web.registerSearchProvider(new AnySearchSearchProvider(() => resolveOptions(ctx, current())))
+    provider = new AnySearchSearchProvider(() => resolveOptions(ctx, current()))
   } catch (error) {
-    ctx.logger?.warn?.(`[hub/web-search] anysearch provider 注册失败：${String(error)}`)
-    throw error
+    ctx.logger?.warn?.(`[hub/web-search] anysearch provider 构造失败：${String(error)}`)
+    return undefined
   }
+  try {
+    ctx.web.registerSearchProvider(provider)
+  } catch (error) {
+    ctx.logger?.warn?.(`[hub/web-search] anysearch provider 注册失败（降级链仍可使用它）：${String(error)}`)
+  }
+  return provider
 }

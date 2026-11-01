@@ -21,6 +21,11 @@ import type {
 } from '@deepseek-ai/dsh-web'
 import type { CredentialRef } from '../vendor/credential-ref.ts'
 import { WebError } from '../vendor/error.ts'
+import { ClassifiedWebError, WEB_UNAVAILABLE, classifyWebFailure, parseRetryAfter } from './web-search-failure.ts'
+import { abortable as sharedAbortable, searchAborted as sharedSearchAborted, throwIfSearchAborted as sharedThrowIfAborted, isAbortError } from './web-search-abort.ts'
+
+/** 取消消息里的 provider 名（保持各环消息可辨识）。 */
+const PROVIDER_NAME = 'AnySearch'
 
 /** Stable id this provider registers under. */
 export const ANYSEARCH_PROVIDER_ID = 'anysearch'
@@ -79,6 +84,11 @@ export interface AnySearchResponse {
   code?: number
   /** Envelope error text, present when `code` is non-zero. */
   message?: string
+  /**
+   * Machine-readable failure class (实测 401 返回 `invalid_api_key`). 额度类失败靠它
+   * 与 message 关键词判定，丢了它就等于让降级链瞎眼。
+   */
+  error_code?: string
   request_id?: string
   /** Nested payload envelope (`data.data.results` / `data.data.metadata`). */
   data?: AnySearchResponseData
@@ -98,10 +108,15 @@ export function mapAnySearchResponse(response: AnySearchResponse): WebSearchResu
   // A non-zero envelope `code` is a business error even when HTTP is 200:
   // swallowing it would surface an empty result set as a successful search.
   if (response.code !== undefined && response.code !== 0) {
-    const message = response.message?.trim()
-    throw new WebError(
-      `AnySearch API ${message !== undefined && message.length > 0 ? message : `code ${response.code}`}`,
-      'WEB_PROVIDER_ERROR',
+    const detail = response.message?.trim()
+    const text = detail !== undefined && detail.length > 0 ? detail : `code ${response.code}`
+    throw new ClassifiedWebError(
+      `AnySearch API ${text}`,
+      classifyWebFailure({
+        ...((response.error_code === undefined || response.error_code.length === 0)
+          ? {} : { errorCode: response.error_code }),
+        message: text,
+      }),
     )
   }
   const sources: WebSearchSource[] = []
@@ -124,15 +139,21 @@ export function mapAnySearchResponse(response: AnySearchResponse): WebSearchResu
   return { sources, truncated: false }
 }
 
-/** The AnySearch-backed search provider; HTTP redirects fail as `WEB_PROVIDER_ERROR`. */
+/** The AnySearch-backed search provider; HTTP redirects fail as `WEB_UNAVAILABLE`. */
 export class AnySearchSearchProvider implements WebSearchProvider {
   readonly id = ANYSEARCH_PROVIDER_ID
+
+  private readonly resolveOptions: () => AnySearchSearchProviderOptions
 
   /**
    * @param resolveOptions - options for the NEXT operation, snapshotted once at
    * each operation's entry so one search never mixes two settings revisions.
+   * 显式赋值而非 parameter property：Node 的 strip-only TS 模式不接受
+   * `constructor(private readonly …)`，那样单测就得先打包才跑得动。
    */
-  constructor(private readonly resolveOptions: () => AnySearchSearchProviderOptions) {}
+  constructor(resolveOptions: () => AnySearchSearchProviderOptions) {
+    this.resolveOptions = resolveOptions
+  }
 
   available(): boolean {
     const options = this.resolveOptions()
@@ -172,16 +193,25 @@ export class AnySearchSearchProvider implements WebSearchProvider {
       })
     } catch (error: unknown) {
       if (signal?.aborted === true || isAbortError(error)) throw searchAborted(signal, error)
-      throw new WebError(`AnySearch search request failed: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
+      // 连不上/超时是「这一家此刻不中用」，不是「这个查询不中用」：值得换下一家。
+      throw new ClassifiedWebError(
+        `AnySearch search request failed: ${String(error)}`,
+        WEB_UNAVAILABLE,
+        undefined,
+        { cause: error },
+      )
     }
 
     if (!response.ok) {
       const status = response.status
-      let message = `AnySearch API error (HTTP ${status})`
+      const prefix = `AnySearch API error (HTTP ${status})`
+      let message = prefix
+      let errorCode: string | undefined
       try {
         const parsed = await response.json() as Partial<AnySearchResponse>
         const detail = parsed.message
-        if (detail !== undefined && detail.length > 0) message = detail
+        if (detail !== undefined && detail.length > 0) message = `${prefix}: ${detail}`
+        errorCode = parsed.error_code
       } catch (error: unknown) {
         // An abort fired mid-body must surface as WEB_ABORTED, not be swallowed
         // into a generic HTTP-error message — cancellation is not a provider
@@ -190,7 +220,17 @@ export class AnySearchSearchProvider implements WebSearchProvider {
         // Otherwise: the HTTP status is already captured in `message` above; a
         // malformed/non-JSON error body can only cost a richer message.
       }
-      throw new WebError(message, 'WEB_PROVIDER_ERROR')
+      const retryAfterSeconds = parseRetryAfter(response.headers.get('retry-after'))
+      throw new ClassifiedWebError(
+        message,
+        classifyWebFailure({
+          status,
+          ...(errorCode === undefined || errorCode.length === 0 ? {} : { errorCode }),
+          message,
+          ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+        }),
+        retryAfterSeconds,
+      )
     }
 
     try {
@@ -198,7 +238,12 @@ export class AnySearchSearchProvider implements WebSearchProvider {
       return mapAnySearchResponse(payload)
     } catch (error: unknown) {
       if (signal?.aborted === true || isAbortError(error)) throw searchAborted(signal, error)
-      throw new WebError(`AnySearch returned an unprocessable response body: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
+      throw new ClassifiedWebError(
+        `AnySearch returned an unprocessable response body: ${String(error)}`,
+        WEB_UNAVAILABLE,
+        undefined,
+        { cause: error },
+      )
     }
   }
 
@@ -229,44 +274,22 @@ export class AnySearchSearchProvider implements WebSearchProvider {
 }
 
 /**
- * Race a same-process asynchronous preflight against caller cancellation. The
- * attached settlement handlers keep observing an uncooperative operation after
- * abort so a later rejection cannot become unhandled.
+ * 取消语义转发到 ./web-search-abort.ts。链上三个后端必须共用同一份实现：多一个
+ * 副本就多一次「改动时被写歪」的机会，而把用户取消误判成后端故障，会让降级链在
+ * 停止生成之后继续往下几家猛打。保留这些同名本地函数只是为了一次都不改调用点。
  */
 function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (signal === undefined) return operation
-  if (signal.aborted) return Promise.reject(searchAborted(signal))
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = (): void => { reject(searchAborted(signal)) }
-    signal.addEventListener('abort', onAbort, { once: true })
-    void operation.then(
-      (value) => {
-        signal.removeEventListener('abort', onAbort)
-        resolve(value)
-      },
-      (error: unknown) => {
-        signal.removeEventListener('abort', onAbort)
-        reject(new Error(String(error).replace(/^Error: /u, ''), { cause: error }))
-      },
-    )
-  })
+  return sharedAbortable(PROVIDER_NAME, operation, signal)
 }
 
 /** Throw the provider's stable cancellation error when the caller already aborted. */
 function throwIfSearchAborted(signal?: AbortSignal): void {
-  if (signal?.aborted === true) throw searchAborted(signal)
+  sharedThrowIfAborted(PROVIDER_NAME, signal)
 }
 
 /** Build the provider's stable cancellation error while retaining the caller's reason. */
 function searchAborted(signal?: AbortSignal, fallback?: unknown): WebError {
-  return new WebError('AnySearch search aborted', 'WEB_ABORTED', {
-    cause: signal?.aborted === true ? signal.reason : fallback,
-  })
-}
-
-/** True for a fetch/`AbortSignal` abort, surfaced as `WEB_ABORTED`. */
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'AbortError'
+  return sharedSearchAborted(PROVIDER_NAME, signal, fallback)
 }
 
 /** True for a request limit that can be sent to AnySearch (a positive whole number). */

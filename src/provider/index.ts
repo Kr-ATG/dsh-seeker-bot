@@ -1,7 +1,7 @@
 /**
  * dsh-seeker-bot — 供应商中心 host 半身（原 dsh-provider-hub，2026-10-05 融合）。
  *
- * 把六个「供应商 / 模型相关」模块装进 dsh-seeker-bot 的 host 半身，每个模块独立
+ * 把七个「供应商 / 模型相关」模块装进 dsh-seeker-bot 的 host 半身，每个模块独立
  * try/catch 挂载，一个模块挂了不得拖垮其余：
  *
  *   1. 网络代理（proxy-host.js，自 dsh-network-proxy lib 产物）：
@@ -26,6 +26,11 @@
  *   6. 凭据密钥环（modules/credential-keyring.ts）：HTTP API
  *      /api/provider-hub-keys/*。替换 API key 不再覆盖——旧值入环
  *      （`R__KEY_n` 存档引用），可命名、可一键切回（交换语义，两边不丢）。
+ *   7. 搜索降级链（modules/web-search-auto.ts + web-search-chain.ts +
+ *      web-search-tavily.ts + web-search-deepseek-fallback.ts +
+ *      web-search-failure.ts）：向 `ctx.web` 注册单入口 id=anysearch-auto 的
+ *      降级链（AnySearch → Tavily → DeepSeek），settings 命名空间
+ *      web-search-auto。宿主 seam 不会降级，所以链只能在插件这一侧成长。
  *
  * 路由前缀、settings 命名空间、工具名一律原样保留（用户零迁移）。
  * 调用方（src/host.ts）负责用 `ctx.inject([...])` 等待上面这些服务就绪，
@@ -40,6 +45,8 @@ import * as capsHost from './capabilities-host.js'
 import { applyVisionHelper } from './modules/vision-helper'
 import { applyPromptOptimize } from './modules/prompt-optimize.ts'
 import { applyAnySearch } from './modules/web-search-anysearch.ts'
+import { applyWebSearchAuto } from './modules/web-search-auto.ts'
+import type { AnySearchSearchProvider } from './modules/web-search-provider.ts'
 import { applyCredentialKeyring } from './modules/credential-keyring.ts'
 
 /** 本模块需要的宿主服务（由调用方 ctx.inject 满足）。 */
@@ -92,8 +99,10 @@ export function applyProviderHub(ctx: Context): void {
   }
 
   // 5. 外接网页搜索：id=anysearch provider + web-search-anysearch 设置命名空间。
+  //    实例留给第 7 步的降级链复用（链不能重复挂同一个命名空间）。
+  let anySearch: AnySearchSearchProvider | undefined
   try {
-    applyAnySearch(ctx)
+    anySearch = applyAnySearch(ctx)
   } catch (error) {
     warn('web-search', error)
   }
@@ -103,5 +112,18 @@ export function applyProviderHub(ctx: Context): void {
     applyCredentialKeyring(ctx)
   } catch (error) {
     warn('credential-keyring', error)
+  }
+
+  // 7. 搜索降级链：单入口 id=anysearch-auto 的链（AnySearch → Tavily → DeepSeek）。
+  //    `ctx.web` 的 seam 不会降级——宿主 WebRuntime.search() 就是
+  //    selectSearchProvider().search() 一行，注释还写明 web.searchProvider
+  //    「不是隐藏优先级链」，registry 也是私有 Map（插件枚举不到别的后端）。
+  //    所以「额度没了自动切」只能长在插件这一侧，对宿主永远只暴露一个 provider。
+  //    profile 里把 web.searchProvider 指向 `anysearch-auto` 即启用，改回
+  //    `anysearch` 即回退，base 不动。
+  try {
+    applyWebSearchAuto(ctx, { anysearch: anySearch })
+  } catch (error) {
+    warn('web-search-auto', error)
   }
 }
