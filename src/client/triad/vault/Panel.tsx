@@ -67,12 +67,14 @@ import {
   PlusIcon,
   RefreshIcon,
   SearchIcon,
+  ShieldIcon,
   TrashIcon,
   sceneIconOf,
 } from './icons.js'
 import { VaultDetailDrawer } from './DetailDrawer.js'
 import { VaultReminderWindow, reminderCount, reminderTone } from './ReminderWindow.js'
 import { VaultBackupPanel } from './BackupPanel.js'
+import { VaultBrokerPanel } from './BrokerPanel.js'
 import { VaultModal } from './Shell.js'
 import { PopoverShell, PshBody } from '../popover-shell.js'
 
@@ -193,6 +195,7 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
   const [reminders, setReminders] = useState<VaultReminderReport | null>(null)
   const [reminderOpen, setReminderOpen] = useState<boolean>(false)
   const [backupOpen, setBackupOpen] = useState<boolean>(false)
+  const [brokerOpen, setBrokerOpen] = useState<boolean>(false)
 
   /** 拉全量（首屏与「刷新 / 重试」共用一条路径）。 */
   const refresh = useCallback(async (): Promise<void> => {
@@ -266,6 +269,11 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
         event.preventDefault()
         event.stopImmediatePropagation()
       }
+      if (brokerOpen) {
+        consume()
+        setBrokerOpen(false)
+        return
+      }
       if (backupOpen) {
         consume()
         setBackupOpen(false)
@@ -288,7 +296,7 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
     }
     window.addEventListener('keydown', onKey, true)
     return () => { window.removeEventListener('keydown', onKey, true) }
-  }, [openId, creatingScene, reminderOpen, backupOpen])
+  }, [openId, creatingScene, reminderOpen, backupOpen, brokerOpen])
 
   // flash 自动消失（定时器随文本变化重置）。
   useEffect(() => {
@@ -564,7 +572,7 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
             data-tone={reminderToneValue}
             title={reminderTitle}
             aria-label={reminderTitle}
-            onClick={() => { setBackupOpen(false); setReminderOpen(true) }}
+            onClick={() => { setBackupOpen(false); setBrokerOpen(false); setReminderOpen(true) }}
           >
             <ClockIcon size={13} />
             {reminderLabel}
@@ -575,8 +583,16 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
           <button
             type="button"
             className={css.ghostBtn}
+            title="凭据代用：让 AI 用档案里的密码完成 SSH / HTTP 操作，但始终看不到密码"
+            onClick={() => { setReminderOpen(false); setBackupOpen(false); setBrokerOpen(true) }}
+          >
+            <ShieldIcon size={13} /> 代用
+          </button>
+          <button
+            type="button"
+            className={css.ghostBtn}
             title="备份密钥与恢复（换机器时用）"
-            onClick={() => { setReminderOpen(false); setBackupOpen(true) }}
+            onClick={() => { setReminderOpen(false); setBrokerOpen(false); setBackupOpen(true) }}
           >
             <KeyIcon size={13} /> 备份
           </button>
@@ -962,6 +978,35 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
             onOpenRecord={onOpenReminder}
             onClose={() => { setReminderOpen(false) }}
           />
+        </VaultModal>
+      )}
+
+      {brokerOpen && (
+        <VaultModal label="凭据代用" onClose={() => { setBrokerOpen(false) }}>
+          <div className={css.panelHead}>
+            <span style={{ display: 'inline-flex', color: 'var(--v-text-2)' }}><ShieldIcon size={16} /></span>
+            <div style={{ flex: 1, minWidth: 0, fontSize: 15, fontWeight: 600, lineHeight: '22px' }}>
+              凭据代用
+            </div>
+            <button
+              type="button"
+              className={css.panelClose}
+              aria-label="关闭凭据代用"
+              title="关闭（Esc）"
+              onClick={() => { setBrokerOpen(false) }}
+            >
+              <CloseIcon size={15} />
+            </button>
+          </div>
+          <div className={css.panelBody}>
+            <VaultBrokerPanel
+              config={config}
+              records={records}
+              onSaved={(next) => { setConfig((previous) => ({ ...previous, ...next })) }}
+              onError={(message) => { setActionError(message) }}
+              onFlash={(message) => { setFlash(message) }}
+            />
+          </div>
         </VaultModal>
       )}
 

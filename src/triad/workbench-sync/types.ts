@@ -62,6 +62,8 @@ export interface WorkbenchSyncSettings {
   includeSkills: boolean
   /** 是否包含 MCP 配置与开关（默认 true）。 */
   includeMcp: boolean
+  /** 是否包含供应商配置与密钥（默认 true）。 */
+  includeProviders: boolean
   /** 上次成功上传时间（ISO 字符串）。 */
   lastUploadedAt?: string
   /** 上次成功上传的 commit sha。 */
@@ -100,6 +102,7 @@ export interface WorkbenchSyncPublic {
   includeMemory: boolean
   includeSkills: boolean
   includeMcp: boolean
+  includeProviders: boolean
   nextUploadAt: string
   nextSyncAt: string
   lastUploadedAt: string
@@ -113,6 +116,10 @@ export interface WorkbenchSyncPublic {
   localSkillsBytes: number
   localMcpBytes: number
   localMcpEntries: number
+  localProvidersBytes: number
+  localProvidersCount: number
+  /** 当前 `web` 条目选的搜索后端（`anysearch-auto` / `anysearch` / `deepseek-official`…），空串=未显式配置。 */
+  localWebSearchProvider: string
   passphraseSet: boolean
   tokenSet: boolean
   tokenSource: 'gh' | 'stored' | 'none'
@@ -136,6 +143,7 @@ export interface WorkbenchSyncPatch {
   includeMemory?: boolean
   includeSkills?: boolean
   includeMcp?: boolean
+  includeProviders?: boolean
   clearToken?: boolean
   clearPassphrase?: boolean
 }
@@ -151,6 +159,7 @@ export const DEFAULT_WORKBENCH_SYNC_SETTINGS: WorkbenchSyncSettings = {
   includeMemory: true,
   includeSkills: true,
   includeMcp: true,
+  includeProviders: true,
   history: [],
 }
 

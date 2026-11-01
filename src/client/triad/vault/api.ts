@@ -130,12 +130,19 @@ export interface VaultPhotoVariantPayload {
   height: number
 }
 
-/** 明文查看审计的一条记录。 */
+/** 明文查看 / 凭据代用审计的一条记录。 */
 export interface VaultAuditEntry {
   at: string
   recordId: string
   fieldKey: string
   via: string
+  /** 'reveal' = 页面点眼睛；'exec' = 凭据代用。老记录没有这个字段。 */
+  action?: 'reveal' | 'exec'
+  program?: string
+  args?: string
+  purpose?: string
+  exitCode?: number | null
+  durationMs?: number
 }
 
 /* ───────────────────────── 传输层 ───────────────────────── */

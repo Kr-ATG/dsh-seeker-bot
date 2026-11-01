@@ -2,15 +2,15 @@
   "version": 1,
   "generatedAt": "2026-11-01T03:48:39.295Z",
   "counts": {
-    "total": 56,
-    "cn": 13,
+    "total": 57,
+    "cn": 14,
     "global": 43
   },
   "categories": [
     {
       "id": "办公协作",
       "label": "办公协作",
-      "count": 5
+      "count": 6
     },
     {
       "id": "开发工具",
@@ -519,7 +519,7 @@
       "name": "Gmail",
       "nameEn": "Gmail",
       "tagline": "收发邮件、搜索、标签管理",
-      "description": "读写 Gmail 邮件：搜索、发送、带附件、标签管理、标记已读与删除。首次使用要在终端跑一次 npx @gongrzhe/server-gmail-autoauth-mcp auth，按提示在浏览器里登录 Google 账号；授权后凭据存在 ~/.gmail-mcp/，之后不用再授权。",
+      "description": "读写 Gmail 邮件：搜索、发送、带附件、标签管理、标记已读与删除。点弹窗里的「打开浏览器授权」会直接拉起浏览器登录 Google，不用自己敲命令；授权后凭据存在 ~/.gmail-mcp/，之后不用再来一次。第一次使用需要先在 Google Cloud 建一个 OAuth 客户端，下载 gcp-oauth.keys.json 放到 ~/.gmail-mcp/。",
       "category": "办公协作",
       "region": "global",
       "author": "GongRzhe",
@@ -535,6 +535,40 @@
       },
       "iconFile": "gmail.png",
       "iconMime": "image/png",
+      "featured": true,
+      "authorize": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@gongrzhe/server-gmail-autoauth-mcp",
+          "auth"
+        ],
+        "requiresFile": "~/.gmail-mcp/gcp-oauth.keys.json",
+        "requiresLabel": "Google OAuth 客户端凭据（gcp-oauth.keys.json）",
+        "setupUrl": "https://console.cloud.google.com/apis/credentials",
+        "doneHint": "浏览器已打开 Google 授权页，登录并同意后凭据会存到 ~/.gmail-mcp/，回来点「保存配置」即可。"
+      }
+    },
+    {
+      "id": "agently-mail",
+      "name": "Agent Mail",
+      "nameEn": "Agent Mail (Tencent)",
+      "tagline": "收发邮件、搜索、附件",
+      "description": "腾讯 Agent Mail 的专属邮箱：收发邮件、搜索、附件上传下载、监听新邮件。授权走设备码流程（点一次链接即可），不需要 Google Cloud 那套项目配置和强制两步验证。装完直接能用——授权 token 存在系统 keychain 里。",
+      "category": "办公协作",
+      "region": "cn",
+      "author": "腾讯 QQ 邮箱",
+      "repo": "https://agent.qq.com",
+      "install": {
+        "type": "stdio",
+        "command": "node",
+        "args": [
+          "{{PLUGIN_DIR}}/assets/mcp-servers/agently-mail/index.mjs"
+        ],
+        "env": []
+      },
+      "iconFile": "agently-mail.svg",
+      "iconMime": "image/svg+xml",
       "featured": true
     },
     {

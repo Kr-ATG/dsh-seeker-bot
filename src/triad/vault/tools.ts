@@ -23,12 +23,18 @@
  *     加密；工具本身不决定加密与否。
  *  3. 返回值给人读：中文、字段名、「已加密」标记，不要吐 JSON——模型读 JSON 会
  *     开始复述结构而不是回答问题。
+ *
+ * ── 第四条边界（内置凭据动作）：能用，但看不见 ─────────────────────
+ * `vault_ssh` / `vault_http` 让模型用敏感字段完成 SSH / HTTP 操作。密码只在
+ * 宿主进程内使用（SSH 握手 / 请求头），工具返回的输出经脱敏处理。模型拿得到
+ * 「操作的结果」，永远拿不到「密码本身」。安全模型详见 builtin.ts。
  */
 
 import { defineTool } from '../../vendor/dsh-tools/schema.js'
 import type { InferArgs, ParameterSchemaSpec } from '../../vendor/dsh-tools/schema.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { VaultStore } from './store.js'
+import { runVaultHttp, runVaultSsh } from './builtin.js'
 import { isFieldSensitive, type VaultConfig, type VaultField, type VaultRecord } from './types.js'
 
 /** Minimal tools service view（与记忆库同款契约：注册返回注销函数）。 */
@@ -254,6 +260,66 @@ export function registerVaultTools(ctx: Context, store: VaultStore, config: Vaul
     },
   })))
 
+  // ── vault_ssh（内置 SSH，零配置）──────────────────────────────────────
+  disposers.push(ctx.tools.register(textTool({
+    name: 'vault_ssh',
+    description: '内置 SSH 凭据动作：用档案记录里的 SSH 密码或私钥，登录**该记录自己的主机**执行一条远程命令。'
+      + '不需要用户安装 sshpass、也不需要白名单；目标主机 / 用户名 / 端口全部从记录字段推导，**不能另行指定**。'
+      + '密码只用于本机 SSH 握手，永远不会出现在工具返回值或对话里；命令输出中的密码会被替换成 ********。'
+      + '适用场景：登录 VPS 执行 uptime / docker ps / 查看服务状态等。',
+    parameters: {
+      record: { type: 'string', required: true, description: '记录 id 或标题（如「VPS · 我的服务器」）。' },
+      command: { type: 'string', required: true, description: '要在目标主机上执行的远程命令（整条命令原样交给 SSH）。' },
+      timeoutMs: { type: 'integer', description: '超时毫秒（默认跟随档案设置，5–120 秒）。' },
+    },
+    async execute(args) {
+      const result = await runVaultSsh(store, config, {
+        recordRef: String(args.record ?? ''),
+        command: String(args.command ?? ''),
+        ...(typeof args.timeoutMs === 'number' ? { timeoutMs: args.timeoutMs } : {}),
+      })
+      return capOutput(result.text)
+    },
+  })))
+
+  // ── vault_http（内置 HTTP，零配置）─────────────────────────────────────
+  disposers.push(ctx.tools.register(textTool({
+    name: 'vault_http',
+    description: '内置 HTTP 凭据动作：用档案记录里的 API Key / Web Key 发起 HTTP 请求。'
+      + '不需要白名单；目标 URL 必须落在**该记录自己的 URL 字段**域名内（模型不能把密钥发到别处），'
+      + '凭据只放进指定请求头，不会出现在返回值或对话里。适合调用记录里已经存了 Base URL + API Key 的服务。',
+    parameters: {
+      record: { type: 'string', required: true, description: '记录 id 或标题。' },
+      field: { type: 'string', required: true, description: '提供凭据的加密字段 key 或显示名（如 api_key / webkey / WEB_KEY）。' },
+      method: { type: 'string', description: 'HTTP 方法，默认 GET。' },
+      url: { type: 'string', required: true, description: '完整 URL，或相对记录 base URL 的路径（如 /v1/models）。' },
+      headers: { type: 'object', additionalProperties: true, description: '额外请求头（键值对）。' },
+      body: { type: 'string', description: '请求体（POST / PUT / PATCH 时使用）。' },
+      authHeader: { type: 'string', description: '凭据放在哪个请求头，默认 Authorization。' },
+      authPrefix: { type: 'string', description: '请求头值前缀，默认「Bearer 」。' },
+      timeoutMs: { type: 'integer', description: '超时毫秒（默认跟随档案设置，5–120 秒）。' },
+    },
+    async execute(args) {
+      const rawHeaders = args.headers !== null && typeof args.headers === 'object' && !Array.isArray(args.headers)
+        ? args.headers as Record<string, unknown>
+        : {}
+      const headers: Record<string, string> = {}
+      for (const [key, value] of Object.entries(rawHeaders)) headers[key] = String(value)
+      const result = await runVaultHttp(store, config, {
+        recordRef: String(args.record ?? ''),
+        fieldRef: String(args.field ?? ''),
+        method: String(args.method ?? 'GET'),
+        url: String(args.url ?? ''),
+        headers,
+        ...(typeof args.body === 'string' ? { body: args.body } : {}),
+        ...(typeof args.authHeader === 'string' ? { authHeader: args.authHeader } : {}),
+        ...(typeof args.authPrefix === 'string' ? { authPrefix: args.authPrefix } : {}),
+        ...(typeof args.timeoutMs === 'number' ? { timeoutMs: args.timeoutMs } : {}),
+      })
+      return capOutput(result.text)
+    },
+  })))
+
   return () => {
     for (const dispose of disposers.splice(0)) dispose()
   }
@@ -293,7 +359,11 @@ function textTool<S extends ParameterSchemaSpec>(definition: {
         ? '查档案：' + String(raw.query ?? '')
         : definition.name === 'vault_get'
           ? '看档案：' + String(raw.id ?? '')
-          : '记档案：' + String(raw.title ?? '')
+          : definition.name === 'vault_ssh'
+            ? '内置 SSH：' + String(raw.record ?? '')
+            : definition.name === 'vault_http'
+              ? '内置 HTTP：' + String(raw.record ?? '')
+              : '记档案：' + String(raw.title ?? '')
       return { card: 'generic' as const, kind: 'other' as const, title, rawInput: args }
     },
   })

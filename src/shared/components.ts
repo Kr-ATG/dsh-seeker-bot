@@ -70,7 +70,7 @@ export const COMPONENTS: ReadonlyArray<ComponentDef> = [
   { id: 'gallery', rowId: 'dsh-seeker-bot-gallery', title: '画廊', description: '跨会话的图片 / 网页 / 视频 / 文档 / 表格产出物索引。', defaultEnabled: true },
   { id: 'vault', rowId: 'dsh-seeker-bot-vault', title: '档案', description: '账号密码 / 支付方式 / 联系方式 / 证件的加密档案与到期提醒。', defaultEnabled: true },
   { id: 'prompt', rowId: 'dsh-seeker-bot-prompt', title: '系统提示词', description: '查看本次会话真正发送给模型的系统提示词快照。', defaultEnabled: true },
-  { id: 'sync', rowId: 'dsh-seeker-bot-sync', title: '同步设置', description: '工作台资产（档案 / 记忆 / 技能 / MCP 配置）的云端双向同步。', defaultEnabled: true },
+  { id: 'sync', rowId: 'dsh-seeker-bot-sync', title: '同步设置', description: '工作台资产（档案 / 记忆 / 技能 / MCP / 供应商与密钥）的云端双向同步。', defaultEnabled: true },
   { id: 'provider', rowId: 'dsh-seeker-bot-provider', title: '供应商中心', description: '官方设置里的供应商页：API Key、网络代理、模型能力、生图 / 识图 / 生视频与 AnySearch。', defaultEnabled: true },
   { id: 'input', rowId: 'dsh-seeker-bot-input', title: '输入区增强', description: '供应商 / 模型选择器、推理强度、提示词优化、工具闸门、界面字体与 @ 运行中的程序。', defaultEnabled: true },
   { id: 'host', rowId: 'dsh-seeker-bot-host', title: '宿主支撑能力', description: '截图渲染引擎、Office / PDF 预览、字体与动画资产、文件打开、运行中程序采集等后台能力。', defaultEnabled: true },

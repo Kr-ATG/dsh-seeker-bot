@@ -81,6 +81,7 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
   const [includeMemory, setIncludeMemory] = useState<boolean>(true)
   const [includeSkills, setIncludeSkills] = useState<boolean>(true)
   const [includeMcp, setIncludeMcp] = useState<boolean>(true)
+  const [includeProviders, setIncludeProviders] = useState<boolean>(true)
 
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -96,6 +97,7 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
       setIncludeMemory(s.includeMemory)
       setIncludeSkills(s.includeSkills)
       setIncludeMcp(s.includeMcp)
+      setIncludeProviders(s.includeProviders ?? true)
       if (s.progress) setProgress(s.progress)
       setRunning(s.running)
     } catch (err) {
@@ -144,6 +146,7 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
         includeMemory,
         includeSkills,
         includeMcp,
+        includeProviders,
       })
       setStatus(updated)
       setPassphrase('')
@@ -209,7 +212,7 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
           <span className={syncCss.eyebrow}><i />Workbench Sync</span>
           <h1 className={syncCss.title}>同步设置 <em>/ 工作台资产双向漫游</em></h1>
           <p className={syncCss.hint}>
-            将档案（账号密码与证件）、长期记忆库、自定义技能（SKILL.md 及其开关状态）与 MCP 配置（cordis.patch.yml 条目）进行端侧加盐强加密后推送到您的 GitHub 私库，实现跨机一键漫游。
+            将档案（账号密码与证件）、长期记忆库、自定义技能（SKILL.md 及其开关状态）、MCP 配置与大模型供应商配置（路由、模型能力、网络代理、网页搜索与抓取后端、API 密钥）进行端侧加盐强加密后推送到您的 GitHub 私库，实现跨机一键漫游。
           </p>
         </div>
         <div className={syncCss.headActions}>
@@ -274,12 +277,15 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
           </div>
 
           <div className={syncCss.stat}>
-            <span className={syncCss.statLabel}>技能与 MCP 规模</span>
+            <span className={syncCss.statLabel}>技能、MCP 与供应商规模</span>
             <span className={syncCss.statValue}>
-              {formatBytes((status?.localSkillsBytes ?? 0) + (status?.localMcpBytes ?? 0))}
+              {formatBytes((status?.localSkillsBytes ?? 0) + (status?.localMcpBytes ?? 0) + (status?.localProvidersBytes ?? 0))}
             </span>
             <span className={syncCss.statSub}>
-              技能包 {formatBytes(status?.localSkillsBytes ?? 0)} · MCP 条目 {status?.localMcpEntries ?? 0} 个
+              技能 {formatBytes(status?.localSkillsBytes ?? 0)} · MCP {status?.localMcpEntries ?? 0} 个 · 供应商 {status?.localProvidersCount ?? 0} 家
+            </span>
+            <span className={syncCss.statSub}>
+              网页搜索 {status?.localWebSearchProvider !== undefined && status.localWebSearchProvider !== '' ? status.localWebSearchProvider : '未显式配置（跟随 base）'}
             </span>
           </div>
         </div>
@@ -540,6 +546,17 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
                 onChange={(e) => { setIncludeMcp(e.target.checked) }}
               />
               <span>MCP 配置</span>
+            </label>
+            <label
+              className={syncCss.checkboxRow}
+              title="大模型供应商路由、模型列表、API 密钥凭据、网络代理、模型能力配置，以及网页搜索与抓取后端的选择（含 anysearch-auto 降级链；端侧强加密，安全跨机漫游）"
+            >
+              <input
+                type="checkbox"
+                checked={includeProviders}
+                onChange={(e) => { setIncludeProviders(e.target.checked) }}
+              />
+              <span>供应商与密钥</span>
             </label>
           </div>
 

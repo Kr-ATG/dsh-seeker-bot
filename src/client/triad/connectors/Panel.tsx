@@ -21,7 +21,7 @@
  * @module
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { css, ensureConnectorsStyles } from './styles.js'
 
 /** 面板 props（与记忆 / 技能 / 档案面板同形）。 */
@@ -50,8 +50,26 @@ interface CatalogEntry {
   author?: string
   repo?: string
   install: { type: 'stdio' | 'http'; command?: string; args?: string[]; url?: string; env?: CatalogEnvField[]; auth?: string }
+  /** 有这一项才显示「开始授权」按钮（目录里声明的，前端只点不管命令）。 */
+  authorize?: {
+    requiresFile?: string
+    requiresLabel?: string
+    setupUrl?: string
+    doneHint?: string
+  }
   iconFile?: string
   featured?: boolean
+}
+
+/** 授权接口返回。 */
+interface AuthorizeResult {
+  ok: boolean
+  started?: boolean
+  needsSetup?: boolean
+  requiresFile?: string
+  requiresLabel?: string
+  setupUrl?: string
+  message?: string
 }
 
 interface CatalogFile {
@@ -128,6 +146,17 @@ async function postInstall(id: string, env: Record<string, string>, overwrite: b
   return body
 }
 
+/** 点一下开始授权（宿主按目录声明 spawn 授权命令，自己会弹浏览器）。 */
+async function postAuthorize(id: string): Promise<AuthorizeResult> {
+  const res = await fetch('/api/triad/mcp-catalog/authorize', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ id }),
+  })
+  const body = (await res.json().catch(() => ({ ok: false, message: '响应无法解析' }))) as AuthorizeResult
+  return body
+}
+
 /** 提交卸载。 */
 async function postUninstall(id: string): Promise<InstallResult> {
   const res = await fetch('/api/triad/mcp-catalog/uninstall', {
@@ -173,6 +202,13 @@ function CardIcon({ entry, size }: { entry: CatalogEntry; size: number }): JSX.E
   )
 }
 
+/** 安装状态筛选的三段。 */
+const SEGMENTS: ReadonlyArray<{ key: 'all' | 'installed' | 'uninstalled'; label: string }> = [
+  { key: 'all', label: '全部' },
+  { key: 'uninstalled', label: '未安装' },
+  { key: 'installed', label: '已安装' },
+]
+
 export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX.Element {
   ensureConnectorsStyles()
 
@@ -187,6 +223,12 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
   const [installing, setInstalling] = useState(false)
   const [installMsg, setInstallMsg] = useState('')
   const [installOk, setInstallOk] = useState(true)
+  const [authBusy, setAuthBusy] = useState(false)
+  const [authResult, setAuthResult] = useState<AuthorizeResult | null>(null)
+  /** 安装状态筛选：全部 / 未安装 / 已安装。 */
+  const [installFilter, setInstallFilter] = useState<'all' | 'installed' | 'uninstalled'>('all')
+  /** 内容区滚动容器（页头滚轮要转发给它）。 */
+  const scrollRef = useRef<HTMLDivElement | null>(null)
 
   const load = useCallback(() => {
     setPhase('loading')
@@ -220,6 +262,9 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
     const entries = catalog?.entries ?? []
     const q = query.trim().toLowerCase()
     return entries.filter((entry) => {
+      const isInstalled = installedState[entry.id] !== undefined
+      if (installFilter === 'installed' && !isInstalled) return false
+      if (installFilter === 'uninstalled' && isInstalled) return false
       if (chip === '精选' && entry.featured !== true) return false
       if (chip === '国内' && entry.region !== 'cn') return false
       if (chip === '国外' && entry.region !== 'global') return false
@@ -228,7 +273,7 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
       const hay = (entry.name + ' ' + (entry.nameEn ?? '') + ' ' + (entry.tagline ?? '') + ' ' + (entry.category ?? '')).toLowerCase()
       return hay.includes(q)
     })
-  }, [catalog, chip, query])
+  }, [catalog, chip, query, installFilter, installedState])
 
   /** 按分类分组（「全部」时分组显示，其余平铺）。 */
   const groups = useMemo(() => {
@@ -248,6 +293,7 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
     // 已装过就把 patch 里的当前值回填进输入框 —— 否则用户装完就再也改不了密钥
     setEnvDraft({ ...(installedState[entry.id]?.env ?? {}) })
     setInstallMsg('')
+    setAuthResult(null)
   }, [installedState])
 
   const closeDetail = useCallback(() => {
@@ -278,6 +324,19 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
     }
   }, [detail, envDraft, installedState])
 
+  const doAuthorize = useCallback(async () => {
+    if (detail === null) return
+    setAuthBusy(true)
+    setAuthResult(null)
+    try {
+      setAuthResult(await postAuthorize(detail.id))
+    } catch (err) {
+      setAuthResult({ ok: false, message: err instanceof Error ? err.message : String(err) })
+    } finally {
+      setAuthBusy(false)
+    }
+  }, [detail])
+
   const doUninstall = useCallback(async () => {
     if (detail === null) return
     setInstalling(true)
@@ -304,6 +363,21 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
   /** 当前打开的详情是否已装（决定按钮是「安装」还是「保存配置 + 卸载」）。 */
   const isDetailInstalled = detail !== null && installedState[detail.id] !== undefined
 
+  /**
+   * 页头区域的滚轮转发。
+   *
+   * 内容区（.dsh-mc-scroll）和页头（标题 / 搜索框 / 分类条）是**兄弟**，
+   * 滚轮事件在页头上冒泡时根本经过不了滚动容器，于是鼠标停在搜索框那一带
+   * 滚页面不动（用户反馈的「无法鼠标滚动」就是这个）。这里手动把增量转过去。
+   */
+  const onRootWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    const scroll = scrollRef.current
+    if (scroll === null) return
+    const target = event.target
+    if (target instanceof Node && scroll.contains(target)) return
+    scroll.scrollTop += event.deltaY
+  }, [])
+
   const requiredFilled = useMemo(() => {
     if (detail === null) return true
     for (const field of detail.install.env ?? []) {
@@ -313,7 +387,7 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
   }, [detail, envDraft])
 
   return (
-    <div className={css.root}>
+    <div className={css.root} onWheel={onRootWheel}>
       <div className={css.head}>
         <div className={css.headTop}>
           <div>
@@ -321,9 +395,23 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
             <h1 className={css.title}>连接器 <em>/ 能接什么</em></h1>
             <p className={css.sub}>精选 MCP 连接器，装一个就能让模型用上它。国内国外都有。</p>
           </div>
-          <span className={css.count}>
-            {catalog === null ? '' : String(filtered.length) + ' / ' + String(catalog.counts.total)}
-          </span>
+          <div className={css.headRight}>
+            <span className={css.count}>
+              {catalog === null ? '' : String(filtered.length) + ' / ' + String(catalog.counts.total)}
+            </span>
+            <div className={css.segmented} role="group" aria-label="按安装状态筛选">
+              {SEGMENTS.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={item.key === installFilter ? css.segBtn + ' ' + css.segBtnOn : css.segBtn}
+                  onClick={() => { setInstallFilter(item.key) }}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         <div className={css.search}>
@@ -350,7 +438,7 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
         </div>
       </div>
 
-      <div className={css.scroll}>
+      <div className={css.scroll} ref={scrollRef}>
         {phase === 'loading' && <div className={css.empty}>正在读取连接器目录…</div>}
         {phase === 'error' && <div className={css.empty + ' ' + css.error}>{error}</div>}
         {phase === 'ready' && filtered.length === 0 && (
@@ -453,6 +541,54 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
                       )}
                     </div>
                   ))}
+                </div>
+              )}
+
+              {detail.authorize !== undefined && (
+                <div className={css.authBox}>
+                  <div className={css.authHead}>需要登录一次</div>
+                  <div className={css.authHint}>
+                    这个连接器要授权你的第三方账号。点下面按钮会拉起浏览器，凭据只存在本机
+                    {detail.authorize.requiresFile !== undefined ? '（' + detail.authorize.requiresFile + '）' : ''}
+                    ，不会上传。
+                  </div>
+                  <div className={css.authRow}>
+                    <button
+                      type="button"
+                      className={css.primaryBtn}
+                      disabled={authBusy}
+                      onClick={() => { void doAuthorize() }}
+                    >
+                      {authBusy ? '正在拉起浏览器…' : '打开浏览器授权'}
+                    </button>
+                    {detail.authorize.setupUrl !== undefined && (
+                      <button
+                        type="button"
+                        className={css.linkBtn}
+                        onClick={() => { window.open(detail.authorize?.setupUrl ?? '', '_blank', 'noopener') }}
+                      >
+                        先去准备凭据 ↗
+                      </button>
+                    )}
+                  </div>
+                  {authResult !== null && (
+                    <div className={css.notice + (authResult.ok ? '' : ' ' + css.error)} style={{ margin: '8px 0 0' }}>
+                      {authResult.message}
+                      {authResult.needsSetup === true && authResult.setupUrl !== undefined && (
+                        <>
+                          {' '}
+                          <a
+                            href={authResult.setupUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className={css.authLink}
+                          >
+                            去获取
+                          </a>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 

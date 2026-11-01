@@ -5,7 +5,7 @@
  *  - agent/pre-step       → 档案索引注入（prepend，跑在记忆库两道闸门之前）
  *  - session/event        → turn/end 捕获本轮对话 → 关键词预筛 → LLM 抽取 → 入库
  *  - agent/disposed / compaction → 清会话级注入状态（压缩后重新注入）
- *  - tools                → vault_search / vault_get / vault_remember
+ *  - tools                → vault_search / vault_get / vault_remember / vault_ssh / vault_http
  *  - webServer            → /api/dsh-vault/*（页面数据 + 明文查看 + 导入导出）
  *  - 定时维护             → 每日快照 + 孤儿清理 + 配额淘汰
  *

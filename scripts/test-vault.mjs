@@ -24,7 +24,12 @@
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import { generateKeyPairSync } from 'node:crypto'
+import { createServer } from 'node:http'
 import { build } from 'esbuild'
+import ssh2 from 'ssh2'
+
+const { Server: SshServer } = ssh2
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..')
@@ -57,7 +62,7 @@ mkdirSync(OUT_DIR, { recursive: true })
  * 叶子模块、没有外部依赖，实测能正常打进这个 ESM 包——所以不退回「只断言 store/inject」
  * 的降级方案。
  */
-const sources = ['types', 'crypto', 'blobs', 'store', 'inject', 'reminders', 'totp', 'backup', 'extract']
+const sources = ['types', 'crypto', 'blobs', 'store', 'inject', 'reminders', 'totp', 'backup', 'extract', 'builtin', 'tools']
   .map((name) => "export * from '" + slash(resolve(ROOT, 'src/triad/vault', name + '.ts')) + "'")
   .join('\n')
 const entryFile = join(OUT_DIR, 'entry.ts')
@@ -72,6 +77,17 @@ try {
     format: 'esm',
     platform: 'node',
     target: 'node22',
+    external: ['cpu-features'],
+    banner: {
+      js: [
+        "import { createRequire as __vaultCreateRequire } from 'node:module';",
+        "import { fileURLToPath as __vaultFileURLToPath } from 'node:url';",
+        "import { dirname as __vaultDirname } from 'node:path';",
+        'const require = __vaultCreateRequire(import.meta.url);',
+        'const __filename = __vaultFileURLToPath(import.meta.url);',
+        'const __dirname = __vaultDirname(__filename);',
+      ].join('\n'),
+    },
     logLevel: 'silent',
   })
   pass('vault engine bundled')
@@ -98,6 +114,11 @@ const {
   VAULT_INJECTION_RULE,
   // v2 起（待确认机制退役）用来钉住迁移与应用层的行为。
   VAULT_SCHEMA_VERSION, migrate, applyVaultOps,
+  // 凭据脱敏与内置动作。
+  redactSecretText, VAULT_BUILTIN_RULE,
+  runVaultSsh, runVaultHttp,
+  // 工具注册面：确保 vault_ssh / vault_http 真的进了模型工具表。
+  registerVaultTools,
 } = vault
 
 // ── 2. 建库（隔离目录 + 真密钥）─────────────────────────────────────────
@@ -634,6 +655,137 @@ const clientPanelSource = readFileSync(resolve(ROOT, 'src/client/triad/vault/Pan
   + readFileSync(resolve(ROOT, 'src/client/triad/vault/DetailDrawer.tsx'), 'utf8')
 assert(!/\bpending\b|badgePending|confirmVaultRecord/.test(clientPanelSource),
   'the vault panel and detail drawer no longer reference pending / badgePending / confirmVaultRecord')
+
+// ── 18. 凭据脱敏函数 ──────────────────────────────────────────────────
+/*
+ * 内置动作返回给模型的文本必须先把凭据抹掉。这里单测脱敏函数覆盖
+ * 原文 / base64 / hex / URL 编码四种最常见的泄漏形态。
+ */
+// 脱敏覆盖常见编码：base64 / hex / URL 编码都不能漏。
+const b64Secret = Buffer.from(NEW_SECRET, 'utf8').toString('base64')
+const hexSecret = Buffer.from(NEW_SECRET, 'utf8').toString('hex')
+const urlSecret = encodeURIComponent(NEW_SECRET)
+for (const [label, variant] of [['base64', b64Secret], ['hex', hexSecret], ['url', urlSecret]]) {
+  const redacted = redactSecretText('prefix ' + variant + ' suffix', NEW_SECRET)
+  assert(!redacted.includes(variant) && redacted.includes('********'), 'redaction catches the ' + label + ' variant')
+}
+
+// 工具注册面：vault_ssh / vault_http 必须真的出现在模型工具表里，且不再注册
+// 已删除的通用 vault_run。
+const registeredTools = []
+const fakeToolCtx = {
+  tools: {
+    register: (definition) => { registeredTools.push(definition); return () => {} },
+  },
+}
+registerVaultTools(fakeToolCtx, store, { ...DEFAULT_VAULT_CONFIG })
+const toolNames = registeredTools.map((definition) => definition.name)
+for (const name of ['vault_search', 'vault_get', 'vault_remember', 'vault_ssh', 'vault_http']) {
+  assert(toolNames.includes(name), 'the ' + name + ' tool is registered')
+}
+assert(!toolNames.includes('vault_run'), 'the retired generic vault_run tool is no longer registered')
+assert(VAULT_BUILTIN_RULE.includes('vault_ssh') && VAULT_BUILTIN_RULE.includes('vault_http'),
+  'the builtin injection rule names the two zero-config tools')
+
+// ── 19. 内置动作：vault_ssh / vault_http（零配置）────────────────────────
+/*
+ * 这两条是「用户不想配置白名单」时的默认路径：目标主机 / 域名只能来自记录，
+ * 密码只用于本机认证。测试里真的起一个 SSH 服务器和一个 HTTP 服务器，
+ * 断言「连接成功 / 认证头正确 / 密码不返回」。
+ */
+const SMOKE_SSH_PW = 'smoke-ssh-pw-2026'
+const { privateKey: sshHostKey } = generateKeyPairSync('rsa', {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: 'pkcs1', format: 'pem' },
+  publicKeyEncoding: { type: 'spki', format: 'pem' },
+})
+const sshServer = new SshServer({ hostKeys: [sshHostKey] }, (client) => {
+  client.on('authentication', (ctx) => {
+    if (ctx.method === 'password' && ctx.username === 'root' && ctx.password === SMOKE_SSH_PW) ctx.accept()
+    else ctx.reject()
+  })
+  client.on('ready', () => {
+    client.on('session', (accept) => {
+      const session = accept()
+      session.on('exec', (acceptExec, _rejectExec, info) => {
+        const stream = acceptExec()
+        stream.write('remote-cmd:' + info.command + '\n')
+        stream.exit(0)
+        stream.end()
+      })
+    })
+  })
+})
+await new Promise((resolve, reject) => {
+  sshServer.once('error', reject)
+  sshServer.listen(0, '127.0.0.1', resolve)
+})
+const sshPort = sshServer.address().port
+await store.upsertRecord({
+  scene: 'accounts',
+  title: 'Smoke · 本地 SSH',
+  fields: [
+    { key: 'ip', label: 'IP 地址', type: 'text', value: '127.0.0.1', updatedAt: new Date().toISOString() },
+    { key: 'username', label: '用户名', type: 'text', value: 'root', updatedAt: new Date().toISOString() },
+    { key: 'password', label: '密码', type: 'secret', value: SMOKE_SSH_PW, updatedAt: new Date().toISOString() },
+    { key: 'ssh-port', label: 'SSH 端口', type: 'text', value: String(sshPort), updatedAt: new Date().toISOString() },
+  ],
+  source: 'manual',
+})
+const builtinOn = { ...DEFAULT_VAULT_CONFIG, credentialBuiltins: true, credentialTimeoutMs: 8000 }
+const sshAttempt = await runVaultSsh(store, builtinOn, { recordRef: 'Smoke · 本地 SSH', command: 'uptime' })
+assert(sshAttempt.ok && sshAttempt.text.includes('remote-cmd:uptime'),
+  'vault_ssh connects with the record password and runs the remote command')
+assert(!sshAttempt.text.includes(SMOKE_SSH_PW), 'vault_ssh never returns the SSH password')
+const sshOff = await runVaultSsh(store, { ...DEFAULT_VAULT_CONFIG, credentialBuiltins: false }, {
+  recordRef: 'Smoke · 本地 SSH', command: 'uptime',
+})
+assert(!sshOff.ok && sshOff.text.includes('已关闭'), 'vault_ssh refuses when the builtin switch is off')
+
+const SMOKE_HTTP_KEY = 'smoke-http-key-2026'
+let seenAuth = ''
+const httpServer = createServer((req, res) => {
+  seenAuth = req.headers.authorization ?? ''
+  res.setHeader('content-type', 'application/json')
+  res.end(JSON.stringify({ ok: true, path: req.url, auth: seenAuth }))
+})
+await new Promise((resolve, reject) => {
+  httpServer.once('error', reject)
+  httpServer.listen(0, '127.0.0.1', resolve)
+})
+const httpPort = httpServer.address().port
+await store.upsertRecord({
+  scene: 'accounts',
+  title: 'Smoke · 本地 API',
+  fields: [
+    { key: 'base_url', label: '接口地址（Base URL）', type: 'url', value: 'http://127.0.0.1:' + String(httpPort), updatedAt: new Date().toISOString() },
+    { key: 'api_key', label: 'API Key', type: 'secret', value: SMOKE_HTTP_KEY, updatedAt: new Date().toISOString() },
+  ],
+  source: 'manual',
+})
+const httpAttempt = await runVaultHttp(store, builtinOn, {
+  recordRef: 'Smoke · 本地 API', fieldRef: 'api_key', method: 'GET', url: '/v1/ping',
+})
+assert(httpAttempt.ok && httpAttempt.text.includes('HTTP 200'), 'vault_http calls the record base URL')
+assert(seenAuth === 'Bearer ' + SMOKE_HTTP_KEY, 'vault_http puts the key in the Authorization header')
+assert(!httpAttempt.text.includes(SMOKE_HTTP_KEY) && httpAttempt.text.includes('********'),
+  'vault_http never returns the API key (response body is redacted)')
+const httpBlocked = await runVaultHttp(store, builtinOn, {
+  recordRef: 'Smoke · 本地 API', fieldRef: 'api_key', method: 'GET', url: 'http://example.com/evil',
+})
+assert(!httpBlocked.ok && httpBlocked.text.includes('不在记录'),
+  'vault_http refuses a target outside the record URL host (no exfiltration)')
+
+// 审计：两个内置动作都要留痕，且审计文本不含任何凭据。
+const builtinAudit = await store.readAudit(100)
+assert(builtinAudit.some((entry) => entry.action === 'exec' && entry.program === 'ssh'),
+  'vault_ssh writes an exec audit entry')
+assert(builtinAudit.some((entry) => entry.action === 'exec' && entry.program === 'http'),
+  'vault_http writes an exec audit entry')
+assert(!JSON.stringify(builtinAudit).includes(SMOKE_SSH_PW) && !JSON.stringify(builtinAudit).includes(SMOKE_HTTP_KEY),
+  'the audit log never stores either credential')
+await new Promise((resolve) => sshServer.close(resolve))
+await new Promise((resolve) => httpServer.close(resolve))
 
 // ── 收尾 ────────────────────────────────────────────────────────────────
 await store.flush()

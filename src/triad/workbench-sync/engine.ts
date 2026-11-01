@@ -14,6 +14,7 @@ import {
   getWorkbenchSizes,
   restoreMcp,
   restoreMemory,
+  restoreProviders,
   restoreSkills,
   restoreVault,
   type GatheredWorkbenchPayload,
@@ -306,12 +307,13 @@ export class WorkbenchSyncEngine {
       this.advanceStep(0, 'done', `私库验证通过（分支: ${branch}）`)
 
       // Step 2: gather
-      this.advanceStep(1, 'running', '正在收集档案、记忆、技能与 MCP 配置...')
+      this.advanceStep(1, 'running', '正在收集档案、记忆、技能、MCP 与供应商配置...')
       const payload = await gatherWorkbenchAssets({
         includeVault: file.settings.includeVault,
         includeMemory: file.settings.includeMemory,
         includeSkills: file.settings.includeSkills,
         includeMcp: file.settings.includeMcp,
+        includeProviders: file.settings.includeProviders ?? true,
         vaultStore: this.vaultStore,
       })
       const vaultCount = payload.vault?.vaultJson ? JSON.parse(payload.vault.vaultJson)?.records?.length ?? 0 : 0
@@ -319,7 +321,9 @@ export class WorkbenchSyncEngine {
       const skillsCount = Object.keys(payload.skills?.files ?? {}).length
       const mcpCount = payload.mcp?.entries.length ?? 0
       const mcpText = payload.mcp === undefined ? '' : `, MCP 条目 ${mcpCount} 个`
-      this.advanceStep(1, 'done', `已收集: 档案 ${vaultCount} 条, 记忆 ${memoryCount} 条, 技能文件 ${skillsCount} 个${mcpText}`)
+      const providersCount = payload.providers?.patchEntries.length ?? 0
+      const providersText = payload.providers === undefined ? '' : `, 供应商与能力配置 ${providersCount} 项`
+      this.advanceStep(1, 'done', `已收集: 档案 ${vaultCount} 条, 记忆 ${memoryCount} 条, 技能文件 ${skillsCount} 个${mcpText}${providersText}`)
 
       // Step 3: fingerprint
       this.advanceStep(2, 'running', '比对本地数据指纹与远端提交...')
@@ -329,6 +333,7 @@ export class WorkbenchSyncEngine {
         memory: payload.memory,
         skills: payload.skills,
         mcp: payload.mcp,
+        providers: payload.providers,
       })
       const isUnchanged = file.lastDataHash === currentHash
 
@@ -545,11 +550,21 @@ export class WorkbenchSyncEngine {
         mcpAdded = mRes.added
         mcpUpdated = mRes.updated
       }
+      let providersAdded = 0
+      let providersUpdated = 0
+      if (payload.providers && (file.settings.includeProviders ?? true)) {
+        const pRes = await restoreProviders(payload.providers)
+        providersAdded = pRes.patchResult.added + pRes.credentialsResult.added
+        providersUpdated = pRes.patchResult.updated + pRes.credentialsResult.updated
+      }
       const removedText = removedSkills > 0 ? ` (已同步清理 ${removedSkills} 个已删技能)` : ''
       const mcpText = payload.mcp === undefined
         ? ''
         : `, MCP 条目 新增 ${mcpAdded} 个 / 更新 ${mcpUpdated} 个`
-      this.advanceStep(3, 'done', `已还原: 档案 ${restoredVault} 条, 记忆 ${restoredMemory} 条, 技能文件 ${restoredSkills} 个${removedText}${mcpText}`)
+      const providersText = payload.providers === undefined
+        ? ''
+        : `, 供应商/密钥 新增 ${providersAdded} 项 / 更新 ${providersUpdated} 项`
+      this.advanceStep(3, 'done', `已还原: 档案 ${restoredVault} 条, 记忆 ${restoredMemory} 条, 技能文件 ${restoredSkills} 个${removedText}${mcpText}${providersText}`)
 
       // Step 5: reload
       this.advanceStep(4, 'done', '所有资产已就绪并生效！')
@@ -618,6 +633,7 @@ export class WorkbenchSyncEngine {
     if (typeof patch.includeMemory === 'boolean') nextSettings.includeMemory = patch.includeMemory
     if (typeof patch.includeSkills === 'boolean') nextSettings.includeSkills = patch.includeSkills
     if (typeof patch.includeMcp === 'boolean') nextSettings.includeMcp = patch.includeMcp
+    if (typeof patch.includeProviders === 'boolean') nextSettings.includeProviders = patch.includeProviders
 
     if (patch.clearToken === true) delete secrets.token
     else if (typeof patch.token === 'string' && patch.token.trim() !== '') {
@@ -689,6 +705,7 @@ export class WorkbenchSyncEngine {
       includeMemory: file.settings.includeMemory,
       includeSkills: file.settings.includeSkills,
       includeMcp: file.settings.includeMcp,
+      includeProviders: file.settings.includeProviders ?? true,
       nextUploadAt,
       lastUploadedAt: file.settings.lastUploadedAt ?? '',
       lastUploadedCommit: file.settings.lastUploadedCommit ?? '',
@@ -701,6 +718,9 @@ export class WorkbenchSyncEngine {
       localSkillsBytes: sizes.skillsBytes,
       localMcpBytes: sizes.mcpBytes,
       localMcpEntries: sizes.mcpEntries,
+      localProvidersBytes: sizes.providersBytes,
+      localProvidersCount: sizes.providersCount,
+      localWebSearchProvider: sizes.webSearchProvider,
       passphraseSet: passphrase.length >= WORKBENCH_SYNC_MIN_PASSPHRASE,
       tokenSet: token.length > 0,
       tokenSource,

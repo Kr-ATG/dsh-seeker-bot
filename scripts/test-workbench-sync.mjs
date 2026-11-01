@@ -36,6 +36,7 @@ await build({
       export * from './src/triad/workbench-sync/crypto.ts';
       export * from './src/triad/workbench-sync/gather.ts';
       export * from './src/triad/workbench-sync/mcp-patch.ts';
+      export * from './src/triad/workbench-sync/provider-patch.ts';
       export * from './src/triad/workbench-sync/engine.ts';
       export * from './src/triad/vault/store.ts';
     `,
@@ -246,6 +247,99 @@ assert.ok(freshContent.includes('- insert:'), '空文件还原必须新建 inser
 assert.equal(mod.scanMcpEntries(freshContent).length, 2, '还原后应能被重新扫描到两条')
 console.log('✓ MCP 配置收集 / 还原（新增 + 更新 + 保留本机独有 + 空文件重建）通过')
 
+console.log('--- 3.7 供应商与模型配置随同步收集与还原 ---')
+const provPatchSource = [
+  '# cordis profile 供应商测试',
+  '- id: llm-pi-ai',
+  '  name: "@deepseek-ai/dsh-llm-pi-ai"',
+  '  config:',
+  '    providers:',
+  '      my-provider:',
+  '        displayName: My Provider',
+  '        apiKeyEnv: MY_PROVIDER_API_KEY',
+  '        baseURL: https://api.myllm.com/v1',
+  '- id: agent-default-model',
+  '  config:',
+  '    provider: my-provider',
+  '    model: my-cool-model',
+  // 网页搜索与抓取后端的选择必须一起漫游：不带它，换机会静默退回 base 默认值。
+  '- id: web',
+  '  name: "@deepseek-ai/dsh-web"',
+  '  config:',
+  '    searchProvider: anysearch-auto',
+  '    fetchProvider: http',
+  '',
+].join('\n')
+writeFileSync(patchPath, provPatchSource, 'utf8')
+
+const provScanned = mod.scanProviderPatchEntries(provPatchSource)
+assert.equal(provScanned.length, 3, '应扫描到 llm-pi-ai、agent-default-model 与 web 三个块')
+assert.deepEqual(provScanned.map((e) => e.id).sort(), ['agent-default-model', 'llm-pi-ai', 'web'])
+const webBlock = provScanned.find((e) => e.id === 'web')
+assert.ok(webBlock.block.includes('searchProvider: anysearch-auto'), 'web 条目要带上搜索后端选择')
+
+// 凭据测试：.credentials.yaml
+const credPath = join(SMOKE_HOME, '.credentials.yaml')
+writeFileSync(credPath, [
+  'records:',
+  '  session: 123',
+  'refs:',
+  "  LOCAL_KEY: 'local_secret_value'",
+  "  MY_PROVIDER_API_KEY: 'old_secret_value'",
+  'version: 1',
+  '',
+].join('\n'), 'utf8')
+
+const parsedRefs = mod.parseCredentialRefs(readFileSync(credPath, 'utf8'))
+assert.equal(parsedRefs.LOCAL_KEY, 'local_secret_value')
+assert.equal(parsedRefs.MY_PROVIDER_API_KEY, 'old_secret_value')
+
+// 收集
+const gatheredProv = mod.gatherProviderAssets()
+assert.equal(gatheredProv.patchEntries.length, 3)
+assert.equal(gatheredProv.credentialRefs.MY_PROVIDER_API_KEY, 'old_secret_value')
+
+// 还原测试：模拟目标机有 LOCAL_KEY（本机独有），云端带入新的 NEW_REMOTE_KEY 和更新的 MY_PROVIDER_API_KEY
+const credRestoreRes = mod.restoreCredentialRefs({
+  MY_PROVIDER_API_KEY: 'new_updated_secret',
+  NEW_REMOTE_KEY: 'remote_secret_888',
+})
+assert.equal(credRestoreRes.updated, 1, '同名 key 应当更新')
+assert.equal(credRestoreRes.added, 1, '缺失 key 应当新增')
+const afterCredContent = readFileSync(credPath, 'utf8')
+const afterParsedRefs = mod.parseCredentialRefs(afterCredContent)
+assert.equal(afterParsedRefs.LOCAL_KEY, 'local_secret_value', '本机独有 key 绝不丢失')
+assert.equal(afterParsedRefs.MY_PROVIDER_API_KEY, 'new_updated_secret', '同名 key 应当被覆盖')
+assert.equal(afterParsedRefs.NEW_REMOTE_KEY, 'remote_secret_888', '新增 key 应当入库')
+assert.ok(afterCredContent.includes('records:\n  session: 123'), 'records 区域必须无损保留')
+
+// 补丁条目还原测试：目标机已有 agent-default-model（模型不同），且有本机独有的 other-entry
+writeFileSync(patchPath, [
+  '- id: agent-default-model',
+  '  config:',
+  '    provider: old-provider',
+  '    model: old-model',
+  '- id: other-entry',
+  '  name: "@deepseek-ai/dsh-other"',
+  '',
+].join('\n'), 'utf8')
+
+const provPatchRestore = mod.restoreProviderPatchEntries(gatheredProv.patchEntries)
+assert.equal(provPatchRestore.updated, 1, 'agent-default-model 应该被更新')
+assert.equal(provPatchRestore.added, 2, 'llm-pi-ai 与 web 应该被新增')
+const targetPatchContent = readFileSync(patchPath, 'utf8')
+assert.ok(targetPatchContent.includes('- id: other-entry'), '本机独有的 patch 条目必须保留')
+assert.ok(targetPatchContent.includes('model: my-cool-model'), '目标条目内容已被更新')
+assert.ok(targetPatchContent.includes('displayName: My Provider'), '新增条目已落盘')
+assert.ok(targetPatchContent.includes('searchProvider: anysearch-auto'), '换机后搜索后端选择必须跟着回来')
+assert.ok(targetPatchContent.includes('fetchProvider: http'), '抓取后端选择也必须跟着回来')
+
+// 状态视图要能读出当前搜索后端（同步设置页上那行「网页搜索 xxx」）
+const summaryAfterRestore = mod.providerPatchSummary()
+assert.equal(summaryAfterRestore.webSearchProvider, 'anysearch-auto', 'providerPatchSummary 应解析出 web 条目的 searchProvider')
+
+console.log('✓ 供应商与模型配置收集 / 还原（条目合并 + 凭据更新 + 保留本机独有 key/条目）通过')
+
 console.log('--- 4. 同步引擎：同步范围的保存与公开状态 ---')
 const vaultStore = new mod.VaultStore(null)
 const engine = new mod.WorkbenchSyncEngine(vaultStore, null, {})
@@ -255,13 +349,15 @@ assert.equal(persistedFile.settings.includeVault, false, 'save 必须把 include
 assert.equal(persistedFile.settings.includeMemory, true, 'save 只改点名的开关，其它范围保持默认')
 assert.equal(persistedFile.settings.includeSkills, true)
 assert.equal(persistedFile.settings.includeMcp, true, 'includeMcp 默认开启')
+assert.equal(persistedFile.settings.includeProviders, true, 'includeProviders 默认开启')
 const view = await engine.publicView()
 assert.equal(view.includeVault, false, 'publicView 必须回传 includeVault')
 assert.equal(view.includeMcp, true, 'publicView 必须回传 includeMcp')
-assert.equal(view.localMcpEntries, 2, '公开状态必须带上本机 MCP 条目数')
-await engine.save({ includeMcp: false })
-const viewAfterMcp = await engine.publicView()
-assert.equal(viewAfterMcp.includeMcp, false, 'includeMcp 开关必须能单独保存')
+assert.equal(view.includeProviders, true, 'publicView 必须回传 includeProviders')
+assert.ok(view.localProvidersBytes > 0, '公开状态必须带上本机供应商配置体积')
+await engine.save({ includeProviders: false })
+const viewAfterProv = await engine.publicView()
+assert.equal(viewAfterProv.includeProviders, false, 'includeProviders 开关必须能单独保存')
 console.log('✓ 同步引擎的同步范围保存与状态视图通过')
 
 console.log('--- 5. 检查安全规范（零私密硬编码） ---')

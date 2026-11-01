@@ -10,6 +10,7 @@ import { homedir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { getWebuiMemoryStore } from '../memory-store-singleton.js'
 import { gatherMcpEntries, mcpPatchSummary, restoreMcpEntries, type GatheredMcp } from './mcp-patch.js'
+import { gatherProviderAssets, providerPatchSummary, restoreProviderAssets, type GatheredProviders } from './provider-patch.js'
 import { memoryHome } from '../memory/engine/store.js'
 import { detectMediaType } from '../vault/blobs.js'
 import { VaultCipher } from '../vault/crypto.js'
@@ -48,6 +49,7 @@ export interface GatheredWorkbenchPayload {
   memory?: GatheredMemory
   skills?: GatheredSkills
   mcp?: GatheredMcp
+  providers?: GatheredProviders
 }
 
 /** 递归统计目录大小（支持忽略以 . 开头的隐藏目录/回收站）。 */
@@ -79,6 +81,10 @@ export async function getWorkbenchSizes(): Promise<{
   skillsBytes: number
   mcpBytes: number
   mcpEntries: number
+  providersBytes: number
+  providersCount: number
+  /** `web` 条目里当前选的搜索后端（如 `anysearch-auto`），空串表示未配置。 */
+  webSearchProvider: string
   totalBytes: number
 }> {
   // 1. 档案：vault.json + key + blobs/（排除 store/workbench-sync.json 运行历史与 audit.jsonl 审计日志）
@@ -121,13 +127,19 @@ export async function getWorkbenchSizes(): Promise<{
   // 4. MCP：cordis.patch.yml 里的 mcp-client 条目（不是独立目录，按块字节算）
   const mcp = mcpPatchSummary()
 
+  // 5. 供应商与模型：cordis.patch.yml 里的 llm-* 条目 + .credentials.yaml + 代理/能力
+  const providers = providerPatchSummary()
+
   return {
     vaultBytes,
     memoryBytes,
     skillsBytes,
     mcpBytes: mcp.bytes,
     mcpEntries: mcp.count,
-    totalBytes: vaultBytes + memoryBytes + skillsBytes + mcp.bytes,
+    providersBytes: providers.bytes,
+    providersCount: providers.count,
+    webSearchProvider: providers.webSearchProvider,
+    totalBytes: vaultBytes + memoryBytes + skillsBytes + mcp.bytes + providers.bytes,
   }
 }
 
@@ -235,6 +247,7 @@ export async function gatherWorkbenchAssets(options: {
   includeSkills: boolean
   /** 未显式传入时按「不收」处理（老调用方与测试的兼容口径）。 */
   includeMcp?: boolean
+  includeProviders?: boolean
   vaultStore: VaultStore
 }): Promise<GatheredWorkbenchPayload> {
   const [vault, memory, skills] = await Promise.all([
@@ -243,6 +256,7 @@ export async function gatherWorkbenchAssets(options: {
     options.includeSkills ? gatherSkills() : undefined,
   ])
   const mcp = options.includeMcp === true ? gatherMcpEntries() : undefined
+  const providers = options.includeProviders === true ? gatherProviderAssets() : undefined
 
   return {
     format: 'dsh-workbench-sync',
@@ -252,12 +266,21 @@ export async function gatherWorkbenchAssets(options: {
     ...(memory ? { memory } : {}),
     ...(skills ? { skills } : {}),
     ...(mcp ? { mcp } : {}),
+    ...(providers ? { providers } : {}),
   }
 }
 
 /** 还原 MCP 配置（只更新同名 / 新增缺失，不删本机独有条目）。 */
 export async function restoreMcp(mcp: GatheredMcp): Promise<{ added: number; updated: number; kept: number }> {
   return restoreMcpEntries(mcp)
+}
+
+/** 还原供应商与模型配置（同名更新/缺失新增，保留本机独有配置与密钥）。 */
+export async function restoreProviders(providers: GatheredProviders): Promise<{
+  patchResult: { added: number; updated: number; kept: number }
+  credentialsResult: { added: number; updated: number; kept: number }
+}> {
+  return restoreProviderAssets(providers)
 }
 
 /** 原子写文本。 */

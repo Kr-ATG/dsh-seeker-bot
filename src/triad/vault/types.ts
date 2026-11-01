@@ -493,6 +493,17 @@ export interface VaultConfig {
   photoRetentionDays: number
   /** 是否加密落盘（默认 true；关掉仅供排障）。 */
   encryptSecrets: boolean
+  /**
+   * 内置凭据动作开关（默认**开**）。
+   *
+   * `vault_ssh`（用记录里的 SSH 密码/私钥登录记录自己的主机执行命令）与
+   * `vault_http`（用记录里的 API Key 请求记录自己的 URL）不需要白名单，
+   * 也不需要用户安装任何程序。目标主机 / 域名只能来自档案记录本身，模型
+   * 无法改到别处；密码仍然不会返回给模型。默认开启是为了「零配置」。
+   */
+  credentialBuiltins: boolean
+  /** 单次内置动作超时毫秒（默认 30 秒）。 */
+  credentialTimeoutMs: number
 }
 
 /** 默认配置。 */
@@ -512,6 +523,8 @@ export const DEFAULT_VAULT_CONFIG: VaultConfig = {
   maxPhotosPerRecord: 12,
   photoRetentionDays: 0,
   encryptSecrets: true,
+  credentialBuiltins: true,
+  credentialTimeoutMs: 30_000,
 }
 
 /** 数值字段取值域（越界钳制而非丢弃）。 */
@@ -526,6 +539,7 @@ export const VAULT_NUMBER_BOUNDS = {
   quotaBytes: { min: 32 * 1024 * 1024, max: 32 * 1024 * 1024 * 1024, int: true, step: 33554432 },
   maxPhotosPerRecord: { min: 1, max: 60, int: true, step: 1 },
   photoRetentionDays: { min: 0, max: 3650, int: true, step: 30 },
+  credentialTimeoutMs: { min: 5000, max: 120_000, int: true, step: 5000 },
 } as const satisfies Record<string, { min: number; max: number; int: boolean; step: number }>
 
 /**
@@ -537,10 +551,11 @@ export const VAULT_NUMBER_BOUNDS = {
  * 回吐这个键——它按 VAULT_BOOLEAN_KEYS 逐项取值，不硬编码字段名。
  */
 export type VaultBooleanKey = 'autoRecord' | 'autoInject' | 'prefilter' | 'keepOriginal' | 'encryptSecrets'
+  | 'credentialBuiltins'
 
 /** 可调布尔字段（顺序 = 面板顺序）。 */
 export const VAULT_BOOLEAN_KEYS: readonly VaultBooleanKey[] = [
-  'autoRecord', 'autoInject', 'prefilter', 'keepOriginal', 'encryptSecrets',
+  'autoRecord', 'autoInject', 'prefilter', 'keepOriginal', 'encryptSecrets', 'credentialBuiltins',
 ]
 
 /** 可调数值字段名。 */

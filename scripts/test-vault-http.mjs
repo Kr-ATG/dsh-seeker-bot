@@ -322,7 +322,31 @@ assert(pwdLong.json.generated.length === 128, 'a too-long request is clamped dow
 const pwdNoSym = await call('/password', { method: 'POST', body: { symbols: false, length: 40 } })
 assert(!/[!#$%&*+\-=?@^_]/.test(pwdNoSym.json.generated.password), 'symbols:false really removes every symbol')
 assert(pwd1.json.generated.entropyBits > 80, 'the reported entropy is high enough to be meaningful')
-// ── 10. 批量换密已随健康审计一起删除 ──────────────────────────────────
+// ── 10. 内置凭据动作配置（默认开启 + 持久化）──────────────────────────
+/*
+ * 内置 SSH / HTTP 动作默认开启（零配置）；这里钉住默认值、关闭开关能持久化，
+ * 以及老的「自定义程序白名单」字段已经从公开配置里彻底消失。
+ */
+const builtinConfigDefault = await call('/config')
+assert(builtinConfigDefault.json.config.credentialBuiltins === true,
+  'the builtin SSH / HTTP actions are on in the public config by default (zero-config)')
+assert(builtinConfigDefault.json.config.credentialBroker === undefined
+  && builtinConfigDefault.json.config.credentialPrograms === undefined,
+  'the retired custom-program whitelist fields are gone from the public config')
+
+const builtinConfigSave = await call('/config', { method: 'POST', body: {
+  credentialBuiltins: false,
+  credentialTimeoutMs: 45000,
+} })
+assert(builtinConfigSave.status === 200 && builtinConfigSave.json.config.credentialBuiltins === false,
+  'POST /config can turn the builtin actions off')
+assert(builtinConfigSave.json.config.credentialTimeoutMs === 45000,
+  'the builtin action timeout is persisted')
+const builtinConfigReload = await call('/config')
+assert(builtinConfigReload.json.config.credentialBuiltins === false,
+  'the builtin action switch survives a config reload')
+
+// ── 11. 批量换密已随健康审计一起删除 ──────────────────────────────────
 /*
  * /rotate 的唯一用途是「审计发现一组复用密码 → 一键换成互不相同的强口令」。
  * 审计按用户要求删掉之后，这条路由就没有入口了；留着它等于留一个「一次改写

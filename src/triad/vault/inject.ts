@@ -113,6 +113,16 @@ export const VAULT_INJECTION_RULE = [
 ].join(LF)
 
 /**
+ * 内置凭据动作开启时追加的一段规则（默认开启，所以这是模型最常见看到的
+ * 那段）。它只教模型「怎么用」，绝不包含任何敏感值。
+ */
+export const VAULT_BUILTIN_RULE = [
+  '  · 已启用**内置凭据动作**：要登录 VPS / 服务器执行命令，用 `vault_ssh`（只用记录自己的主机，密码不会给你看）；',
+  '    要调用已存 API Key / Web Key 的服务，用 `vault_http`（目标必须落在记录自己的 URL 域名内）。',
+  '    这两个工具无需用户配置白名单；如果记录里缺主机 / URL / 凭据字段，直接告诉用户缺什么，不要猜。',
+].join(LF)
+
+/**
  * 排序权重：越可能「马上就要用」的排越前。
  *
  * 证件类（有 date 字段）排最前，因为它们会过期，而「还剩几天」是唯一会让用户
@@ -294,7 +304,9 @@ export class VaultInjector {
       this.watermarks.set(sessionId, maxUpdatedAt(records))
       if (text === '') return decision
       const message = createUserMessage({
-        content: [{ type: 'text', text: VAULT_INJECTION_RULE + LF + LF + text }],
+        content: [{ type: 'text', text: VAULT_INJECTION_RULE
+          + (this.config.credentialBuiltins !== false ? LF + VAULT_BUILTIN_RULE : '')
+          + LF + LF + text }],
         source: {
           kind: 'plugin:dsh-vault',
           plugin: 'dsh-vault',

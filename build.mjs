@@ -141,6 +141,9 @@ const HOST_RUNTIME_EXTERNAL_ALLOWLIST = new Set([
   // undici 必须留给运行时——它的加载器按 process.versions.undici 挑同大版本
   // 实例，内联会锁死版本并与 Node 内置 fetch 的 dispatcher 协议对不上。
   'undici',
+  // ssh2 的可选原生加速件：ssh2 自己在 try/catch 里 require，装不上会回退纯 JS。
+  // 把它留成外部依赖，避免 esbuild 去找 build/Release/cpufeatures.node 而构建失败。
+  'cpu-features',
 ])
 
 /** Host half: ESM, self-contained except node builtins and the allowlist. */
@@ -168,7 +171,11 @@ const hostBundle = {
   banner: {
     js: [
       "import { createRequire as __thinkToolsCreateRequire } from 'node:module';",
+      "import { fileURLToPath as __thinkToolsFileURLToPath } from 'node:url';",
+      "import { dirname as __thinkToolsDirname } from 'node:path';",
       'const require = __thinkToolsCreateRequire(import.meta.url);',
+      'const __filename = __thinkToolsFileURLToPath(import.meta.url);',
+      'const __dirname = __thinkToolsDirname(__filename);',
     ].join('\n'),
   },
   plugins: [{
@@ -181,6 +188,8 @@ const hostBundle = {
       // undici 绝不可内联：代理加载器按 process.versions.undici 挑同大版本实例，
       // 内联会锁死版本并与 Node 内置 fetch 的 dispatcher 协议对不上。
       build.onResolve({ filter: /^undici$/ }, args => ({ path: args.path, external: true }))
+      // ssh2 的可选原生加速件：保持 external，运行时装不上会由 ssh2 自己回退。
+      build.onResolve({ filter: /^cpu-features$/ }, args => ({ path: args.path, external: true }))
     },
   }],
 }

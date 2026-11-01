@@ -1066,29 +1066,68 @@ export class VaultStore {
 
   /* ────────────────── 审计 ────────────────── */
 
-  /** 记一条明文查看审计（谁在什么时候看了哪个字段）。 */
-  async appendAudit(entry: { recordId: string; fieldKey: string; via: string }): Promise<void> {
+  /**
+   * 记一条敏感值使用审计。
+   *
+   * 两种动作共用一本账：
+   *  · `reveal` —— 用户在页面点眼睛看了某个字段的明文；
+   *  · `exec`   —— 凭据代用：模型让宿主用某个字段执行内置 SSH / HTTP 动作。
+   * 老记录只有 recordId / fieldKey / via，没有 action 字段，读的时候按 undefined 处理。
+   */
+  async appendAudit(entry: {
+    recordId: string
+    fieldKey: string
+    via: string
+    action?: 'reveal' | 'exec'
+    program?: string
+    args?: string
+    purpose?: string
+    exitCode?: number | null
+    durationMs?: number
+  }): Promise<void> {
     try {
       await mkdir(this.root, { recursive: true })
       const line = JSON.stringify({ at: nowIso(), ...entry }) + '\n'
       await appendFile(this.auditFile, line, 'utf8')
     } catch {
-      // 审计写不进去不影响查看（否则一次磁盘故障就让用户看不到自己的密码）。
+      // 审计写不进去不影响执行（否则一次磁盘故障就让用户用不了自己的凭据）。
     }
   }
 
   /** 读审计（最近 N 条）。 */
-  async readAudit(limit = 100): Promise<Array<{ at: string; recordId: string; fieldKey: string; via: string }>> {
+  async readAudit(limit = 100): Promise<Array<{
+    at: string
+    recordId: string
+    fieldKey: string
+    via: string
+    action?: 'reveal' | 'exec'
+    program?: string
+    args?: string
+    purpose?: string
+    exitCode?: number | null
+    durationMs?: number
+  }>> {
     try {
       const raw = await readFile(this.auditFile, 'utf8')
       const lines = raw.split('\n').filter((line) => line.trim() !== '')
       return lines.slice(-Math.max(1, limit)).reverse().map((line) => {
         try {
-          return JSON.parse(line) as { at: string; recordId: string; fieldKey: string; via: string }
+          return JSON.parse(line) as {
+            at: string
+            recordId: string
+            fieldKey: string
+            via: string
+            action?: 'reveal' | 'exec'
+            program?: string
+            args?: string
+            purpose?: string
+            exitCode?: number | null
+            durationMs?: number
+          }
         } catch {
           return null
         }
-      }).filter((item): item is { at: string; recordId: string; fieldKey: string; via: string } => item !== null)
+      }).filter((item): item is NonNullable<typeof item> => item !== null)
     } catch {
       return []
     }

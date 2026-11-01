@@ -20,6 +20,7 @@
  * 与 src/triad/mcp-status.ts 的启停/删除同源——同一个文件、同一种条目、同一套
  * 语义（serverName 唯一、disabled 标记）。面板里已装的条目立刻能看到新装的。
  */
+import { spawn } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -39,6 +40,27 @@ export interface CatalogEnvField {
   label?: string
   secret?: boolean
   url?: string
+}
+
+/**
+ * 「点一下就开始授权」的声明（目前只有 Gmail 这类需要本地 OAuth 回调的条目用）。
+ *
+ * 为什么要声明在目录里而不是让前端传命令：spawn 一个进程是敏感操作，
+ * 能跑什么必须由随包分发的目录决定，前端只能点「对这条执行它的授权」。
+ */
+export interface CatalogAuthorize {
+  /** 可执行文件（只认白名单里的 npx / uvx / node）。 */
+  command: string
+  /** 参数。 */
+  args?: string[]
+  /** 必须先存在的文件（支持 ~ 展开）；没有就不启动，直接提示去准备。 */
+  requiresFile?: string
+  /** 那个文件是什么（给用户看的名字）。 */
+  requiresLabel?: string
+  /** 去哪拿这个文件。 */
+  setupUrl?: string
+  /** 授权命令会自己开浏览器，完成后凭据写到哪里（提示语用）。 */
+  doneHint?: string
 }
 
 /** 安装方式：本地 stdio 或远程 streamable-http。 */
@@ -63,6 +85,8 @@ export interface CatalogEntry {
   author?: string
   repo?: string
   install: CatalogInstall
+  /** 可选的「点一下开始授权」声明。 */
+  authorize?: CatalogAuthorize
   iconFile?: string
   iconMime?: string
   verified?: boolean
@@ -325,11 +349,22 @@ function installEntry(body: { id?: unknown; env?: unknown; overwrite?: unknown }
     envValues[field.name] = value
   }
 
-  // 配置里带双花括号占位符的（目录、连接串这类），用 env 值直接替换。
+  // 配置里带双花括号占位符的：{{VAR}} 用 env 值替换，{{PLUGIN_DIR}} 换成插件包根目录
+  // （随包分发的本地 MCP server 要靠它拼出绝对路径，DSH 的 stdio 配置不认相对路径）。
+  const pluginDir = (() => {
+    try {
+      // 末尾的分隔符要去掉：拼 '{{PLUGIN_DIR}}/assets/x' 时否则会出现 "D:\a\b\/assets"
+      return fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]+$/, '')
+    } catch {
+      return ''
+    }
+  })()
   const resolved: CatalogEntry = { ...entry, install: { ...entry.install } }
   if (Array.isArray(entry.install.args)) {
     resolved.install.args = entry.install.args.map((arg) =>
-      arg.replace(/\{\{([A-Za-z0-9_]+)\}\}/g, (all, key: string) => envValues[key] ?? all))
+      arg
+        .replace(/\{\{PLUGIN_DIR\}\}/g, pluginDir)
+        .replace(/\{\{([A-Za-z0-9_]+)\}\}/g, (all, key: string) => envValues[key] ?? all))
   }
 
   const patchPath = patchFilePath()
@@ -387,6 +422,82 @@ function uninstallEntry(body: { id?: unknown }): InstallResult {
     return { ok: false, error: 'write failed: ' + (error instanceof Error ? error.message : String(error)) }
   }
   return { ok: true, serverName, patchFile: patchPath, needsRestart: false }
+}
+
+/** 授权命令白名单（spawn 是敏感操作，只认这几个）。 */
+const ALLOWED_AUTH_COMMANDS = new Set(['npx', 'uvx', 'node', 'python', 'python3', 'mcp-remote', 'agently-cli'])
+
+export interface AuthorizeResult {
+  ok: boolean
+  /** 已拉起授权进程。 */
+  started?: boolean
+  /** 前置文件缺失，需要用户先准备。 */
+  needsSetup?: boolean
+  requiresFile?: string
+  requiresLabel?: string
+  setupUrl?: string
+  message?: string
+}
+
+/** 展开 ~ 开头的主目录路径。 */
+function expandHome(path: string): string {
+  return path.startsWith('~') ? join(homedir(), path.slice(1).replace(/^[\\/]/, '')) : path
+}
+
+/**
+ * 点一下开始授权：spawn 目录里声明的那条命令，让它在后台把浏览器弹出来。
+ *
+ * 为什么只能跑目录声明的命令：前端能传的只有一个 id，命令、参数、前置文件
+ * 全部来自随包分发的 catalog.json。否则这就是一个「任意命令执行」接口。
+ *
+ * 为什么 detached + stdio:ignore：授权命令自己会开浏览器、自己起本地回调端口，
+ * 然后一直挂着等回调；被 DSH 的进程树管着的话，DSH 一退出它就断，用户回来
+ * 看不到结果。detached + unref 让它独立跑完。
+ */
+function authorizeEntry(body: { id?: unknown }): AuthorizeResult {
+  const id = typeof body.id === 'string' ? body.id : ''
+  if (id === '') return { ok: false, message: 'id required' }
+  const catalog = readCatalog()
+  if (catalog === null) return { ok: false, message: 'catalog missing from package' }
+  const entry = catalog.entries.find((item) => item.id === id)
+  if (entry === undefined) return { ok: false, message: 'unknown connector: ' + id }
+  const auth = entry.authorize
+  if (auth === undefined) return { ok: false, message: '这个连接器没有授权步骤' }
+  if (!ALLOWED_AUTH_COMMANDS.has(auth.command)) {
+    return { ok: false, message: '不支持的授权命令: ' + auth.command }
+  }
+
+  if (typeof auth.requiresFile === 'string' && auth.requiresFile !== '') {
+    const file = expandHome(auth.requiresFile)
+    if (!existsSync(file)) {
+      return {
+        ok: false,
+        needsSetup: true,
+        requiresFile: auth.requiresFile,
+        requiresLabel: auth.requiresLabel,
+        setupUrl: auth.setupUrl,
+        message: '还缺「' + (auth.requiresLabel ?? auth.requiresFile) + '」，准备好再点授权。',
+      }
+    }
+  }
+
+  try {
+    const child = spawn(auth.command, auth.args ?? [], {
+      detached: true,
+      stdio: 'ignore',
+      // Windows 上 npx 是 npx.cmd，不套 shell 会 ENOENT
+      shell: process.platform === 'win32',
+      cwd: homedir(),
+    })
+    child.unref()
+  } catch (error) {
+    return { ok: false, message: '启动授权命令失败: ' + (error instanceof Error ? error.message : String(error)) }
+  }
+  return {
+    ok: true,
+    started: true,
+    message: auth.doneHint ?? '授权窗口已启动，按浏览器里的提示完成登录。',
+  }
 }
 
 /**
@@ -498,6 +609,14 @@ export function applyMcpCatalog(ctx: Context): void {
           let body: { id?: unknown } = {}
           try { body = JSON.parse(raw) as { id?: unknown } } catch { /* 空体按缺参处理 */ }
           writeJson(res, 200, uninstallEntry(body))
+          return
+        }
+        if (url.pathname === CATALOG_ROUTE + '/authorize') {
+          if (req.method !== 'POST') { writeJson(res, 405, { error: 'POST only' }); return }
+          const raw = await readBody(req)
+          let body: { id?: unknown } = {}
+          try { body = JSON.parse(raw) as { id?: unknown } } catch { /* 空体按缺参处理 */ }
+          writeJson(res, 200, authorizeEntry(body))
           return
         }
         writeJson(res, 404, { error: 'no route for ' + url.pathname })
