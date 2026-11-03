@@ -10,6 +10,8 @@
  *
  *  · image / video / audio —— 原生 <img> / <video controls> / <audio controls>；
  *  · pdf                  —— 内嵌 iframe，交给浏览器自带的 PDF 查看器；
+ *  · page（`.html`）       —— 内嵌 iframe 直接看成品页面，另给「打开页面」入口
+ *                            （3.1 Pages：可回访的持久页面，不是普通文件）；
  *  · doc / sheet / slide  —— 先给一张首页页图（宿主把 Office 转成 PNG），
  *                            再挂一个转成 PDF 的 iframe；两个都是宿主路由，
  *                            页图失败时退成图标占位，不出现裂图；
@@ -18,7 +20,7 @@
  * 预览面板默认收起：一条消息里可能连着三四个产出物，全展开会把对话流顶掉。
  */
 import { useEffect, useState, type ReactNode } from 'react'
-import { IconChevronDown, IconDownload } from '../icons.tsx'
+import { IconChevronDown, IconDownload, IconExpand } from '../icons.tsx'
 import {
   artifactKindOf,
   fileExtOf,
@@ -39,6 +41,7 @@ const KIND_LABEL: Readonly<Record<ArtifactKind, string>> = {
   sheet: '表格',
   slide: '演示',
   image: '图片',
+  page: '页面',
   file: '文件',
 }
 
@@ -92,6 +95,17 @@ const GLYPHS: Readonly<Record<ArtifactKind, ReactNode>> = {
       <rect x="3.2" y="4.5" width="17.6" height="15" rx="2.5" />
       <circle cx="8.8" cy="9.8" r="1.6" />
       <path d="m4.6 17.8 4.6-4.6 3.6 3.1 2.6-2.4 4 3.9" />
+    </>
+  ),
+  // 网页 / 页面（3.1 Pages）：浏览器窗口轮廓 + 标题栏三个点。
+  page: (
+    <>
+      <rect x="3" y="4.6" width="18" height="14.8" rx="2.4" />
+      <path d="M3 9.2h18" />
+      <circle cx="6" cy="6.9" r="0.8" />
+      <circle cx="8.6" cy="6.9" r="0.8" />
+      <circle cx="11.2" cy="6.9" r="0.8" />
+      <path d="M6.4 12.4h9.2M6.4 15.6h6" />
     </>
   ),
   file: (
@@ -152,8 +166,8 @@ function OfficePreview({ path, name, kind }: { path: string; name: string; kind:
   )
 }
 
-/** 预览正文：按归族分派。 */
-function ArtifactPreview({ path, name, kind }: { path: string; name: string; kind: ArtifactKind }): JSX.Element | null {
+/** 预览正文：按归族分派。`full=true` 用于全屏预览层（Office 只给 PDF iframe，不再叠首页图）。 */
+function ArtifactPreview({ path, name, kind, full = false }: { path: string; name: string; kind: ArtifactKind; full?: boolean }): JSX.Element | null {
   const url = fileUrlOf(path)
   if (kind === 'image') {
     return <img className="pa-media__image" src={url} alt={name} loading="lazy" decoding="async" />
@@ -167,7 +181,17 @@ function ArtifactPreview({ path, name, kind }: { path: string; name: string; kin
   if (kind === 'pdf') {
     return <iframe className="pa-media__frame" src={url} title={`${name} 预览`} loading="lazy" />
   }
+  /*
+   * 页面（3.1 Pages）：`.html` 直接 iframe 渲染 —— 它就是给人看的成品，
+   * 不需要「先下载再用浏览器打开」这一道。头部另有「打开页面」入口，
+   * 需要整屏 / 分享时走它。
+   */
+  if (kind === 'page') {
+    return <iframe className="pa-media__frame" src={url} title={`${name} 预览`} loading="lazy" />
+  }
   if (kind === 'doc' || kind === 'sheet' || kind === 'slide') {
+    // 全屏层里首页图是多余的（用户已经在看大图），只要 PDF 查看器
+    if (full) return <iframe className="pa-media__frame pa-media__frame--full" src={officePdfUrl(path)} title={`${name} 预览`} />
     return <OfficePreview path={path} name={name} kind={kind} />
   }
   return null
@@ -180,6 +204,14 @@ export interface ArtifactCardProps {
   readonly label?: string | undefined
   /** 字节数；只有 host 的 ArtifactRef 带 size 时才有。 */
   readonly size?: number | undefined
+  /**
+   * 这个页面已经有更新版本（3.1 Pages）。
+   *
+   * 由 MessageBlockView 按「该 Bot 的 Pages 列表里同一路径的 updatedAt 晚于本条
+   * 消息时间」算出来。只做提示、不做版本 diff：用户点它打开最新版，旧卡片留在
+   * 原位作为历史记录。
+   */
+  readonly stale?: { url: string; updatedAt: number } | undefined
 }
 
 /**
@@ -188,52 +220,136 @@ export interface ArtifactCardProps {
  * 路径不在白名单里（`artifactKindOf` 返回 null）时按「文件」渲染，而不是返回
  * null：调用方既然把它当产出物传进来，留一张能下载的通用卡比让它凭空消失好。
  */
-export function ArtifactCard({ path, label, size }: ArtifactCardProps): JSX.Element {
+export function ArtifactCard({ path, label, size, stale }: ArtifactCardProps): JSX.Element {
   const kind = artifactKindOf(path) ?? 'file'
   const name = fileNameOf(path) || path
   const ext = fileExtOf(path).toUpperCase()
   const url = fileUrlOf(path)
   const [open, setOpen] = useState(false)
+  /** 全屏预览层：点缩略图打开，点遮罩关闭。 */
+  const [lightbox, setLightbox] = useState(false)
+  const [thumbFailed, setThumbFailed] = useState(false)
+  useEffect(() => { setThumbFailed(false) }, [path])
   const previewable = kind !== 'file'
   const meta = [ext, KIND_LABEL[kind], typeof size === 'number' ? formatFileSize(size) : '']
     .filter((part) => part !== '')
     .join(' · ')
+  /*
+   * 常显缩略图：文档 / 表格 / 演示 / PDF 出首页页图，图片直接用它自己。
+   *
+   * 用户要的是「文件生成完，一眼看见它长什么样」，而不是先点「预览」再等一张图。
+   * 视频与音频没有可靠的静态首帧，仍然走折叠预览。
+   */
+  const thumbUrl = kind === 'image'
+    ? url
+    : (kind === 'doc' || kind === 'sheet' || kind === 'slide' || kind === 'pdf')
+      ? officePageUrl(path)
+      : ''
+  const hasThumb = thumbUrl !== '' && !thumbFailed
   return (
-    <div className="pa-media" data-kind={kind} data-open={open ? 'true' : 'false'}>
-      <div className="pa-media__head">
-        <span className="pa-media__icon" data-kind={kind}>
-          <ArtifactGlyph kind={kind} size={17} />
-        </span>
-        <div className="pa-media__main">
-          <div className="pa-media__name" title={path}>{name}</div>
-          <div className="pa-media__meta">
-            {label !== undefined && label !== '' ? <span className="pa-media__label">{label}</span> : null}
-            <span className="pa-media__kind">{meta}</span>
+    <>
+      <div className="pa-media" data-kind={kind} data-open={open ? 'true' : 'false'} data-thumb={hasThumb ? 'true' : 'false'}>
+        <div className="pa-media__head">
+          <span className="pa-media__icon" data-kind={kind}>
+            <ArtifactGlyph kind={kind} size={17} />
+          </span>
+          <div className="pa-media__main">
+            <div className="pa-media__name" title={path}>{name}</div>
+            <div className="pa-media__meta">
+              {label !== undefined && label !== '' ? <span className="pa-media__label">{label}</span> : null}
+              <span className="pa-media__kind">{meta}</span>
+              {/*
+               * 旧页面提示（3.1）：同一页面已被更新过。给「打开最新版」的入口而不是
+               * 隐藏旧卡片——对话流是历史记录，用户回看时仍需要知道当时展示的是什么。
+               */}
+              {stale !== undefined ? (
+                <a
+                  className="pa-media__stale"
+                  href={stale.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  title="这个页面有更新版本，打开最新版"
+                >
+                  已更新到下方
+                </a>
+              ) : null}
+            </div>
+          </div>
+          <div className="pa-media__actions">
+            {kind === 'page' ? (
+              <a className="pa-media__btn" href={url} target="_blank" rel="noreferrer" title={`在新窗口打开 ${name}`}>
+                <IconExpand size={12} />
+                <span>打开页面</span>
+              </a>
+            ) : null}
+            {previewable ? (
+              <button
+                className="pa-media__btn"
+                type="button"
+                aria-expanded={open}
+                onClick={() => setOpen((value) => !value)}
+              >
+                {open ? '收起' : '预览'}
+                <IconChevronDown size={12} className="pa-media__caret" />
+              </button>
+            ) : null}
+            <a className="pa-media__btn" href={url} download={name} title={`下载 ${name}`}>
+              <IconDownload size={12} />
+              <span>下载</span>
+            </a>
           </div>
         </div>
-        <div className="pa-media__actions">
-          {previewable ? (
-            <button
-              className="pa-media__btn"
-              type="button"
-              aria-expanded={open}
-              onClick={() => setOpen((value) => !value)}
-            >
-              {open ? '收起' : '预览'}
-              <IconChevronDown size={12} className="pa-media__caret" />
-            </button>
-          ) : null}
-          <a className="pa-media__btn" href={url} download={name} title={`下载 ${name}`}>
-            <IconDownload size={12} />
-            <span>下载</span>
-          </a>
-        </div>
+        {hasThumb ? (
+          <button
+            className="pa-media__thumbwrap"
+            type="button"
+            onClick={() => setLightbox(true)}
+            title={`打开 ${name} 预览`}
+            aria-label={`打开 ${name} 预览`}
+          >
+            <img
+              className="pa-media__thumb"
+              src={thumbUrl}
+              alt={`${name} 首页预览`}
+              loading="lazy"
+              decoding="async"
+              onError={() => setThumbFailed(true)}
+            />
+            <span className="pa-media__thumbhint">点击查看</span>
+          </button>
+        ) : null}
+        {open && previewable ? (
+          <div className="pa-media__preview">
+            <ArtifactPreview path={path} name={name} kind={kind} />
+          </div>
+        ) : null}
       </div>
-      {open && previewable ? (
-        <div className="pa-media__preview">
-          <ArtifactPreview path={path} name={name} kind={kind} />
+      {lightbox ? (
+        <div
+          className="pa-media__lightbox"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${name} 预览`}
+          onClick={() => setLightbox(false)}
+        >
+          {/* 阻止冒泡：点内容区不该关掉整个预览层 */}
+          <div className="pa-media__lightbox-inner" onClick={(event) => event.stopPropagation()}>
+            <div className="pa-media__lightbox-head">
+              <span className="pa-media__lightbox-title" title={path}>{name}</span>
+              <a className="pa-media__btn" href={url} download={name} title={`下载 ${name}`}>
+                <IconDownload size={12} />
+                <span>下载</span>
+              </a>
+              <button className="pa-media__btn" type="button" onClick={() => setLightbox(false)} aria-label="关闭预览">
+                关闭
+              </button>
+            </div>
+            <div className="pa-media__lightbox-body">
+              <ArtifactPreview path={path} name={name} kind={kind} full />
+            </div>
+          </div>
         </div>
       ) : null}
-    </div>
+    </>
   )
 }

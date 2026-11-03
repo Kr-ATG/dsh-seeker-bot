@@ -5,7 +5,7 @@
  * `src/vendor/`，因此本文件相对它的位置与 dsh-triad 的 `src/host.ts`
  * 相对 `<repo>/vendor/` 的位置同构，所有相对 import 保持原样可解析：
  *
- *   src/triad/host.ts                    → ../vendor/usage-skill/index.js
+ *   src/triad/host.ts                    → ../vendor/usage-skill/skills-host.js
  *   src/triad/memory/engine/*.ts         → ../../../vendor/dsh-llm/index.js
  *   src/triad/memory/tools.ts            → ../../vendor/dsh-tools/schema.js
  *
@@ -13,9 +13,8 @@
  *
  *  - memory     → 本地记忆引擎（LLM 抽取、embedding 检索、
  *                 `agent/pre-step` 注入、工具、`/api/dsh-memory/*`）
- *  - usage+skills → 用量统计 + 供应商余额（`/api/usage-stats/*`）与技能包
- *                 管理（`/api/skill-manager/*`），即 vendor 化的
- *                 dsh-usage-skill host
+ *  - skills     → 技能包管理（`/api/skill-manager/*`），即 vendor 化的
+ *                 dsh-usage-skill 里的 skills-host 半身
  *  - skill-toggles / skill-health / mcp-recommended / mcp-status
  *               → `/api/skill-toggles/*`、`/api/skill-health`、
  *                 `/api/mcp-recommended`、`/api/triad/mcp-status`
@@ -32,7 +31,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { applyMemory } from './memory/index.js'
 // @ts-expect-error — vendored JS half (no type declarations shipped)
-import { apply as applyUsageHost } from '../vendor/usage-skill/index.js'
+import { apply as applySkillsHost } from '../vendor/usage-skill/skills-host.js'
 import { apply as applySkillToggles } from './skill-toggles.js'
 import { applySkillHealth } from './skill-health.js'
 import { applyMcpRecommended } from './mcp-recommended.js'
@@ -52,21 +51,21 @@ import type { MemoryConfig } from './memory/types.js'
  *
  *  - dsh-seeker-bot 现有：webServer, tools
  *  - 其余模块：
- *      memory     → webServer, tools
- *      usage      → webServer, credentials, sessions, sessionPersistence,
- *                   settings, llm
+ *      memory     → webServer, tools, llm
  *      skills     → webServer
+ *      gallery / session-outputs / session-capabilities
+ *                 → webServer, sessions, sessionPersistence
  *
- * 并集：webServer, tools, credentials, sessions, sessionPersistence,
- *       settings, llm（7 个，与 dsh-triad 原 inject 完全一致）。
+ * 并集：webServer, tools, sessions, sessionPersistence, llm（5 个）。
+ *
+ * 用量统计后端（`/api/usage-stats/*`）连同它独占的 credentials / settings
+ * 两个 service 依赖已整块删除，故不在并集里。
  */
 
 /** Runtime config shape（通过主插件的 cordis.patch.yml 传入）。 */
 export interface TriadConfig {
   /** Memory engine overrides；未给的键回落到 DEFAULT_CONFIG。 */
   memory?: Partial<MemoryConfig>
-  /** Usage/account overrides，转发给 vendor 的 usage host。 */
-  usage?: Record<string, unknown>
   /** 个人档案（vault）配置覆盖；未给的键回落到 DEFAULT_VAULT_CONFIG。 */
   vault?: Record<string, unknown>
 }
@@ -78,11 +77,9 @@ export interface TriadConfig {
  */
 export function resolveConfig(config: TriadConfig = {}): {
   memory: Partial<MemoryConfig> | undefined
-  usage: Record<string, unknown>
 } {
   return {
     memory: config.memory,
-    usage: config.usage ?? {},
   }
 }
 
@@ -100,7 +97,7 @@ export async function applyTriadHost(ctx: Context, config: TriadConfig = {}): Pr
   // skill-filesystem provider 扫到，而技能面板列的就是这个目录。放在
   // 面板/开关之后装，面板会先渲染出一个"技能不存在"的空态再刷新。
   // 纯文件操作、不依赖任何 ctx service，失败只 warn（内置技能装不上不该
-  // 拖垮记忆引擎与用量面板）。
+  // 拖垮记忆引擎与技能面板）。
   try {
     await installBundledSkills(ctx.logger)
   } catch (error) {
@@ -119,13 +116,13 @@ export async function applyTriadHost(ctx: Context, config: TriadConfig = {}): Pr
     )
   }
 
-  // ── 用量 + 技能 ─────────────────────────────────────────────────────
+  // ── 技能管理（/api/skill-manager/*）─────────────────────────────────
   try {
-    await applyUsageHost(ctx, resolved.usage)
-    ctx.logger?.info?.('[dsh-seeker-bot] triad usage + skills host mounted')
+    await applySkillsHost(ctx)
+    ctx.logger?.info?.('[dsh-seeker-bot] triad skills host mounted')
   } catch (error) {
     ctx.logger?.warn?.(
-      `[dsh-seeker-bot] triad usage host failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+      `[dsh-seeker-bot] triad skills host failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
     )
   }
 

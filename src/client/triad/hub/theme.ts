@@ -182,8 +182,10 @@ body[data-ds-dark-theme] .wb-root {
 .wb2-card:hover { transform: translateY(-2px); border-color: var(--wb2-line2); box-shadow: var(--wb2-drop); }
 
 /* 重点卡（v4）：1px 渐变描边流光 + 右上径向光晕。
-   position:relative 必须有——hero 类会被加在 grid 项上（原 .wb2-persona 已删，
-   现在挂在用量页 hero 上），没有定位上下文时 ::before 会逃到 .wb-root 去铺满整页。
+   position:relative 必须有——hero 类会被加在 grid 项上（原 .wb2-persona 与
+   原「用量」页 hero 都已删除，当前无使用者；保留为通用重点卡装饰类，以后
+   给任意卡片加 .wb2-card-hero 即可复用），没有定位上下文时 ::before 会逃到
+   .wb-root 去铺满整页。
    isolation:isolate 把伪元素的层叠收在本卡内；::after 用 z-index:-1 落在
    本卡背景之上、内容之下（负 z-index 在隔离上下文里的正确层级）。 */
 .wb2-card-hero { position: relative; isolation: isolate; }
@@ -308,72 +310,7 @@ body[data-ds-dark-theme] .wb-root {
    （./strip.tsx），页内不再有任何切换器。Dock 的样式与组件一并清掉，
    不留在表里当死代码。 */
 
-/* ══════════ 4 · 用量页英雄区（效果图第 4 页） ══════════ */
-.wb2-us-hero { display: grid; grid-template-columns: 1.28fr 1fr 1fr .94fr; gap: 12px; margin-bottom: 12px; }
-@media (max-width: 1180px) { .wb2-us-hero { grid-template-columns: 1fr 1fr; } }
-@media (max-width: 640px) { .wb2-us-hero { grid-template-columns: 1fr; } }
-.wb2-us-main { padding: 20px 22px; position: relative; overflow: hidden;
-  background: linear-gradient(168deg, var(--wb2-s2), var(--wb2-s1) 54%); }
-.wb2-us-big { font-size: 44px; font-weight: 700; letter-spacing: -.042em; line-height: 1.1; color: var(--wb2-t1);
-  font-variant-numeric: tabular-nums; font-family: var(--wb2-mono); margin: 6px 0 6px;
-  text-shadow: 0 0 34px var(--wb2-a3); }
-.wb2-us-spark { margin-top: 12px; height: 40px; }
-.wb2-us-spark svg { width: 100%; height: 100%; overflow: visible; }
-.wb2-us-spark-line { fill: none; stroke: var(--wb2-accent); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
-  stroke-dasharray: 900; stroke-dashoffset: 900; animation: wb2-draw 1.9s var(--wb2-ease) .25s forwards;
-  filter: drop-shadow(0 0 5px var(--wb2-a3)); }
-@keyframes wb2-draw { to { stroke-dashoffset: 0; } }
-.wb2-us-spark-fill { fill: var(--wb2-a1); opacity: 0; animation: wb2-fadein 900ms var(--wb2-ease) 1.15s forwards; }
-@keyframes wb2-fadein { to { opacity: 1; } }
-.wb2-us-metric { padding: 15px 16px; display: flex; flex-direction: column; gap: 2px; min-height: 128px; }
-.wb2-us-metric-v { font-size: 23px; font-weight: 680; color: var(--wb2-t1); letter-spacing: -.026em; line-height: 1.2;
-  font-variant-numeric: tabular-nums; font-family: var(--wb2-mono); margin-top: 5px; }
-.wb2-us-metric-s { font-size: 10.5px; color: var(--wb2-t4); margin-top: 3px; }
-.wb2-us-bar { height: 3px; border-radius: 3px; background: color-mix(in srgb, var(--wb2-t1) 8%, transparent);
-  overflow: hidden; margin-top: auto; }
-.wb2-us-bar i { display: block; height: 100%; border-radius: 3px;
-  background: linear-gradient(90deg, var(--wb2-accent), var(--wb2-accent-hi));
-  transform-origin: left; animation: wb2-grow 1.15s var(--wb2-ease) both; box-shadow: 0 0 9px var(--wb2-a3); }
-@keyframes wb2-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
-.wb2-us-gauge-wrap { display: flex; align-items: center; gap: 12px; margin-top: auto; }
-.wb2-us-gauge { position: relative; width: 58px; height: 58px; flex: none; }
-.wb2-us-gauge svg { transform: rotate(-90deg); }
-.wb2-us-gauge-arc { stroke: var(--wb2-accent); stroke-dasharray: 163; stroke-dashoffset: 163;
-  animation: wb2-gdash 1.5s var(--wb2-ease) .35s forwards; filter: drop-shadow(0 0 5px var(--wb2-a3)); }
-@keyframes wb2-gdash { to { stroke-dashoffset: var(--go, 40); } }
-.wb2-us-gauge b { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; }
-.wb2-us-gauge b i { font-style: normal; font-size: 14px; font-weight: 700; color: var(--wb2-t1); font-family: var(--wb2-mono); line-height: 1; }
-.wb2-us-gauge b u { text-decoration: none; font-size: 8px; color: var(--wb2-t4); margin-top: 2px; }
-.wb2-us-bottom { display: grid; grid-template-columns: 1.34fr 1fr; gap: 12px; margin-top: 12px; }
-@media (max-width: 980px) { .wb2-us-bottom { grid-template-columns: 1fr; } }
-.wb2-us-rank-i { display: flex; align-items: center; gap: 11px; padding: 8px 0; }
-.wb2-us-rank-i + .wb2-us-rank-i { border-top: 1px solid var(--wb2-line); }
-.wb2-us-rank-n { flex: none; width: 16px; font-size: 10.5px; color: var(--wb2-t4); font-weight: 600; }
-.wb2-us-rank-c { flex: 1; min-width: 0; }
-.wb2-us-rank-t { display: flex; align-items: baseline; gap: 8px; margin-bottom: 5px; }
-.wb2-us-rank-name { font-size: 11.5px; color: var(--wb2-t1); font-weight: 520; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wb2-us-rank-v { margin-left: auto; font-size: 11px; color: var(--wb2-t2); font-family: var(--wb2-mono); font-weight: 600; flex: none; }
-.wb2-us-rank-bar { height: 4px; border-radius: 4px; background: color-mix(in srgb, var(--wb2-t1) 6%, transparent); overflow: hidden; }
-.wb2-us-rank-bar i { display: block; height: 100%; border-radius: 4px; transform-origin: left;
-  background: linear-gradient(90deg, var(--wb2-a4), var(--wb2-accent));
-  animation: wb2-grow 1.05s var(--wb2-ease) both; animation-delay: var(--d, 0ms); }
-.wb2-us-pie-wrap { display: flex; align-items: center; gap: 16px; padding-top: 6px; }
-.wb2-us-pie { width: 96px; height: 96px; flex: none; transform: rotate(-90deg); }
-.wb2-us-pie circle { fill: none; stroke-width: 11; stroke-dasharray: 264; animation: wb2-piespin 1.35s var(--wb2-ease) both; }
-@keyframes wb2-piespin { from { stroke-dashoffset: 264; } }
-.wb2-us-pie-lg { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
-.wb2-us-pie-i { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--wb2-t2); }
-.wb2-us-pie-i i { width: 8px; height: 8px; border-radius: 2.5px; flex: none; font-style: normal; }
-.wb2-us-pie-i .wb2-num { margin-left: 4px; color: var(--wb2-t3); }
-.wb2-us-pie-i b { margin-left: auto; font-family: var(--wb2-mono); color: var(--wb2-t1); font-weight: 600; font-size: 11px; }
-/* 工作台内热力格放大到效果图尺寸（compact 小卡片保持原紧凑格） */
-.wb-root .usm-uc { --dsh-activity-cell: 11px; --dsh-activity-radius: 3px; max-width: 1400px !important;
-  padding: 0 !important; gap: 12px !important; margin: 0 auto !important; }
-.wb-root .usm-uc-card { border-radius: var(--wb2-r-lg) !important; border: 1px solid var(--wb2-line) !important;
-  background: linear-gradient(168deg, var(--wb2-s2), var(--wb2-s1) 46%) !important;
-  box-shadow: var(--wb2-inset), var(--wb2-drop) !important; padding: 15px 17px !important; }
-.wb-root .usm-uc-stat { border-radius: var(--wb2-r-md) !important; border: 1px solid var(--wb2-line) !important;
-  background: linear-gradient(168deg, var(--wb2-s2), var(--wb2-s1) 46%) !important; }
+/* ══════════ 4 · 页内版式（用量页英雄区已于 2026-11 随该页删除） ══════════ */
 
 /* 分类页包裹层：页头 + 面板主体纵向排布，撑满 wb-body */
 .wb2-page-wrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; position: relative; overflow: hidden; }
@@ -545,10 +482,8 @@ body[data-ds-dark-theme] .wb-root {
 
 /* 动效一票否决（Dock 已删，选择器同步清理，不留死类名）。 */
 @media (prefers-reduced-motion: reduce) {
-  .wb2-rise, .wb2-eyebrow i, .wb2-dot-ok, .wb2-card-hero::before,
-  .wb2-us-spark-line, .wb2-us-gauge-arc, .wb2-us-pie circle { animation: none !important; }
-  .wb2-card, .wb2-btn, .wb2-ibtn, .wb2-sw, .wb2-sw::after,
-  .wb2-us-bar i, .wb2-us-rank-bar i { transition: none !important; }
+  .wb2-rise, .wb2-eyebrow i, .wb2-dot-ok, .wb2-card-hero::before { animation: none !important; }
+  .wb2-card, .wb2-btn, .wb2-ibtn, .wb2-sw, .wb2-sw::after { transition: none !important; }
 }
 `
 

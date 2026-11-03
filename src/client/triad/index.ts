@@ -1,10 +1,10 @@
 /**
  * dsh-triad client 半身（搬迁进 dsh-seeker-bot，三工作台融合）。
  *
- * 挂载五个模块，每个独立 try/catch，一个失败不拖垮其他：
+ * 挂载以下模块，每个独立 try/catch，一个失败不拖垮其他：
  *
+ *  - workbench  → 统一工作台（记忆 / 能力 / 连接器 / 画廊 / 档案 / 系统提示词 / 同步设置）
  *  - memory     → 官方 main 页 + sidebar.panellist 菜单行（composer 注入开关已全部下线）
- *  - usage      → 侧边栏导航行 + 用量紧凑卡片（唯一保留的自绘浮层入口）
  *  - skills     → 官方 main 页 + sidebar.panellist 菜单行 + `/` slash source + skill tool row
  *  - responsive → 窄屏全局覆盖样式
  *
@@ -14,8 +14,7 @@
  * 2026-10-04 入口改版：记忆 / 能力两个工作台原先都是「自绘侧边栏导航行
  * + createPortal 到 body 的浮层抽屉」，现已全部改走官方座位（`main` 页 +
  * `sidebar.panellist` 菜单行），与官方「自动化任务」页完全同座位——见
- * `./panel-seat.tsx`。用量因为点开的是贴入口的紧凑小卡而不是整页，仍保留
- * 自绘导航行（官方菜单行只表达「选中一个 main 页面」，装不下这个语义）。
+ * `./panel-seat.tsx`。原「用量」工作台（自绘紧凑小卡入口）已于 2026-11 整块删除。
  *
  * 座位与命名空间（locale namespace / 路由前缀）原样保留，dsh-triad 退役后用户
  * 零迁移。所有数据经 host 半身的 loopback-only HTTP 路由以 same-origin fetch
@@ -30,7 +29,6 @@ import { applyWorkbenchSeat } from './hub/seat.js'
 import { applyMemoryClient } from './memory/index.js'
 import { apply as applySkillSource } from './skill-source/index.js'
 import { injectResponsiveStyles } from './responsive.js'
-import { buildActivityGrid, activityColor, ACTIVITY_COLUMNS } from './usage/dashboard/ActivityGrid.js'
 
 /** Run one module's apply, logging and swallowing any failure. */
 function safe(label: string, run: (ctx: ClientContext) => void, ctx: ClientContext): void {
@@ -44,21 +42,10 @@ function safe(label: string, run: (ctx: ClientContext) => void, ctx: ClientConte
 /** Apply the dsh-seeker-bot browser half. */
 export function applyTriadClient(ctx: ClientContext): void {
   safe('responsive styles', (c) => { c.effect(injectResponsiveStyles, 'dsh-seeker-bot: triad responsive styles') }, ctx)
-  // 统一工作台（记忆、能力、用量、画廊）
+  // 统一工作台（记忆、能力、连接器、画廊、档案、系统提示词、同步设置）
   safe('workbench', applyWorkbenchSeat, ctx)
   // 记忆模块：只剩 locale 字典注册（composer 注入开关已全部下线，见 memory/index.ts）
   safe('memory locale', applyMemoryClient, ctx)
   // 斜杠命令与技能工具行源
   safe('skills source', applySkillSource, ctx)
 }
-
-/** 纯逻辑导出：供 smoke 测试直接断言「Token 活动」贡献热力模型。 */
-export { buildActivityGrid, activityColor, ACTIVITY_COLUMNS }
-/**
- * 纯逻辑导出：供 smoke 断言「下拉选项 id ↔ 筛选比对值」口径一致。
- *
- * 这条口径踩过真坑（选模型后四格全 0、热力图全空），必须由冒烟钉死：
- * 供应商选项的 id 是前缀段、模型选项的 id 是完整 model 串，两者都要能被
- * `filterDaysByScope` 原样吃下。
- */
-export { collectModels, collectProviders, filterDaysByScope, providerOfModel } from './usage/dashboard/aggregate.js'

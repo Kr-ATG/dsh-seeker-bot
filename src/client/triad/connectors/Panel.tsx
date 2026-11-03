@@ -3,8 +3,10 @@
  *
  * ── 这是什么 ────────────────────────────────────────────────────────
  * 一个 MCP 连接器市场：精选目录（随包分发）+ 搜索 + 分类 + 一键安装。
- * 目录数据来自 assets/mcp-catalog/catalog.json（56 条，国内 14 / 国外 42，
+ * 目录数据来自 assets/mcp-catalog/catalog.json（61 条，国内 14 / 国外 47，
  * 每条都验过包在 npm/pypi 上真实存在，图标自托管在 assets/mcp-catalog/icons/）。
+ * 「系统能力」那一组（电脑操作 / 浏览器操作）是 DSH 官方插件，install.type
+ * 为 plugin —— 安装动作写的是 cordis 插件行，不是 mcp-client 实例。
  *
  * ── 为什么自己做目录而不是接第三方市场 ──────────────────────────────
  * 调研了 12 个开源 agent（Cline / Hermes / Cherry Studio / Chatbox / 5ire /
@@ -49,7 +51,18 @@ interface CatalogEntry {
   region?: 'cn' | 'global'
   author?: string
   repo?: string
-  install: { type: 'stdio' | 'http'; command?: string; args?: string[]; url?: string; env?: CatalogEnvField[]; auth?: string }
+  install: {
+    type: 'stdio' | 'http' | 'plugin'
+    command?: string
+    args?: string[]
+    url?: string
+    env?: CatalogEnvField[]
+    auth?: string
+    /** type='plugin'：要写进 patch 的官方插件条目。 */
+    entries?: Array<{ id: string; name: string }>
+    /** type='plugin'：安装前必须已在 profile 里装好的包。 */
+    requiresPackages?: string[]
+  }
   /** 有这一项才显示「开始授权」按钮（目录里声明的，前端只点不管命令）。 */
   authorize?: {
     requiresFile?: string
@@ -100,6 +113,11 @@ function iconUrl(file: string | undefined): string {
 /** 安装配置的一行人类可读描述。 */
 function installSummary(entry: CatalogEntry): string {
   const inst = entry.install
+  // 官方插件：没有进程也没有 URL，展示它会往 patch 里挂哪几个包。
+  if (inst.type === 'plugin') {
+    const names = (inst.entries ?? []).map((item) => item.name)
+    return names.length === 0 ? 'DSH 官方插件' : 'DSH 官方插件 · ' + names.join(' + ')
+  }
   if (inst.type === 'http') return '远程 HTTP · ' + (inst.url ?? '')
   const args = (inst.args ?? []).join(' ')
   return '本地 stdio · ' + (inst.command ?? 'npx') + ' ' + args

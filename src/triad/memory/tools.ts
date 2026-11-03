@@ -9,16 +9,19 @@ import { defineTool } from '../../vendor/dsh-tools/schema.js'
 import type { InferArgs, ParameterSchemaSpec } from '../../vendor/dsh-tools/schema.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ConsolidateResult, MemoryConfig } from './types.js'
-import { projectHashOf, summarize, type MemoryStore } from './engine/store.js'
+import { ownerOf, ownerOfSessionId, projectHashOf, summarize, type MemoryStore } from './engine/store.js'
+import { visibilityFor } from './engine/visibility.js'
 import { compileAll, workspaceHashOf } from './engine/compile.js'
 import { consolidateAll, consolidateScope } from './engine/consolidate.js'
 import { searchEntries, searchEntriesSemantic, type RetrievalMode } from './engine/retrieval.js'
 import { resolveEmbeddingProvider, type EmbeddingProvider } from './engine/embedding.js'
+import { currentPromptOf } from './engine/session-turn.js'
 
 /** 当前会话项目 hash（exec.agent 缺失时回退 null → global 或全部）。 */
 interface AgentLike {
   readonly id: string
-  readonly session: { readonly id: string; readonly header?: { cwd?: string } }
+  readonly session: { readonly id: string; readonly header?: { cwd?: string }; snapshotEvents?: () => readonly any[] }
+  readonly ctx?: { get?: (name: string) => any }
 }
 
 /** 注册全部记忆工具，返回合并 disposer。 */
@@ -36,6 +39,7 @@ export function registerMemoryTools(
     parameters: {
       query: { type: 'string', description: '搜索关键词（空格分隔多个词）。留空列出全部。' },
       scope: { type: 'string', enum: ['global', 'project'], description: 'global=全局层（身份/偏好）；project=项目层。默认全部。' },
+      owner: { type: 'string', enum: ['self', 'bots', 'work'], description: '按归属筛选：self=只有当前会话自己的；bots=所有 Bot 的记忆；work=Work 模式的记忆。默认按身份自动（主 Bot 全库、子 Bot 只读自己与全局、Work 只读 work）。' },
       project: { type: 'string', description: '项目标识（workspace 路径或 hash）。默认当前工作区项目。' },
       tag: { type: 'string', description: '按标签筛选。' },
       mode: { type: 'string', enum: ['hybrid', 'keyword', 'semantic'], description: '检索模式：hybrid=相似度+精确命中（默认）；keyword=仅精确子串；semantic=向量语义（需配置 embedding，未配置时回退 hybrid）。' },
@@ -46,14 +50,30 @@ export function registerMemoryTools(
       const entries = await store.readEntries()
       const agent = exec.agent as AgentLike | undefined
       const currentHash = agent !== undefined ? workspaceHashOf(agent.session.header) : null
+      /*
+       * 可见性（schema v6）：主 Bot 可跨 Bot、跨 Work 项目检索；子 Bot 只读自己
+       * 加 Work 全局；Work 会话只读 work。`owner` 参数只能在此范围内**进一步收窄**，
+       * 不能越过——否则模型一句 `owner: 'bots'` 就能把隔离拆掉。
+       */
+      const visibility = visibilityFor(agent !== undefined ? String(agent.session.id) : '', currentHash)
+      const ownerArg = args.owner === 'self' || args.owner === 'bots' || args.owner === 'work' ? args.owner : ''
+      /*
+       * 项目过滤：主 Bot 不指定项目时**不按当前工作区收窄**——它的活跨项目，
+       * 默认只看 `D:\Seeker-Bot` 会让「Work 里那条约束」永远搜不到。
+       */
       const projectFilter = typeof args.project === 'string' && args.project !== ''
         ? resolveProjectFilter(args.project)
-        : currentHash
+        : (visibility.isMain ? null : currentHash)
       const query = typeof args.query === 'string' ? args.query : ''
       const mode: RetrievalMode = args.mode === 'keyword' || args.mode === 'semantic' ? args.mode : 'hybrid'
 
-      // 先做 scope/project/tag 硬过滤，再做检索排序。
+      // 先做归属/scope/project/tag 硬过滤，再做检索排序。
       const visible = entries.filter(entry => {
+        if (!visibility.canSearch(entry)) return false
+        const owner = ownerOf(entry)
+        if (ownerArg === 'self' && owner !== visibility.self) return false
+        if (ownerArg === 'bots' && !owner.startsWith('bot:')) return false
+        if (ownerArg === 'work' && owner !== 'work') return false
         if (entry.scope === 'project' && projectFilter !== null && entry.projectHash !== projectFilter) return false
         if (typeof args.scope === 'string' && entry.scope !== args.scope) return false
         if (typeof args.tag === 'string' && args.tag !== '' && !entry.tags.includes(args.tag)) return false
@@ -79,7 +99,10 @@ export function registerMemoryTools(
         // 禁用条目仍可被搜索到（避免「记忆凭空消失」），但明确标注不参与注入。
         const disabledMark = entry.disabled === true ? '〔已禁用·不参与注入〕' : ''
         // 软废弃条目（includeDeprecated 时才出现）：标注废弃状态。
-        const deprecatedMark = entry.deprecated === true ? '〔已废弃·retire/revise 标记〕' : ''
+        // 文案不点名 retire/revise：废弃来源现在有三类——手动 retire、revise 的旧
+        // 版本、TTL 过期自动软废弃（每日编译）。对模型来说它们只有同一个含义：
+        // 「这条已退出活跃集，默认不参与注入」。
+        const deprecatedMark = entry.deprecated === true ? '〔已废弃·不参与注入〕' : ''
         // pending 条目不会经由检索出现（searchEntries 恒定排除），但保留这个标记
         // 是为了兜底：万一将来有别的路径把 pending 带进结果集，模型也不会误以为
         // 它已生效。宁可白写一行，不要靠「调用方一定会过滤」这种隐式契约。
@@ -114,6 +137,12 @@ export function registerMemoryTools(
       if (content === '') throw new Error('content 不能为空')
       const agent = exec.agent as AgentLike | undefined
       const hash = agent !== undefined ? workspaceHashOf(agent.session.header) : null
+      /*
+       * 归属恒为当前会话自己：Bot 说「记住」写进 `bot:<自己>`，Work 说「记住」写进
+       * `work`。**不提供 owner 参数**是刻意的——让模型能指定归属，等于让它一句话
+       * 就能把记忆写进别的 Bot 或 Work 的库，隔离形同虚设。
+       */
+      const owner = ownerOfSessionId(agent !== undefined ? agent.session.id : null)
       const scope = args.scope === 'global' ? 'global' as const : 'project' as const
       if (scope === 'project' && hash === null) {
         throw new Error('无法判定当前工作区项目（无 cwd），请用 scope: "global" 或稍后重试')
@@ -126,16 +155,44 @@ export function registerMemoryTools(
       const tags = Array.isArray(args.tags)
         ? args.tags.filter((tag): tag is string => typeof tag === 'string' && tag.trim() !== '').map(tag => tag.trim()).slice(0, 8)
         : []
+      /*
+       * provenance 记到 turn + 当前真人消息 id：Bot 允许执行中插话（steer），
+       * 第 2、3 句可能在同一个 turn 里。只记 turn 的话撤回第 2 句会把第 3 句
+       * 的记忆一起带走；有消息 id 时撤回按消息精确匹配。
+       */
+      const prompt = currentPromptOf(agent)
+      const turn = prompt.turn
+      const sessionId = agent?.session.id
+      const recalled = (): boolean => agent !== undefined
+        && (store.isMessageRecalled(sessionId, prompt.userMessageId) || store.isTurnRecalled(sessionId, turn))
+      if (recalled()) {
+        return `该轮对话已撤回，未记录：${content}`
+      }
       const { created, entry } = await store.upsertEntry({
         content,
         scope,
         projectHash: scope === 'project' ? hash : null,
+        owner,
         tags,
         importance,
         source: 'manual',
         // 溯源：手动记忆也记下写入它的会话（KR 右栏记忆卡按 sessionId 判定本会话新增）。
-        provenance: agent !== undefined ? { sessionId: agent.session.id } : undefined,
+        provenance: agent !== undefined
+          ? {
+            sessionId: agent.session.id,
+            ...(turn > 0 ? { turn } : {}),
+            ...(prompt.userMessageId !== undefined ? { userMessageId: prompt.userMessageId } : {}),
+          }
+          : undefined,
       })
+      /*
+       * 落库后再查一次：撤回可能发生在上面的 await 期间。新条目直接删掉；
+       * 已有条目的更新无法无损回滚，保留原记忆（不为了撤回把旧内容一起删）。
+       */
+      if (recalled()) {
+        if (created) await store.removeEntry(entry.id)
+        return `该轮对话已撤回，未记录：${content}`
+      }
       // 项目层落盘时确保 meta.json 存在（面板项目列表可见）。
       if (scope === 'project' && hash !== null) {
         const meta = await store.readProjectMeta(hash)
@@ -288,6 +345,13 @@ export function registerMemoryTools(
       // 项目层受自动记忆开关约束（与 remember 一致）。
       const target = await store.getEntry(entryId)
       if (target === undefined) throw new Error(`记忆不存在：${entryId}`)
+      const prompt = currentPromptOf(agent)
+      const turn = prompt.turn
+      const recalled = (): boolean => agent !== undefined
+        && (store.isMessageRecalled(agent.session.id, prompt.userMessageId) || store.isTurnRecalled(agent.session.id, turn))
+      if (recalled()) {
+        throw new Error('该轮对话已撤回，不再修订记忆')
+      }
       if (target.scope === 'project' && (hash === null || !(await store.isAutoMemoryEnabled(target.projectHash ?? hash)))) {
         throw new Error('该项目的自动记忆已关闭，已跳过修订；如需记录请先在记忆面板开启该项目开关')
       }
@@ -300,7 +364,13 @@ export function registerMemoryTools(
           : undefined,
         importance: typeof args.importance === 'number' ? Math.max(1, Math.min(10, args.importance)) : undefined,
         // 后继条目记本会话（新内容是本会话写的）。
-        provenance: agent !== undefined ? { sessionId: agent.session.id } : undefined,
+        provenance: agent !== undefined
+          ? {
+            sessionId: agent.session.id,
+            ...(turn > 0 ? { turn } : {}),
+            ...(prompt.userMessageId !== undefined ? { userMessageId: prompt.userMessageId } : {}),
+          }
+          : undefined,
       })
       if (result === undefined) {
         // 旧条目不存在/已废弃 → 无法修订；内容未变化 → 无修订空间。

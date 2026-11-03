@@ -113,11 +113,29 @@ export interface WorkbenchSyncPublic {
   localTotalBytes: number
   localVaultBytes: number
   localMemoryBytes: number
+  /**
+   * 记忆条目总数（schema v6：含 Work 与各 Bot 归属）。
+   *
+   * 为什么单独给四个数字而不是只给总条数：v6 起记忆按 `owner` 分家，面板上
+   * 「记忆 14 条」看不出其中 5 条属于某个 Bot——用户换机后最容易困惑的正是
+   * 「我的记忆怎么少了一半」，而那其实是归属过滤，不是丢数据。
+   */
+  localMemoryEntries: number
+  /** `owner = work` 的条目数。 */
+  localMemoryWorkEntries: number
+  /** `owner = bot:<id>` 的条目数（Bot 模式记忆）。 */
+  localMemoryBotEntries: number
+  /** 出现过的不同 Bot 归属个数。 */
+  localMemoryBots: number
   localSkillsBytes: number
   localMcpBytes: number
   localMcpEntries: number
   localProvidersBytes: number
   localProvidersCount: number
+  /** Live（实时语音）供应商数量（`realtime-config.json` 的 vendors）。 */
+  localLiveVendors: number
+  /** 默认 Live 供应商 id（空串 = 未显式设置）。 */
+  localLiveDefaultVendor: string
   /** 当前 `web` 条目选的搜索后端（`anysearch-auto` / `anysearch` / `deepseek-official`…），空串=未显式配置。 */
   localWebSearchProvider: string
   passphraseSet: boolean

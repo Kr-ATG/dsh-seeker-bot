@@ -1,12 +1,17 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-01T03:48:39.295Z",
+  "generatedAt": "2026-11-02T06:37:49.905Z",
   "counts": {
-    "total": 57,
+    "total": 61,
     "cn": 14,
-    "global": 43
+    "global": 47
   },
   "categories": [
+    {
+      "id": "系统能力",
+      "label": "系统能力",
+      "count": 2
+    },
     {
       "id": "办公协作",
       "label": "办公协作",
@@ -60,7 +65,7 @@
     {
       "id": "内容媒体",
       "label": "内容媒体",
-      "count": 5
+      "count": 6
     },
     {
       "id": "电商购物",
@@ -75,7 +80,7 @@
     {
       "id": "生活服务",
       "label": "生活服务",
-      "count": 1
+      "count": 2
     },
     {
       "id": "数据表格",
@@ -94,6 +99,70 @@
     }
   ],
   "entries": [
+    {
+      "id": "browser-use",
+      "name": "浏览器操作",
+      "nameEn": "Browser Use",
+      "tagline": "真实浏览器里的点击与读取",
+      "description": "让模型在真实浏览器里打开网页、点击、填表、读页面内容（24 个工具，走 playwright-mcp）。DSH 官方能力，默认 attach 到 9222 端口的专用 Chrome（没起来时由插件的按需拉起负责）。装好后下一步请求即可用，开启期间每轮多约 1 万 token。注意：这两个官方包目前没装在 profile 里，需要先在 profile 目录 dsh plugin add 装回来，否则点安装会明确提示缺哪个包。",
+      "category": "系统能力",
+      "region": "global",
+      "author": "DSH 官方",
+      "repo": "https://github.com/deepseek-ai",
+      "install": {
+        "type": "plugin",
+        "entries": [
+          {
+            "id": "browser-use",
+            "name": "@deepseek-ai/dsh-browser-use"
+          },
+          {
+            "id": "browser-use-playwright-mcp",
+            "name": "@deepseek-ai/dsh-experimental-browser-use-playwright-mcp",
+            "config": {
+              "mode": "attach",
+              "endpoint": "http://127.0.0.1:9222"
+            }
+          }
+        ],
+        "requiresPackages": [
+          "@deepseek-ai/dsh-browser-use",
+          "@deepseek-ai/dsh-experimental-browser-use-playwright-mcp"
+        ]
+      },
+      "iconFile": "browser-use.svg",
+      "iconMime": "image/svg+xml"
+    },
+    {
+      "id": "computer-use",
+      "name": "电脑操作",
+      "nameEn": "Computer Use",
+      "tagline": "鼠标、键盘与屏幕控制",
+      "description": "让模型真的操作这台电脑：移动鼠标、点击、输入、滚动、截屏、读窗口（56 个工具，走 cua-driver 原生运行时）。DSH 官方能力，装好后本会话下一步请求就能用；开启期间每轮请求会多约 3.1 万 token 的工具定义，不用了在连接器里卸载即可收回，也不会再占用宿主内存。",
+      "category": "系统能力",
+      "region": "global",
+      "author": "DSH 官方",
+      "repo": "https://github.com/deepseek-ai",
+      "install": {
+        "type": "plugin",
+        "entries": [
+          {
+            "id": "computer-use",
+            "name": "@deepseek-ai/dsh-computer-use"
+          },
+          {
+            "id": "computer-use-cua-driver-native",
+            "name": "@deepseek-ai/dsh-experimental-computer-use-cua-driver-native"
+          }
+        ],
+        "requiresPackages": [
+          "@deepseek-ai/dsh-computer-use",
+          "@deepseek-ai/dsh-experimental-computer-use-cua-driver-native"
+        ]
+      },
+      "iconFile": "computer-use.svg",
+      "iconMime": "image/svg+xml"
+    },
     {
       "id": "amap",
       "name": "高德地图",
@@ -284,6 +353,28 @@
       "iconMime": "image/svg+xml"
     },
     {
+      "id": "weather",
+      "name": "天气",
+      "nameEn": "Open-Meteo",
+      "tagline": "实况、预报、空气质量与历史",
+      "description": "查全球任意地点的天气：当前实况、最多 16 天预报、逐小时、空气质量（PM2.5 / AQI / 花粉 / 紫外线）、1940 年至今的历史天气，另有海洋、洪水与气候预估。基于 Open-Meteo 的免费接口，不需要任何 API Key、也不用注册；中文城市名直接说就行（模型会先调 geocoding 把地名解析成坐标）。数据源可自托管：设 OPEN_METEO_API_URL 等环境变量即可指向自己的实例。",
+      "category": "生活服务",
+      "region": "global",
+      "author": "cmer81",
+      "repo": "https://github.com/cmer81/open-meteo-mcp",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "open-meteo-mcp-server"
+        ],
+        "env": []
+      },
+      "iconFile": "weather.svg",
+      "iconMime": "image/svg+xml"
+    },
+    {
       "id": "weread",
       "name": "微信读书",
       "nameEn": "WeRead",
@@ -355,6 +446,54 @@
       },
       "iconFile": "weibo.png",
       "iconMime": "image/png"
+    },
+    {
+      "id": "x-twitter",
+      "name": "X（Twitter）",
+      "nameEn": "X",
+      "tagline": "搜索推文、用户与时间线",
+      "description": "读 X 上的公开内容并操作账号：首页时间线、搜索推文、看用户资料与关注关系，也能发推、回复、引用与删除。走 X 官方 API v2（OAuth 1.0a），需要开发者后台的四个凭据——API Key、API Key Secret、Access Token、Access Token Secret，在同一个页面就能一次拿全。X 官方 API 现在没有免费档、按量计费：发推 $0.015/次、读 $0.005/资源，新账号绑卡首充送 $20。",
+      "category": "内容媒体",
+      "region": "global",
+      "author": "mobalab",
+      "repo": "https://github.com/mobalab/x-mcp-server",
+      "install": {
+        "type": "stdio",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@mobalab/x-mcp-server"
+        ],
+        "env": [
+          {
+            "name": "TWITTER_API_KEY",
+            "required": true,
+            "label": "API Key（Consumer Key）",
+            "secret": true,
+            "url": "https://developer.x.com/en/portal/dashboard"
+          },
+          {
+            "name": "TWITTER_API_SECRET",
+            "required": true,
+            "label": "API Key Secret",
+            "secret": true
+          },
+          {
+            "name": "TWITTER_ACCESS_TOKEN",
+            "required": true,
+            "label": "Access Token",
+            "secret": true
+          },
+          {
+            "name": "TWITTER_ACCESS_SECRET",
+            "required": true,
+            "label": "Access Token Secret",
+            "secret": true
+          }
+        ]
+      },
+      "iconFile": "x.svg",
+      "iconMime": "image/svg+xml"
     },
     {
       "id": "jd",

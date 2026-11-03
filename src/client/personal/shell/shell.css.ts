@@ -9,34 +9,95 @@
 
 export const PERSONAL_SHELL_CSS = `
 /* ───────────────────────── 左侧栏：整体 ───────────────────────── */
+/*
+ * 收起态：与 Work 模式官方侧栏的 rail 同宽（官方折叠后 64px 含内边距）。
+ * 只留图标轨道，品牌行缩成一枚 logo 按钮，点它展开。
+ */
 .pa-sidebar[data-collapsed='true'] {
   width: 64px;
   flex: 0 0 64px;
 }
 .pa-sidebar[data-collapsed='true'] .pa-sidebar__top {
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+}
+/* 折叠轨道：主 Bot 头像 + 子 Bot 头像 + 群聊，全部靠 hover 提示认人。 */
+.pa-sidebar__rail {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 10px 0 6px;
+  gap: 4px;
+  padding: 6px 0 10px;
 }
-.pa-sidebar[data-collapsed='true'] .pa-spacer { display: none; }
-.pa-sidebar-top__right {
-  margin-left: auto;
+.pa-rail-item {
+  position: relative;
+  width: 44px;
+  height: 44px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
+  border-radius: 12px;
+  flex: none;
+  transition: background 120ms ease;
 }
-.pa-sidebar[data-collapsed='true'] .pa-sidebar-top__right {
-  margin-left: 0;
+.pa-rail-item:hover { background: rgba(128, 132, 140, 0.14); }
+.pa-rail-item[data-selected='true'] { background: var(--pa-card-2); }
+.pa-rail-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--pa-accent);
+  box-shadow: 0 0 0 2px var(--pa-sidebar);
+}
+/* 群聊：成员头像叠加（与展开态 .pa-room-avatars 同一套叠法）。 */
+.pa-rail-room { display: inline-flex; align-items: center; }
+.pa-rail-room .pa-avatar {
+  border-radius: 50%;
+  border: 1.5px solid var(--pa-sidebar);
+  margin-left: -9px;
+  background: var(--pa-sidebar);
+}
+.pa-rail-room .pa-avatar:first-child { margin-left: 0; }
+.pa-rail-sep {
+  width: 24px;
+  height: 1px;
+  background: var(--pa-line);
+  margin: 2px 0;
+  flex: none;
+}
+.pa-sidebar__bottom[data-collapsed='true'] {
+  display: flex;
   flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 0 10px;
 }
-.pa-sidebar__top .pa-icon-btn--bordered {
-  background: rgba(128, 132, 140, 0.14);
-  color: var(--pa-text-2);
-}
-.pa-sidebar__top .pa-icon-btn--bordered:hover {
-  background: rgba(128, 132, 140, 0.24);
-  color: var(--pa-text);
+/*
+ * dsh-shell 的 topbar 有一块 -webkit-app-region: drag 拖拽区，覆盖在 iframe
+ * 内容上方，落在里面的点击会被窗口拖拽吃掉。
+ *
+ * 2026-11-02 起壳子侧已把它缩到 240×30（topbar.css / main.js / renderer.js
+ * 三处同步），品牌行右侧的收起按钮（x243 起、y22–50）整块落在热区外，直接可点。
+ *
+ * 下面这条透明热区是**兜底**：万一哪天热区又盖到按钮上半截（旧壳子 / 换壳子），
+ * 按钮向下补的这块（y44 以下）仍然能点中，视觉保持 28×28 不变。
+ */
+.pa-sidebar-toggle { position: relative; }
+.pa-root[data-shell-embed='true'] .pa-sidebar-toggle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: -18px;
+  left: 0;
 }
 
 /* 搜索条 */
@@ -69,17 +130,7 @@ export const PERSONAL_SHELL_CSS = `
   margin-right: -4px;
 }
 
-/* 折叠后的图标轨道 */
-.pa-sidebar__rail {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 9px;
-  padding: 8px 0;
-}
+/* 折叠轨道底部的图标按钮（期刊 / 设置）。轨道本体样式见文件顶部。 */
 .pa-rail-btn {
   width: 44px;
   height: 44px;
@@ -87,18 +138,12 @@ export const PERSONAL_SHELL_CSS = `
   align-items: center;
   justify-content: center;
   border-radius: 12px;
-  transition: background 120ms ease;
+  color: var(--pa-text-2);
+  transition: background 120ms ease, color 120ms ease;
   flex: none;
 }
-.pa-rail-btn:hover { background: rgba(128, 132, 140, 0.14); }
+.pa-rail-btn:hover { background: rgba(128, 132, 140, 0.14); color: var(--pa-text); }
 .pa-rail-btn[data-selected='true'] { background: var(--pa-card-2); }
-.pa-rail-sep {
-  width: 24px;
-  height: 1px;
-  background: var(--pa-line);
-  margin: 1px 0;
-  flex: none;
-}
 
 /* 行内更多按钮 */
 .pa-row-more {
@@ -225,6 +270,87 @@ export const PERSONAL_SHELL_CSS = `
 .pa-popover__confirm-row { display: flex; gap: 6px; margin-top: 9px; }
 .pa-popover__confirm-row .pa-btn { flex: 1; height: 27px; padding: 0 8px; font-size: calc(11px + var(--pa-font-delta)); }
 
+/* ───────────────────────── 顶部「+」：新建菜单 ───────────────────────── */
+.pa-create-trigger svg { transition: transform 170ms cubic-bezier(0.2, 0.9, 0.3, 1); }
+.pa-create-trigger[data-open='true'] {
+  background: var(--pa-card-2);
+  color: var(--pa-text);
+}
+.pa-create-trigger[data-open='true'] svg { transform: rotate(45deg); }
+.pa-create-menu {
+  width: 256px;
+  min-width: 256px;
+  padding: 8px;
+  border-radius: 14px;
+}
+.pa-create-menu__title {
+  padding: 3px 10px 7px;
+  font-size: calc(10px + var(--pa-font-delta));
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--pa-text-2);
+}
+.pa-create-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: 10px;
+  text-align: left;
+  transition: background 120ms ease;
+}
+/* base 里的 .pa-root button 会把按钮内边距清零，这里用更高优先级拿回菜单项的留白 */
+.pa-root button.pa-create-item { padding: 9px 10px; }
+.pa-create-item + .pa-create-item { margin-top: 2px; }
+.pa-create-item:hover { background: rgba(128, 132, 140, 0.16); }
+.pa-create-item__icon {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 11px;
+}
+.pa-create-item__icon--bot {
+  color: #ffb45c;
+  background: linear-gradient(145deg, rgba(255, 159, 10, 0.24), rgba(255, 159, 10, 0.07));
+  box-shadow: inset 0 0 0 1px rgba(255, 159, 10, 0.16);
+}
+.pa-create-item__icon--room {
+  color: #7cb8ff;
+  background: linear-gradient(145deg, rgba(10, 132, 255, 0.26), rgba(10, 132, 255, 0.07));
+  box-shadow: inset 0 0 0 1px rgba(10, 132, 255, 0.18);
+}
+.pa-create-item__text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pa-create-item__text b {
+  font-size: calc(12.5px + var(--pa-font-delta));
+  font-weight: 600;
+  color: var(--pa-text);
+}
+.pa-create-item__text span {
+  font-size: calc(10.5px + var(--pa-font-delta));
+  color: var(--pa-text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pa-create-item__arrow {
+  flex: none;
+  color: var(--pa-text-4);
+  opacity: 0;
+  transform: translateX(-2px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.pa-create-item:hover .pa-create-item__arrow { opacity: 1; transform: translateX(0); }
+
 /* ───────────────────────── 通用弹窗补充 ───────────────────────── */
 .pa-overlay.pa-overlay--fixed { position: fixed; }
 .pa-modal--sm { max-width: 380px; }
@@ -263,6 +389,18 @@ export const PERSONAL_SHELL_CSS = `
 .pa-form-row:last-child { margin-bottom: 0; }
 .pa-form-row .pa-field { border-radius: 10px; }
 .pa-form-row textarea.pa-field { resize: vertical; min-height: 86px; line-height: 1.55; }
+/* 表单行下方的解释小字（音色的场景提示等） */
+.pa-form-hint {
+  margin: 6px 0 0;
+  font-size: calc(10.5px + var(--pa-font-delta));
+  line-height: 1.5;
+  color: var(--pa-text-4);
+}
+/* 读不到宿主配置时的提示（Live 供应商列表拉取失败）：用错误色区分，别让它看起来像普通说明 */
+.pa-form-hint--warn,
+.pa-routine__meta--warn { color: var(--pa-red); }
+/* 新建 Bot 里紧跟在建议 chip 网格之后的表单行 */
+.pa-form-row--voice { margin-top: 14px; }
 .pa-spinner {
   width: 12px;
   height: 12px;
@@ -347,8 +485,13 @@ export const PERSONAL_SHELL_CSS = `
 
 /* ───────────────────────── 右栏 ───────────────────────── */
 .pa-right {
-  width: 300px;
-  flex: 0 0 300px;
+  /*
+   * 宽度走 CSS 变量：index.tsx 在 .pa-app-shell 上按 ui.rightPanelWidth 设置，
+   * 拖拽过程中 RightPanel 直接改它（不触发 React 重渲染）。窄屏媒体查询里
+   * 仍是固定宽度（后定义，同优先级覆盖 var）。
+   */
+  width: var(--pa-right-w, 300px);
+  flex: 0 0 var(--pa-right-w, 300px);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -356,6 +499,40 @@ export const PERSONAL_SHELL_CSS = `
   background: var(--pa-right);
   border-left: 1px solid var(--pa-line);
   position: relative;
+}
+
+/*
+ * 右栏左边缘的拖拽手柄：7px 热区压住发丝线，悬停/拖拽时亮一条线提示可拖。
+ * 往左拖变宽、往右拖变窄；双击恢复默认宽度（逻辑在 RightPanel.tsx）。
+ */
+.pa-right__resizer {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  z-index: 3;
+  cursor: col-resize;
+  background: transparent;
+}
+.pa-right__resizer::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+.pa-right__resizer:hover::after,
+body[data-pa-resizing='true'] .pa-right__resizer::after {
+  background: var(--pa-line-2);
+}
+/* 拖拽中禁止选中文字：否则鼠标划过聊天区会整片变蓝。 */
+body[data-pa-resizing='true'] {
+  cursor: col-resize;
+  user-select: none;
 }
 .pa-right__head { position: relative; padding: 18px 16px 8px; flex: none; }
 .pa-right__actions {
@@ -842,47 +1019,152 @@ export const PERSONAL_SHELL_CSS = `
 .pa-term b { color: #7ee2a0; font-weight: 500; }
 .pa-term i { color: #ffb45c; font-style: normal; }
 
-/* ───────────────────────── 新建 Bot 弹窗 ───────────────────────── */
-.pa-newbot { max-width: 520px; }
-.pa-newbot__lead {
-  margin: -4px 0 16px;
-  font-size: calc(11.5px + var(--pa-font-delta));
-  color: var(--pa-text-3);
-  line-height: 1.5;
+/* ───────────────────────── 新建 Bot / 新建群聊弹窗 ───────────────────────── */
+.pa-create-modal {
+  max-width: 560px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
-.pa-suggest-head {
+.pa-create-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  padding: 22px 24px 18px;
+  border-bottom: 1px solid var(--pa-line);
+  flex: none;
+}
+.pa-create-head__icon {
+  width: 42px;
+  height: 42px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 13px;
+}
+.pa-create-head__icon--bot {
+  color: #ffb45c;
+  background: linear-gradient(145deg, rgba(255, 159, 10, 0.26), rgba(255, 159, 10, 0.08));
+  box-shadow: inset 0 0 0 1px rgba(255, 159, 10, 0.16);
+}
+.pa-create-head__icon--room {
+  color: #7cb8ff;
+  background: linear-gradient(145deg, rgba(10, 132, 255, 0.28), rgba(10, 132, 255, 0.08));
+  box-shadow: inset 0 0 0 1px rgba(10, 132, 255, 0.18);
+}
+.pa-create-head__text { flex: 1; min-width: 0; padding-top: 1px; }
+.pa-create-head__title {
+  font-size: calc(16px + var(--pa-font-delta));
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  color: var(--pa-text);
+}
+.pa-create-head__sub {
+  margin: 4px 0 0;
+  font-size: calc(11px + var(--pa-font-delta));
+  line-height: 1.55;
+  color: var(--pa-text-3);
+}
+.pa-create-body {
+  padding: 18px 24px 4px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.pa-create-sec { margin-bottom: 18px; }
+.pa-create-sec:last-child { margin-bottom: 8px; }
+.pa-create-sec__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin: 16px 0 8px;
+  gap: 10px;
+  margin: 0 0 9px;
+  font-size: calc(11px + var(--pa-font-delta));
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--pa-text-2);
 }
-.pa-suggest-head > span { font-size: calc(11px + var(--pa-font-delta)); color: var(--pa-text-3); }
+.pa-create-sec__head em {
+  margin-left: 4px;
+  font-style: normal;
+  font-weight: 400;
+  color: var(--pa-text-4);
+}
+.pa-create-sec__aside {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.pa-create-sec__aside em {
+  margin: 0;
+  font-size: calc(10.5px + var(--pa-font-delta));
+  color: var(--pa-text-4);
+}
+.pa-create-sec__aside .pa-link-btn:disabled { opacity: 0.35; cursor: default; }
+.pa-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.pa-form-grid .pa-form-row { margin-bottom: 0; }
+.pa-label em {
+  margin-left: 3px;
+  font-style: normal;
+  font-size: calc(10px + var(--pa-font-delta));
+  color: var(--pa-text-4);
+}
+.pa-create-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 24px;
+  border-top: 1px solid var(--pa-line);
+  background: rgba(128, 132, 140, 0.035);
+  flex: none;
+}
+.pa-create-foot__hint {
+  margin: 0;
+  font-size: calc(10.5px + var(--pa-font-delta));
+  line-height: 1.45;
+  color: var(--pa-text-4);
+}
+.pa-create-foot__actions { display: flex; gap: 8px; flex: none; }
+.pa-create-foot__actions .pa-btn { padding: 0 14px; }
+.pa-create-foot .pa-btn--primary { min-width: 96px; }
+
 .pa-suggest-refresh {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   font-size: calc(10.5px + var(--pa-font-delta));
+  font-weight: 400;
+  letter-spacing: 0;
   color: var(--pa-text-3);
   transition: color 120ms ease;
 }
 .pa-suggest-refresh:hover { color: var(--pa-text); }
 .pa-suggest-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.pa-suggest-chip {
+.pa-root button.pa-suggest-chip {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 3px;
-  padding: 9px 10px;
-  border-radius: 10px;
+  min-height: 62px;
+  padding: 10px 11px;
+  border-radius: 11px;
   border: 1px solid var(--pa-line-2);
-  background: rgba(128, 132, 140, 0.12);
+  background: rgba(128, 132, 140, 0.08);
   text-align: left;
-  transition: border-color 120ms ease, background 120ms ease;
+  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
 }
-.pa-suggest-chip:hover { border-color: rgba(255, 255, 255, 0.22); background: rgba(128, 132, 140, 0.2); }
-.pa-suggest-chip[data-active='true'] {
+.pa-root button.pa-suggest-chip:hover {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(128, 132, 140, 0.16);
+  transform: translateY(-1px);
+}
+.pa-root button.pa-suggest-chip[data-active='true'] {
   border-color: rgba(255, 159, 10, 0.6);
-  background: rgba(255, 159, 10, 0.08);
+  background: rgba(255, 159, 10, 0.1);
 }
 .pa-suggest-chip b { font-size: calc(11.5px + var(--pa-font-delta)); font-weight: 600; color: var(--pa-text); }
 .pa-suggest-chip span {
@@ -1045,6 +1327,18 @@ export const PERSONAL_SHELL_CSS = `
 }
 .pa-settings-note b { color: var(--pa-text-2); font-weight: 600; }
 .pa-settings-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* 读写宿主配置失败时的可见提示（红字条，不弹窗） */
+.pa-settings-error {
+  margin-bottom: 10px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 69, 58, 0.35);
+  background: rgba(255, 69, 58, 0.1);
+  color: #ff8a82;
+  font-size: calc(10.5px + var(--pa-font-delta));
+  line-height: 1.5;
+  word-break: break-word;
+}
 
 /* ───────────────────────── 亮色补充 ───────────────────────── */
 .pa-root[data-pa-theme='light'] .pa-sidebar .pa-mode-seg button {
@@ -1062,10 +1356,34 @@ export const PERSONAL_SHELL_CSS = `
   background: rgba(15, 17, 21, 0.06);
 }
 .pa-root[data-pa-theme='light'] .pa-suggest-chip {
-  background: rgba(15, 17, 21, 0.05);
+  background: rgba(15, 17, 21, 0.045);
 }
 .pa-root[data-pa-theme='light'] .pa-suggest-chip:hover {
-  background: rgba(15, 17, 21, 0.06);
+  background: rgba(15, 17, 21, 0.07);
+}
+.pa-root[data-pa-theme='light'] .pa-create-item__icon--bot {
+  color: #b96f00;
+  background: linear-gradient(145deg, rgba(255, 159, 10, 0.16), rgba(255, 159, 10, 0.05));
+}
+.pa-root[data-pa-theme='light'] .pa-create-item__icon--room {
+  color: #0a66c9;
+  background: linear-gradient(145deg, rgba(10, 132, 255, 0.14), rgba(10, 132, 255, 0.04));
+}
+.pa-root[data-pa-theme='light'] .pa-create-foot {
+  background: rgba(15, 17, 21, 0.025);
+}
+/* 浅色下 #ff453a 对白底只有约 3.4:1，小字提示换成更深的红 */
+.pa-root[data-pa-theme='light'] .pa-form-hint--warn {
+  color: #c62828;
+}
+.pa-root[data-pa-theme='light'] .pa-member-pick__row {
+  background: rgba(15, 17, 21, 0.02);
+}
+.pa-root[data-pa-theme='light'] .pa-member-pick__row:hover {
+  background: rgba(15, 17, 21, 0.05);
+}
+.pa-root[data-pa-theme='light'] .pa-member-pick__row[data-on='true'] {
+  background: rgba(255, 159, 10, 0.09);
 }
 .pa-root[data-pa-theme='light'] .pa-mem-search input,
 .pa-root[data-pa-theme='light'] .pa-mem-add textarea,
@@ -1084,6 +1402,11 @@ export const PERSONAL_SHELL_CSS = `
 /* 窄屏：右栏逐档收窄，给聊天区留出阅读宽度（参考图 900 宽时右栏约 230px） */
 @media (max-width: 1200px) {
   .pa-right { width: 268px; flex-basis: 268px; }
+  /*
+   * 窄屏固定宽度，拖拽改了也会被上面的规则覆盖——干脆收起手柄，
+   * 不留一个「拖了没反应」的交互。
+   */
+  .pa-right__resizer { display: none; }
 }
 @media (max-width: 1000px) {
   .pa-right { width: 232px; flex-basis: 232px; }
@@ -1093,35 +1416,69 @@ export const PERSONAL_SHELL_CSS = `
   .pa-right { width: 232px; flex-basis: 232px; }
 }
 
-/* 新建群聊 / 分组管理 */
-.pa-sec-add {
+/* 新建群聊成员选择 / 分组管理 */
+.pa-member-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 330px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.pa-root button.pa-member-pick__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--pa-line);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.025);
+  text-align: left;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.pa-root button.pa-member-pick__row:hover { background: rgba(255, 255, 255, 0.055); }
+.pa-root button.pa-member-pick__row[data-on='true'] {
+  border-color: rgba(255, 159, 10, 0.38);
+  background: rgba(255, 159, 10, 0.08);
+}
+.pa-member-pick__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.pa-member-pick__main b {
+  font-size: calc(12.5px + var(--pa-font-delta));
+  font-weight: 600;
+  color: var(--pa-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pa-member-pick__main small {
+  font-size: calc(10px + var(--pa-font-delta));
+  color: var(--pa-text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pa-member-pick__check {
   width: 18px;
   height: 18px;
-  margin-left: 4px;
+  flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 5px;
-  color: var(--pa-text-4);
-  transition: background 120ms ease, color 120ms ease;
+  border: 1.5px solid var(--pa-line-2);
+  border-radius: 50%;
+  color: #1a1206;
+  transition: background 120ms ease, border-color 120ms ease;
 }
-.pa-sec-add:hover { background: rgba(128, 132, 140, 0.18); color: var(--pa-text); }
-.pa-member-pick { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
-.pa-member-pick__row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.035);
-  font-size: calc(12px + var(--pa-font-delta));
-  color: var(--pa-text-2);
-  text-align: left;
+.pa-member-pick__row[data-on='true'] .pa-member-pick__check {
+  border-color: var(--pa-accent);
+  background: var(--pa-accent);
 }
-.pa-member-pick__row:hover { background: rgba(255, 255, 255, 0.07); }
-.pa-member-pick__row[data-on='true'] { color: var(--pa-text); background: rgba(255, 159, 10, 0.1); }
-.pa-member-pick__row span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pa-member-pick__row svg { color: var(--pa-accent); flex: none; }
 .pa-group-list { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 8px; }
 .pa-group-row { display: flex; align-items: center; gap: 8px; font-size: calc(12px + var(--pa-font-delta)); color: var(--pa-text-2); }
 .pa-group-row__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1129,6 +1486,17 @@ export const PERSONAL_SHELL_CSS = `
 .pa-group-add { display: flex; gap: 6px; margin-bottom: 12px; }
 .pa-group-add .pa-field { flex: 1; height: 30px; padding: 4px 9px; font-size: calc(12px + var(--pa-font-delta)); }
 .pa-link-btn--danger { color: #ff8a82; }
+
+/* 新建弹窗在窄屏下：单列、底部操作区换行 */
+@media (max-width: 620px) {
+  .pa-create-modal { max-width: calc(100vw - 28px); }
+  .pa-form-grid { grid-template-columns: 1fr; }
+  .pa-suggest-grid { grid-template-columns: 1fr; }
+  .pa-create-head { padding: 18px 18px 15px; }
+  .pa-create-body { padding: 16px 18px 2px; }
+  .pa-create-foot { padding: 12px 18px; flex-direction: column; align-items: stretch; }
+  .pa-create-foot__actions { justify-content: flex-end; }
+}
 `
 
 let injected = false

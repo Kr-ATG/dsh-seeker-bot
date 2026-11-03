@@ -28,6 +28,12 @@ export interface ChatProviderListProps {
   onAddCustom: () => void
   /** 整页加载失败后的重试。 */
   onRetry: () => void
+  /**
+   * 标题位置的替代内容（当前用于「模型 / 实时语音」模式切换）。
+   *
+   * 给值时不再渲染「模型供应商」文字——用户 2026-11-02 要求「切换按钮替换这个文字」。
+   */
+  headerSlot?: ReactNode
 }
 
 /** 一行提供方的 models 数组（无则 []）；父组件的性能基准测试弹窗用它取模型清单。 */
@@ -44,7 +50,7 @@ export function modelsOf(state: ModelsSettingsState, row: ProviderRow): readonly
  * @returns 导航栏（分组列表 + 添加按钮）。
  */
 export function ChatProviderList(props: ChatProviderListProps): ReactNode {
-  const { state, selected, onSelect, onAddCustom, onRetry } = props
+  const { state, selected, onSelect, onAddCustom, onRetry, headerSlot } = props
   const configured = state.rows.filter(row => row.configured)
   const addable = state.rows.filter(row => !row.configured && row.entry.settingsNs !== '')
   // 目录预设默认折叠：目录里有一百多个内建提供方，全展开会把「已配置」那几行
@@ -69,7 +75,7 @@ export function ChatProviderList(props: ChatProviderListProps): ReactNode {
     return (
       <section className="phub-nav" style={navColStyle}>
         <div style={navHeaderStyle}>
-          <p style={titleStyle}>{chatCopy.chatTitle}</p>
+          <p style={titleStyle}>{headerSlot ?? chatCopy.chatTitle}</p>
         </div>
         <p style={hintStyle}>加载中…</p>
       </section>
@@ -79,7 +85,7 @@ export function ChatProviderList(props: ChatProviderListProps): ReactNode {
     return (
       <section className="phub-nav" style={navColStyle}>
         <div style={navHeaderStyle}>
-          <p style={titleStyle}>{chatCopy.chatTitle}</p>
+          <p style={titleStyle}>{headerSlot ?? chatCopy.chatTitle}</p>
         </div>
         <p style={errorStyle}>{chatCopy.loadFailed + ': ' + (state.error ?? '')}</p>
         <button type="button" className="dsh-webui-capsule-btn" style={addBtnStyle} onClick={onRetry}>
@@ -92,7 +98,7 @@ export function ChatProviderList(props: ChatProviderListProps): ReactNode {
   return (
     <section className="phub-nav" style={navColStyle}>
       <div style={navHeaderStyle}>
-        <p style={{ ...titleStyle, flex: 1, minWidth: 0 }}>{chatCopy.chatTitle}</p>
+        <p style={{ ...titleStyle, flex: 1, minWidth: 0 }}>{headerSlot ?? chatCopy.chatTitle}</p>
       </div>
 
       <div style={navScrollStyle}>

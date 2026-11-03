@@ -27,15 +27,80 @@
  */
 import { randomUUID } from 'node:crypto'
 import { ensureBotAgent, type BotAgentSpec } from './agent.ts'
+import { purgeWorkingTasksForTurn } from './working-memory.ts'
+import { getWebuiMemoryStore } from '../../triad/memory-store-singleton.ts'
+import { isEntryFromRecalledTurn, type RecalledTurnScope } from '../../triad/memory/engine/recall-scope.ts'
 
 /** 撤回结果。 */
 export interface RecallResult {
   ok: boolean
   /** 被遮蔽的 surface 节点数（用户消息 + 该轮 bot 回复 + 工具结果 + 注入上下文）。 */
   removed?: number
+  /** 同时从记忆引擎删掉的条目数（「连记忆一起」那一半）。 */
+  memoriesRemoved?: number
+  /** 同时从工作记忆删掉的任务数（按 sessionId + turn 精确回收）。 */
+  workingTasksRemoved?: number
+  /** 被撤回的轮次号（0 = 未能定位，只按时间窗口兼容旧数据）。 */
+  turn?: number
+  /** 被撤回的真人消息 id（有它时记忆 / 工作记忆按消息精确回收）。 */
+  userMessageId?: string
   error?: string
   /** 落盘失败原因（撤回本身已生效，只是重启后会丢）。 */
   flushError?: string
+}
+
+/**
+ * 删掉这一轮被写进记忆引擎的条目。
+ *
+ * ## 为什么不再用 `[消息时间-1分钟, +10分钟]`
+ *
+ * 用户连发三句时，三句都在这个窗口里；撤回第二句会把第三句刚抽取的记忆
+ * 一起删掉。现在按 `(sessionId, turn)` 精确回收：抽取与 `memory_remember`
+ * 都写 `provenance.turn`，只有没有 turn 的旧数据才退回该轮的精确起止时间。
+ *
+ * 记忆引擎不在线时返回 0（撤回上下文那部分已经完成）。
+ */
+async function purgeTurnMemories(botId: string, scope: RecalledTurnScope): Promise<number> {
+  const store = getWebuiMemoryStore() as {
+    readEntries?: () => Promise<any[]>
+    removeEntry?: (id: string) => Promise<boolean>
+    removeEntriesWhere?: (predicate: (entry: any) => boolean) => Promise<number>
+    flush?: () => Promise<void>
+    markTurnRecalled?: (sessionId: string, turn: number) => void
+    markMessageRecalled?: (sessionId: string, userMessageId: string) => void
+  } | undefined
+  if (store === undefined) return 0
+  const owner = `bot:${botId}`
+  const belongs = (entry: any): boolean => (entry?.owner ?? 'work') === owner && isEntryFromRecalledTurn(entry, scope)
+  try {
+    // 先立墓碑：抽取任务可能正在 LLM 里跑，落库前后都会查这个标记。
+    // 有消息 id 时按消息立（steer 场景只挡这一条），否则退回整轮。
+    if (scope.userMessageId !== undefined && typeof store.markMessageRecalled === 'function') {
+      store.markMessageRecalled(scope.sessionId, scope.userMessageId)
+    } else {
+      store.markTurnRecalled?.(scope.sessionId, scope.turn)
+    }
+    let removed = 0
+    if (typeof store.removeEntriesWhere === 'function') {
+      removed = await store.removeEntriesWhere(belongs)
+    } else if (typeof store.readEntries === 'function' && typeof store.removeEntry === 'function') {
+      // 兼容旧 store：逐条删。
+      for (const entry of await store.readEntries()) {
+        if (!belongs(entry)) continue
+        try {
+          if (await store.removeEntry(String(entry.id))) removed += 1
+        } catch {
+          /* 单条删除失败不影响其余条目与撤回本身 */
+        }
+      }
+    }
+    // 撤回是「删掉就要落盘」的动作，不能只等 debounce。
+    if (typeof store.flush === 'function') await store.flush()
+    return removed
+  } catch {
+    /* 引擎读失败：撤回上下文那部分已经完成，记忆这半只能尽力 */
+    return 0
+  }
 }
 
 /** 撤回占位消息的文本：模型看到它就知道这一段被用户撤掉了。 */
@@ -57,15 +122,43 @@ function isHumanTurn(event: any): boolean {
   return event?.type === 'user/message' && event?.data?.source?.kind === 'user'
 }
 
+/**
+ * 找某个 surface 节点所属的 turn 号与该轮开始时间。
+ *
+ * assistant/message 自己带 `data.turn`，但「刚发完消息还没回复就撤回」时区间里
+ * 只有 user 节点，拿不到 turn。这时从 session 日志里向前找最近的 turn/start。
+ */
+function turnStartForSeq(session: any, seq: number): { turn: number; time: number } {
+  try {
+    const events = typeof session?.snapshotEvents === 'function' ? session.snapshotEvents() : []
+    let turn = 0
+    let time = 0
+    for (const event of events) {
+      if (typeof event?.seq === 'number' && event.seq >= seq) break
+      if (event?.type !== 'turn/start') continue
+      const value = Number(event?.data?.turn ?? 0)
+      if (Number.isInteger(value) && value > 0) {
+        turn = value
+        time = typeof event.time === 'number' ? event.time : 0
+      }
+    }
+    return { turn, time }
+  } catch {
+    return { turn: 0, time: 0 }
+  }
+}
+
 /** 撤回一轮对话：把「这条用户消息 + 它之后的 bot 回复」从模型可见 surface 上遮蔽掉。 */
 export async function recallBotTurn(
   ctx: any,
   spec: BotAgentSpec,
   text: string,
   at: number,
+  messageId?: string,
 ): Promise<RecallResult> {
   const wanted = String(text ?? '').trim()
-  if (wanted === '') return { ok: false, error: '空消息无法撤回' }
+  const wantedId = String(messageId ?? '').trim()
+  if (wanted === '' && wantedId === '') return { ok: false, error: '空消息无法撤回' }
 
   let agent: any
   try {
@@ -78,17 +171,29 @@ export async function recallBotTurn(
   const nodes: number[] = Array.isArray(session?.surface?.nodes) ? [...session.surface.nodes] : []
   if (nodes.length === 0) return { ok: false, error: '会话里还没有可撤回的消息' }
 
-  // 目标节点：文本相等、且时间最接近前端那条消息的真人输入
+  // 目标节点：优先按 host 消息 id 精确匹配；旧消息 / 群聊其他 bot 没有同一 id 时，
+  // 退回「文本相等 + 时间最接近」。
   let targetIndex = -1
-  let bestDelta = Number.POSITIVE_INFINITY
-  for (let index = 0; index < nodes.length; index += 1) {
-    const event = session.eventAt(nodes[index])
-    if (!isHumanTurn(event)) continue
-    if (textOf(event) !== wanted) continue
-    const delta = Math.abs((typeof event.time === 'number' ? event.time : 0) - at)
-    if (delta < bestDelta) {
-      bestDelta = delta
+  if (wantedId !== '') {
+    for (let index = 0; index < nodes.length; index += 1) {
+      const event = session.eventAt(nodes[index])
+      if (!isHumanTurn(event)) continue
+      if (String(event?.data?.id ?? '') !== wantedId) continue
       targetIndex = index
+      break
+    }
+  }
+  if (targetIndex < 0 && wanted !== '') {
+    let bestDelta = Number.POSITIVE_INFINITY
+    for (let index = 0; index < nodes.length; index += 1) {
+      const event = session.eventAt(nodes[index])
+      if (!isHumanTurn(event)) continue
+      if (textOf(event) !== wanted) continue
+      const delta = Math.abs((typeof event.time === 'number' ? event.time : 0) - at)
+      if (delta < bestDelta) {
+        bestDelta = delta
+        targetIndex = index
+      }
     }
   }
   if (targetIndex < 0) return { ok: false, error: '会话里找不到这条消息（可能已被撤回或清空）' }
@@ -114,6 +219,31 @@ export async function recallBotTurn(
     const data: any = session.eventAt(seq)?.data
     if (typeof data?.turn === 'number') turn = data.turn
     if (typeof data?.step === 'number') step = data.step
+  }
+  // 只有 user 节点（还没回复）时区间里没有 turn，从日志里补；同时拿到该轮开始时间。
+  const turnStart = turnStartForSeq(session, startSeq)
+  if (turn === 0 && turnStart.turn > 0) turn = turnStart.turn
+
+  /*
+   * 记忆 / 工作记忆的精确作用域。
+   *
+   * `from` 用该轮 turn/start 的时间（拿不到时用本条用户消息时间）；`to` 只用
+   * 撤回区间最后一个节点的时间——下一句用户的 turn 在这之后，因此不会被误删。
+   * ±少量毫秒的余量只为吸收抽取落库与事件时间的抖动，不会跨到下一轮。
+   */
+  const rangeTimes = range
+    .map((seq) => session.eventAt(seq)?.time)
+    .filter((time: unknown): time is number => typeof time === 'number' && Number.isFinite(time))
+  const firstTime = rangeTimes.length > 0 ? Math.min(...rangeTimes) : at
+  const lastTime = rangeTimes.length > 0 ? Math.max(...rangeTimes) : at
+  const scope: RecalledTurnScope = {
+    sessionId: String(session?.id ?? ''),
+    turn,
+    ...(typeof session.eventAt(startSeq)?.data?.id === 'string' && session.eventAt(startSeq).data.id !== ''
+      ? { userMessageId: String(session.eventAt(startSeq).data.id) }
+      : {}),
+    from: Math.min(firstTime, turnStart.time > 0 ? turnStart.time : firstTime) - 1_000,
+    to: lastTime + 2_000,
   }
 
   try {
@@ -158,5 +288,27 @@ export async function recallBotTurn(
     flushError = String(error?.message ?? error)
   }
 
-  return { ok: true, removed: range.length, ...(flushError === undefined ? {} : { flushError }) }
+  /*
+   * 记忆 / 工作记忆那一半：只清「这一轮」写下的东西。
+   *
+   * 放在上下文遮蔽成功之后——撤回的核心承诺是「后续上下文不再带着它」，
+   * 记忆清理是附加动作，失败也不该把整个撤回判成失败。
+   */
+  const memoriesRemoved = await purgeTurnMemories(spec.botId, scope)
+  let workingTasksRemoved = 0
+  try {
+    workingTasksRemoved = await purgeWorkingTasksForTurn(spec.botId, scope)
+  } catch {
+    /* 工作记忆是附加项：文件读写失败不影响「上下文已撤回」的结论 */
+  }
+
+  return {
+    ok: true,
+    removed: range.length,
+    memoriesRemoved,
+    workingTasksRemoved,
+    turn,
+    ...(scope.userMessageId !== undefined ? { userMessageId: scope.userMessageId } : {}),
+    ...(flushError === undefined ? {} : { flushError }),
+  }
 }

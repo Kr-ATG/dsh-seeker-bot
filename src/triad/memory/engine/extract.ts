@@ -94,7 +94,16 @@ function parseExtractPayload(raw: string): ExtractCandidate[] | undefined {
     const importance = typeof record.importance === 'number' && Number.isFinite(record.importance)
       ? Math.max(1, Math.min(10, Math.round(record.importance)))
       : 5
-    out.push({ content, scope, tags, importance })
+    /*
+     * ttlDays 只认 1-90 的整数：模型偶尔会输出 0（「永久」的另一种写法）、
+     * 负数或小数。0 / 负数按「没填」处理（永久），越界的正数钳到 90 天——
+     * 90 天是「临时」这个概念的上界，再长就该走正常记忆而不是 TTL。
+     */
+    const rawTtl = typeof record.ttlDays === 'number' && Number.isFinite(record.ttlDays)
+      ? Math.round(record.ttlDays)
+      : 0
+    const ttlDays = rawTtl > 0 ? Math.min(90, Math.max(1, rawTtl)) : undefined
+    out.push({ content, scope, tags, importance, ...(ttlDays === undefined ? {} : { ttlDays }) })
   }
   return out
 }
@@ -109,16 +118,37 @@ export function extractSystemPrompt(): string {
   return [
     'You are a memory extractor for an AI assistant. Read the conversation transcript and extract information worth remembering across sessions.',
     'Return ONLY a JSON object in this exact shape (no markdown, no commentary):',
-    '{"memories":[{"content":"...","scope":"global"|"project","tags":["..."],"importance":1}]}',
+    '{"memories":[{"content":"...","scope":"global"|"project","tags":["..."],"importance":1,"ttlDays":7}]}',
     'Rules:',
     '- Extract only DURABLE cross-session knowledge: user identity, stable preferences, hard-won gotchas, architectural decisions, non-obvious constraints. Litmus test: would a session a month later still act on this? If not, skip it.',
     '- NEVER extract session work logs: commit hashes, push/release announcements, version bumps, "已修复并推送", build/deploy results, file-change lists, intermediate debugging steps, transient bug states. Git and the issue tracker already record those.',
     '- NEVER extract facts trivially derivable from the workspace: package.json contents, dependency lists, directory layouts, file paths, config values the model can simply read again.',
+    /*
+     * 上面那条「不要记路径」有个必须留的例外：**本轮产出的交付物**。
+     * 起因是工具结果现在会进转录（1.2），但 prompt 里一刀切禁止路径，于是
+     * 「Bot 刚生成了 report.html」这类唯一值得记的事实被规则自己挡掉——用户
+     * 下一轮问「上次那个文件在哪」，记忆库里什么都没有。口径按「产出 vs 读到」
+     * 划：产出物记一次（路径 + 是什么），只是读过/搜到的路径仍然不记。
+     */
+    '- Exception worth remembering: deliverables this task produced (files the assistant created or updated, with their absolute paths and what they are). The user will ask "where is that file" in a later session. Record each deliverable once; do NOT record paths that were merely read, searched, or listed.',
     '- NEVER extract generic programming knowledge, framework docs, or explanations the model already knows.',
     '- Skip small talk, greetings, chit-chat, and content with no lasting value.',
     '- scope: "global" for user identity/preferences/working style; "project" for workspace/project-specific content.',
     '- tags: 1-4 short category tags in the same language as the content (e.g. 技术, 踩坑, 架构, 偏好).',
     '- importance: integer 1-10. 8-10 = durable facts/decisions a future session will act on; anything below 8 is treated as session-scoped noise and dropped. When unsure, score low or skip.',
+    /*
+     * ── 临时信息（ttlDays）────────────────────────────────────────────
+     *
+     * 抽取管线里有一类内容在写下那一刻是真的、过几天就是错的：「今天要发 36 条」
+     * 「这周先按 A 方案」「临时把端口改成 8080」。它们能过「一个月后还会不会依据
+     * 它行动」这一关——因为提问时看起来确实重要——却会在下周变成误导性事实：
+     * 模型照着一条过期的「今天要发 36 条」去安排工作。
+     *
+     * 所以给模型两条路，而不是让它硬判「记 / 不记」：能给出有效期的标 ttlDays
+     * （注入侧到点自动过滤），给不出有效期的**宁可不入库**。一句过期的「今天」
+     * 比缺一条更糟：缺的那条模型会重新问，过期的那条它会当真。
+     */
+    '- Temporary facts: if the information only holds for a limited time (e.g. "ship 36 items today", "use plan A this week", "port temporarily changed to 8080"), set "ttlDays" to how many days it stays true (integer 1-90). If you cannot bound it, do NOT extract it — an expired "today" fact is worse than a missing one, because a later session will act on it as if it were current.',
     '- content: write in the original language of the conversation, one complete concise sentence or bullet.',
     '- NEVER extract project instruction files (AGENTS.md, CLAUDE.md), the skill catalog (available skills list), or any skill content: those are auto-injected by the harness and must NOT be stored as memory.',
     '- If nothing is worth remembering, return {"memories":[]}.',
@@ -172,7 +202,7 @@ export async function extractCandidatesWithOutcome(
       provider: route.provider,
       model: route.model,
       messages: [createUserMessage({
-        content: [{ type: 'text', text: extractUserPrompt(transcript.slice(0, config.extractMaxChars)) }],
+        content: [{ type: 'text', text: extractUserPrompt(clipTranscript(transcript, config.extractMaxChars)) }],
         source: { kind: 'plugin:dsh-memory', plugin: 'dsh-memory' },
       })],
       system: extractSystemPrompt(),
@@ -269,10 +299,138 @@ export async function resolveRoute(
   return undefined
 }
 
+/** 单条工具结果收进提取素材时的截断长度。 */
+const TOOL_RESULT_CLIP = 2000
+
+/**
+ * 一回合里工具行合计的字符预算。
+ *
+ * 与单条上限分开：单条 2000 只保证「不爆」，十几次工具调用照样能堆到几万字符，
+ * 而提取请求的预算（extractMaxChars，默认 6000）比这还小——不在这里收口，
+ * 最后仍会被整份转录的裁剪规则切掉，只是切得没有章法。
+ */
+const TOOL_LINES_BUDGET = 4000
+
+/**
+ * 中间过程类工具：结果只代表「过程状态」，不是本轮最终产出。
+ *
+ * 两类：
+ *  · 状态类（清单 / 待办）：每轮都在变，写进记忆只会得到一堆过期快照；
+ *  · 可重新取回的派生物（读文件、搜索、目录树、检索命中）：提取 prompt 本身就
+ *    禁止把「工作区里能直接读到的内容」写成记忆，整段灌进去只会诱发这类候选，
+ *    还把真正的事实挤出预算。
+ *
+ * 它们的**路径**仍然要留（见 transcriptFromEvents），只是正文不收。
+ */
+const INTERMEDIATE_TOOLS = new Set([
+  // 状态类
+  'todo_write', 'todo_read', 'todo_list', 'task_state',
+  // 可重新取回的派生物
+  'read', 'grep', 'glob', 'ls', 'list_dir', 'list_files',
+  'memory_search', 'memory_pending', 'memory_list',
+  // 过程播报：给用户推的进度消息，正文里没有新事实
+  'bot_emit', 'progress',
+])
+
+/** 工具名归一：去掉 mcp 前缀与命名空间，只留最后一段小写名（mcp__amap__maps_geo → maps_geo）。 */
+function baseToolName(name: string): string {
+  const lower = name.trim().toLowerCase()
+  const parts = lower.split(/__|[.:/]/).filter(part => part !== '')
+  return parts.length === 0 ? lower : parts[parts.length - 1]!
+}
+
+/** 截断单条工具结果（压平空白后截断：工具输出里的大段缩进/空行没有信息量）。 */
+function clipToolResult(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length <= TOOL_RESULT_CLIP
+    ? flat
+    : `${flat.slice(0, TOOL_RESULT_CLIP)}…[truncated ${flat.length - TOOL_RESULT_CLIP} chars]`
+}
+
+/**
+ * 绝对路径提取：只认「盘符开头」或「至少两段的 / 开头」。
+ *
+ * 为什么不收相对路径：提取素材里没有可靠的工作区基准（同一段文本可能来自
+ * 子代理、另一个工作区），猜一个基准只会写出错路径——错路径比没路径更糟。
+ */
+const ABSOLUTE_PATH_RE = /[A-Za-z]:[\\/][^\s"'`<>|?*，。；：、（）【】]+|\/(?:[\w.@-]+\/)+[\w.@-]+/g
+
+/** 从工具结果里抽文件路径（去重、限 8 条）。 */
+function filePathsIn(text: string, limit = 8): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const match of text.matchAll(ABSOLUTE_PATH_RE)) {
+    // 句末标点常被正则吞进来（"…report.html."），去掉尾部的标点/括号。
+    const path = match[0].replace(/[.,;:)\]}>]+$/, '')
+    if (path.length < 4) continue
+    const key = path.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(path)
+    if (out.length >= limit) break
+  }
+  return out
+}
+
+/**
+ * 按预算裁剪整份转录：保留头 60% + 尾 40%。
+ *
+ * 为什么不是只取头部（原来的做法）：工具结果落在转录末尾，而「上次那个文件
+ * 在哪」这类问题的线索只在那里——只取头部等于把它们全切掉，纳入工具结果的
+ * 改造就白做了。头部保 60%：用户/助手对话仍是提取的主料，得占大头。
+ */
+function clipTranscript(transcript: string, max: number): string {
+  if (transcript.length <= max) return transcript
+  const head = Math.floor(max * 0.6)
+  const tail = max - head
+  const omitted = transcript.length - max
+  return `${transcript.slice(0, head)}\n…[middle omitted: ${omitted} chars]…\n${transcript.slice(-tail)}`
+}
+
 /** 从事件流维护的 turn 缓冲里取文本（extract 输入）。 */
 export function transcriptFromEvents(events: Array<{ type: string; data: unknown }>): string {
-  const lines: string[] = []
+  /*
+   * ── 为什么把工具结果也收进来（1.2）──────────────────────────────────
+   *
+   * 原来只收 user/assistant 的正文，于是「Bot 刚生成了 report.html」这件事在
+   * 提取素材里**完全不存在**——文件路径只出现在工具结果里。用户下一轮问
+   * 「上次那个文件在哪」，模型手里没有任何线索。
+   *
+   * 但工具结果不能整段收：读文件、跑命令的结果动辄上万字符，而提取要的是
+   * 「一个月后还会依据它行动」的结论，不是过程日志。所以三条收窄规则：
+   *   ① 单条截断（TOOL_RESULT_CLIP），
+   *   ② 一回合合计预算（TOOL_LINES_BUDGET，超了从最早的开始丢），
+   *   ③ 中间过程类工具只留路径（INTERMEDIATE_TOOLS）。
+   */
+  /** 行 + 是否工具行：预算裁剪时只有工具行会被丢，对话正文一行不删。 */
+  const lines: Array<{ text: string; tool: boolean }> = []
+  /** callId → 工具名：tool/result 自己不带工具名，只能靠 tool/call 配对。 */
+  const toolNames = new Map<string, string>()
   for (const event of events) {
+    if (event.type === 'tool/call') {
+      const data = event.data as { callId?: unknown; name?: unknown }
+      if (typeof data?.callId === 'string' && typeof data.name === 'string') toolNames.set(data.callId, data.name)
+      continue
+    }
+    if (event.type === 'tool/result') {
+      const data = event.data as {
+        message?: { toolCallId?: unknown; content?: unknown }
+      }
+      const text = textOfContent(data?.message?.content).trim()
+      if (text === '') continue
+      const callId = typeof data?.message?.toolCallId === 'string' ? data.message.toolCallId : ''
+      const rawName = callId === '' ? undefined : toolNames.get(callId)
+      const name = typeof rawName === 'string' && rawName !== '' ? baseToolName(rawName) : ''
+      if (INTERMEDIATE_TOOLS.has(name)) {
+        const paths = filePathsIn(text)
+        // 中间过程类整段跳过，只留路径：路径才是「上次那个文件在哪」的答案。
+        if (paths.length === 0) continue
+        lines.push({ text: `Tool(${name}) paths: ${paths.join(' ')}`, tool: true })
+        continue
+      }
+      lines.push({ text: `Tool(${name === '' ? 'unknown' : name}): ${clipToolResult(text)}`, tool: true })
+      continue
+    }
     if (event.type === 'user/message') {
       const message = event.data as { role?: string; content?: unknown; source?: { kind?: string } }
       // 跳过注入类上下文消息（这些由 DSH/插件自动注入，重复提取成记忆只会造成噪音与冲突）：
@@ -285,13 +443,27 @@ export function transcriptFromEvents(events: Array<{ type: string; data: unknown
       //   等于把摘要的摘要写进记忆库，二手转述会一轮轮稀释掉原始事实。
       const injectedKinds = ['plugin', 'agent-instructions', 'skill-catalog', 'skill-invocation', 'compact-checkpoint']
       if (typeof message.source?.kind === 'string' && (injectedKinds.includes(message.source.kind) || message.source.kind.startsWith('plugin:'))) continue
-      lines.push(`User: ${textOfContent(message.content)}`)
+      lines.push({ text: `User: ${textOfContent(message.content)}`, tool: false })
     } else if (event.type === 'assistant/message') {
       const data = event.data as { message?: { content?: unknown } }
-      lines.push(`Assistant: ${textOfContent(data.message?.content)}`)
+      lines.push({ text: `Assistant: ${textOfContent(data.message?.content)}`, tool: false })
     }
   }
-  return lines.join('\n')
+  // 工具行预算：从最近往前装，装不下的（更早的）丢掉。一回合里最后的工具结果
+  // 才是本轮真正的产出，前面的多半是查资料的过程。
+  const kept = new Set<number>()
+  let budget = TOOL_LINES_BUDGET
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]
+    if (!line.tool) continue
+    if (line.text.length > budget) continue
+    budget -= line.text.length
+    kept.add(index)
+  }
+  return lines
+    .filter((line, index) => !line.tool || kept.has(index))
+    .map(line => line.text)
+    .join('\n')
 }
 
 /** 把 ContentBlock[] 或字符串平铺为文本。 */

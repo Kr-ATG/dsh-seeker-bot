@@ -251,6 +251,21 @@ function applyModeDom(): void {
   hide(doc.getElementById(NAV_SECTIONS_ID), mode === 'bot')
   // 官方工作区行（锚点）在 Bot 模式整体让位。
   for (const node of Array.from(doc.querySelectorAll(ANCHOR))) hide(node, mode === 'bot')
+  /*
+   * Work 侧栏里混入的 Bot 宿主会话：Personal Agent 的每个 Bot 在宿主侧都是一个
+   * `pa-bot-v2-<botId>` 会话，而官方会话列表不区分来源，会把它当成普通会话
+   * 列在「未分组」下——用户看到的就是 Bot 和 Work 串在一起。
+   *
+   * Bot 在 Bot 模式有自己的侧栏，这些行不该出现在 Work。用宿主行自带的
+   * `data-row-key="session:<id>"` 精确识别（只隐藏 DOM，不动任何数据）。
+   * 虚拟列表会把行节点复用到普通会话，所以每次对账都按当前 key 重新判定，
+   * 非 Bot 行要撤销隐藏，不能只加不减。
+   */
+  for (const node of Array.from(doc.querySelectorAll('[data-row-key]'))) {
+    const key = node.getAttribute('data-row-key') ?? ''
+    if (key.startsWith('session:pa-bot-v2-')) hide(node, true)
+    else if (node.hasAttribute(HIDE_ATTR)) node.removeAttribute(HIDE_ATTR)
+  }
 }
 
 /** 幂等对账：宿主 + 选中态 + 模式外壳。 */

@@ -10,8 +10,15 @@ import { homedir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { getWebuiMemoryStore } from '../memory-store-singleton.js'
 import { gatherMcpEntries, mcpPatchSummary, restoreMcpEntries, type GatheredMcp } from './mcp-patch.js'
-import { gatherProviderAssets, providerPatchSummary, restoreProviderAssets, type GatheredProviders } from './provider-patch.js'
-import { memoryHome } from '../memory/engine/store.js'
+import {
+  gatherProviderAssets,
+  liveVendorSummary,
+  providerPatchSummary,
+  restoreProviderAssets,
+  type GatheredProviders,
+} from './provider-patch.js'
+import { migrateEntries, memoryHome } from '../memory/engine/store.js'
+import type { MemoryEntry } from '../memory/types.js'
 import { detectMediaType } from '../vault/blobs.js'
 import { VaultCipher } from '../vault/crypto.js'
 import { VaultStore, vaultHome } from '../vault/store.js'
@@ -35,6 +42,15 @@ export interface GatheredMemory {
   entriesJson?: string
   stateJson?: string
   projects?: Record<string, string> // projectHash -> meta.json text
+  /**
+   * 包内自描述的归属分布（schema v6）。
+   *
+   * 为什么要把「谁的记忆」写进包里：`entries.json` 里的 `owner` 是 `work` /
+   * `bot:<id>`，而 Bot 名册住在浏览器 localStorage（不在宿主侧），换机后子 Bot
+   * 的 id 与云端并不相同。恢复端拿到这份分布就能在进度与提示里说清「这包里有
+   * N 条属于别的 Bot 的记忆」，而不是让它们静默地消失在某次归属过滤里。
+   */
+  ownerStats?: { work: number; bots: Record<string, number> }
 }
 
 export interface GatheredSkills {
@@ -43,13 +59,61 @@ export interface GatheredSkills {
 
 export interface GatheredWorkbenchPayload {
   format: 'dsh-workbench-sync'
-  version: 1
+  /**
+   * 包格式版本。
+   *
+   * v1：档案 / 记忆 / 技能 / MCP / 供应商（`llm-*`、凭据、能力、代理、密钥环）。
+   * v2：记忆带 `ownerStats`（schema v6 归属），供应商带 `liveVendors`（实时语音
+   *     Live 供应商，`realtime-config.json`）。
+   *
+   * 读取端必须容忍缺字段——v1 的包照样能恢复，只是少了这两段。
+   */
+  version: 1 | 2
   createdAt: string
   vault?: GatheredVault
   memory?: GatheredMemory
   skills?: GatheredSkills
   mcp?: GatheredMcp
   providers?: GatheredProviders
+}
+
+/**
+ * 统计一批条目的归属分布。
+ *
+ * `bots` 的 key 用**裸 botId**（去掉 `bot:` 前缀，如 `bot-main-xiaomo`）：它与前端
+ * `bot.id` 一致，UI 与日志里能直接对上；归属前缀在 `owner` 字段本身已经表达过了。
+ *
+ * 调用方负责先按需过滤软废弃条目。归属统计（`ownerStats` / `restoreMemory` 的
+ * `work` / `bots` / 本机规模视图）统一只数**活跃条目**：软废弃的记忆已经不在注入
+ * 与检索里，把它算进去会让「恢复完成：带回来 2 条 Bot 记忆」和面板上的 1 条对不上。
+ * 只有 `restoreMemory().entries` 是落盘总条数（含软废弃），因为它回答的是「文件里
+ * 一共写了几条」。
+ */
+function countOwners(entries: readonly MemoryEntry[]): { work: number; bots: Record<string, number> } {
+  let work = 0
+  const bots: Record<string, number> = {}
+  for (const entry of entries) {
+    const owner = entry.owner ?? 'work'
+    if (owner.startsWith('bot:')) {
+      const botId = owner.slice('bot:'.length)
+      bots[botId] = (bots[botId] ?? 0) + 1
+    } else {
+      work += 1
+    }
+  }
+  return { work, bots }
+}
+
+/** 只保留活跃条目（软废弃的 `deprecated === true` 不参与归属统计）。 */
+function activeOnly(entries: readonly MemoryEntry[]): MemoryEntry[] {
+  return entries.filter(entry => entry.deprecated !== true)
+}
+
+/** 归属分布里 Bot 条目的总数（`countOwners` 的 `bots` 求和）。 */
+function totalBotEntries(bots: Record<string, number>): number {
+  let total = 0
+  for (const count of Object.values(bots)) total += count
+  return total
 }
 
 /** 递归统计目录大小（支持忽略以 . 开头的隐藏目录/回收站）。 */
@@ -85,6 +149,18 @@ export async function getWorkbenchSizes(): Promise<{
   providersCount: number
   /** `web` 条目里当前选的搜索后端（如 `anysearch-auto`），空串表示未配置。 */
   webSearchProvider: string
+  /** 记忆条目总数（schema v6：含 Work 与各 Bot 归属）。 */
+  memoryEntries: number
+  /** `owner = work` 的条目数。 */
+  memoryWorkEntries: number
+  /** `owner = bot:<id>` 的条目数。 */
+  memoryBotEntries: number
+  /** 出现过的不同 Bot 归属个数。 */
+  memoryBots: number
+  /** Live（实时语音）供应商数量。 */
+  liveVendors: number
+  /** 默认 Live 供应商 id（空串 = 未设置）。 */
+  liveDefaultVendor: string
   totalBytes: number
 }> {
   // 1. 档案：vault.json + key + blobs/（排除 store/workbench-sync.json 运行历史与 audit.jsonl 审计日志）
@@ -117,6 +193,32 @@ export async function getWorkbenchSizes(): Promise<{
     memoryBytes += await getDirSize(projectsDir, true)
   }
 
+  /*
+   * 记忆归属分布（schema v6）。
+   *
+   * 走 `migrateEntries()` 而不是直接读 `owner` 字段：v5 存量条目没有 owner，归属
+   * 只能从 `provenance.sessionId` 推导，绕过归一的话所有老条目都会被算成 work。
+   * 软废弃条目（`deprecated === true`）不参与统计——这个视图回答的是「还有效的
+   * 记忆有多少条」，回收站里的不该撑数字。
+   */
+  let memoryEntries = 0
+  let memoryWorkEntries = 0
+  let memoryBotEntries = 0
+  let memoryBots = 0
+  if (existsSync(entriesFile)) {
+    try {
+      const parsed = JSON.parse(await readFile(entriesFile, 'utf8')) as { entries?: unknown }
+      const active = activeOnly(migrateEntries(parsed.entries))
+      const stats = countOwners(active)
+      memoryEntries = active.length
+      memoryWorkEntries = stats.work
+      memoryBotEntries = totalBotEntries(stats.bots)
+      memoryBots = Object.keys(stats.bots).length
+    } catch {
+      // 读不出来就保持零值：状态视图不该因为一份坏文件整块报错。
+    }
+  }
+
   // 3. 技能：skills/ 目录下的自定义技能（排除 .trash 回收站）
   let skillsBytes = 0
   const sRoot = skillsHome()
@@ -130,6 +232,9 @@ export async function getWorkbenchSizes(): Promise<{
   // 5. 供应商与模型：cordis.patch.yml 里的 llm-* 条目 + .credentials.yaml + 代理/能力
   const providers = providerPatchSummary()
 
+  // 6. Live（实时语音）供应商：realtime-config.json（由 provider-patch 侧读，这里只要规模与默认项）
+  const live = liveVendorSummary()
+
   return {
     vaultBytes,
     memoryBytes,
@@ -139,6 +244,13 @@ export async function getWorkbenchSizes(): Promise<{
     providersBytes: providers.bytes,
     providersCount: providers.count,
     webSearchProvider: providers.webSearchProvider,
+    memoryEntries,
+    memoryWorkEntries,
+    memoryBotEntries,
+    memoryBots,
+    liveVendors: live.vendors,
+    liveDefaultVendor: live.defaultVendor,
+    // 体积口径保持不变：Live 配置的字节数已经算不进任何一项，这里也不重复累加。
     totalBytes: vaultBytes + memoryBytes + skillsBytes + mcp.bytes + providers.bytes,
   }
 }
@@ -207,7 +319,25 @@ async function gatherMemory(): Promise<GatheredMemory> {
     } catch {}
   }
 
-  return { entriesJson, stateJson, projects }
+  /*
+   * 包内归属分布（schema v6）。
+   *
+   * 走 `migrateEntries()` 而不是直接读 `owner` 字段：v5 及更早的包没有 owner，
+   * 归属只能从 `provenance.sessionId` 推导；不归一的话统计出来的永远是 work，
+   * 恢复端也就无从知道「这包里其实带着 Bot 记忆」。
+   *
+   * 软废弃条目不进统计（与 `restoreMemory()` 的返回、本机规模视图同一口径），
+   * 解析失败时整段省略——ownerStats 只是提示信息，不值得让它把整个上传流程搞失败。
+   */
+  let ownerStats: GatheredMemory['ownerStats']
+  if (entriesJson !== undefined) {
+    try {
+      const parsed = JSON.parse(entriesJson) as { entries?: unknown }
+      ownerStats = countOwners(activeOnly(migrateEntries(parsed.entries)))
+    } catch {}
+  }
+
+  return { entriesJson, stateJson, projects, ...(ownerStats !== undefined ? { ownerStats } : {}) }
 }
 
 /** 递归收集目录下的所有文件（自动排除以 . 开头的隐藏目录/回收站/系统隐藏文件）。 */
@@ -260,7 +390,7 @@ export async function gatherWorkbenchAssets(options: {
 
   return {
     format: 'dsh-workbench-sync',
-    version: 1,
+    version: 2,
     createdAt: new Date().toISOString(),
     ...(vault ? { vault } : {}),
     ...(memory ? { memory } : {}),
@@ -279,6 +409,8 @@ export async function restoreMcp(mcp: GatheredMcp): Promise<{ added: number; upd
 export async function restoreProviders(providers: GatheredProviders): Promise<{
   patchResult: { added: number; updated: number; kept: number }
   credentialsResult: { added: number; updated: number; kept: number }
+  /** Live（实时语音）供应商的合并结果（包格式 v1 无此段时为全零）。 */
+  liveResult: { added: number; updated: number; kept: number }
 }> {
   return restoreProviderAssets(providers)
 }
@@ -336,21 +468,69 @@ export async function restoreVault(vault: GatheredVault, store: VaultStore): Pro
   return { records: recordsCount }
 }
 
-/** 还原记忆数据（含覆盖前安全备份与孤儿项目目录隔离）。 */
-export async function restoreMemory(memory: GatheredMemory): Promise<{ entries: number }> {
+/**
+ * 还原记忆数据（含覆盖前安全备份与孤儿项目目录隔离）。
+ *
+ * 返回值带上归属统计：`work` / `bots` 是**还原后**（归一 + 归属补齐之后）的分布，
+ * 进度与提示文案要用它说清「这次带回来多少条 Bot 记忆」。口径：`entries` 是落盘
+ * 总条数（含软废弃），`work` / `bots` 只数活跃条目——与面板的规模视图一致。
+ */
+export async function restoreMemory(memory: GatheredMemory): Promise<{
+  entries: number
+  work: number
+  bots: number
+}> {
   const root = memoryHome()
   let entriesCount = 0
+  let workCount = 0
+  let botsCount = 0
   if (memory.entriesJson) {
     const entriesFile = join(root, 'store', 'entries.json')
     // 覆盖前自动生成本地安全快照备份，防误操作
     if (existsSync(entriesFile)) {
       await atomicWriteFile(entriesFile + '.bak-before-sync', await readFile(entriesFile)).catch(() => undefined)
     }
-    await atomicWriteFile(entriesFile, memory.entriesJson)
+
+    /*
+     * 落盘前先归一成 schema v6。
+     *
+     * 云端包可能是 v5（无 owner、旧 id 算法）。原样搬只会把旧结构留在磁盘上：
+     * 宿主 `reload()` 会再跑一遍 `migrateEntries()`，于是内存态里的 id 与磁盘上的
+     * 不是同一套，面板按 id 定位条目会找不到（表现为「同步恢复后记忆列表是空的」，
+     * 而文件明明有内容）。这里提前归一，磁盘与内存态就是同一份 v6 数据。
+     */
+    let payload = memory.entriesJson
+    let restored: MemoryEntry[] | undefined
     try {
-      const parsed = JSON.parse(memory.entriesJson) as { entries?: unknown[] }
-      if (Array.isArray(parsed.entries)) entriesCount = parsed.entries.length
-    } catch {}
+      const parsed = JSON.parse(memory.entriesJson) as { entries?: unknown }
+      if (Array.isArray(parsed.entries)) {
+        restored = migrateEntries(parsed.entries)
+        // 与 MemoryStore.flushNow 的落盘格式保持一致（`{ version: 2, entries }`）。
+        payload = `${JSON.stringify({ version: 2, entries: restored }, null, 2)}\n`
+      }
+    } catch {
+      // 解析不了就原样写：宁可让宿主把它当坏文件走恢复链，也不要吞掉用户云端数据。
+    }
+    await atomicWriteFile(entriesFile, payload)
+
+    if (restored !== undefined) {
+      entriesCount = restored.length
+      // 归属只数活跃条目：软废弃的不进 work / bots（`entries` 仍是落盘总条数）。
+      const stats = countOwners(activeOnly(restored))
+      workCount = stats.work
+      /*
+       * `bot:*` 归属原样保留，不删也不改。
+       *
+       * 宿主侧拿不到浏览器 localStorage 里的 Bot 名册，认不出这些 id 是预期状态；
+       * 这不是清理它们的理由——用户下次进那个 Bot，记忆还得在。
+       */
+      botsCount = totalBotEntries(stats.bots)
+    } else {
+      try {
+        const parsed = JSON.parse(memory.entriesJson) as { entries?: unknown[] }
+        if (Array.isArray(parsed.entries)) entriesCount = parsed.entries.length
+      } catch {}
+    }
   }
   if (memory.stateJson) {
     const stateFile = join(root, 'store', 'state.json')
@@ -384,7 +564,7 @@ export async function restoreMemory(memory: GatheredMemory): Promise<{ entries: 
     activeStore.reload()
   }
 
-  return { entries: entriesCount }
+  return { entries: entriesCount, work: workCount, bots: botsCount }
 }
 
 /** 还原技能数据（含孤儿技能安全隔离清理与内置技能防删保护）。 */

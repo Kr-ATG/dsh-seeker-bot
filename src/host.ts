@@ -43,14 +43,17 @@ import { applyScreenshot } from './shot/index.ts'
 import { admitSpillPath, spillRoots } from './spill/index.ts'
 import { MATERIALIZE_ROUTE, handleMaterialize, parseGeneratedResult } from './spill/materialize.ts'
 import { applyDownloadRoutes, applyDownloadTool } from './download/index.ts'
+import { applySessionAdmin } from './session-admin/index.ts'
 import { validateHtmlCardTool } from './validate-card/index.ts'
 import { applyOpenPathRoutes } from './open-path/index.ts'
 import { applyOpenFileRoutes } from './open-file/index.ts'
 import { applyOfficePreview } from './office/index.ts'
 import { applyFontRoutes } from './fonts/index.ts'
 import { applyTriadHost } from './triad/host.ts'
+import { isPluginInstalled } from './triad/mcp-catalog.ts'
 import { applyProviderHub, providerHubServices } from './provider/index.ts'
 import { applyToolsGate, setGateDefaultEnabled } from './tools-gate/index.ts'
+import { applyToolRetrieval } from './host/tool-retrieval/index.ts'
 import { applyBrowserOnDemand } from './browser-on-demand/index.ts'
 import { applyBrowserActivity } from './browser-activity/index.ts'
 import { applyRunningApps } from './running-apps/index.ts'
@@ -58,7 +61,6 @@ import { applyDonePillHost } from './host/done-pill/index.ts'
 import { applyRecWindows } from './host/done-pill/rec-windows.js'
 import { applyRecCapture } from './host/done-pill/rec-capture.js'
 import { applySfxRoutes } from './host/done-pill/sfx.ts'
-import { applyEchoViewport, ECHO_VIEWPORT_FRAME_ROUTE, handleEchoViewportFrameRoute } from './echo-viewport/index.ts'
 // 「系统提示词」观测（2026-10-27）：assemble 出口抓最终快照 + 只读路由，
 // 供操作间「系统提示词」页查看「这次发送会话会带上的提示词」。
 import { applySystemPromptInspector } from './system-prompt/index.ts'
@@ -68,25 +70,13 @@ import { applyPersonalAgentHost } from './host/personal/index.ts'
 export { applyPersonalAgentHost } from './host/personal/index.ts'
 export { applyDownloadRoutes, downloadTool, readDownloadState, watchShellDownload } from './download/index.ts'
 export { applyFontRoutes, FONT_ROUTE } from './fonts/index.ts'
-export {
-  applyEchoViewport,
-  ECHO_VIEWPORT_FRAME_ROUTE,
-  ECHO_VIEWPORT_SPACE_ROUTE,
-  handleEchoViewportFrameRoute,
-  handleEchoViewportSpaceRoute,
-  pickWorkspaceSpace,
-  extractWorkspaceHints,
-  WorkspaceLink,
-  listWorkspaceSpaces,
-  captureWorkspaceFrame,
-} from './echo-viewport/index.ts'
 // 「用默认浏览器 / 默认应用打开文件」（2026-10-21）：纯判定面导出给冒烟。
 // 这三条（路径绝对化基准 / 可执行类型拒绝 / 浏览器命令解析）判错了都不会抛错，
 // 只会表现为「点了没反应」或「打开了不相干的东西」，只能断言。
 export { applyOpenFileRoutes, __test as openFileTest } from './open-file/index.ts'
 // 工具闸门（computer-use / browser-use 按需注入）：纯函数与分组表导出给 smoke，
 // 钉住「默认全关 → 每轮省掉那 80 个工具的 schema」这条主回归。
-export { applyToolsGate, __test as toolsGateTest, DEFAULT_GATE_GROUPS } from './tools-gate/index.ts'
+export { applyToolsGate, setGateDefaultEnabled, __test as toolsGateTest, DEFAULT_GATE_GROUPS } from './tools-gate/index.ts'
 export type { GateConfig, GateGroup } from './tools-gate/index.ts'
 // 浏览器按需拉起：纯函数与状态机导出给 smoke（等待/去重/空闲关停/归属认领
 // 这四条错了都不会抛错，只会表现为「Chrome 没起来」或「常驻不关」）。
@@ -287,17 +277,32 @@ function handleGeneratedImages(ctx: Record<string, any>, req: any, res: any): vo
  * 且服务销毁时 webCtx.effect 注册的路由自动回收。与 packages/api/gateway
  * 的写法一致。
  */
-export function apply(ctx: Record<string, any>, config?: { toolsGate?: Record<string, unknown>; browserOnDemand?: Record<string, unknown>; browserActivity?: Record<string, unknown> }): void {
+export function apply(ctx: Record<string, any>, config?: { toolsGate?: Record<string, unknown>; browserOnDemand?: Record<string, unknown>; browserActivity?: Record<string, unknown>; personalRealtime?: Record<string, unknown> }): void {
   // 组件开关：登记宿主 context（host 各模块在 apply 期用 hostFeatureEnabled
   // 读 loader 行状态），再注册 /api/chat-flow/components 只读路由。
   initializeFeatures(ctx)
 
-  // Personal Agent（Bot 模式）：真实模型回复 / 期刊生图 / Edge TTS / ASR。
+  // Personal Agent（Bot 模式）：真实模型回复 / 期刊生图 / 全双工实时语音 / ASR。
   // 全部路由自带降级；任一项服务缺失都不影响其它能力与前端本地引擎。
   try {
-    applyPersonalAgentHost(ctx)
+    applyPersonalAgentHost(ctx, { personalRealtime: config?.personalRealtime as never })
   } catch (error) {
     console.warn('[dsh-seeker-bot] personal-agent host 未挂载：', error instanceof Error ? error.message : String(error))
+  }
+
+  // 会话管理（真正删除会话）：/api/session-admin/*。
+  //
+  // 官方只提供归档（archiveSession 只往归档集合里塞 id，日志与记账都留着），
+  // 没有删除。这一块补上永久删除：走 registry 的 unarchive/unpin 与
+  // workspace.detachSession（内存态与磁盘同步，不会在下次写入时复活），
+  // 最后删 <DSH_HOME>/sessions/<projectKey>/<uuid>/ 目录。
+  //
+  // 内部自己 inject(['webServer','workspaceRegistry','sessions'])，任一服务
+  // 缺失时整块静默不挂——前端探测不到路由就不显示菜单项，不影响其余能力。
+  try {
+    applySessionAdmin(ctx)
+  } catch (error) {
+    console.warn('[dsh-seeker-bot] session-admin 未挂载：', error instanceof Error ? error.message : String(error))
   }
 
   ctx.inject(['webServer'], (webCtx: any) => {
@@ -353,7 +358,6 @@ export function apply(ctx: Record<string, any>, config?: { toolsGate?: Record<st
         applyRecCapture(webCtx)
         applySfxRoutes(webCtx)
       }
-      applyEchoViewport(webCtx)
     } catch (error) {
       try {
         webCtx.logger?.warn?.(`[dsh-seeker-bot] done-pill media routes failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`)
@@ -403,15 +407,22 @@ export function apply(ctx: Record<string, any>, config?: { toolsGate?: Record<st
       } catch { /* 拿不到 logger 时静默：不为了记日志再抛一次 */ }
     }
   })
-  // ── 融合的原 dsh-triad 工作台（记忆引擎 / 用量+技能 / MCP）────────────
+  // ── 融合的原 dsh-triad 工作台（记忆引擎 / 技能管理 / MCP）────────────
   // 路由前缀与座位一仍其旧（/api/dsh-memory/* 等），用户零迁移；dsh-triad
   // 自此退役，数据与配置目录也不动。定时自动化已交给官方 schedule bundle。
   //
-  // 七个 service 与原 dsh-triad 顶层 inject 一致。任一缺失则回调不执行
-  // （工作台整体不挂载，但本插件的截图/下载/generated-images 照常）——
-  // 与 dsh-triad 原本的硬依赖语义相同，不额外放宽。
+  // 五个 service：任一缺失则回调不执行（工作台整体不挂载，但本插件的
+  // 截图/下载/generated-images 照常）——与 dsh-triad 原本的硬依赖语义相同，
+  // 不额外放宽。
+  //
+  // credentials / settings 已随用量统计后端（/api/usage-stats/*）一起移除：
+  // 原先只有被删的那块在用。grep 复核过 —— workbench-sync 碰的是
+  // `~/.dsh/.credentials.yaml` 这个**文件**（不走 ctx 服务），供应商中心与
+  // 个人 Bot 的 credentials/settings 都在它们各自的 ctx.inject 里，不吃这份
+  // 声明；而 sessions / sessionPersistence / llm 仍被画廊、子会话产出物、
+  // 记忆引擎与档案抽取实际使用，故保留。
   ctx.inject(
-    ['webServer', 'tools', 'credentials', 'sessions', 'sessionPersistence', 'settings', 'llm'],
+    ['webServer', 'tools', 'sessions', 'sessionPersistence', 'llm'],
     (triadCtx: any) => {
       applyTriadHost(triadCtx)
     },
@@ -435,9 +446,10 @@ export function apply(ctx: Record<string, any>, config?: { toolsGate?: Record<st
   )
 
   // ── 工具闸门（computer-use / browser-use 按需注入）──────────────────────
-  // 默认全关：电脑操作 56 个 + 浏览器操作 24 个工具（实测占全部工具定义
-  // 74.7%、约 3.1 万 tok/请求）不再进入每轮请求；`/computer-use on`、
-  // `/browser-use on` 按会话打开。见 src/tools-gate/index.ts 的设计说明：
+  // 默认关：电脑操作 56 个 + 浏览器操作 24 个工具（实测占全部工具定义
+  // 74.7%、约 3.1 万 tok/请求）不进每轮请求。开关入口在「操作间 → 连接器」：
+  // 装「电脑操作」/「浏览器操作」条目即打开（下面按 patch 里有没有对应插件
+  // 条目推导部署默认值），卸载即关闭。见 src/tools-gate/index.ts 的设计说明：
   // 走 system-prompt/assemble 出口过滤而非 tools.restrict，因为 browser-use
   // 的工具由 provider 注册在 agent 自己的作用域层，restrict 只过滤继承层。
   //
@@ -445,18 +457,31 @@ export function apply(ctx: Record<string, any>, config?: { toolsGate?: Record<st
   // 冒出去，中断本插件后面所有 ctx.inject（triad 工作台全不挂）。模块内部
   // 已对缺失服务逐项自查，这里再加一层兜底，任何意外都只让闸门失效。
   //
-  // 2026-11：输入框左侧那张开关卡片已按用户要求整块移除（截图那两个开关），
-  // 但**闸门本身保留** —— 它负责把 74.7% 的工具定义挡在请求之外，删掉会让
-  // computer-use / browser-use 的工具全部注入。现在只留命令行入口
-  // （/computer-use on、/browser-use on），不再有可视开关。
+  // 2026-11：输入框左侧那张开关卡片与 `/computer-use`、`/browser-use` 命令
+  // 都已按用户要求移除（它们是 DSH 官方插件，不是指令），入口统一收到连接器
+  // 面板；闸门本身保留 —— 它负责把 74.7% 的工具定义挡在请求之外。
   try {
     applyToolsGate(ctx as never, (config?.toolsGate ?? {}) as never)
-    // 电脑操作与浏览器操作一致：部署级默认全关，需要时用 /computer-use on
-    // 按会话打开（运行时不再有模式切换）。
-    setGateDefaultEnabled('computer-use', false)
+    // 部署默认值 = 连接器里装没装。装了就默认注入（装了要能用），没装就继续
+    // 挡在请求外（省那 3.1 万 token）。连接器安装/卸载时会同步改这两个值，
+    // 这里负责宿主重启后的第一帧（见 src/triad/mcp-catalog.ts）。
+    setGateDefaultEnabled('computer-use', isPluginInstalled('computer-use'))
+    setGateDefaultEnabled('browser-use', isPluginInstalled('browser-use'))
   } catch (error) {
     ctx.logger?.warn?.(
       `[dsh-seeker-bot] tools gate failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+    )
+  }
+
+  // ── MCP 工具按需注入（Tool RAG，Work 与 Bot 统一）──────────────────────
+  // 与上面闸门的区别：闸门是**显式开关**（整组能力进不进请求），这里是
+  // **按意图检索**（这一轮具体哪些 MCP 工具值得进请求）。两者叠加不冲突：
+  // 闸门先把整组挡掉，检索器再在剩下的工具里挑。见 src/host/tool-retrieval/。
+  try {
+    applyToolRetrieval(ctx as never, (config?.toolRetrieval ?? {}) as never)
+  } catch (error) {
+    ctx.logger?.warn?.(
+      `[dsh-seeker-bot] MCP 按需注入 failed to mount（工具将全量注入）: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
     )
   }
 

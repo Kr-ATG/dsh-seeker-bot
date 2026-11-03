@@ -3,6 +3,19 @@
  * 全部为纯 JSON 可序列化结构（schema v1）。
  */
 
+/**
+ * 记忆的归属主体（schema v6）。
+ *
+ * - `work`：Work 模式的普通会话（含旧版本所有存量条目）。
+ * - `bot:<botId>`：Personal Agent 的某个 Bot。
+ *
+ * 为什么必须单独一维：所有 bot 与群聊共用同一个工作目录（`D:\Seeker-Bot`），
+ * `workspaceHashOf()` 对它们算出同一个 `projectHash`，所以只靠
+ * `scope + projectHash` 无法把「bot 之间」「bot 与 Work」的记忆分开——
+ * 这正是改造前所有 bot 记忆混在一个项目层里的原因。
+ */
+export type MemoryOwner = 'work' | `bot:${string}`
+
 /** 记忆条目（~/.dsh/memories/dsh-memory/store/entries.json, schema v1）。 */
 export interface MemoryEntry {
   /** mem_<sha1>，由 content+scope+projectHash 稳定推导（同内容合并）。 */
@@ -13,6 +26,13 @@ export interface MemoryEntry {
   scope: 'global' | 'project'
   /** scope=project 时必填：workspace 路径的 sha1。 */
   projectHash: string | null
+  /**
+   * 归属主体（schema v6）。缺省 = `work`，用于兼容 schema v5 及更早的存量条目。
+   *
+   * 语义是「这条记忆属于谁」而不是「谁能看」：可见性由 `visibleTo()` 按会话身份
+   * 推导（主 bot 可跨 bot 只读），写入永远只落到当前会话自己的 owner 上。
+   */
+  owner?: MemoryOwner
   /** 自定义标签（灵活分类手段）。 */
   tags: string[]
   /** 置顶标记（全局与项目各自独立）。 */
@@ -29,8 +49,8 @@ export interface MemoryEntry {
   lastHitAt: string | null
   /** 当前所在层：short=短期时间线；long=长期沉淀。 */
   layer: 'short' | 'long'
-  /** extract=自动提取；manual=用户手写。 */
-  source: 'extract' | 'manual'
+  /** extract=自动提取；manual=用户/面板手写；bot-working-memory=工作记忆沉淀的日志。 */
+  source: 'extract' | 'manual' | 'bot-working-memory'
 
   // ── schema v2（MemCube 元数据：识别 / 控制 / 进化）─────────────────
   /** 条目级版本号（每次内容变更 +1；迁移自 v1 时补 1）。 */
@@ -41,8 +61,8 @@ export interface MemoryEntry {
   verified: boolean
   /** 显式记忆类型（替代靠标签猜 identity/fact）。 */
   kind: MemoryKind
-  /** 溯源：产生该条目的会话 / 轮次 / 原始片段（截断，可缺省）。 */
-  provenance?: { sessionId?: string; turn?: number; snippet?: string }
+  /** 溯源：产生该条目的会话 / 轮次 / 真人消息 id / 原始片段（截断，可缺省）。 */
+  provenance?: { sessionId?: string; turn?: number; userMessageId?: string; snippet?: string }
   /** 嵌入向量（Retrieval 层缓存；未算则缺省）。 */
   embedding?: number[]
 
@@ -88,6 +108,21 @@ export interface MemoryEntry {
    * 每个条目都能被均匀轮转，不会出现「20 条被反复咀嚼、其余永不处理」。
    */
   lastConsolidatedAt?: string
+
+  // ── schema v7（临时信息 TTL）──────────────────────────────────────
+  /**
+   * 有效期天数（可选）。缺省 = 永久有效。
+   *
+   * 为什么需要它：抽取管线里有一类内容**在写下那一刻是真的、过几天就是错的**
+   * ——「今天要发 36 条」「这周先按 A 方案」「临时把端口改成 8080」。它们能过
+   * 提取模型的「一个月后还会不会依据它行动」这一关（因为提问时看起来确实重要），
+   * 却会在下周变成误导性事实：模型照着一条过期的「今天要发 36 条」去安排工作。
+   *
+   * 语义是「**从创建起**算多久之后不再注入」，不是「最近一次命中起」：临时信息
+   * 的有效期由事情本身决定，不会因为被读了两次而延长。过期条目仍留在库里
+   * （面板可见、可手动改 ttlDays 复活），只是不再自动进上下文。
+   */
+  ttlDays?: number
 }
 
 /** 显式记忆类型（compile 按此分组，不再靠标签硬猜）。 */
@@ -331,6 +366,18 @@ export interface MemoryConfig {
   /** 注入检索 top-k（当前任务相关记忆注入条数；identity/pinned/长期常驻不占此预算）。 */
   injectTopK: number
   /**
+   * 检索层刷新间隔（轮，默认 5）。
+   *
+   * 注入拆成两层之后，稳定层（置顶/身份/长期）仍只在会话首步注入一次，而
+   * 「与当前任务相关的记忆」是**跟着话题走**的：首步按第一句话检索出来的 8 条，
+   * 聊到第十轮时多半已经无关。检索层按本间隔重新检索并**替换**旧块，
+   * 让相关记忆跟着话题换，同时不在历史里堆出十几份越来越像的清单。
+   *
+   * 取 5 而不是每轮：每次替换都会让 prompt 前缀缓存失效一次（那条 user message
+   * 在历史中段被换掉），太频繁等于把缓存收益全吃掉；而话题通常不会两三轮就跳。
+   */
+  retrievalRefreshTurns: number
+  /**
    * 自动抽取是否走待确认制（pending）。
    *
    * true  = 抽取结果挂 pending，不检索/不注入/不编译，用户确认后才生效；
@@ -451,6 +498,9 @@ export const DEFAULT_CONFIG: MemoryConfig = {
   // 而清单收尾不干净会让右栏任务卡残留过期状态——与「回合结束自动收口」互为两半。
   todoRuleInjectDefaultEnabled: true,
   injectTopK: 8,
+  // 检索层每 5 轮重检索一次并替换旧块：话题通常不会两三轮就跳，而每次替换都会
+  // 让 prompt 前缀缓存失效一次（见字段注释）。
+  retrievalRefreshTurns: 5,
   // 默认 false：升级不改既有可见性（见 extractRequireConfirm 注释）。
   extractRequireConfirm: false,
   pendingRetentionDays: 14,
@@ -542,6 +592,13 @@ export interface ExtractCandidate {
   scope: 'global' | 'project'
   tags: string[]
   importance: number
+  /**
+   * 临时信息的有效期天数（可选，缺省 = 永久）。
+   *
+   * 只对「过了这几天就不成立」的内容填（今天要发多少条、这周先按哪个方案）。
+   * 提取 prompt 要求模型二选一：要么标 ttlDays，要么干脆不入库。
+   */
+  ttlDays?: number
 }
 
 // ── 配置覆盖与公开视图（cordis.patch.yml 与 config.json 共用） ────────
@@ -561,6 +618,7 @@ export const CONFIG_NUMBER_BOUNDS = {
   consolidateMaxEntries: { min: 10, max: 2000, int: true, step: 10 },
   consolidateTimeoutMs: { min: 5000, max: 600_000, int: true, step: 5000 },
   injectTopK: { min: 1, max: 50, int: true, step: 1 },
+  retrievalRefreshTurns: { min: 1, max: 100, int: true, step: 1 },
   entryLimit: { min: 50, max: 100_000, int: true, step: 50 },
   pruneNeverHitDays: { min: 0, max: 3650, int: true, step: 1 },
   minImportanceForPrune: { min: 1, max: 10, int: false, step: 0.5 },

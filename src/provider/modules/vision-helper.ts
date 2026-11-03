@@ -898,7 +898,7 @@ export function applyVisionHelper(ctx: PluginContext, configInput: Partial<Confi
       for (const [key, value] of Object.entries(caps)) {
         if (Array.isArray(value)) {
           const clean = value.filter((x): x is string =>
-            typeof x === 'string' && (x === 'image' || x === 'video' || x === 'speech'))
+            typeof x === 'string' && (x === 'image' || x === 'video'))
           if (clean.length > 0) out[key] = clean
         }
       }
@@ -1528,7 +1528,7 @@ export function applyVisionHelper(ctx: PluginContext, configInput: Partial<Confi
           for (const [key, value] of Object.entries(caps)) {
             if (splitKey(key) && Array.isArray(value)) {
               const mods = value.filter((x): x is string =>
-                typeof x === 'string' && (x === 'image' || x === 'video' || x === 'speech'))
+                typeof x === 'string' && (x === 'image' || x === 'video'))
               if (mods.length > 0) clean[key] = mods
             }
           }

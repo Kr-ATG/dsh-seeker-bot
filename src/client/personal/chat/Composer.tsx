@@ -11,7 +11,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
-import { IconPaperclip, IconPlus, IconSend, IconUsers, IconWave, IconX } from '../icons.tsx'
+import { IconMessage, IconPaperclip, IconPlus, IconSend, IconStop, IconUsers, IconWave, IconX } from '../icons.tsx'
 import { usePersonal } from '../store.tsx'
 import { SpeechRecorder, transcribeWav } from '../audio.ts'
 import { VoiceBar, type VoiceBarPhase } from './VoiceBar.tsx'
@@ -20,7 +20,7 @@ import type { Bot, ChatImage } from '../types.ts'
 type VoicePhase = 'idle' | VoiceBarPhase
 
 export function Composer(): JSX.Element {
-  const { state, actions, activeBot, activeRoom } = usePersonal()
+  const { state, ui, actions, activeBot, activeRoom, activeMessages } = usePersonal()
   const [text, setText] = useState('')
   const [attachments, setAttachments] = useState<string[]>([])
   const [images, setImages] = useState<ChatImage[]>([])
@@ -74,7 +74,11 @@ export function Composer(): JSX.Element {
       actions.toast('图片还在上传，稍等一下')
       return
     }
-    actions.sendMessage(value, { images })
+    actions.sendMessage(value, {
+      images,
+      // 输入框挂着引用就带上（store 里还会兜底读 ui.replyTo，这里显式传更清楚）
+      ...(ui.replyTo !== null ? { replyTo: ui.replyTo } : {}),
+    })
     setText('')
     setImages([])
     setAttachments([])
@@ -227,9 +231,34 @@ export function Composer(): JSX.Element {
 
   const hasText = text.trim() !== ''
   const canSend = hasText || images.length > 0
+  /*
+   * 运行中判定：pending 消息 + 还挂着 running 的任务记录。
+   *
+   * 只认 pending 消息是不够的（2026-11-02 实测）：页面重载时 store 会把消息的
+   * pending 清掉，但任务记录可能还是 running——那时停止键消失，用户既停不掉、
+   * 也看不到「它还在跑」。两条都看，按钮才不会在这种半恢复状态下消失。
+   * 群聊里任一成员还在回复都算运行中——停止键要能一次停掉整个群。
+   */
+  const replying = activeMessages.some((message) => message.role === 'bot' && message.pending === true)
+    || state.tasks.some((task) => task.status === 'running' && (activeRoom !== null
+      ? task.roomId === activeRoom.id
+      : task.botId === activeBot?.id && task.roomId === undefined))
 
   return (
     <div className="pa-composer" ref={rootRef}>
+      {/*
+       * 引用提示（2.3）：点某条消息的「回复」后，这里显示被引用的内容。
+       * 放在附件 chips 之前：它说明的是「这条消息在回复谁」，优先级比附件高。
+       */}
+      {ui.replyTo !== null ? (
+        <div className="pa-composer__reply">
+          <IconMessage size={12} />
+          <span className="pa-composer__reply-text" title={ui.replyTo.preview}>{ui.replyTo.preview}</span>
+          <button type="button" title="取消引用" aria-label="取消引用" onClick={() => actions.setReplyTo(null)}>
+            <IconX size={11} />
+          </button>
+        </div>
+      ) : null}
       {activeRoom !== null || attachments.length > 0 ? (
         <div className="pa-composer__chips">
           {activeRoom !== null ? (
@@ -303,7 +332,15 @@ export function Composer(): JSX.Element {
             }}
           />
           <div className="pa-composer__tools">
-            {canSend ? (
+            {/*
+             * 运行中优先显示停止键：哪怕输入框里已经打了字，用户此刻最需要的
+             * 也是「先停下来」——发送可以等停止之后再点。
+             */}
+            {replying ? (
+              <button className="pa-composer__stop" type="button" title="停止回复" aria-label="停止回复" onClick={() => actions.stopReply()}>
+                <IconStop size={15} />
+              </button>
+            ) : canSend ? (
               <button className="pa-composer__send" type="button" data-on="true" title="发送" aria-label="发送" onClick={send}>
                 <IconSend size={17} />
               </button>

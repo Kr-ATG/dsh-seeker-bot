@@ -23,7 +23,7 @@
  *      注册表里该区域的条目行。
  *   2. `registerNavEntry({ id, section, label, icon, order, target, children? })`
  *      `target` 三种写法：
- *        `{ kind: 'workbench', tab }` 打开工作台的某个分类（记忆/SKILL/用量/画廊/档案）
+ *        `{ kind: 'workbench', tab }` 打开工作台的某个分类（记忆/SKILL/连接器/画廊/档案/系统提示词/同步设置）
  *        `{ kind: 'panel', panelId }` 打开任意官方 main 面板
  *        `{ kind: 'custom', run }`    自定义动作（弹浮层、发命令…）
  *      `children` 给出该行的**二级菜单**（可省略；省略就是一行不可展开的菜单）。
@@ -101,7 +101,7 @@ export type NavSectionIcon = ComponentType<{ size: number }>
 
 /** 条目点击行为。 */
 export type NavEntryTarget =
-  /** 打开工作台并落在指定分类（记忆 / SKILL / 用量 / 画廊 / 档案）。 */
+  /** 打开工作台并落在指定分类（记忆 / SKILL / 连接器 / 画廊 / 档案 / 系统提示词 / 同步设置）。 */
   | { readonly kind: 'workbench'; readonly tab: WorkbenchTab }
   /** 打开任意官方 main 面板（`ctx.layout.selectPanel(panelId)`）。 */
   | { readonly kind: 'panel'; readonly panelId: string }

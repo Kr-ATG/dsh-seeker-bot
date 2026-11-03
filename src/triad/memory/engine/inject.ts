@@ -1,10 +1,15 @@
 /**
- * dsh-memory 注入引擎：agent/pre-step 把「全局 identity + 当前项目 memory +
- * pinned + facts」组装为一条带来源的 user message 注入（source: { kind: 'plugin' }）。
- * 绝不写 system prompt（DSH persona complete:true 会静默丢弃）；
- * 只注入当前工作区项目 + 全局层；token 超预算按重要性截断，置顶先占预算但只占
- * injectPinnedBudgetRatio（默认 40%），装不下的置顶退回普通池参与竞争。
- * 命中刷新：被注入的条目距上次命中 ≥1 天时刷新 lastHitAt 并加分。
+ * dsh-memory 注入引擎：agent/pre-step 把记忆组装成带来源的 user message 注入
+ * （source: { kind: 'plugin:dsh-memory' }）。绝不写 system prompt（DSH persona
+ * complete:true 会静默丢弃）。
+ *
+ * ── 注入分两层（0.3）──────────────────────────────────────────────
+ *  · **稳定层**：置顶 + 全局身份/偏好 + 长期沉淀。每会话首步注入一次，记忆内容
+ *    变了（store.revision 变化）再补一次——这些东西与话题无关，反复注入纯浪费。
+ *  · **检索层**：与当前对话最相关的 top-k。**每 N 轮或话题明显变化时重新检索，
+ *    并整体替换上一轮的检索块**（不是追加）。首步按第一句话检索出的 8 条，聊到
+ *    第十轮时多半已经无关；但每轮都追加一份，历史里会堆出十几份越来越像的清单，
+ *    既烧 token 又让模型分不清哪份是当前的。
  *
  * 除主注入外，本文件还承载四条**内置通道**（zh 中文偏好 / html+iu 卡片规范 /
  * team 团队协作 / 任务清单纪律）：各自独立 stepCounters、各自全局开关、每会话只注首步、
@@ -16,12 +21,14 @@ import { createUserMessage } from '../../../vendor/dsh-llm/index.js'
 // 的 doc 行，不再在这里手写示例——手写必然漂移（piano 的 showNotes 字段实现了
 // 但文档从没提过，模型永远不知道能用它）。文档跟着实现走。
 import { iuKindsDoc, IU_KIND_NAMES } from '../../../client/iu/kinds/registry.ts'
-import type { MemoryConfig } from '../types.js'
-import { buildChineseInjectionText, buildInjectionText, selectChineseEntries, selectInjectionEntries, workspaceHashOf } from './compile.js'
+import type { MemoryConfig, MemoryEntry } from '../types.js'
+import { buildChineseInjectionText, buildInjectionText, renderEntryLines, selectChineseEntries, selectInjectionEntries, workspaceHashOf } from './compile.js'
 import { TODO_RULE_INJECTION_RULE } from './todo-rule.js'
-import { searchEntries } from './retrieval.js'
+import { searchEntries, semanticSimilarity } from './retrieval.js'
 import { daysSince } from './scoring.js'
-import type { MemoryStore } from './store.js'
+import { isExpired, type MemoryStore } from './store.js'
+import { filterCoveredByVault } from './vault-overlap.js'
+import { visibilityFor } from './visibility.js'
 import { hostFeatureEnabled } from '../../../features/store.ts'
 
 /** pre-step 载荷的最小 agent 面。 */
@@ -40,12 +47,69 @@ export interface MemoryInjector {
     messages: unknown[]
     signal: AbortSignal
   }, next: () => Promise<{ kind: 'enter'; messages: unknown[] } | { kind: 'reject' }>) => Promise<unknown>
+  /**
+   * 新的一轮开始（index.ts 在 `turn/start` 调）。
+   *
+   * 用途只有一个：把「本轮已因记忆变更重注过」的标记清掉，让下一轮还能再重注一次。
+   * 没有它，就分不清「同一轮里连续两次写记忆」和「隔了一轮又写记忆」——前者要
+   * 合并成一次重注（否则模型每调一次 memory_remember 就重注一遍整块记忆），
+   * 后者必须重注（用户真的改了东西）。
+   */
+  noteTurnStart: (sessionId: string) => void
   /** 清理会话级状态。 */
   disposeSession: (sessionId: string) => void
 }
 
 /** 每次注入最多刷新的命中条目数。 */
 const MAX_HITS_PER_INJECTION = 5
+
+/**
+ * 稳定层占注入预算的比例。
+ *
+ * 0.7 而不是对半分：稳定层是「用户置顶 + 身份偏好 + 长期沉淀」，条目数少、
+ * 命中率高，而且 pinned 另有 40% 占比上限，实际很少吃满；检索层才是每轮真正
+ * 跟着话题变的部分，留 30%（默认预算 6000 字符时约 1800）够放 8 条中等长度记忆。
+ */
+const STABLE_BUDGET_RATIO = 0.7
+
+/**
+ * 检索块的首行标记：靠它从历史消息里认出上一轮的检索块并整体替换。
+ *
+ * 为什么用文本前缀而不是 source 字段：历史消息经 DSH 会话持久化后，source 上的
+ * 自定义字段不保证原样保留，而 content 文本一定在。source.sections 里同时写一份
+ * （面板/调试时更好认），但判定只认文本。
+ */
+const RETRIEVAL_MARK = '【相关记忆 · 按当前任务检索】'
+
+/** 该消息是否是本插件上一轮注入的检索块。 */
+function isRetrievalBlockMessage(message: unknown): boolean {
+  if (typeof message !== 'object' || message === null) return false
+  const record = message as { role?: string; source?: { kind?: string }; content?: unknown }
+  // 只认 user 消息：检索块是插件注入的 user message，assistant 正文里即使复述了
+  // 这个前缀（比如它在解释记忆机制）也不该被删。
+  if (record.role !== undefined && record.role !== 'user') return false
+  // source 还在时以它为准（别的插件注入的块绝不能被误删）；source 被会话持久化层
+  // 丢掉时退回纯文本判定——前缀是插件专用的，误伤概率极低，而漏判（旧块删不掉）
+  // 会让历史里堆出多份检索块，那正是 0.3 要解决的问题。
+  if (typeof record.source?.kind === 'string' && record.source.kind !== 'plugin:dsh-memory') return false
+  return textOf(record.content).startsWith(RETRIEVAL_MARK)
+}
+
+/**
+ * 用户输入是否「换话题了」。
+ *
+ * 检索层除了按轮数刷新，还要认这一条：用户直接甩一句新任务时，不该等满 N 轮。
+ * 用 n-gram 相似度而不是字符串相等——「帮我看下 X」→「X 的日志在哪」是同一话题
+ * 的追问，相似度不低；而「帮我改下 CSS」→「客户 A 的合同呢」会明显掉下来。
+ *
+ * 阈值 0.35：同一话题的追问通常 > 0.5，换话题常 < 0.3，取中间留余量。
+ */
+function queryShifted(previous: string, next: string): boolean {
+  const a = previous.trim()
+  const b = next.trim()
+  if (a === '' || b === '') return a !== b
+  return semanticSimilarity(a, b) < 0.35
+}
 
 /** ContentBlock[] 或字符串 → 纯文本。 */
 function textOf(content: unknown): string {
@@ -360,47 +424,106 @@ export function createMemoryInjector(
    */
   const todoRuleStepCounters = new Map<string, number>()
 
-  async function buildMemoryBlock(
-    agent: PreStepAgent,
-    query: string,
-  ): Promise<{ text: string; sections: Array<{ name: string; text: string }> } | null> {
+  /**
+   * 每会话「上次注入时」的记忆内容版本号（store.revision）。
+   *
+   * 为什么必须记住它：主注入每会话只做一次，而记忆是会被改的（面板增删改、
+   * 提取入库、整理合并）。不比较版本号，用户改完记忆要等到会话重启才看得到效果
+   * ——注入是记忆唯一的出口，出口关着，改了也白改。
+   *
+   * 版本号是**全库共享**的（不按 owner 分区）：某个 bot 写入也会让另一个 bot
+   * 的会话重注一次。按归属分区的代价是给每个条目追一套版本号并让写路径知道
+   * 「这次改的是谁的」，而收益只是省掉少数几次「重注后内容其实没变」的注入；
+   * 主 bot 本来就能看见所有子 bot，跨 bot 的重注多数也确有其事。取舍上取简单。
+   *
+   * 只影响主注入：zh / html / team / todo 四条内置通道投的是静态规范文本，
+   * 与记忆内容无关，重注它们纯属浪费 token（HTML 卡片规范一篇就上千字符）。
+   */
+  const injectedRevisions = new Map<string, number>()
+
+  /**
+   * 本轮已经因记忆变更重注过的会话。
+   *
+   * 模型在一次回复里可能连续调好几次 memory_remember：每次工具调用后都会再走
+   * pre-step，若每次都重注，一轮里同一块记忆会重复进上下文 N 遍（cacheRead 也
+   * 跟着涨）。一轮只重注一次，剩下的改动合并到下一轮——反正下一轮还会比较版本号。
+   */
+  const reinjectedThisTurn = new Set<string>()
+
+  /**
+   * 每会话的轮次计数（noteTurnStart 递增）。
+   *
+   * 检索层的「每 N 轮刷新」需要一个轮次来源：pre-step 载荷里没有轮次号
+   * （payload 只有 agent / messages / signal），而 turn/start 事件在 index.ts
+   * 侧稳定可达，所以在这里自己数——比从 messages 长度猜要可靠。
+   */
+  const turnCounters = new Map<string, number>()
+
+  /**
+   * 每会话检索层的状态：上次刷新时的轮次 / query / 记忆 revision。
+   *
+   * revision 也必须记：同一轮里模型可能连续写两次记忆，第二次 pre-step 时
+   * 「revision 变了」依旧成立；不记住「已经按哪个 revision 刷过」，检索层会在
+   * 每个 step 都重检索一次——工具调用越多，重检索越频繁。
+   */
+  const retrievalStates = new Map<string, { turn: number; query: string; revision: number }>()
+
+  /**
+   * 注入可见条目：库 → 可见性 → 过期 → 档案去重。
+   *
+   * 四道过滤的顺序有讲究：可见性最先（决定「能不能看」），TTL 过期其次
+   * （临时信息到点就该消失），档案去重最后（要读 vault，异步且最贵，前面的
+   * 过滤已经把候选砍到几十条以内）。
+   */
+  async function buildVisibleEntries(agent: PreStepAgent): Promise<MemoryEntry[]> {
     const entries = await store.readEntries()
     const hash = workspaceHashOf(agent.session.header)
+    /*
+     * 可见性按会话身份推导（schema v6）：Work 会话只看 work 自己的，子 Bot 看
+     * 自己 + work 全局。主 Bot 的「全部子 Bot」只用于显式检索，不进自动注入
+     * （口径见 visibility.ts 模块头）。
+     */
+    const visibility = visibilityFor(agent.session.id, hash)
     // disabled 条目保留在库与检索中，但绝不参与注入；
-    // deprecated 条目（软废弃）同样不参与注入。
+    // deprecated 条目（软废弃）同样不参与注入；
     // pending 条目（待确认）也不注入——这正是待确认制的全部意义：自动抽取的东西
     // 在用户点头之前不许进上下文。它仍然在面板里可见、可确认、可拒绝。
+    // ttlDays 过期的临时信息同样不注入（见 MemoryEntry.ttlDays）。
     const visible = entries.filter(entry =>
       entry.disabled !== true && entry.deprecated !== true && entry.pending !== true &&
-      (entry.scope === 'global' || (entry.scope === 'project' && entry.projectHash === hash)))
-    if (visible.length === 0) return null
+      !isExpired(entry) &&
+      visibility.canInject(entry))
+    // 档案已覆盖的字段从记忆块里剔掉：两套注入各投一份，内容一旦分叉模型会拿到
+    // 互相矛盾的两个值（口径与「为什么不读 vault 的注入文本」见 vault-overlap.ts）。
+    return filterCoveredByVault(visible)
+  }
 
-    // 常驻候选：pinned（不受 compileThreshold 过滤）+ 全局身份/偏好 + 长期沉淀；
-    // 其余按当前任务检索 top-k。注意这里只是「进候选池」，pinned 在注入文本里还要
-    // 过预算占比上限（见 buildInjectionText），超出的会退回普通池参与竞争。
+  /** 把可见条目分成「稳定层常驻」与「参与检索」两池（两池不重叠）。 */
+  function partitionEntries(visible: MemoryEntry[]): { stable: MemoryEntry[]; rest: MemoryEntry[] } {
     const pinned = visible.filter(entry => entry.pinned)
     const identity = visible.filter(entry =>
       entry.scope === 'global' && !entry.pinned && (entry.kind === 'identity' || entry.kind === 'preference'))
     const longterm = visible.filter(entry =>
       entry.layer === 'long' && !entry.pinned && !identity.includes(entry))
-    const rest = visible.filter(entry =>
-      !pinned.includes(entry) && !identity.includes(entry) && !longterm.includes(entry))
-    const topK = query.trim() === ''
-      ? selectInjectionEntries(rest, config.compileThreshold).slice(0, config.injectTopK)
-      : searchEntries(query, rest, 'hybrid').slice(0, config.injectTopK).map(match => match.entry)
-    const selected = [...pinned, ...identity, ...longterm, ...topK]
-    if (selected.length === 0) return null
+    const stable = [...pinned, ...identity, ...longterm]
+    const rest = visible.filter(entry => !stable.includes(entry))
+    return { stable, rest }
+  }
 
-    // 命中刷新：从未命中或距上次命中 ≥1 天的条目加分并重置衰减起点（最多 MAX_HITS 条）。
-    //
-    // 取哪几条必须按「最久没被命中」排，不能直接拿 selected 的头部：selected 的前缀
-    // 是 pinned + identity + longterm（见上），而 pinned 在注入侧另有条数上限，
-    // 于是「取前 5 条」永远落在同一批置顶条目上——加分被它们反复吃掉，其余条目
-    // 的 lastHitAt 永不刷新，衰减只降不升，越冷越冷。改成 lastHitAt 升序（从未
-    // 命中=null 排最前）后，加分在整库范围内轮转，与「命中即有价值」的初衷一致。
-    //
-    // 用字符串比较而非 Date.parse：lastHitAt 一律是 toISOString() 产出的同格式
-    // ISO 串，字典序即时间序；Date.parse 遇到脏数据会给 NaN，让排序变成随机。
+  /**
+   * 命中刷新：被注入的条目距上次命中 ≥1 天时加分并重置衰减起点（最多 MAX_HITS 条）。
+   *
+   * 取哪几条必须按「最久没被命中」排，不能直接拿 selected 的头部：selected 的前缀
+   * 是 pinned + identity + longterm（见上），而 pinned 在注入侧另有条数上限，
+   * 于是「取前 5 条」永远落在同一批置顶条目上——加分被它们反复吃掉，其余条目
+   * 的 lastHitAt 永不刷新，衰减只降不升，越冷越冷。改成 lastHitAt 升序（从未
+   * 命中=null 排最前）后，加分在整库范围内轮转，与「命中即有价值」的初衷一致。
+   *
+   * 用字符串比较而非 Date.parse：lastHitAt 一律是 toISOString() 产出的同格式
+   * ISO 串，字典序即时间序；Date.parse 遇到脏数据会给 NaN，让排序变成随机。
+   */
+  async function refreshHits(selected: MemoryEntry[]): Promise<void> {
+    if (selected.length === 0) return
     const hitCandidates = selected
       .filter(entry => entry.lastHitAt === null || daysSince(entry.lastHitAt) >= 1)
       .sort((a, b) => {
@@ -415,8 +538,38 @@ export function createMemoryInjector(
       const refreshed = await store.applyHits(hitIds, config.hitBonus)
       logger?.debug?.(`[dsh-memory] hit refresh: ${refreshed} entries`)
     }
+  }
 
-    return buildInjectionText(selected, config)
+  /**
+   * 稳定层：置顶 + 全局身份/偏好 + 长期沉淀。
+   *
+   * 空集返回 null（而不是空文本）：调用方据此决定「要不要追加这条消息」，
+   * 两者语义不同——空文本会让历史里多出一条只有引导语的消息。
+   */
+  async function buildStableBlock(stable: MemoryEntry[]): Promise<{ text: string; sections: Array<{ name: string; text: string }> } | null> {
+    if (stable.length === 0) return null
+    await refreshHits(stable)
+    // 稳定层拿 70% 预算：剩下的留给检索层。稳定层里 pinned 另有 40% 占比上限，
+    // 实际很少吃满；而检索层每一条都是按当前话题挑出来的，值得留足空间。
+    const budget = Math.max(800, Math.floor(config.injectTokenBudget * STABLE_BUDGET_RATIO))
+    return buildInjectionText(stable, { ...config, injectTokenBudget: budget })
+  }
+
+  /**
+   * 检索层：与当前任务相关的 top-k（稳定层已带上的条目不再重复出现）。
+   *
+   * 不走 buildInjectionText：那一套按 identity/memory/pinned/facts 四段分桶，
+   * 8 条 top-k 会被拆成三小堆、每堆再带一个段头，预算全花在标题上。
+   */
+  async function buildRetrievalBlock(rest: MemoryEntry[], query: string): Promise<string> {
+    if (rest.length === 0) return ''
+    const topK = query.trim() === ''
+      ? selectInjectionEntries(rest, config.compileThreshold).slice(0, config.injectTopK)
+      : searchEntries(query, rest, 'hybrid').slice(0, config.injectTopK).map(match => match.entry)
+    if (topK.length === 0) return ''
+    await refreshHits(topK)
+    const budget = Math.max(600, config.injectTokenBudget - Math.floor(config.injectTokenBudget * STABLE_BUDGET_RATIO))
+    return renderEntryLines(topK, budget)
   }
 
   /**
@@ -593,50 +746,138 @@ export function createMemoryInjector(
     if (!(await store.isInjectEnabled(sessionId, config.injectDefaultEnabled !== false))) {
       return { kind: 'enter', messages }
     }
-    // 每个会话只在首步注入一次：后续轮次不再重复注入，
-    // 避免置顶/记忆内容在多轮里反复出现（用户明确要求仅首轮注入）。
-    if (stepCounters.has(sessionId)) return { kind: 'enter', messages }
-    stepCounters.set(sessionId, 1)
+    // ── 注入分层判定 ────────────────────────────────────────────────
+    // 稳定层（置顶/身份/长期）与检索层（当前任务 top-k）各有自己的触发条件，
+    // 互不依赖：稳定层看「注入过没有 / 记忆变没变」，检索层看「隔了几轮 / 换没换话题」。
+    const injectedRevision = injectedRevisions.get(sessionId)
+    const revisionChanged = injectedRevision !== undefined && injectedRevision !== store.revision
+    const stableInjected = stepCounters.has(sessionId)
+    // 一轮最多重注一次：同一轮里连续写记忆只合并成一次（理由见 reinjectedThisTurn）。
+    const needStable = !stableInjected || (revisionChanged && !reinjectedThisTurn.has(sessionId))
+
+    const turnNo = turnCounters.get(sessionId) ?? 0
+    const refreshEvery = Math.max(1, Math.round(config.retrievalRefreshTurns ?? 5))
+    const retrievalState = retrievalStates.get(sessionId)
+    // 检索 query 刻意取 payload.messages（原始）而非已追加中文块的 messages：
+    // 否则中文偏好记忆会参与本次任务的相似度检索，等于自己检索自己。
+    const query = extractQuery(payload.messages)
+    const needRetrieval = retrievalState === undefined
+      // 首步跟随稳定层：两者一起构成第一次注入。
+      ? needStable
+      : store.revision !== retrievalState.revision
+        || turnNo - retrievalState.turn >= refreshEvery
+        || queryShifted(retrievalState.query, query)
+
+    if (!needStable && !needRetrieval) return { kind: 'enter', messages }
+    // 版本号在求值**之前**取：buildStableBlock 内部会 applyHits（它不推进版本号），
+    // 但把捕获点放前面，将来新增的写路径也不会造成「刚注入完就被判成过时」。
+    const revisionAtInject = store.revision
+    if (needStable) {
+      stepCounters.set(sessionId, 1)
+      if (revisionChanged) {
+        // 复用 compaction 的重置路径：只清主注入自己的计数器。四条内置通道投的是
+        // 静态规范文本、与记忆内容无关，上下文里那几段也还在，不必跟着重注。
+        reinjectedThisTurn.add(sessionId)
+        logger?.debug?.(
+          `[dsh-memory] re-injected after memory change: ${sessionId} rev ${injectedRevision} -> ${store.revision}`,
+        )
+      }
+    }
     try {
-      // 检索 query 刻意取 payload.messages（原始）而非已追加中文块的 messages：
-      // 否则中文偏好记忆会参与本次任务的相似度检索，等于自己检索自己。
-      const query = extractQuery(payload.messages)
-      const block = await buildMemoryBlock(payload.agent, query)
-      if (block === null || block.text === '') return { kind: 'enter', messages }
-      // 注入引导：明确记忆属于用户指令/参考，模型应"该执行就执行"；
-      // 同时声明优先级——与 AGENTS.md/项目指令/系统提示冲突时，以项目指令为准，
-      // 记忆不覆盖项目级规范（避免与项目指令打架）。
-      const wrapped = [
-        SAFETY_RULE,
-        '【长期记忆 · 用户要求按需执行或参考】',
-        '（若与当前项目的 AGENTS.md / 项目指令或系统提示冲突，一律以项目指令为准；记忆仅作参考与用户偏好补充）',
-        block.text,
-      ].join('\n')
-      const memoryMessage = createUserMessage({
-        content: [{ type: 'text', text: wrapped }],
-        source: {
-          kind: 'plugin:dsh-memory',
-          plugin: 'dsh-memory',
-          form: 'snapshot',
-          sections: [{ name: '安全规范', text: SAFETY_RULE }, ...block.sections],
-        },
-      })
-      return { kind: 'enter', messages: [...messages, memoryMessage] }
+      const visible = await buildVisibleEntries(payload.agent)
+      const { stable, rest } = partitionEntries(visible)
+      // ── 稳定层 ────────────────────────────────────────────────────
+      if (needStable) {
+        const block = await buildStableBlock(stable)
+        if (block !== null && block.text !== '') {
+          // 注入引导：明确记忆属于用户指令/参考，模型应"该执行就执行"；
+          // 同时声明两条优先级——
+          //  ① 与 AGENTS.md/项目指令/系统提示冲突时，以项目指令为准；
+          //  ② 记忆是「记忆」不是实时数据：金额、库存、状态这类会变的事实必须
+          //    先查当前源（文件/接口/数据库），直接引用记忆里的旧值会给出过时答案。
+          //    这条与 ① 并列而不是塞进 ① 里：它们回答的是两个不同问题（谁优先 /
+          //    数据新不新），合成一句模型只会记住前半个。
+          const wrapped = [
+            SAFETY_RULE,
+            '【长期记忆 · 用户要求按需执行或参考】',
+            '（若与当前项目的 AGENTS.md / 项目指令或系统提示冲突，一律以项目指令为准；记忆仅作参考与用户偏好补充）',
+            '（记忆不是实时数据：涉及会变的事实（金额、库存、状态、价格、进度等）时先查当前源，不要直接引用记忆里的旧值）',
+            block.text,
+          ].join('\n')
+          messages = [...messages, createUserMessage({
+            content: [{ type: 'text', text: wrapped }],
+            source: {
+              kind: 'plugin:dsh-memory',
+              plugin: 'dsh-memory',
+              form: 'snapshot',
+              sections: [{ name: '安全规范', text: SAFETY_RULE }, ...block.sections],
+            },
+          })]
+          logger?.debug?.(`[dsh-memory] stable injection ok (${block.text.length} chars)`)
+        }
+        // 即使稳定层为空也记下版本号：否则「首步没有常驻记忆」会让每一步都重新
+        // 求值一次（每步都读库 + 读档案），直到有内容为止。
+        injectedRevisions.set(sessionId, revisionAtInject)
+      }
+      // ── 检索层 ────────────────────────────────────────────────────
+      if (needRetrieval) {
+        // **替换**而不是追加：先把历史里所有旧的检索块摘掉，再在末尾放新的。
+        // 这样「当前相关记忆」永远只有一份，且位置最靠近本轮；旧块留在历史里
+        // 只会让模型分不清哪份是当前的。代价是每刷新一次前缀缓存失效一次——
+        // 所以间隔取 5 轮而不是每轮（见 config.retrievalRefreshTurns 注释）。
+        const before = messages.length
+        messages = messages.filter(message => !isRetrievalBlockMessage(message))
+        const removed = before - messages.length
+        const retrievalText = await buildRetrievalBlock(rest, query)
+        if (retrievalText !== '') {
+          messages = [...messages, createUserMessage({
+            content: [{
+              type: 'text',
+              text: `${RETRIEVAL_MARK}\n（以下是按当前对话检索出的记忆条目；记忆不是实时数据，涉及会变的事实先查当前源）\n${retrievalText}`,
+            }],
+            source: {
+              kind: 'plugin:dsh-memory',
+              plugin: 'dsh-memory',
+              form: 'snapshot',
+              sections: [{ name: '相关记忆（检索层）', text: retrievalText }],
+            },
+          })]
+        }
+        retrievalStates.set(sessionId, { turn: turnNo, query, revision: store.revision })
+        logger?.debug?.(`[dsh-memory] retrieval refreshed: ${sessionId} turn=${turnNo} removed=${removed} chars=${retrievalText.length}`)
+      }
+      return { kind: 'enter', messages }
     } catch (error) {
       // 注入失败绝不阻塞对话。
       logger?.warn?.(`[dsh-memory] injection failed: ${error instanceof Error ? error.message : String(error)}`)
+      // 失败也记下版本号：否则失败一次之后，每一步都会重新尝试（且每步都失败），
+      // 日志被刷满而用户什么也看不到。等下一次记忆真正变化再试。
+      if (needStable) injectedRevisions.set(sessionId, revisionAtInject)
       return { kind: 'enter', messages }
     }
   }
 
   return {
     preStepListener,
+    noteTurnStart: (sessionId: string) => {
+      reinjectedThisTurn.delete(sessionId)
+      // 轮次自己数：pre-step 载荷里没有轮次号，而检索层的「每 N 轮刷新」
+      // 需要一个可靠来源（见 turnCounters 注释）。
+      turnCounters.set(sessionId, (turnCounters.get(sessionId) ?? 0) + 1)
+    },
     disposeSession: (sessionId: string) => {
       stepCounters.delete(sessionId)
       zhStepCounters.delete(sessionId)
       htmlStepCounters.delete(sessionId)
       teamStepCounters.delete(sessionId)
       todoRuleStepCounters.delete(sessionId)
+      injectedRevisions.delete(sessionId)
+      reinjectedThisTurn.delete(sessionId)
+      // 检索层状态跟着清：压缩会把注入的那几条消息一起摘要掉（agent/disposed
+      // 时更不用说），不清就会出现「以为历史里还有检索块、实际已经没有」——
+      // 表现为压缩后的会话再也拿不到相关记忆。轮次计数一并归零，重注后重新计时。
+      retrievalStates.delete(sessionId)
+      turnCounters.delete(sessionId)
     },
   }
 }

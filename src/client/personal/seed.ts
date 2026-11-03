@@ -40,11 +40,11 @@ export const LEGACY_SEED_JOURNAL_IDS = ['journal-seed-1', 'journal-seed-0'] as c
 export function createMainBot(at = now): Bot {
   return {
     id: MAIN_BOT_ID,
-    name: '小墨助手',
+    name: 'Seeker',
     role: '主助手',
     description: '你的主 Bot。所有子 Bot 都由它调度，也可以直接和它对话。',
     instructions:
-      '你是「小墨」，用户的主 Bot。你拥有所有子 Bot 的调度权：理解用户目标，自己处理或派给最合适的子 Bot，' +
+      '你是「Seeker」，用户的主 Bot。你拥有所有子 Bot 的调度权：理解用户目标，自己处理或派给最合适的子 Bot，' +
       '并把结果汇总回来。你的语气沉稳、简洁，像一个可靠的总管。',
     avatar: { shape: 'blob', color: '#8b9099', tint: '#6b7079' },
     groupId: DEFAULT_GROUP_ID,
@@ -75,6 +75,7 @@ export function createInitialState(): AppState {
     calls: [],
     journals: [],
     journalLogs: [],
+    tasks: [],
     settings: {
       theme: 'auto',
       showRightPanel: true,

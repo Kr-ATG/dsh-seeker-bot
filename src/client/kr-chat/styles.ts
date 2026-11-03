@@ -1,8 +1,9 @@
 /**
  * dsh-seeker-bot — KR 对话双栏布局与执行大盘独立样式表。
  *
- * 2026-10-31：不再拼入 echo-viewport 那张表 —— 工作区实时回显已按用户要求移除，
- * 没有对应 DOM 的样式留在 bundle 里只是死代码（源文件仍保留在 echo-viewport/）。
+ * 2026-10-31：不再拼入 echo-viewport 那张表 —— 工作区实时回显已按用户要求移除。
+ * 2026-11-02：回显功能整体删除（源目录 echo-viewport/ 与 client 半身一并移除），
+ * 这里不再有任何回显样式来源。
  */
 export const KR_STYLES = `
 /* ══ 当处于 KR 对话模式时，外层 conversation-content 成为双栏 row 布局 ══════ */
@@ -2191,9 +2192,9 @@ body[data-ds-dark-theme] .kr-card--reasoning[data-inline] {
  * 高度（实测卡头 215px），右栏本来就窄，信息反而挤在下面。这一版把身份区
  * 压成一张横向的「小卡」：
  *
- *   ┌ 头像(64×64) ┐  Seeker              [Git][邮件][齿轮]
- *   │             │  ● 观月中
- *   └─────────────┘  查看文件 · 设计面板布局
+ *   ┌ 头像(64×64) ┐  Seeker  查看文件 设计面板布局   [Git][邮件][齿轮]
+ *   │             │  (浏览器标志)
+ *   └─────────────┘
  *   ───────────────────────────────────────────────────────
  *   12 个动作                                        展开时间线 ⌄
  *
@@ -2201,22 +2202,35 @@ body[data-ds-dark-theme] .kr-card--reasoning[data-inline] {
  *    我们的插件头像」）：原来那条 64×114 的任务动画在这张卡里撤掉，换成 64×64
  *    的方形头像（brand-avatar.ts 的内联 PNG）。人物动画没删，新对话页 Hero 照旧；
  *  - 名字与状态在右侧信息列，左对齐，不再被大图压到卡片底部；
+ *  - **当前动作与名字同一行**（2026-11-03 用户要求「操作面板的这个操作放在
+ *    seeker 文字后面」）：原来是「Seeker / 动作」上下两行，动作行独占一行；
+ *    现在动作紧跟在名字右侧，扫读顺序变成「谁 · 在做什么」一句话；
+ *  - 动作仍**允许两排**（2026-11-03 同日用户补一句「文字半截，我需要双行显示」）：
+ *    首排与名字同高，超出部分在动作列内折到第二排，两排还放不下才抹省略号；
+ *  - **浏览器标志在名字下方**（2026-11-03 用户要求「浏览器标识放在 seeker 文字
+ *    下方」）：原来是名字右侧并排，现在竖排左对齐，名字列宽度不变；
  *  - 底部摘要行负责「还有东西可看」的暗示：动作数 + 展开/收起 + 箭头；
  *  - 整块卡头仍然是折叠热区，点击行为不变；
  *  - 以上只作用于 .kr-plain-head--compact（操作面板），新对话页 Hero 仍是原来的
  *    竖排大立绘 + 任务动画 —— 同一个组件、两套骨架，不会互相影响。
  *
  * 高度账：64×64 的头像 + 8px 内距 + 23px 摘要行 ≈ 100px（立绘版 160px、旧竖排版
- * 215px），一屏能多放约 115px 的内容；动作行最长两排时卡头会自然长高，逻辑不变。
+ * 215px），一屏能多放约 115px 的内容；动作折到第二排时卡头长高约一行（19px），
+ * 这是「把话读完」的必要代价。
  */
 .kr-plain-head--compact {
   display: grid;
-  grid-template-columns: 64px minmax(0, 1fr);
+  /*
+   * 三列：头像 / 名字（按内容宽）/ 动作（吃掉剩余宽度）。
+   *
+   * 名字列用 auto 而不是 1fr：动作要**紧贴名字右侧**（用户要的是「Seeker 后面」），
+   * 名字列若等分，动作会被推到行尾、和名字之间隔一大片空白。
+   */
+  grid-template-columns: 64px auto minmax(0, 1fr);
   grid-template-areas:
-    "stage name"
-    "stage status"
-    "summary summary";
-  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr) auto;
+    "stage name status"
+    "summary summary summary";
+  grid-template-rows: auto auto;
   align-items: center;
   justify-items: stretch;
   column-gap: 14px;
@@ -2275,22 +2289,55 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
 
 .kr-plain-head--compact .kr-plain-head__name-row {
   grid-area: name;
+  /*
+   * 名字一行、**浏览器标志在名字下方**（2026-11-03 用户要求「浏览器标识放在
+   * seeker 文字下方」）。基础规则是横排（Hero 那版名字居中、图标在右侧），
+   * 这里改成竖排左对齐：
+   *
+   *   Seeker
+   *   (浏览器标志)
+   *
+   * 宽度仍按内容走（auto 列），动作位紧跟在名字列右侧，所以竖排不影响
+   * 「动作跟在 Seeker 后面」这条。
+   */
+  flex-direction: column;
+  align-items: flex-start;
   justify-content: flex-start;
-  align-self: end;
+  /*
+   * 名字与动作**首排对齐**（2026-11-03）。
+   *
+   * 动作允许折两排，所以不能再让两者各自「垂直居中」：动作两排时块高 38px，
+   * 居中会让它的首排比名字高半个行高，读起来是「Seeker」挂在两排中间偏下。
+   * 这里改用「同一视觉中线起排」：各自补 (64 − 自身行高) / 2 的上内距，
+   * 单排时等价于居中，双排时首排与名字同高、第二排自然向下延伸。
+   */
+  align-self: start;
+  padding-top: calc((64px - 1.3em) / 2);
   margin-top: 0;
-  /* 名字与浏览器标志的间距：gap 6 在紧凑卡头里偏挤，单独放宽到 8。 */
-  gap: 8px;
-  /* 给右上角三枚动作按钮留出净空（3×28 + 2×2 gap = 88px）。 */
-  padding-right: 92px;
+  /*
+   * 名字与图标的竖向间距：**0**。
+   *
+   * 图标按钮自带 3px 内边距，视觉间距已经有 3px；再叠任何 gap 都会让名字 +
+   * 图标的总高（19.5 + gap + 22）加上起排内距后超过 64px 的行高 —— 实测
+   * gap: 1px 就把卡头从 110px 顶到 111px，摘要行跟着下移 1px。
+   */
+  gap: 0;
+  /*
+   * 这里**不再**给右上角三枚按钮留净空：动作位现在跟在名字右边（同一行），
+   * 净空属于这一行的最右端，见下面 status 那条规则。留在这里会让「Seeker」与
+   * 动作之间空出 92px，正好和用户要的「紧跟在名字后面」相反。
+   */
+  padding-right: 0;
   min-width: 0;
 }
 
 /*
- * 浏览器标志在紧凑卡头里不能用基础规则的负外边距：那 -3px 会把 21px 的按钮
- * 向左拉回名字上（实测按钮左缘落进名字右缘 3px），同时上下各 -3px 会让它在
- * flex 行里比文字高 1.5px —— 正是「距离太近 + 没对齐」的来源。这里归零，
- * 让 icon 的 3px 内边距 + 8px gap 形成干净的 11px 视觉间距，垂直交给
- * align-items:center。 */
+ * 浏览器标志在紧凑卡头里：名字下方、左对齐。
+ *
+ * 2026-11-03 起它不再与名字并排（见上面 name-row 的竖排说明），所以那条
+ * 「负外边距会把按钮拉回名字上」的老问题自然消失，margin 归零即可；水平
+ * 对齐交给父级的 align-items: flex-start，垂直间距交给 gap: 1px。
+ */
 .kr-plain-head--compact .kr-plain-head__browser {
   margin: 0;
 }
@@ -2304,25 +2351,60 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
 .kr-plain-head--compact .kr-plain-head__idle {
   grid-area: status;
   justify-content: flex-start;
+  /* 与名字同一条视觉中线起排，见 .kr-plain-head--compact .kr-plain-head__name-row。 */
   align-self: start;
+  padding-top: calc((64px - 1.45em) / 2);
   margin-top: 0;
   min-height: 20px;
   height: auto;
   font-size: max(12px, calc(var(--dsh-content-font-size, 14px) - 0.5px));
   text-align: left;
+  /*
+   * 右侧**不再**给按钮留净空（2026-11-03 实测后改）。
+   *
+   * 第一版按「动作行与按钮同高」留了 92px，但真实按钮组是 133px 宽（能力胶囊
+   * 比 Git / 齿轮宽），92px 根本不够 —— 实测文字右缘仍被压住 39px，而且留给
+   * 动作的宽度只剩 100px，双行也放不下半句话（用户看到的「确认 3080 ⋯」）。
+   *
+   * 现在靠**垂直错开**避让：名字与动作都用 padding-top 落到 64px 行的中线起排
+   * （见上面 name-row 那条），首排文字顶边 ≈ 卡头 29px，而按钮组只占顶部
+   * 28px —— 两者相差 1px 以上，水平方向可以放心用满整行。
+   * 代价：用户把字号调到很大（首排上移）时按钮会擦到首排尾部，属于极端档位。
+   */
+  padding-right: 0;
+  min-width: 0;
 }
 
 .kr-plain-head--compact .kr-plain-head__act {
+  /*
+   * 折两排时图标贴**首排**（与基础规则同一口径）：居中会让图标浮在两排正中，
+   * 既不属于上面那句也不属于下面那句。
+   */
   align-items: flex-start;
   gap: 5px;
 }
 
 .kr-plain-head--compact .kr-plain-head__detail {
   text-align: left;
+  /*
+   * 与名字同行后**最多两排**（2026-11-03 用户要求：「文字半截，我需要双行显示」）。
+   *
+   * 第一版为了卡头恒定高度把它压成单排（line-clamp: 1），结果「确认 3080 …」这类
+   * 中等长度的动作被截成半句 —— 用户看到的正是那半截。这里放开到两排：
+   *  · 首排与名字同高（见上面的 padding-top），第二排从动作列左缘续排；
+   *  · 两排仍放不下才抹省略号，完整文案在展开后的时间线里逐行都在；
+   *  · 两排时卡头自然长高一行 —— 这是「把话读完」的必要代价，用户明确要这个。
+   */
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 
 .kr-plain-head--compact .kr-plain-head__ic {
-  margin-top: 2px;
+  /*
+   * 图标贴首排：算式与基础规则同源，只是紧凑卡头里图标是 14px（不是 15px），
+   * 字号轴每涨 1px 图标也跟着涨（见下面 svg 那条）。
+   */
+  margin-top: calc((1.45em - (14px + var(--dsh-content-font-delta, 0px))) / 2);
 }
 
 .kr-plain-head--compact .kr-plain-head__ic svg {
@@ -3292,13 +3374,18 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
 }
 
 /*
- * Seeker 名字右侧的浏览器标志（2026-10-25 从会话列表行搬来）。
+ * Seeker 名字旁的浏览器标志（2026-10-25 从会话列表行搬来）。
  *
  * 用户原话：「这个球标志放在操作面板的 Seeker 文字右侧」—— 那枚图标说的是
  * 「这个会话正在操作浏览器」，而操作面板正是这个会话的实时状态卡，它就该跟
  * 当前动作待在一起；会话列表那一行是导航，不是状态。
  *
- * 用 flex 居中而不是绝对定位：名字长度会变（字号轴缩放），绝对定位在窄栏里迟早
+ * 这一层是**基础骨架（Hero）**：横排、名字居中、图标在右侧。
+ * 操作面板的紧凑骨架里它改成了**名字下方竖排左对齐**（2026-11-03 用户要求
+ * 「浏览器标识放在 seeker 文字下方」），覆盖规则见
+ * .kr-plain-head--compact .kr-plain-head__name-row。
+ *
+ * 用 flex 而不是绝对定位：名字长度会变（字号轴缩放），绝对定位在窄栏里迟早
  * 会压到名字上。gap 6px 是"并排但不相连"的最小距离。
  */
 .kr-plain-head__name-row {
@@ -3469,7 +3556,8 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
 }
 
 /*
- * Seeker 名字右侧的浏览器标志（2026-10-25 从会话列表行搬来）。
+ * Seeker 名字旁的浏览器标志（2026-10-25 从会话列表行搬来；操作面板里 2026-11-03
+ * 起位于名字**下方**，见 .kr-plain-head--compact .kr-plain-head__name-row）。
  *
  * 与它原来那版保持同一套语言：主色 + 慢呼吸（1.6s），不转圈 —— 转圈读作
  * 「加载中」，而它表达的是「正在进行」，稳定的慢呼吸才不会让右栏看起来在闪。

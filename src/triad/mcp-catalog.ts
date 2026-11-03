@@ -26,6 +26,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
+import { setGateDefaultEnabled } from '../tools-gate/index.ts'
 
 const CATALOG_ROUTE = '/api/triad/mcp-catalog'
 const ICON_ROUTE = '/api/chat-flow/mcp-icons'
@@ -63,14 +64,34 @@ export interface CatalogAuthorize {
   doneHint?: string
 }
 
-/** 安装方式：本地 stdio 或远程 streamable-http。 */
+/** 插件条目：type='plugin' 时直接写进 patch 的 cordis 插件行，不走 mcp-client。 */
+export interface CatalogPluginEntry {
+  /** loader 条目 id（patch 里 `- id:` 的值，全局唯一）。 */
+  id: string
+  /** npm 包名（`@deepseek-ai/...`）。 */
+  name: string
+  /** 可选 config 段（扁平键值）。 */
+  config?: Record<string, string | number | boolean>
+}
+
+/** 安装方式：本地 stdio、远程 streamable-http，或 DSH 官方插件（cordis 条目）。 */
 export interface CatalogInstall {
-  type: 'stdio' | 'http'
+  type: 'stdio' | 'http' | 'plugin'
   command?: string
   args?: string[]
   url?: string
   env?: CatalogEnvField[]
   auth?: string
+  /**
+   * type='plugin'：要写进 patch 的插件条目（通常两条：本体 + 提供方）。
+   *
+   * 为什么不复用 mcp-client：官方 browser-use / computer-use 是 cordis 插件，
+   * 各自注册 `browserUse` / `computerUse` 服务与一批工具，而不是一个 MCP
+   * server 进程。用 mcp-client 包一层既起不来也拿不到它们的系统权限。
+   */
+  entries?: CatalogPluginEntry[]
+  /** type='plugin'：安装前必须已经在 profile 里装好的 npm 包（缺了就提示，不假装能装）。 */
+  requiresPackages?: string[]
 }
 
 /** 目录条目（字段与 assets/mcp-catalog/catalog.json 对齐）。 */
@@ -141,6 +162,29 @@ function readCatalog(): CatalogFile | null {
   } catch {
     return null
   }
+}
+
+/**
+ * 按 id 精确取目录条目（Bot 主动推荐连接器时用）。
+ *
+ * 为什么保持入参顺序：模型给的顺序就是它认为的推荐优先级（最该连的排最前），
+ * 按目录顺序重排等于把那个判断丢掉，卡片第一行可能变成最不相关的那条。
+ *
+ * 未知 id 静默丢弃而不是报错：模型可能记错名字、也可能自己编一个，报错会让它
+ * 以为工具坏了、下次干脆不推荐。少一条比一张报错卡片好。
+ */
+export function findCatalogEntries(ids: readonly string[]): CatalogEntry[] {
+  if (ids.length === 0) return []
+  const catalog = readCatalog()
+  if (catalog === null) return []
+  const byId = new Map<string, CatalogEntry>()
+  for (const entry of catalog.entries) byId.set(entry.id, entry)
+  const found: CatalogEntry[] = []
+  for (const id of ids) {
+    const entry = byId.get(id)
+    if (entry !== undefined) found.push(entry)
+  }
+  return found
 }
 
 /** 图标精确文件名表（只认目录里出现过的文件名，杜绝路径穿越）。 */
@@ -273,6 +317,130 @@ function removeEntryBlock(content: string, entry: InstalledEntry): string {
   return lines.join(eol)
 }
 
+/* ─────────────────── 官方插件条目（type='plugin'）─────────────────── */
+
+/** patch 里一条已存在的插件条目。 */
+interface InstalledPluginEntry {
+  id: string
+  /** `- id:` 行号。 */
+  startLine: number
+  /** 条目块结束行（不含）。 */
+  endLine: number
+  /** 所属 insert 容器起始行；-1 表示没有容器。 */
+  insertLine: number
+}
+
+/**
+ * 扫描 patch 里的官方插件条目（只认传入的 id 白名单）。
+ *
+ * 为什么不复用 scanInstalledEntries：那个只认 `name: '@deepseek-ai/dsh-mcp-client'`
+ * 的条目。官方插件行没有 mcp-client 包装，是 `- id: computer-use` +
+ * `name: '@deepseek-ai/dsh-computer-use'` 的裸形态，扫描判据完全不同。
+ *
+ * 白名单是必须的：patch 里到处是 `- id: xxx` 形式的条目（ui-settings-general、
+ * agent-default-model 等），不按目录声明的 id 过滤会把它们当成连接器条目删掉。
+ */
+function scanPluginEntries(content: string, ids: ReadonlySet<string>): Map<string, InstalledPluginEntry> {
+  const lines = content.split(/\r?\n/)
+  const map = new Map<string, InstalledPluginEntry>()
+  for (let i = 0; i < lines.length; i += 1) {
+    const head = /^\s*-\s*id:\s*([A-Za-z0-9_-]+)\s*$/.exec(lines[i])
+    if (head === null) continue
+    const id = head[1]!
+    if (!ids.has(id)) continue
+    let end = lines.length
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const line = lines[j]!
+      if (line.trim() === '') continue
+      if (!/^[ \t]/.test(line)) { end = j; break }
+      if (line.trimStart().startsWith('- ')) { end = j; break }
+    }
+    let insertLine = -1
+    for (let k = i - 1; k >= 0; k -= 1) {
+      if (lines[k]!.trim() === '') continue
+      if (/^[ \t]/.test(lines[k]!)) continue
+      if (lines[k]!.trimStart().startsWith('- insert:')) insertLine = k
+      break
+    }
+    map.set(id, { id, startLine: i, endLine: end, insertLine })
+  }
+  return map
+}
+
+/** 数一个 insert 容器里的条目数。 */
+function countInsertItems(lines: readonly string[], insertLine: number): number {
+  let count = 0
+  for (let k = insertLine + 1; k < lines.length; k += 1) {
+    const line = lines[k]!
+    if (line.trim() === '') continue
+    if (!/^[ \t]/.test(line)) break
+    if (line.trimStart().startsWith('- ')) count += 1
+  }
+  return count
+}
+
+/** 一个 insert 容器的结束行（不含）。 */
+function insertBlockEnd(lines: readonly string[], insertLine: number): number {
+  for (let j = insertLine + 1; j < lines.length; j += 1) {
+    const line = lines[j]!
+    if (line.trim() === '') return j
+    if (!/^[ \t]/.test(line)) return j
+  }
+  return lines.length
+}
+
+/**
+ * 从 patch 里摘掉指定的官方插件条目。
+ *
+ * 两种情况：
+ *  - 条目所在的 insert 块**全部**都是要删的条目 → 连块带抬头注释一起删
+ *    （留下空 `- insert:` 会让 loader 抱怨空插入块）；
+ *  - 块里还有别的条目 → 只删这几行，容器留着。
+ *
+ * 从后往前删，避免前面的行号被前面的 splice 带偏。
+ */
+function removePluginEntries(content: string, ids: ReadonlySet<string>): string {
+  const eol = content.includes('\r\n') ? '\r\n' : '\n'
+  const lines = content.split(/\r?\n/)
+  const found = scanPluginEntries(content, ids)
+  if (found.size === 0) return content
+
+  // 按 insert 容器分组
+  const byInsert = new Map<number, InstalledPluginEntry[]>()
+  for (const item of found.values()) {
+    const list = byInsert.get(item.insertLine) ?? []
+    list.push(item)
+    byInsert.set(item.insertLine, list)
+  }
+
+  const ranges: Array<{ from: number; to: number; keep?: string[] }> = []
+  for (const [insertLine, items] of byInsert) {
+    if (insertLine < 0) {
+      for (const item of items) ranges.push({ from: item.startLine, to: item.endLine })
+      continue
+    }
+    if (countInsertItems(lines, insertLine) === items.length) {
+      // 整个块都要删：把紧贴上方的注释与空行一并带走。
+      //
+      // 但块**内部**的注释要留下：用户在这段里手写过恢复说明（换后端怎么配、
+      // 依赖装回来要几步），删掉就再也找不回来了。注释留在原位不影响 loader
+      // （YAML 注释不参与解析），比「干净」重要。
+      const to = insertBlockEnd(lines, insertLine)
+      const kept = lines.slice(insertLine + 1, to).filter((line) => /^\s*#/.test(line))
+      let from = insertLine
+      while (from > 0 && /^#/.test(lines[from - 1]!.trim())) from -= 1
+      if (from > 0 && lines[from - 1]!.trim() === '') from -= 1
+      ranges.push(kept.length > 0 ? { from, to, keep: kept } : { from, to })
+    } else {
+      for (const item of items) ranges.push({ from: item.startLine, to: item.endLine })
+    }
+  }
+
+  ranges.sort((a, b) => b.from - a.from)
+  for (const range of ranges) lines.splice(range.from, range.to - range.from, ...(range.keep ?? []))
+  return lines.join(eol)
+}
+
 /**
  * 生成一条 mcp-client 条目（4 空格缩进，挂在 insert 块下）。
  *
@@ -307,6 +475,32 @@ function buildEntryYaml(entry: CatalogEntry, serverName: string, envValues: Reco
   return lines.join('\n')
 }
 
+/** YAML 标量：字符串走单引号转义，布尔/数字原样输出。 */
+function yamlScalar(value: string | number | boolean): string {
+  if (typeof value === 'string') return yamlString(value)
+  return String(value)
+}
+
+/**
+ * 生成一条 cordis 插件条目（官方包，不是 mcp-client）。
+ *
+ * 形态与用户手工 insert 的一致：
+ *     - id: computer-use
+ *       name: '@deepseek-ai/dsh-computer-use'
+ */
+function buildPluginYaml(plugin: CatalogPluginEntry): string {
+  const lines: string[] = []
+  lines.push('    - id: ' + plugin.id)
+  lines.push('      name: ' + yamlString(plugin.name))
+  if (plugin.config !== undefined) {
+    lines.push('      config:')
+    for (const [key, value] of Object.entries(plugin.config)) {
+      lines.push('        ' + key + ': ' + yamlScalar(value))
+    }
+  }
+  return lines.join('\n')
+}
+
 export interface InstallResult {
   ok: boolean
   error?: string
@@ -335,6 +529,9 @@ function installEntry(body: { id?: unknown; env?: unknown; overwrite?: unknown }
   if (catalog === null) return { ok: false, error: 'catalog missing from package' }
   const entry = catalog.entries.find((item) => item.id === id)
   if (entry === undefined) return { ok: false, error: 'unknown connector: ' + id }
+
+  // 官方插件类条目走另一条落地路径：写 cordis 插件行，不是 mcp-client 实例。
+  if (entry.install.type === 'plugin') return installPluginEntry(entry, body.overwrite === true)
 
   const serverName = toServerName(entry.id)
   const envValues: Record<string, string> = {}
@@ -405,10 +602,140 @@ function installEntry(body: { id?: unknown; env?: unknown; overwrite?: unknown }
   return { ok: true, serverName, updated: existing !== undefined, env: envValues, patchFile: patchPath, needsRestart: false }
 }
 
+/* ─────────────────── 官方插件类条目的安装 / 卸载 ─────────────────── */
+
+/** profile 的 node_modules 根（与 patch 同一个 profile）。 */
+function profileModulesDir(): string {
+  return join(dshHome(), 'profiles', PROFILE_NAME, 'node_modules')
+}
+
+/** 检查哪些官方包在 profile 里还没装（连接器不替用户装包，只如实提示）。 */
+function missingPackages(packages: readonly string[]): string[] {
+  const missing: string[] = []
+  for (const pkg of packages) {
+    if (!existsSync(join(profileModulesDir(), ...pkg.split('/'), 'package.json'))) missing.push(pkg)
+  }
+  return missing
+}
+
+/**
+ * 安装一条官方插件类条目：把它的 cordis 插件行写进 patch。
+ *
+ * 与 mcp-client 条目的三点差别：
+ *  1. 已装判定看 patch 里有没有**同 id 的插件行**（用户可能已经手工 insert 过，
+ *     再写一次会 duplicate loader entry id 直接崩）；
+ *  2. 包缺失时拒绝并说清缺哪个 —— 官方这些包不在 npm 公开源发最新版，
+ *     连接器没法替用户装，只能提示；
+ *  3. 装完顺手把闸门部署默认打开：否则插件在跑、工具却被挡在请求之外，
+ *     用户会得到「装了但模型看不见」的哑状态。
+ */
+function installPluginEntry(entry: CatalogEntry, overwrite: boolean): InstallResult {
+  const plugins = entry.install.entries ?? []
+  if (plugins.length === 0) return { ok: false, error: 'plugin entry declares no entries' }
+
+  const missing = missingPackages(entry.install.requiresPackages ?? [])
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      error: '这个能力要先装好官方包：' + missing.join('、')
+        + '。在 profile 目录执行 `dsh plugin add <包名>`（或 npm i）后再点安装。',
+    }
+  }
+
+  const patchPath = patchFilePath()
+  let content = ''
+  if (existsSync(patchPath)) {
+    content = readFileSync(patchPath, 'utf8')
+  } else {
+    mkdirSync(dirname(patchPath), { recursive: true })
+    content = '# DSH web profile patch（由 dsh-seeker-bot 连接器市场创建）\n'
+  }
+
+  const ids = new Set(plugins.map((plugin) => plugin.id))
+  const installed = scanPluginEntries(content, ids)
+  const pending = plugins.filter((plugin) => !installed.has(plugin.id))
+
+  if (pending.length === 0 && !overwrite) {
+    setGateDefaultEnabled(entry.id, true)
+    return { ok: true, serverName: toServerName(entry.id), alreadyInstalled: true, patchFile: patchPath }
+  }
+
+  // 覆盖更新：先把已存在的同 id 条目摘掉再重写（config 可能变了）
+  const base = overwrite && installed.size > 0 ? removePluginEntries(content, ids) : content
+  const eol = base.includes('\r\n') ? '\r\n' : '\n'
+  const block = [
+    '',
+    '# DSH 官方能力：' + entry.name + '（dsh-seeker-bot 连接器市场安装）',
+    '# 卸载：在连接器面板里点卸载，或删除下面整个 insert 块。',
+    '- insert:',
+    ...pending.map(buildPluginYaml),
+    '',
+  ].join(eol)
+
+  try {
+    if (existsSync(patchPath)) copyFileSync(patchPath, patchPath + BACKUP_SUFFIX)
+    writeFileSync(patchPath, base.replace(/\s*$/, '') + eol + block, 'utf8')
+  } catch (error) {
+    return { ok: false, error: 'write failed: ' + (error instanceof Error ? error.message : String(error)) }
+  }
+  catalogCache = null
+  setGateDefaultEnabled(entry.id, true)
+  return {
+    ok: true,
+    serverName: toServerName(entry.id),
+    updated: installed.size > 0,
+    patchFile: patchPath,
+    needsRestart: false,
+  }
+}
+
+/** 卸载一条官方插件类条目：把它的 cordis 插件行从 patch 里摘掉。 */
+function uninstallPluginEntry(entry: CatalogEntry): InstallResult {
+  const ids = new Set((entry.install.entries ?? []).map((plugin) => plugin.id))
+  const patchPath = patchFilePath()
+  if (!existsSync(patchPath)) return { ok: false, error: 'patch file not found' }
+  const content = readFileSync(patchPath, 'utf8')
+  if (scanPluginEntries(content, ids).size === 0) return { ok: false, error: 'not installed: ' + entry.id }
+  try {
+    copyFileSync(patchPath, patchPath + BACKUP_SUFFIX)
+    writeFileSync(patchPath, removePluginEntries(content, ids), 'utf8')
+  } catch (error) {
+    return { ok: false, error: 'write failed: ' + (error instanceof Error ? error.message : String(error)) }
+  }
+  catalogCache = null
+  setGateDefaultEnabled(entry.id, false)
+  return { ok: true, serverName: toServerName(entry.id), patchFile: patchPath, needsRestart: false }
+}
+
+/**
+ * 某条官方插件类条目当前是否已写进 patch。
+ *
+ * 给 host 启动时定闸门默认值用：装了 → 默认注入工具，没装 → 继续挡在请求外。
+ * 目录读不到、patch 不存在、条目不是 plugin 类，一律 false（失败即「没装」，
+ * 宁可少占上下文也不误开）。
+ */
+export function isPluginInstalled(id: string): boolean {
+  const catalog = readCatalog()
+  const entry = catalog?.entries.find((item) => item.id === id)
+  if (entry === undefined || entry.install.type !== 'plugin') return false
+  const ids = new Set((entry.install.entries ?? []).map((plugin) => plugin.id))
+  if (ids.size === 0) return false
+  const patchPath = patchFilePath()
+  if (!existsSync(patchPath)) return false
+  try {
+    return scanPluginEntries(readFileSync(patchPath, 'utf8'), ids).size === ids.size
+  } catch {
+    return false
+  }
+}
+
 /** 卸载：把该条目的 mcp-client 块从 patch 里摘掉。 */
 function uninstallEntry(body: { id?: unknown }): InstallResult {
   const id = typeof body.id === 'string' ? body.id : ''
   if (id === '') return { ok: false, error: 'id required' }
+  const catalog = readCatalog()
+  const catalogEntry = catalog?.entries.find((item) => item.id === id)
+  if (catalogEntry !== undefined && catalogEntry.install.type === 'plugin') return uninstallPluginEntry(catalogEntry)
   const serverName = toServerName(id)
   const patchPath = patchFilePath()
   if (!existsSync(patchPath)) return { ok: false, error: 'patch file not found' }
@@ -515,6 +842,14 @@ function readState(): { ok: boolean; items: Record<string, { serverName: string;
   const catalog = readCatalog()
   for (const entry of catalog?.entries ?? []) {
     const serverName = toServerName(entry.id)
+    // 官方插件类条目：patch 里出现它的全部插件行才算已装（少一条就是没装好）。
+    if (entry.install.type === 'plugin') {
+      const ids = new Set((entry.install.entries ?? []).map((plugin) => plugin.id))
+      if (ids.size > 0 && scanPluginEntries(content, ids).size === ids.size) {
+        items[entry.id] = { serverName, env: {} }
+      }
+      continue
+    }
     const hit = installed.get(serverName)
     if (hit !== undefined) items[entry.id] = { serverName, env: hit.env }
   }

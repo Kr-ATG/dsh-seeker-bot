@@ -11,6 +11,13 @@ export interface MemoryEntryView {
   content: string
   scope: 'global' | 'project'
   projectHash: string | null
+  /**
+   * 归属主体（schema v6）：`work` 或 `bot:<botId>`。
+   *
+   * 面板用它区分「这条是谁的记忆」——主 Bot 的资料库列出全部子 Bot 时要标注来源。
+   * 旧 host 不回该字段，按 `work` 兜底。
+   */
+  owner?: string
   tags: string[]
   pinned: boolean
   /** true = 已禁用（保留但不参与注入/编译）。 */
@@ -372,7 +379,7 @@ async function sendJson<T>(path: string, payload: unknown): Promise<T> {
 
 /** 面板 API 面（slots inject 提供）。 */
 export interface MemoryApi {
-  list: (params?: { scope?: string; project?: string; q?: string; tag?: string; includeDeprecated?: boolean }) => Promise<MemoryListResponse>
+  list: (params?: { scope?: string; project?: string; owner?: string; q?: string; tag?: string; includeDeprecated?: boolean }) => Promise<MemoryListResponse>
   projects: () => Promise<{ projects: ProjectView[] }>
   tags: () => Promise<MemoryTagsResponse>
   changes: (date?: string) => Promise<MemoryChangesResponse>
@@ -417,6 +424,8 @@ export interface MemoryApi {
     scope?: 'global' | 'project'
     projectHash?: string
     path?: string
+    /** 归属：`bot:<id>` 写进该 Bot 的记忆库；缺省 `work`。 */
+    owner?: string
     tags?: string[]
     pinned?: boolean
     importance?: number
@@ -480,6 +489,8 @@ export function createMemoryApi(): MemoryApi {
       const query = new URLSearchParams()
       if (params.scope !== undefined && params.scope !== '') query.set('scope', params.scope)
       if (params.project !== undefined && params.project !== '') query.set('project', params.project)
+      // owner：`work` / `bot:<id>` 精确匹配，`bots` 表示全部 Bot（主 Bot 资料库用）。
+      if (params.owner !== undefined && params.owner !== '') query.set('owner', params.owner)
       if (params.q !== undefined && params.q !== '') query.set('q', params.q)
       if (params.tag !== undefined && params.tag !== '') query.set('tag', params.tag)
       if (params.includeDeprecated === true) query.set('includeDeprecated', '1')

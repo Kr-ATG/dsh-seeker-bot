@@ -31,7 +31,9 @@
  * provider、不动 DSH 源码、不动 profile 配置：
  *
  *  - 默认全关 → 每轮请求真的少 3.1 万 token，不是「注册了但看不见」；
- *  - `/computer-use on|off`、`/browser-use on|off` 按会话切换，下一步生效；
+ *  - 入口在「操作间 → 连接器」：安装「电脑操作」/「浏览器操作」条目即打开本组，
+ *    卸载即关闭，下一步生效（2026-11 起不再注册 `/computer-use`、`/browser-use`
+ *    命令 —— 它们本质是官方插件，归连接器管）；
  *  - 关闭时相关的 GUIDANCE 提示词段一并移除，避免模型去调用看不见的工具而收
  *    `UNKNOWN_TOOL`（官方 browser-use runtime 对 blocked 会话也是这么做的）。
  *
@@ -132,7 +134,7 @@ export interface GateWebServer {
 
 /** 一个工具组：前缀命中即归入该组，关闭时连同其提示词段一起从请求里移除。 */
 export interface GateGroup {
-  /** 状态键，同时就是 `/` 命令名（须满足官方命令语法：小写字母开头，可含 `-`/`_`/数字）。 */
+  /** 状态键，同时是连接器目录里对应条目的 id（装/卸该条目即开关本组）。 */
   key: string
   /** 命令返回文案里的中文展示名。 */
   label: string
@@ -151,14 +153,14 @@ export const DEFAULT_GATE_GROUPS: readonly GateGroup[] = [
     label: '电脑操作',
     prefixes: ['cua_driver_native__'],
     sections: ['computer-use:cua-driver-native'],
-    description: '电脑操作工具按需开关（/computer-use on|off|status；不带参数 = 切换）',
+    description: '鼠标、键盘与屏幕控制工具组（连接器里的「电脑操作」条目）',
   },
   {
     key: 'browser-use',
     label: '浏览器操作',
     prefixes: ['mcp__playwright-mcp__'],
     sections: ['mcp:playwright-mcp'],
-    description: '浏览器操作工具按需开关（/browser-use on|off|status；不带参数 = 切换）',
+    description: '浏览器自动化工具组（连接器里的「浏览器操作」条目）',
   },
 ]
 
@@ -255,13 +257,13 @@ export function offlineNotice(
 ): GatePromptSection | null {
   const off = groups.filter((group) => !enabled(group.key))
   if (off.length === 0) return null
-  const items = off.map((group) => `- ${group.label}（工具名前缀 \`${group.prefixes[0]}\`）：用 \`/${group.key} on\` 打开，或让用户说「开启${group.label}」`).join('\n')
+  const items = off.map((group) => `- ${group.label}（工具名前缀 \`${group.prefixes[0]}\`）：在「操作间 → 连接器」里安装「${group.label}」条目后即可使用`).join('\n')
   return {
     name: 'tools-gate:offline',
     text: [
-      '本会话的以下工具组当前**未注入**（按需开关，默认关闭，以节省上下文）：',
+      '本会话的以下能力当前**未启用**（按需注入，默认关闭，以节省上下文）：',
       items,
-      '不要假装调用了这些能力。需要时先请用户用上面的 `/` 命令开启（或直接调用 slash 命令开关），开启后下一步请求即可使用。',
+      '不要假装调用了这些能力。需要时请用户到「操作间 → 连接器」安装对应条目（装完即生效，无需重启），装好后下一步请求即可使用。',
     ].join('\n'),
   }
 }
@@ -394,40 +396,17 @@ export function applyToolsGate(ctx: GateHostContext, config: GateConfig = {}): G
     })
   }
 
-  // ── 2. `/` 命令：按会话切换 ────────────────────────────────────────────
-  // 服务面可能不完整（裸组合 / 测试桩）：缺 commands 时只丢命令，闸门本身照常。
-  // 延迟注入回调里抛错会从 apply 冒出去，把同插件后面所有 inject 一起中断
-  // （triad 工作台全不挂）—— 所以这里必须自查而不是等 TypeError。
-  ctx.inject(['commands'], (commandCtx: never) => {
-    const commands = (commandCtx as unknown as { commands?: GateCommands }).commands
-    if (commands === undefined || typeof commands.register !== 'function') {
-      ctx.logger?.warn?.('[tools-gate] commands service unavailable: /commands skipped')
-      return
-    }
-    for (const group of groups) {
-      if (!COMMAND_NAME.test(group.key)) {
-        ctx.logger?.warn?.(`[tools-gate] skip group "${group.key}": not a valid command name`)
-        continue
-      }
-      commands.register({
-        name: group.key,
-        description: group.description,
-        // 必须声明 `input`：官方 ui-commands 的 matchEnter 里，**不带** input 的
-        // 宿主命令只认裸 token（`/computer-use`），一旦带参数（`/computer-use off`）
-        // 就直接 `return undefined` —— 命令行被静默降级成普通提示词发给模型。
-        // 那是比多按一次回车严重得多的失败：用户以为关掉了，实际只是对着模型
-        // 说了一句话，工具照样关着。
-        //
-        // 代价（已实测确认）：裸敲 `/computer-use` + 回车会进入 leadingInput
-        // 认领态（草稿留下 `/computer-use ` 与 hint），需再回车一次（空参数 =
-        // toggle）或直接输入 on/off/status。`/computer-use on` 这类带参写法
-        // 一次回车即可。两害相权，取不静默降级。
-        input: { hint: '[on|off|status]' },
-        handler: (invocation) => runGateCommand(ctx, groups, group, invocation, defaultEnabled),
-      })
-    }
-    ctx.logger?.info?.(`[tools-gate] commands ready: ${groups.map((g) => `/${g.key}`).join(', ')} (default off)`)
-  })
+  // ── 2. `/` 命令：已按用户要求移除 ─────────────────────────────────────
+  // 2026-11：电脑操作 / 浏览器操作本质是 DSH 官方插件（各自注册服务与工具），
+  // 不是「指令」，所以入口整体挪到了「操作间 → 连接器」：
+  // 在那边安装/卸载对应条目，本模块的部署默认值随之变化（见
+  // src/triad/mcp-catalog.ts 的 setGateDefaultEnabled 调用与 src/host.ts 的
+  // 启动期推导）。这里不再注册 /computer-use、/browser-use，`/` 菜单干净了。
+  //
+  // 保留下面的纯函数（runGateCommand / renderState / usage）作为状态机的测试面：
+  // 它们没有任何调用方，也不注册到 commands 服务；将来若要恢复斜杠命令入口，
+  // 重新接上 commands.register 即可，语义不用重写。
+
 
   // ── 3. 状态路由：输入栏胶囊读/写同一张状态表 ───────────────────────────
   // 与 /指令 是同一份 state，不存在两套真相：胶囊点开关 == 敲 /xxx on|off。

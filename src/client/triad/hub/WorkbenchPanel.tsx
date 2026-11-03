@@ -1,14 +1,16 @@
 /**
- * WorkbenchPanel — 4 合 1 统一工作台主容器。
+ * WorkbenchPanel — 统一工作台主容器。
  *
  * 聚合模块（顺序 = WORKBENCH_TABS 顺序 = 侧栏操作间顺序）：
- *  0. 记忆 (Memory)    — DSH 暗色系大盘与卡片流
- *  1. 能力 (Skills)    — 技能与 MCP 工具包管理
- *  2. 用量 (Usage)     — Token 消耗总览、24小时/月度平滑曲线与 52 周全局热力大盘
- *  3. 画廊 (Gallery)   — 多媒体画廊：所有对话生成的图片 / 网页 / 演示 / 文档一站查看
- *  4. 档案 (Vault)     — 结构化个人档案：账号密码 / 支付方式 / 联系方式 / 证件
- *                        （与记忆库**互不隶属**：不受工作区开关管辖，敏感值加密
- *                        落盘且绝不进模型上下文；侧栏二级菜单 = 场景分组）
+ *  0. 记忆 (Memory)       — DSH 暗色系大盘与卡片流
+ *  1. 能力 (Skills)       — 技能与 MCP 工具包管理
+ *  2. 连接器 (Connectors) — MCP 市场：精选目录 + 搜索 + 一键安装
+ *  3. 画廊 (Gallery)      — 多媒体画廊：所有对话生成的图片 / 网页 / 演示 / 文档一站查看
+ *  4. 档案 (Vault)        — 结构化个人档案：账号密码 / 支付方式 / 联系方式 / 证件
+ *                          （与记忆库**互不隶属**：不受工作区开关管辖，敏感值加密
+ *                          落盘且绝不进模型上下文；侧栏二级菜单 = 场景分组）
+ *  5. 系统提示词 (Prompt) — 只读视图：这次发送会带上什么
+ *  6. 同步设置 (Sync)     — 工作台资产（档案、记忆、技能、MCP 配置）云端双向漫游
  *
  * 供应商与网络代理**不在这里**（2026-10-05 用户点名「还是把供应商配置和代理
  * 放在设置里面吧」）：两者都在官方「设置」弹窗的「供应商」页
@@ -19,9 +21,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { ensureWorkbenchStyles } from './styles.js'
 import { ensureWorkbenchTheme } from './theme.js'
 import { MemoryPanel } from '../memory/Panel.js'
-import { SkillsPanel } from '../usage/dashboard/SkillsPanel.js'
+import { SkillsPanel } from '../skills/SkillsPanel.js'
 import { ConnectorsPanel } from '../connectors/Panel.js'
-import { UsagePanel } from '../usage/dashboard/UsagePanel.js'
 import { GalleryPanel } from '../gallery/GalleryPanel.js'
 import { VaultPanel } from '../vault/Panel.js'
 import { SystemPromptPanel } from '../system-prompt/Panel.js'
@@ -46,7 +47,7 @@ import {
  * ⚠ DEFAULT_TAB 仍然是 'memory'：默认页是「上次看过的分类」（localStorage
  * 回填），首次安装落到记忆是既有约定。
  */
-export type WorkbenchTab = 'memory' | 'skills' | 'connectors' | 'usage' | 'gallery' | 'vault' | 'prompt' | 'sync'
+export type WorkbenchTab = 'memory' | 'skills' | 'connectors' | 'gallery' | 'vault' | 'prompt' | 'sync'
 
 /**
  * 默认 Tab。
@@ -82,18 +83,15 @@ export function WorkbenchGridIcon({ size = 15 }: { size?: number }): JSX.Element
 const PAGE_HEADS: ReadonlyArray<{ id: WorkbenchTab; eyebrow: string; title: string; sub: string; tail: string }> = [
   { id: 'memory', eyebrow: 'Memory Stream', title: '记忆', sub: '按时间成河，按重要度分层。左侧图标轨切视图，选中条目右侧滑出详情抽屉。', tail: '记住什么' },
   { id: 'skills', eyebrow: 'Capability Matrix', title: 'SKILL', sub: '技能包统一编目，展开看每个包里的技能。', tail: '会什么' },
-  { id: 'usage', eyebrow: 'Token Telemetry', title: '用量', sub: '范围胶囊只作用于消耗汇总；热力带恒为全量 52 周，是横跨历史的总览。', tail: '烧了多少' },
   { id: 'gallery', eyebrow: 'Output Gallery', title: '画廊', sub: '所有对话产出的图片、网页、演示、文档一站看全。', tail: '产出过什么' },
 ]
 
 function PageHead({ tab }: { tab: WorkbenchTab }): JSX.Element | null {
   const head = PAGE_HEADS.find(item => item.id === tab)
-  // 用量页头在 UsagePanel 嵌入分支内（与英雄区同一组件树）；
-  // SKILL 页头由 SkillsPanel 自己的刊头（Skills / 索引 + 三格统计）承担，
-  // 这里再画一次会变成「SKILL / 会什么」压着「Skills 索引」两个大标题。
-  // usage / skills / vault 三个面板自带页头（巨型标题 + 说明），这里再画一次
-  // 会变成两层大标题压在一起。
-  if (head === undefined || tab === 'usage' || tab === 'skills' || tab === 'vault'
+  // SKILL 页头由 SkillsPanel 自己的刊头（Skills / 索引 + 三格统计）承担；
+  // vault / sync 两个面板也自带页头（巨型标题 + 说明）。这里再画一次会变成
+  // 两层大标题压在一起。
+  if (head === undefined || tab === 'skills' || tab === 'vault'
     || tab === 'sync') return null
   return (
     <header className="wb2-head wb2-rise">
@@ -155,7 +153,7 @@ export function WorkbenchPanel({ onClose, initialTab = DEFAULT_TAB }: WorkbenchP
   const memoryApi = useMemo(() => createMemoryApi(), [])
 
   /**
-   * ⌘1–4 / Ctrl+1–4 直切分类（与侧栏横滑条的提示一致）。
+   * ⌘1–7 / Ctrl+1–7 直切分类（与侧栏横滑条的提示一致）。
    *
    * 只在工作台页挂载期间生效（本组件就是那一页），不进全局快捷键表——它是
    * 页内导航，离开工作台按这组键不该有任何反应。输入框内不劫持。
@@ -235,10 +233,6 @@ export function WorkbenchPanel({ onClose, initialTab = DEFAULT_TAB }: WorkbenchP
               自带页头（标题 + 搜索 + 分类条），所以不叠 PageHead。 */}
           {effectiveTab === 'connectors' && (
             <ConnectorsPanel key="connectors" onClose={onClose} embedded />
-          )}
-
-          {effectiveTab === 'usage' && (
-            <UsagePanel key="usage" onClose={onClose} embedded />
           )}
 
           {effectiveTab === 'gallery' && (

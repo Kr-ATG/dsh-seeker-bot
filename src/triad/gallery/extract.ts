@@ -128,7 +128,13 @@ export interface ToolResultEvent {
 /** 结果消息里全部 text 块拼接（与 client resultText 同口径）。 */
 function resultTextOf(event: ToolResultEvent): string {
   const parts: string[] = []
-  for (const block of event.data?.message?.content ?? []) {
+  /*
+   * `Array.isArray` 兜住旧数据：插件的自注册工具曾经把 `output.render` 的返回值
+   * 写成字符串，宿主原样存进 `content`。直接 `for…of` 一个字符串会逐字符遍历，
+   * 虽然不抛错，但一个条目也提不出来（表现是「老会话的画廊是空的」）。
+   */
+  const blocks = Array.isArray(event.data?.message?.content) ? event.data.message.content : []
+  for (const block of blocks) {
     if (block?.type === 'text' && typeof block.text === 'string') parts.push(block.text)
   }
   return parts.join('\n')

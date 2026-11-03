@@ -14,6 +14,7 @@ import type {
   MemoryConfig,
   MemoryEntry,
   MemoryKind,
+  MemoryOwner,
   ProjectMeta,
   RevisionMeta,
   SessionTickerState,
@@ -53,10 +54,90 @@ export function projectHashOf(cwd: string): string {
   return createHash('sha1').update(cwd).digest('hex').slice(0, 12)
 }
 
-/** 记忆条目稳定 id：mem_<sha1(content|scope|projectHash)>，同内容合并。 */
-export function entryIdOf(content: string, scope: 'global' | 'project', projectHash: string | null): string {
+/**
+ * 记忆条目稳定 id：`mem_<sha1(owner|scope|projectHash|content)>`，同内容同归属合并。
+ *
+ * **owner 必须参与 key**（schema v6）：所有 bot 共用 `D:\Seeker-Bot` 这一个工作区，
+ * `projectHash` 对它们完全相同。若 id 不含 owner，两个 bot 记下同一句话会被合并成
+ * 一条，隔离就无从谈起。缺省 `work` 让所有既有调用点保持原有语义。
+ *
+ * 代价：存量条目的 id 会随本次升级整体变化，需要 `scripts/migrate-memory-owner.mjs`
+ * 一次性重算；`legacyEntryIdOf()` 保留旧算法，供迁移脚本与兼容读取使用。
+ */
+export function entryIdOf(
+  content: string,
+  scope: 'global' | 'project',
+  projectHash: string | null,
+  owner: MemoryOwner = 'work',
+): string {
+  const key = `${owner}\u0000${scope}\u0000${projectHash ?? ''}\u0000${content.trim()}`
+  return `mem_${createHash('sha1').update(key).digest('hex').slice(0, 16)}`
+}
+
+/**
+ * schema v5 及更早的条目 id 算法（不含 owner）。
+ *
+ * 只用于两件事：迁移脚本读旧 id、以及迁移尚未跑完时 `getEntry()` 的回退查找。
+ * 新代码一律用 `entryIdOf()`，不要再用它生成 id。
+ */
+export function legacyEntryIdOf(
+  content: string,
+  scope: 'global' | 'project',
+  projectHash: string | null,
+): string {
   const key = `${scope}\u0000${projectHash ?? ''}\u0000${content.trim()}`
   return `mem_${createHash('sha1').update(key).digest('hex').slice(0, 16)}`
+}
+
+/** 条目的归属（缺省 = work，兼容 schema v5 及更早）。 */
+export function ownerOf(entry: Pick<MemoryEntry, 'owner'>): MemoryOwner {
+  return entry.owner ?? 'work'
+}
+
+/**
+ * 条目是否已过期（临时信息 TTL，见 MemoryEntry.ttlDays）。
+ *
+ * 判据从**创建时间**起算，不是最近更新/命中：ttlDays 表达的是「这件事本身的有效
+ * 期」（今天要发多少条），不会因为被读了一次就续命。createdAt 解析失败时一律按
+ * 未过期处理——宁可多注入一条，也不要把一条正常记忆因为时间戳坏了永久藏起来。
+ */
+export function isExpired(entry: Pick<MemoryEntry, 'createdAt' | 'ttlDays'>, now = Date.now()): boolean {
+  const ttl = entry.ttlDays
+  if (typeof ttl !== 'number' || !Number.isFinite(ttl) || ttl <= 0) return false
+  const created = Date.parse(entry.createdAt)
+  if (Number.isNaN(created)) return false
+  return now - created > ttl * 86_400_000
+}
+
+/**
+ * 会话 id → 记忆归属。
+ *
+ * Personal Agent 的会话 id 形如 `pa-bot-v2-<botId>`（见 `src/host/personal/agent.ts`
+ * 的 `SESSION_PREFIX`）。这里用宽松正则（`pa-bot-` 前缀 + 可选版本段）而不是写死
+ * `pa-bot-v2-`：bot 侧换前缀是发生过的事（v2 就是为了绕开坏会话），写死会让升级
+ * 那天所有 bot 记忆静默退回 `work`，而那是最难发现的一类回归。
+ *
+ * 匹配不上的一律视为 Work 会话——这是安全侧默认：宁可把 bot 记忆当成 Work 的
+ * （主 bot 和 Work 都看得到），也不要把 Work 记忆误判成某个 bot 的（那会让它在
+ * 其他会话里凭空消失）。
+ */
+export function ownerOfSessionId(sessionId: string | undefined | null): MemoryOwner {
+  if (typeof sessionId !== 'string') return 'work'
+  const match = /^pa-bot-(?:v\d+-)?(.+)$/.exec(sessionId.trim())
+  if (match === null) return 'work'
+  const botId = match[1].trim()
+  /*
+   * `pa-bot-v2-` 这种残缺 id 会因正则回溯落到 botId = `v2-`（可选组放弃匹配，
+   * 整段塞进捕获组）。它不是合法 botId，认下来会得到一个永远没人用的归属，
+   * 所以显式拒绝：只有「版本段」没有「实体 id」一律当 Work。
+   */
+  if (botId === '' || /^v\d+-$/.test(botId)) return 'work'
+  return `bot:${botId}`
+}
+
+/** 校验落盘数据里的 owner 是否合法（脏数据一律当作缺失，由会话溯源兜底）。 */
+function isMemoryOwner(value: unknown): value is MemoryOwner {
+  return typeof value === 'string' && (value === 'work' || (value.startsWith('bot:') && value.length > 4))
 }
 
 /** 本地日期 YYYY-MM-DD。 */
@@ -350,15 +431,52 @@ export class MemoryStore {
   private dirty = false
   /** 节流回刷计时器。 */
   private flushTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * 已撤回的轮次（`sessionId#turn`）。
+   *
+   * 记忆提取是 turn/end 之后的异步任务，撤回可能发生在它真正落库之前。
+   * 记下墓碑后，抽取侧在候选写入前后都能看到并跳过；同一进程内有效。
+   */
+  private readonly recalledTurns = new Set<string>()
+  /**
+   * 已撤回的真人消息（`sessionId#userMessageId`）。
+   *
+   * Bot 允许执行中插话：第 2、3 句可能在同一个 turn 里。只按 turn 立墓碑会把
+   * 第 3 句的抽取也一起跳过，所以能拿到消息 id 时优先按消息立墓碑。
+   */
+  private readonly recalledMessages = new Set<string>()
 
   /** 构造时加载失败的说明（空串 = 正常）。供 index.ts 打日志用。 */
   readonly loadWarning: string
+
+  /**
+   * 记忆**内容**版本号：任何改变「会进上下文的记忆内容」的写操作 +1。
+   *
+   * 为什么需要它：注入按设计每会话只在首步做一次（见 inject.ts），于是面板上
+   * 新加/改过/删掉的记忆在**当前会话里永远不生效**——注入是记忆唯一的出口，
+   * 出口关着，用户改了也白改。注入侧拿这个版本号跟「上次注入时的版本」比，
+   * 变了就重新注入一次（一轮最多一次）。
+   *
+   * 只记「内容」不记「访问」：命中加分（applyHits）与整理标记（markConsolidated）
+   * 虽然也走写路径，但都不改变注入文本——把它们算进来会让每次注入都触发下一轮
+   * 重注，等于取消「仅首步注入」，token 成本翻倍。
+   *
+   * 随 entries.json 一起落盘：内存态是权威副本，落盘只为跨进程单调不回退
+   * （重启后从盘上读回，不会回到 0 而让旧会话误判成「内容变了」）。
+   */
+  private revisionValue = 0
+
+  /** 当前记忆内容版本号（同步可读：注入侧在 pre-step 里逐 step 比较）。 */
+  get revision(): number {
+    return this.revisionValue
+  }
 
   constructor(root = memoryHome()) {
     this.root = root
     const { data, warning } = loadEntriesWithRecovery(this.entriesFile())
     this.loadWarning = warning
     this.entries = migrateEntries(data.entries)
+    this.revisionValue = revisionOf(data)
   }
 
   /** 重新载入磁盘上的 entries.json，同步更新内存态（用于从云端同步还原后热生效）。 */
@@ -370,6 +488,13 @@ export class MemoryStore {
     this.dirty = false
     const { data } = loadEntriesWithRecovery(this.entriesFile())
     this.entries = migrateEntries(data.entries)
+    /*
+     * 重新载入意味着「盘上的记忆整体换了一份」（云端还原、手工改文件、另一进程
+     * 写入），即使盘上的 revision 不比内存大也必须让版本号变化：否则正在跑的
+     * 会话会认为上下文里的记忆副本仍然有效，热还原对它完全不可见。
+     */
+    const diskRevision = revisionOf(data)
+    this.revisionValue = diskRevision > this.revisionValue ? diskRevision : this.revisionValue + 1
   }
 
   // ── 路径 ────────────────────────────────────────────────────────────
@@ -456,7 +581,13 @@ export class MemoryStore {
     if (!this.dirty) return
     const run = this.flushInFlight.then(async () => {
       if (!this.dirty) return
-      await atomicWriteJson(this.entriesFile(), { version: 2, entries: this.entries })
+      // revision 与条目同一次写盘落下去：分成两个文件会出现「内容已更新、版本号
+      // 还是旧的」的中间态，重启后版本号倒退，注入侧的重注判定就失准。
+      await atomicWriteJson(this.entriesFile(), {
+        version: 2,
+        entries: this.entries,
+        revision: this.revisionValue,
+      })
       this.dirty = false
     })
     // 无论成败都让队列继续，但错误要原样抛给调用方去记日志/重试。
@@ -467,9 +598,17 @@ export class MemoryStore {
   /**
    * 修改内存态条目（fn 原地修改传入数组或返回替换数组），随后节流回刷。
    * 单线程下内存数组的同步操作天然原子，无需额外写串行队列。
+   *
+   * 默认推进 revision（记忆内容变了，已注入的副本就过时了）。`bumpRevision: false`
+   * 只留给**不改变注入内容**的记账写：命中加分、整理标记——它们每次注入都会跑，
+   * 算成内容变更等于每轮都重注。
    */
-  async mutateEntries<T>(fn: (entries: MemoryEntry[]) => Promise<T> | T): Promise<T> {
+  async mutateEntries<T>(
+    fn: (entries: MemoryEntry[]) => Promise<T> | T,
+    options?: { bumpRevision?: boolean },
+  ): Promise<T> {
     const result = await fn(this.entries)
+    if (options?.bumpRevision !== false) this.revisionValue += 1
     this.scheduleFlush()
     return result
   }
@@ -486,20 +625,34 @@ export class MemoryStore {
     content: string
     scope: 'global' | 'project'
     projectHash: string | null
+    /**
+     * 归属主体（schema v6）。缺省 `work`。
+     *
+     * 只影响「这条记忆属于谁」：id 会带上它，所以同一句话在两个 bot 下是两条。
+     * 调用方**不要**为了让主 bot 看得到而写成别的 owner——可见性由读取侧推导。
+     */
+    owner?: MemoryOwner
     tags?: string[]
     pinned?: boolean
     importance?: number
     lastHitAt?: string | null
     layer?: 'short' | 'long'
-    source?: 'extract' | 'manual'
+    source?: 'extract' | 'manual' | 'bot-working-memory'
     kind?: MemoryKind
     confidence?: number
-    provenance?: { sessionId?: string; turn?: number; snippet?: string }
+    provenance?: { sessionId?: string; turn?: number; userMessageId?: string; snippet?: string }
     /** 待确认（true = 挂起，不参与检索/注入/编译）。缺省 = 直接生效。 */
     pending?: boolean
+    /**
+     * 有效期天数（可选，见 MemoryEntry.ttlDays）。
+     *
+     * 只在**明确传值**时改：undefined 表示「不关心」——一次普通 upsert（面板改
+     * 标签、提取重复命中）不该顺手把用户手动设过的 ttlDays 抹掉。要清空传 0。
+     */
+    ttlDays?: number
   }): Promise<{ created: boolean; entry: MemoryEntry }> {
     return this.mutateEntries(entries => {
-      const id = entryIdOf(next.content, next.scope, next.projectHash)
+      const id = entryIdOf(next.content, next.scope, next.projectHash, next.owner)
       const existing = entries.find(entry => entry.id === id)
       const now = nowIso()
       let entry: MemoryEntry
@@ -528,6 +681,10 @@ export class MemoryStore {
             : next.pending
               ? { pending: true as const, pendingAt: revived.pendingAt ?? now }
               : { pending: undefined, pendingAt: undefined }),
+          // ttlDays 同款语义：undefined = 不关心（保留原值），0 = 显式清空。
+          ...(next.ttlDays === undefined
+            ? {}
+            : next.ttlDays > 0 ? { ttlDays: next.ttlDays } : { ttlDays: undefined }),
         }
         entries.splice(entries.indexOf(existing), 1, entry)
         return { created: false, entry }
@@ -537,6 +694,7 @@ export class MemoryStore {
         content: next.content,
         scope: next.scope,
         projectHash: next.scope === 'project' ? next.projectHash : null,
+        owner: next.owner,
         tags: next.tags ?? [],
         pinned: next.pinned ?? false,
         createdAt: now,
@@ -552,6 +710,7 @@ export class MemoryStore {
         provenance: next.provenance,
         embedding: undefined,
         ...(next.pending === true ? { pending: true as const, pendingAt: now } : {}),
+        ...(typeof next.ttlDays === 'number' && next.ttlDays > 0 ? { ttlDays: next.ttlDays } : {}),
       }
       entries.push(entry)
       return { created: true, entry }
@@ -584,7 +743,7 @@ export class MemoryStore {
         version: current.version + 1,
       }
       if (merged.scope === 'global') merged.projectHash = null
-      const nextId = entryIdOf(merged.content, merged.scope, merged.projectHash)
+      const nextId = entryIdOf(merged.content, merged.scope, merged.projectHash, ownerOf(merged))
       if (nextId === id) {
         entries[index] = merged
         return merged
@@ -620,6 +779,68 @@ export class MemoryStore {
       entries.splice(index, 1)
       return true
     })
+  }
+
+  /** 批量删除满足条件的条目；返回删除条数。 */
+  async removeEntriesWhere(predicate: (entry: MemoryEntry) => boolean): Promise<number> {
+    return this.mutateEntries(entries => {
+      let removed = 0
+      for (let index = entries.length - 1; index >= 0; index -= 1) {
+        if (!predicate(entries[index])) continue
+        entries.splice(index, 1)
+        removed += 1
+      }
+      return removed
+    })
+  }
+
+  /** 标记某一轮已撤回：抽取侧看到后不再写入该轮的记忆。 */
+  markTurnRecalled(sessionId: string | undefined, turn: number | undefined): void {
+    if (typeof sessionId !== 'string' || sessionId === '') return
+    if (typeof turn !== 'number' || !Number.isInteger(turn) || turn <= 0) return
+    this.recalledTurns.add(`${sessionId}#${turn}`)
+  }
+
+  /** 某一轮是否已撤回。 */
+  isTurnRecalled(sessionId: string | undefined, turn: number | undefined): boolean {
+    if (typeof sessionId !== 'string' || sessionId === '') return false
+    if (typeof turn !== 'number' || !Number.isInteger(turn) || turn <= 0) return false
+    return this.recalledTurns.has(`${sessionId}#${turn}`)
+  }
+
+  /** 标记某条真人消息已撤回（steer 插话场景，精确到消息而不是整轮）。 */
+  markMessageRecalled(sessionId: string | undefined, userMessageId: string | undefined): void {
+    if (typeof sessionId !== 'string' || sessionId === '') return
+    if (typeof userMessageId !== 'string' || userMessageId === '') return
+    this.recalledMessages.add(`${sessionId}#${userMessageId}`)
+  }
+
+  /** 某条真人消息是否已撤回。 */
+  isMessageRecalled(sessionId: string | undefined, userMessageId: string | undefined): boolean {
+    if (typeof sessionId !== 'string' || sessionId === '') return false
+    if (typeof userMessageId !== 'string' || userMessageId === '') return false
+    return this.recalledMessages.has(`${sessionId}#${userMessageId}`)
+  }
+
+  /**
+   * 清掉某会话的撤回墓碑（清空对话后调用）。
+   *
+   * 会话重置后 turn 号会从 1 重新开始；不清的话新会话的同一 turn 会被旧墓碑
+   * 误判成「已撤回」，表现为「这个 Bot 从此不再抽取记忆」。
+   */
+  clearTurnRecalls(sessionId?: string): void {
+    if (typeof sessionId !== 'string' || sessionId === '') {
+      this.recalledTurns.clear()
+      this.recalledMessages.clear()
+      return
+    }
+    const prefix = `${sessionId}#`
+    for (const key of [...this.recalledTurns]) {
+      if (key.startsWith(prefix)) this.recalledTurns.delete(key)
+    }
+    for (const key of [...this.recalledMessages]) {
+      if (key.startsWith(prefix)) this.recalledMessages.delete(key)
+    }
   }
 
   /**
@@ -661,7 +882,7 @@ export class MemoryStore {
     tags?: string[]
     importance?: number
     kind?: MemoryKind
-    provenance?: { sessionId?: string; turn?: number; snippet?: string }
+    provenance?: { sessionId?: string; turn?: number; userMessageId?: string; snippet?: string }
   }): Promise<{ deprecatedId: string; newId: string; entry: MemoryEntry } | undefined> {
     const content = input.content.trim()
     if (content === '') throw new Error('content 不能为空')
@@ -669,7 +890,7 @@ export class MemoryStore {
     if (target === undefined) return undefined
     if (target.deprecated === true) return undefined
 
-    const nextId = entryIdOf(content, target.scope, target.projectHash)
+    const nextId = entryIdOf(content, target.scope, target.projectHash, ownerOf(target))
     // 内容没变（或只是空白差异）：无修订空间。
     if (nextId === input.id) return undefined
 
@@ -795,7 +1016,7 @@ export class MemoryStore {
         count += 1
       }
       return count
-    })
+    }, { bumpRevision: false }) // 加分不改变注入文本：算成内容变更会让每次注入都触发下一轮重注
   }
 
   /**
@@ -821,13 +1042,15 @@ export class MemoryStore {
         count += 1
       }
       return count
-    })
+    }, { bumpRevision: false }) // 整理标记同样只是记账，内容没变
   }
 
   /** 原子替换全部条目（ticker 每日编译等批量场景；fn 返回新数组）。 */
   async replaceEntries(fn: (entries: MemoryEntry[]) => Promise<MemoryEntry[]> | MemoryEntry[]): Promise<MemoryEntry[]> {
     const next = await fn(this.entries)
     this.entries = next
+    // 批量替换（含历史版本回滚、整理产出）必然改变注入内容，直接推进版本号。
+    this.revisionValue += 1
     this.scheduleFlush()
     return next
   }
@@ -1410,13 +1633,31 @@ export function summarize(content: string, max = 80): string {
 
 // ── schema v1 → v2 迁移与记忆类型推断 ────────────────────────────────
 
+/**
+ * entries.json 的落盘载荷。
+ *
+ * `revision` 是后加的可选字段（旧文件没有），语义见 `MemoryStore.revision`。
+ */
+interface EntriesPayload {
+  version: 1 | 2
+  entries: unknown
+  /** 记忆内容版本号；缺失按 0 读。 */
+  revision?: unknown
+}
+
 /** 加载结果：数据 + 需要人看见的告警（空 = 一切正常）。 */
 interface LoadOutcome {
-  data: { version: 1 | 2; entries: unknown }
+  data: EntriesPayload
   warning: string
 }
 
-const EMPTY_STORE: { version: 1 | 2; entries: unknown } = { version: 2, entries: [] }
+const EMPTY_STORE: EntriesPayload = { version: 2, entries: [], revision: 0 }
+
+/** 从落盘载荷里取 revision（脏数据 / 旧文件一律按 0）。 */
+function revisionOf(data: EntriesPayload): number {
+  const value = data.revision
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0
+}
 
 /**
  * 加载 entries.json，带三级恢复链。
@@ -1442,7 +1683,7 @@ function loadEntriesWithRecovery(file: string): LoadOutcome {
   }
   if (isHealthyPayload(raw)) {
     try {
-      return { data: JSON.parse(raw) as { version: 1 | 2; entries: unknown }, warning: '' }
+      return { data: JSON.parse(raw) as EntriesPayload, warning: '' }
     } catch {
       // isHealthyPayload 已经 parse 过一遍，这里不该失败；真失败了按坏文件处理。
     }
@@ -1452,7 +1693,7 @@ function loadEntriesWithRecovery(file: string): LoadOutcome {
     try {
       const backupRaw = readFileSync(snapshot, 'utf8')
       if (!isHealthyPayload(backupRaw)) continue
-      const data = JSON.parse(backupRaw) as { version: 1 | 2; entries: unknown }
+      const data = JSON.parse(backupRaw) as EntriesPayload
       // 恢复后立刻把主文件写回好的内容，否则下一次写又会以坏文件为基线做快照。
       try {
         renameSync(file, file + '.corrupt-' + new Date().toISOString().replace(/[:.]/g, '-'))
@@ -1504,20 +1745,46 @@ function inferKind(tags: string[] | undefined): MemoryKind {
   return 'fact'
 }
 
-/** v1 → v2 迁移：补 version/confidence/verified/kind（容错坏行）。 */
-function migrateEntries(entries: unknown): MemoryEntry[] {
+/**
+ * 存量条目迁移（v1 → v2 → … → v6）：白名单式重建 + 补 owner + 重算 id（容错坏行）。
+ *
+ * 导出供 workbench-sync 还原时归一，保证磁盘/内存态与云端包版本一致：云端包可能是
+ * v5（无 owner、旧 id 算法），落盘前不跑一遍这里，`reload()` 后内存态会按新算法
+ * 重算出一套与磁盘不同的 id。
+ *
+ * ## schema v6：owner 与 id 重算
+ *
+ * v6 起 id 含 owner（`mem_sha1(owner|scope|projectHash|content)`）。所以每次加载都要
+ * 把 id 归位——这既是升级迁移，也是幂等校验：算出来一样就不动。
+ *
+ * 归属判定顺序：落盘字段（合法才认）→ `provenance.sessionId` → `work`。
+ * 之所以允许落盘字段优先，是因为「同内容不同归属」在 v6 是合法状态（两个 bot 各记
+ * 一条），不能让迁移把它们合并。
+ *
+ * `supersededBy` 存的是**别的条目的 id**，id 一变软废弃链就会指向不存在的条目，
+ * 表现为「被取代的旧记忆在面板里既不在正文也不在回收站」。所以第二遍统一改指。
+ */
+export function migrateEntries(entries: unknown): MemoryEntry[] {
   if (!Array.isArray(entries)) return []
   const out: MemoryEntry[] = []
+  /** 旧 id → 新 id：用于重写 supersededBy。 */
+  const idRemap = new Map<string, string>()
   for (const raw of entries) {
     if (typeof raw !== 'object' || raw === null) continue
     const entry = raw as Partial<MemoryEntry>
     if (typeof entry.id !== 'string' || typeof entry.content !== 'string') continue
     const source = entry.source === 'manual' ? 'manual' as const : 'extract' as const
+    const scope = entry.scope === 'global' ? 'global' as const : 'project' as const
+    const projectHash = scope === 'project' ? (typeof entry.projectHash === 'string' ? entry.projectHash : null) : null
+    const owner = isMemoryOwner(entry.owner) ? entry.owner : ownerOfSessionId(entry.provenance?.sessionId)
+    const id = entryIdOf(entry.content, scope, projectHash, owner)
+    if (id !== entry.id) idRemap.set(entry.id, id)
     out.push({
-      id: entry.id,
+      id,
       content: entry.content,
-      scope: entry.scope === 'global' ? 'global' : 'project',
-      projectHash: entry.scope === 'project' ? (typeof entry.projectHash === 'string' ? entry.projectHash : null) : null,
+      scope,
+      projectHash,
+      owner,
       tags: Array.isArray(entry.tags) ? entry.tags.filter((tag): tag is string => typeof tag === 'string') : [],
       pinned: entry.pinned === true,
       createdAt: typeof entry.createdAt === 'string' ? entry.createdAt : nowIso(),
@@ -1536,6 +1803,12 @@ function migrateEntries(entries: unknown): MemoryEntry[] {
       // 表现为「整理永远从最早那批开始」的饥饿修不掉。未整理过时留 undefined，
       // JSON.stringify 会忽略它，正好等于「没整理过」的语义。
       lastConsolidatedAt: typeof entry.lastConsolidatedAt === 'string' ? entry.lastConsolidatedAt : undefined,
+      // schema v7：临时信息有效期（仅正数保留；undefined=永久，落盘不冗余）。
+      // 与 lastConsolidatedAt 同一个坑：白名单重建漏带一次，ttlDays 会在下次
+      // 重启时静默消失，过期的「今天要发 36 条」又会被当成永久事实注入。
+      ...(typeof entry.ttlDays === 'number' && Number.isFinite(entry.ttlDays) && entry.ttlDays > 0
+        ? { ttlDays: entry.ttlDays }
+        : {}),
       // disabled 是可选字段：仅 true 时保留（undefined=启用，落盘不冗余）。
       ...(entry.disabled === true ? { disabled: true } : {}),
       // schema v5：待确认字段（仅 pending=true 时保留，undefined=已生效）。
@@ -1558,6 +1831,17 @@ function migrateEntries(entries: unknown): MemoryEntry[] {
           }
         : {}),
     })
+  }
+  /*
+   * 第二遍：软废弃链改指新 id。
+   * 只有真的发生过 id 变化时才需要；没有变化时整段是零开销的空转。
+   */
+  if (idRemap.size > 0) {
+    for (const entry of out) {
+      if (typeof entry.supersededBy !== 'string') continue
+      const mapped = idRemap.get(entry.supersededBy)
+      if (mapped !== undefined) entry.supersededBy = mapped
+    }
   }
   return out
 }

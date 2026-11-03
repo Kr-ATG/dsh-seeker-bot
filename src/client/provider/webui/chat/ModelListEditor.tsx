@@ -72,8 +72,12 @@ export const chatCopy = {
   supportsImageGenHint: '声明该模型可生成图片，生图候选列表将标注「生图」。',
   supportsVideoGen: '生视频',
   supportsVideoGenHint: '声明该模型可生成视频，生视频候选列表将标注「生视频」。',
-  supportsSpeech: '语音',
-  supportsSpeechHint: '声明该模型可输出语音（OpenAI 兼容 /audio/speech），语音播报的「模型语音」引擎可选它。',
+  /*
+   * 「语音」能力开关已删（2026-11-03）：它标记的是「该模型能走 OpenAI 兼容的
+   * /audio/speech 输出语音」，用于旧版「模型语音」TTS 引擎。全双工通话改成
+   * Realtime API 之后那条链路整条没了，开关没有任何消费者，留着只会让人以为
+   * 勾了它通话就会换音色（实际换音色在「实时语音」的 Live 供应商里）。
+   */
   capabilityHint: '模型能力（手动开关声明）',
   detectReasoning: '检测推理等级',
   detectReasoningTitle: '优先读取供应商 /models 公布的 reasoning_levels / supported_reasoning_levels（magpie 等网关已公布），网关没公布时才回落实测；结果自动保存。视觉/生图/生视频请用行内复选框手动声明，不做实测。',
@@ -858,7 +862,7 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
               const mods: string[] = []
               if (model.image === true) mods.push('image')
               if (model.video === true) mods.push('video')
-              if (model.speech === true) mods.push('speech')
+              // 旧的 speech 标记不再读（那条 /audio/speech 链路已随 Realtime 改造删除）
               if (mods.length > 0) next[`${provider.provider}/${model.id}`] = mods
             }
           }
@@ -888,7 +892,7 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
    * 回滚不能用 render 闭包里的 `caps`(它是本次点击时的值,连按两个模型会互相
    * 回滚),所以显式记一份 prev;同一次点击里的多次调用共用它。
    */
-  const toggleCap = (index: number, cap: 'image' | 'video' | 'speech', on: boolean): void => {
+  const toggleCap = (index: number, cap: 'image' | 'video', on: boolean): void => {
     const key = capKeyOf(index)
     if (!key) return
     const prev = caps
@@ -1267,13 +1271,6 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
                 checked={(caps[capKeyOf(index)] ?? []).includes('video')}
                 disabled={disabled || capKeyOf(index) === ''}
                 onToggle={(on) => { toggleCap(index, 'video', on) }}
-              />
-              <InlineCapCheck
-                label={chatCopy.supportsSpeech}
-                hint={chatCopy.supportsSpeechHint}
-                checked={(caps[capKeyOf(index)] ?? []).includes('speech')}
-                disabled={disabled || capKeyOf(index) === ''}
-                onToggle={(on) => { toggleCap(index, 'speech', on) }}
               />
             </div>
             <button

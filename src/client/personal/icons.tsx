@@ -42,6 +42,20 @@ export function IconPlus({ size, className }: IconProps): JSX.Element {
   return <Svg size={size} className={className}><path d="M12 5v14M5 12h14" /></Svg>
 }
 
+/** 机器人头像（新建 Bot 入口 / 创建弹窗的英雄图标）。 */
+export function IconBot({ size, className }: IconProps): JSX.Element {
+  return (
+    <Svg size={size} className={className}>
+      <rect x="3.6" y="7.4" width="16.8" height="12.1" rx="4.2" />
+      <path d="M12 3.4v4" />
+      <circle cx="8.7" cy="12.6" r="1" fill="currentColor" stroke="none" />
+      <circle cx="15.3" cy="12.6" r="1" fill="currentColor" stroke="none" />
+      <path d="M9.4 16.2h5.2" />
+      <path d="M3.6 12.2H2.2M20.4 12.2h1.4" />
+    </Svg>
+  )
+}
+
 export function IconPhone({ size, className }: IconProps): JSX.Element {
   return <Svg size={size} className={className}><path d="M5.2 3.8h3.1l1.4 3.9-2 1.4a12.5 12.5 0 0 0 5.2 5.2l1.4-2 3.9 1.4v3.1a2.4 2.4 0 0 1-2.6 2.4C9.3 18.7 5.3 14.7 2.8 6.4a2.4 2.4 0 0 1 2.4-2.6Z" /></Svg>
 }
@@ -170,6 +184,16 @@ export function IconPause({ size, className }: IconProps): JSX.Element {
   return <Svg size={size} className={className}><path d="M8 5v14M16 5v14" /></Svg>
 }
 
+/**
+ * 停止（实心方块）。
+ *
+ * 用填充而不是描边：输入框里只有 17px，三条描边会糊成一团；实心块靠颜色
+ * （currentColor，由样式表给红）就能说明「这一下会中断」，不必再画细节。
+ */
+export function IconStop({ size, className }: IconProps): JSX.Element {
+  return <Svg size={size} className={className}><rect x="7.2" y="7.2" width="9.6" height="9.6" rx="2.2" fill="currentColor" stroke="none" /></Svg>
+}
+
 export function IconPlay({ size, className }: IconProps): JSX.Element {
   return <Svg size={size} className={className}><path d="M7 4.5 19 12 7 19.5Z" /></Svg>
 }
@@ -192,6 +216,26 @@ export function IconArrowRight({ size, className }: IconProps): JSX.Element {
 
 export function IconMessage({ size, className }: IconProps): JSX.Element {
   return <Svg size={size} className={className}><path d="M20.5 11.5a7.8 7.8 0 0 1-8.5 7.7 9.7 9.7 0 0 1-3-.5L4 20.5l1.3-4.2A7.8 7.8 0 0 1 12 3.7a7.8 7.8 0 0 1 8.5 7.8Z" /></Svg>
+}
+
+/**
+ * 引用：把这条消息带进输入框当上下文（气泡侧边的图标按钮用）。
+ *
+ * 用**实心双引号**而不是回转箭头：箭头在聊天界面里是「回复」的通用符号，
+ * 放在这里会让人以为点下去会另起一条消息。实心形状在 18px 下也不会糊。
+ */
+export function IconQuote({ size, className }: IconProps): JSX.Element {
+  return (
+    <Svg size={size} className={className}>
+      <path fill="currentColor" d="M9.6 4.6C5.4 6.3 2.8 9.4 2.8 13c0 2.8 1.7 4.6 4 4.6 2.1 0 3.6-1.5 3.6-3.5 0-1.9-1.3-3.2-3.1-3.2-.4 0-.8 0-1.1.1.5-1.9 1.9-3.4 4-4.3l-.6-2.1Z" />
+      <path fill="currentColor" d="M19.6 4.6c-4.2 1.7-6.8 4.8-6.8 8.4 0 2.8 1.7 4.6 4 4.6 2.1 0 3.6-1.5 3.6-3.5 0-1.9-1.3-3.2-3.1-3.2-.4 0-.8 0-1.1.1.5-1.9 1.9-3.4 4-4.3l-.6-2.1Z" />
+    </Svg>
+  )
+}
+
+/** 撤回：撤销箭头（不是刷新）。刷新表示「重来一次」，撤回是「退回去」。 */
+export function IconUndo({ size, className }: IconProps): JSX.Element {
+  return <Svg size={size} className={className}><path d="M9 14 4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></Svg>
 }
 
 export function IconMemory({ size, className }: IconProps): JSX.Element {

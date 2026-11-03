@@ -212,7 +212,7 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
           <span className={syncCss.eyebrow}><i />Workbench Sync</span>
           <h1 className={syncCss.title}>同步设置 <em>/ 工作台资产双向漫游</em></h1>
           <p className={syncCss.hint}>
-            将档案（账号密码与证件）、长期记忆库、自定义技能（SKILL.md 及其开关状态）、MCP 配置与大模型供应商配置（路由、模型能力、网络代理、网页搜索与抓取后端、API 密钥）进行端侧加盐强加密后推送到您的 GitHub 私库，实现跨机一键漫游。
+            将档案（账号密码与证件）、长期记忆库（含 Work 与各 Bot 归属）、自定义技能（SKILL.md 及其开关状态）、MCP 配置与大模型供应商配置（路由、模型能力、网络代理、网页搜索与抓取后端、API 密钥，以及实时语音的 Live 供应商与通话默认）进行端侧加盐强加密后推送到您的 GitHub 私库，实现跨机一键漫游。
           </p>
         </div>
         <div className={syncCss.headActions}>
@@ -274,6 +274,12 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
             <span className={syncCss.statSub}>
               档案 {formatBytes(status?.localVaultBytes ?? 0)} · 记忆 {formatBytes(status?.localMemoryBytes ?? 0)}
             </span>
+            {/* 记忆归属（schema v6）：只给总条数看不出其中多少条属于某个 Bot，
+                换机后最容易困惑的就是「记忆怎么少了一半」——那其实是归属过滤。
+                字段来自旧宿主时可能缺失，统一 ?? 0 兜底，绝不显示 undefined。 */}
+            <span className={syncCss.statSub}>
+              记忆 {status?.localMemoryEntries ?? 0} 条（Work {status?.localMemoryWorkEntries ?? 0} · Bot {status?.localMemoryBotEntries ?? 0}）
+            </span>
           </div>
 
           <div className={syncCss.stat}>
@@ -282,7 +288,7 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
               {formatBytes((status?.localSkillsBytes ?? 0) + (status?.localMcpBytes ?? 0) + (status?.localProvidersBytes ?? 0))}
             </span>
             <span className={syncCss.statSub}>
-              技能 {formatBytes(status?.localSkillsBytes ?? 0)} · MCP {status?.localMcpEntries ?? 0} 个 · 供应商 {status?.localProvidersCount ?? 0} 家
+              技能 {formatBytes(status?.localSkillsBytes ?? 0)} · MCP {status?.localMcpEntries ?? 0} 个 · 供应商 {status?.localProvidersCount ?? 0} 家 · Live 供应商 {status?.localLiveVendors ?? 0} 家
             </span>
             <span className={syncCss.statSub}>
               网页搜索 {status?.localWebSearchProvider !== undefined && status.localWebSearchProvider !== '' ? status.localWebSearchProvider : '未显式配置（跟随 base）'}
@@ -520,7 +526,10 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
               />
               <span>档案数据</span>
             </label>
-            <label className={syncCss.checkboxRow}>
+            <label
+              className={syncCss.checkboxRow}
+              title="entries.json 里的全部记忆条目：schema v6 起每条带 owner 归属（work / bot:<id>），恢复时按 owner 原样保留，不会把某个 Bot 的记忆并进 Work"
+            >
               <input
                 type="checkbox"
                 checked={includeMemory}
@@ -549,7 +558,7 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
             </label>
             <label
               className={syncCss.checkboxRow}
-              title="大模型供应商路由、模型列表、API 密钥凭据、网络代理、模型能力配置，以及网页搜索与抓取后端的选择（含 anysearch-auto 降级链；端侧强加密，安全跨机漫游）"
+              title="大模型供应商路由、模型列表、API 密钥凭据、网络代理、模型能力配置，网页搜索与抓取后端的选择（含 anysearch-auto 降级链），以及实时语音的 Live 供应商与通话默认（realtime-config.json：供应商列表、默认供应商、音色、语速、网页搜索开关；端侧强加密，安全跨机漫游）"
             >
               <input
                 type="checkbox"

@@ -122,7 +122,13 @@ function usePinToConversationBottom(
   }, [active, ref])
 }
 
-const DotMatrix = memo(function DotMatrix({ cols, rows }: { readonly cols: number; readonly rows: number }): JSX.Element {
+/**
+ * 点阵格子。
+ *
+ * 导出是为了让「文档生成中」的占位复用同一套点阵——用户明确要求
+ * 「只要是生成的都要这种点阵图」，两处各画一套迟早会走样。
+ */
+export const DotMatrix = memo(function DotMatrix({ cols, rows }: { readonly cols: number; readonly rows: number }): JSX.Element {
   return (
     <div
       className={`${NS}__dots`}

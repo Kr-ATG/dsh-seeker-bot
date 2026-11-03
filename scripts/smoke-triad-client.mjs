@@ -261,138 +261,6 @@ try {
   fail(`apply(ctx) threw: ${error?.stack ?? error}`)
 }
 
-// ── Token 活动：52 周贡献热力模型（纯函数断言） ─────────────────────────
-const { buildActivityGrid, activityColor, ACTIVITY_COLUMNS: ACTIVITY_COLS } = mod
-if (typeof buildActivityGrid !== 'function' || typeof activityColor !== 'function') {
-  fail('buildActivityGrid / activityColor must be exported from the client bundle')
-} else if (ACTIVITY_COLS !== 52) {
-  fail(`Token 活动 must span 52 week columns, got ${ACTIVITY_COLS}`)
-} else {
-  pass('Token 活动 exports 52-week grid model')
-}
-
-const weekKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-const weekdayIdx = (key) => { const [y, m, d] = key.split('-').map(Number); return (new Date(y, m - 1, d).getDay() + 6) % 7 }
-const fixedToday = new Date(2026, 7, 23) // 2026-08-23（周日）
-const synthDays = []
-for (let i = 0; i < 60; i += 1) {
-  const d = new Date(2026, 7, 23 - i)
-  const wd = (d.getDay() + 6) % 7
-  const weekend = wd === 0 || wd === 6
-  synthDays.push({ date: weekKey(d), tokens: weekend ? 4000 : 90000 + (i % 9) * 55000, requests: 3 + (i % 5), cacheHitRate: i % 4 === 0 ? 0 : 87.3 })
-}
-
-if (typeof buildActivityGrid === 'function') {
-  const snap = buildActivityGrid(synthDays, 'day', fixedToday)
-  if (snap.columns !== 52 || snap.cells.length !== 52 * 7) fail(`grid shape must be 52 x 7, got ${snap.cells.length} cells`)
-  else if (snap.rows.length !== 7 || snap.rows.some((row) => row.length !== 52)) fail('rows must be 7 rows of 52')
-  else pass('grid shape is 52 weeks x 7 weekday rows')
-
-  const todayCell = snap.cells.find((c) => c.key === '2026-08-23')
-  if (todayCell === undefined || todayCell.isToday !== true || todayCell.column !== 51) fail('today must sit in the last column')
-  else pass('grid right-aligns on the current week')
-
-  const futureCount = snap.cells.filter((c) => !c.past).length
-  if (futureCount !== 6 - weekdayIdx('2026-08-23')) fail(`only the current week holds future placeholders, got ${futureCount}`)
-  else pass('future days are in-week placeholders only')
-
-  const byDate = new Map(synthDays.map((d) => [d.date, d.tokens]))
-  const dayOk = snap.cells.every((c) => c.tokens === (byDate.get(c.key) ?? 0))
-  if (!dayOk) fail('day mode must carry each day own tokens')
-  else pass('day mode carries per-day tokens')
-
-  const weekSnap = buildActivityGrid(synthDays, 'week', fixedToday)
-  let weekOk = true
-  for (let c = 0; c < 52; c += 1) {
-    if (new Set(weekSnap.rows.map((row) => row[c].tokens)).size !== 1) { weekOk = false; break }
-  }
-  if (!weekOk) fail('week mode must share one Monday-start total per column')
-  else pass('week mode shares one total per column')
-
-  const cumSnap = buildActivityGrid(synthDays, 'cumulative', fixedToday)
-  let prev = -1
-  let cumOk = true
-  for (const cell of cumSnap.cells) {
-    if (cell.tokens < prev) { cumOk = false; break }
-    prev = cell.tokens
-  }
-  if (!cumOk) fail('cumulative must never decrease')
-  else pass('cumulative mode is monotonic')
-
-  const expectedTotal = synthDays.reduce((sum, d) => sum + d.tokens, 0)
-  if (cumSnap.cells[cumSnap.cells.length - 1].tokens !== expectedTotal) fail('cumulative tail must equal the token total')
-  else pass('cumulative tail equals total tokens')
-
-  const expectedPeak = Math.max(...synthDays.map((d) => d.tokens))
-  if (snap.peakDay === null || snap.peakTokens !== expectedPeak) fail(`peak day must be the busiest day, expected ${expectedPeak}`)
-  else pass('peak-day detection ok')
-
-  if (snap.activeDays !== synthDays.filter((d) => d.tokens > 0).length) fail('activeDays must count non-zero days')
-  else pass('active-day count ok')
-}
-
-if (typeof activityColor === 'function') {
-  const alphaOf = (t, m) => Number(activityColor(t, m).match(/rgba\(\d+, \d+, \d+, ([\d.]+)\)/)?.[1] ?? -1)
-  if (!activityColor(0, 100).includes('color-mix')) fail('zero must render the neutral gray fill')
-  else if (alphaOf(1e9, 1e9) !== 1) fail('the busiest cell must reach alpha 1')
-  else {
-    const ramp = [1, 1000, 100000, 10000000].map((t) => alphaOf(t, 10000000))
-    if (ramp.some((a, i) => i > 0 && a <= ramp[i - 1])) fail(`color ramp must be monotonic: ${ramp.join(',')}`)
-    else if (ramp[0] !== 0.25) fail(`the quietest cell must start at alpha 0.25, got ${ramp[0]}`)
-    else pass(`activity color ramp ok: ${ramp.map((a) => a.toFixed(3)).join(' -> ')}`)
-  }
-}
-
-// ── 用量筛选：下拉选项 id ↔ filterDaysByScope 比对值必须同口径 ──────────
-//
-// 真故障：模型下拉的 id 曾经是剥掉供应商前缀的短名（`deepseek-v4.1-flash`），
-// 而 filterDaysByScope 拿它跟完整 model 串（`wb/deepseek-v4.1-flash`）全等比较
-// —— 选任何模型都筛不出数据，四格归零、热力图全空、元信息显示
-// 「有量 0 天 · 0 个模型」；同时三个供应商下的同名模型会先在 Map 里被合并成
-// 一条，用户根本选不到其中任何一个。
-//
-// 口径固定为：**供应商选项 id = 前缀段；模型选项 id = 完整 model 串**。
-// 两条都必须能被 filterDaysByScope 原样吃下，这里用「选它筛出来的总量 =
-// 下拉里标的量」闭环断言，比断言字符串形状更抗改。
-{
-  const { collectModels, collectProviders, filterDaysByScope } = mod
-  if (typeof collectModels !== 'function' || typeof collectProviders !== 'function' || typeof filterDaysByScope !== 'function') {
-    fail('collectModels / collectProviders / filterDaysByScope must be exported from the client bundle')
-  } else {
-    const filterDays = [{
-      date: '2026-10-01',
-      inputTokens: 100, outputTokens: 50, cacheReadTokens: 10, cacheWriteTokens: 5, tokens: 165, cacheHitRate: 9,
-      models: [
-        { model: 'group/auto-deepseek-v4-1-flash', inputTokens: 100, outputTokens: 50, cacheReadTokens: 10, cacheWriteTokens: 5, tokens: 165, cacheHitRate: 9 },
-        { model: 'workbuddy-ai/deepseek-v4.1-flash', inputTokens: 20, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, tokens: 30, cacheHitRate: 0 },
-        { model: 'workbuddy/deepseek-v4.1-flash', inputTokens: 7, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0, tokens: 10, cacheHitRate: 0 },
-        { model: 'plainmodel', inputTokens: 5, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, tokens: 6, cacheHitRate: 0 },
-      ],
-    }]
-
-    const models = collectModels(filterDays, null)
-    const providers = collectProviders(filterDays)
-    const mismatched = [
-      ...models.map((o) => ['model', o]),
-      ...providers.map((o) => ['provider', o]),
-    ].filter(([kind, o]) => {
-      const got = filterDaysByScope(filterDays, kind === 'provider' ? o.id : null, kind === 'provider' ? null : o.id)[0].tokens
-      return got !== o.tokens
-    })
-
-    // 同名不同供应商的模型必须是两条独立选项（合并 = 用户选不到其中任何一个）。
-    const sameName = models.filter((m) => m.label === 'deepseek-v4.1-flash')
-
-    if (mismatched.length > 0) {
-      fail(`下拉选项 id 与 filterDaysByScope 口径不一致（选了筛不出数据）：${mismatched.map(([k, o]) => `${k}:${o.id}`).join(' / ')}`)
-    } else if (sameName.length !== 2) {
-      fail(`同名不同供应商的模型必须各自独立成项，期望 2 条 deepseek-v4.1-flash，实际 ${sameName.length} 条`)
-    } else {
-      pass(`用量筛选口径一致：${models.length} 个模型 / ${providers.length} 个供应商选项都能筛出下拉里标的量（同名模型各自独立）`)
-    }
-  }
-}
-
 // ── 人话行动流：工具调用 → 中文人话 + 时间线组装 ────────────────────────
 //
 // extractIntent 已随「执行过程播报」整条通道下掉（2026-10-01）：承载它的预告行
@@ -1029,8 +897,9 @@ if (typeof toPlainStep !== 'function' || typeof buildPlainTimeline !== 'function
   // （顶栏邮件按钮、邮件卡片与邮箱面板一并删除，不再有入口搬迁这件事）。
   // 2026-10-21：'soul' 随灵魂模块整块删除。这里只钉「联合类型里确实
   // 列了这几个分类」，不再把已删除的旧分类当成员。
-  // 2026-11：'connectors' 插在 skills 与 usage 之间，断言改成「这四个都在、顺序不变」。
-  if (!/'memory' \| 'skills'( \| 'connectors')? \| 'usage' \| 'gallery'/.test(hubSrc)) {
+  // 2026-11：'connectors' 插在 skills 与 gallery 之间；用量工作台已下线，
+  // 断言改成「memory / skills / connectors / gallery 都在、顺序不变」。
+  if (!/'memory' \| 'skills'( \| 'connectors')? \| 'gallery'/.test(hubSrc)) {
     fail('WorkbenchTab 联合类型必须含 gallery（工作台第四 Tab）')
   } else if (!/<GalleryPanel[\s>]/.test(hubSrc)) {
     // 断言放宽到「渲染了 GalleryPanel」：key 后来移到了外层包裹 div

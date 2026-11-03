@@ -1,7 +1,7 @@
 /**
  * dsh-seeker-bot — 插件「包含的组件」目录（原生行开关的唯一真相）。
  *
- * 用户在插件页面要看到的不是 64 个细项，而是**组件级**的一行一开关：
+ * 用户在插件页面要看到的不是五十多个细项，而是**组件级**的一行一开关：
  *
  *   包含的组件  共 N 个 · N 运行中
  *   ├ 对话增强        [运行中 ●—]
@@ -14,9 +14,9 @@
  * dsh-seeker-bot/packages/<id> 的 host-only 子模块），插件页面就会自动出现
  * 一行带「运行中」开关的组件。**行开关是官方原生的**，不经过本插件自绘面板。
  *
- * 细粒度功能（src/shared/features.ts 的 64 项）仍然保留，但它们只是**内部
+ * 细粒度功能（src/shared/features.ts 的五十多项）仍然保留，但它们只是**内部
  * 实现视角**：每项映射到下面某一个组件，组件行关掉时该组件的全部 UI / 宿主
- * 行为一起停。这样既满足「组件级开关」，又不用把 64 个开关塞给用户。
+ * 行为一起停。这样既满足「组件级开关」，又不用把五十多个开关塞给用户。
  *
  * ⚠ 新增组件 = 三件事：这里加一行、cordis.patch.yml 加一条 insert、
  * packages/<id>/ 下放一个空的 host-only 插件与 locale/zh.json（行标题与说明
@@ -34,7 +34,6 @@ export type ComponentId =
   | 'memory'
   | 'skills'
   | 'connectors'
-  | 'usage'
   | 'gallery'
   | 'vault'
   | 'prompt'
@@ -66,7 +65,6 @@ export const COMPONENTS: ReadonlyArray<ComponentDef> = [
   { id: 'memory', rowId: 'dsh-seeker-bot-memory', title: '记忆工作台', description: '自动沉淀的长期记忆：按项目 / 全局分层、检索、置顶与按工作区开关。', defaultEnabled: true },
   { id: 'skills', rowId: 'dsh-seeker-bot-skills', title: 'SKILL 工作台', description: '技能（Skill）安装、停用、分类、查看说明与技能包管理。', defaultEnabled: true },
   { id: 'connectors', rowId: 'dsh-seeker-bot-connectors', title: '连接器', description: 'MCP 连接器市场：精选目录、搜索分类与一键安装（写 cordis.patch.yml）。', defaultEnabled: true },
-  { id: 'usage', rowId: 'dsh-seeker-bot-usage', title: '用量工作台', description: 'Token / 请求 / 缓存 / 输出速度的观测大盘与 52 周活动热力。', defaultEnabled: true },
   { id: 'gallery', rowId: 'dsh-seeker-bot-gallery', title: '画廊', description: '跨会话的图片 / 网页 / 视频 / 文档 / 表格产出物索引。', defaultEnabled: true },
   { id: 'vault', rowId: 'dsh-seeker-bot-vault', title: '档案', description: '账号密码 / 支付方式 / 联系方式 / 证件的加密档案与到期提醒。', defaultEnabled: true },
   { id: 'prompt', rowId: 'dsh-seeker-bot-prompt', title: '系统提示词', description: '查看本次会话真正发送给模型的系统提示词快照。', defaultEnabled: true },
@@ -139,7 +137,6 @@ export const FEATURE_COMPONENT: Readonly<Record<string, ComponentId>> = {
   'work.memory': 'memory',
   'work.skills': 'skills',
   'work.connectors': 'connectors',
-  'work.usage': 'usage',
   'work.gallery': 'gallery',
   'work.vault': 'vault',
   'work.prompt': 'prompt',

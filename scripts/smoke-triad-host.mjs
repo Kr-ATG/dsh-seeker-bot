@@ -12,8 +12,8 @@
  * Usage: node scripts/smoke-triad-host.mjs
  */
 
-import { resolve, dirname } from 'node:path'
-import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { resolve, dirname, join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -176,9 +176,9 @@ const ctx = {
   },
 }
 
-// 注意：`applyTriadHost` 是 async（usage host 与 skill-toggles 都 await），而主插件
+// 注意：`applyTriadHost` 是 async（skills host 与 skill-toggles 都 await），而主插件
 // 的 `ctx.inject([...], cb)` 回调是同步的、不返回 promise。所以工作台里凡是被
-// await 的挂载（usage/skills、skill-toggles、skill-health、mcp-*）在同步 apply 期间
+// await 的挂载（skills、skill-toggles、skill-health、mcp-*）在同步 apply 期间
 // **根本没跑完**——routes 里看不到它们不是缺陷，是同步回调的固有语义。
 //
 // 等待方式必须是**真实时间**的轮询，不能只等一个 setImmediate（微任务拍）：
@@ -192,7 +192,7 @@ try {
    * 等待条件必须覆盖**整条挂载链**，不能只等第一个出现的路由。
    *
    * 原先只等 /api/dsh-memory，可它在 applyTriadHost 里是**靠前**挂的，后面的
-   * usage/skills、skill-toggles、mcp-*、画廊都还在各自的 await 里排着；循环一
+   * skills、skill-toggles、mcp-*、画廊都还在各自的 await 里排着；循环一
    * 看到 memory 就退出，画廊（装配顺序最后一块）于是有一半概率还没注册 ——
    * 表现为同一份 bundle 连跑 6 次里有 1~2 次红在
    * 「media gallery route registered」。这是**测试竞态**，不是挂载缺陷：
@@ -203,7 +203,6 @@ try {
    */
   const mustMount = [
     '/api/dsh-memory',
-    '/api/usage-stats',
     '/api/skill-manager',
     '/api/triad/mcp-status',
     '/api/triad/gallery',
@@ -216,7 +215,7 @@ try {
   while (Date.now() < deadline && !allMounted()) {
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
-  pass('deferred async mounts (memory/usage/skills/toggles/mcp/gallery) settled')
+  pass('deferred async mounts (memory/skills/toggles/mcp/gallery) settled')
 } catch (error) {
   fail(`apply(ctx) threw: ${error?.stack ?? error}`)
 }
@@ -233,7 +232,6 @@ console.log(`\n  listeners (${listeners.size}): ${[...listeners.keys()].join(', 
 
 const need = (cond, msg) => (cond ? pass(msg) : fail(msg))
 need(paths.some(p => p.startsWith('/api/dsh-memory')), 'memory routes registered (/api/dsh-memory/*)')
-need(paths.some(p => p.startsWith('/api/usage-stats')), 'usage routes registered (/api/usage-stats/*)')
 need(paths.some(p => p.startsWith('/api/skill-manager')), 'skill routes registered (/api/skill-manager/*)')
 // 技能面板的开关与「Agent 预设」筛选条都打这条；漏了就全 404、面板顶部没有预设条。
 need(paths.some(p => p.startsWith('/api/skill-toggles')), 'skill toggle routes registered (/api/skill-toggles/*)')
@@ -1481,6 +1479,84 @@ need(![...routes.keys()].some(p => p.startsWith('/api/chat-flow/') && p.includes
       '无 cwd 时 POST 不回一个假的项目状态（三件套仍为 null）')
     need(projectDirCount() === before, `无 cwd 时 POST 不写任何项目目录（前 ${before} 后 ${projectDirCount()}）`)
   }
+}
+
+// ── 连接器市场：官方插件类条目的安装 / 卸载 ──────────────────────────────
+// 2026-11：电脑操作 / 浏览器操作从 `/` 命令挪到连接器后，「安装」不再是写
+// mcp-client 实例，而是把 cordis 插件行写进 patch。三个容易错的点全部钉住：
+//   1. 官方包没装 → 拒绝并说清缺哪个（连接器不替用户装包）；
+//   2. 已装判定看 patch 里的插件行（用户可能手工 insert 过，重复插会 duplicate
+//      loader entry id 直接崩）；
+//   3. 卸载连 insert 块一起删（留下空 `- insert:` loader 会抱怨）。
+const catalogRoute = routes.get('/api/triad/mcp-catalog')
+need(catalogRoute !== undefined, 'mcp catalog route registered (/api/triad/mcp-catalog)')
+
+if (catalogRoute !== undefined) {
+  const callCatalog = async (method, url, body) => {
+    const captured = { status: 0, body: null }
+    const res = {
+      writeHead: (status) => { captured.status = status },
+      end: (payload) => { try { captured.body = JSON.parse(payload) } catch { captured.body = null } },
+    }
+    const req = {
+      method,
+      url,
+      socket: { remoteAddress: '127.0.0.1' },
+      headers: { host: '127.0.0.1:3080' },
+      on: (event, handler) => {
+        if (event === 'data') handler(Buffer.from(JSON.stringify(body ?? {})))
+        else if (event === 'end') handler()
+        return req
+      },
+      destroy: () => {},
+    }
+    catalogRoute.handler(req, res)
+    // handler 里是 `void (async () => …)()`，让微任务跑完再读
+    await new Promise((done) => setTimeout(done, 10))
+    return captured
+  }
+
+  const smokeProfile = join(process.env.DSH_HOME, 'profiles', 'web')
+  const patchFile = join(smokeProfile, 'cordis.patch.yml')
+  const fakePackages = ['@deepseek-ai/dsh-computer-use', '@deepseek-ai/dsh-experimental-computer-use-cua-driver-native']
+
+  // ① 官方包没装：拒绝并点名缺哪个
+  const denied = await callCatalog('POST', '/api/triad/mcp-catalog/install', { id: 'computer-use', env: {} })
+  need(denied.body?.ok === false && /@deepseek-ai\/dsh-computer-use/.test(denied.body?.error ?? ''),
+    `官方包缺失时拒绝安装并点名缺哪个（实得 ${JSON.stringify(denied.body)}）`)
+
+  // ② 包补齐后安装成功，patch 里出现两条插件行
+  for (const pkg of fakePackages) {
+    mkdirSync(join(smokeProfile, 'node_modules', ...pkg.split('/')), { recursive: true })
+    writeFileSync(join(smokeProfile, 'node_modules', ...pkg.split('/'), 'package.json'),
+      '{"name":"' + pkg + '","version":"0.0.0"}', 'utf8')
+  }
+  const installed = await callCatalog('POST', '/api/triad/mcp-catalog/install', { id: 'computer-use', env: {} })
+  const textAfterInstall = existsSync(patchFile) ? readFileSync(patchFile, 'utf8') : ''
+  // 行尾锚点：`computer-use` 是 `computer-use-cua-driver-native` 的前缀，
+  // 不带 $ 的话一条条目会被数成两条（本断言第一版就踩了这个）。
+  need(installed.body?.ok === true
+    && /- id: computer-use\s*$/m.test(textAfterInstall)
+    && /- id: computer-use-cua-driver-native\s*$/m.test(textAfterInstall),
+    '安装写入两条 cordis 插件行（本体 + 提供方，不是 mcp-client 包装）')
+
+  // ③ 已装时再点安装：如实报 alreadyInstalled，不重复插
+  const again = await callCatalog('POST', '/api/triad/mcp-catalog/install', { id: 'computer-use', env: {} })
+  const occurrences = (readFileSync(patchFile, 'utf8').match(/- id: computer-use\s*$/gm) ?? []).length
+  need(again.body?.alreadyInstalled === true && occurrences === 1,
+    `已装时回 alreadyInstalled 且不重复写入（实得 ${JSON.stringify(again.body)} / ${occurrences} 条）`)
+
+  // ④ state 接口认得插件条目（面板据此显示「已安装」）
+  const state = await callCatalog('GET', '/api/triad/mcp-catalog/state')
+  need(state.body?.items?.['computer-use'] !== undefined,
+    `state 应把 computer-use 标为已装（实得 ${JSON.stringify(state.body?.items)}）`)
+
+  // ⑤ 卸载：插件行与整个 insert 块一起消失
+  const removed = await callCatalog('POST', '/api/triad/mcp-catalog/uninstall', { id: 'computer-use' })
+  const textFinal = readFileSync(patchFile, 'utf8')
+  const tailLine = textFinal.trimEnd().split('\n').pop() ?? ''
+  need(removed.body?.ok === true && !/- id: computer-use\s*$/m.test(textFinal) && !/^- insert:\s*$/.test(tailLine),
+    `卸载删掉插件行与整个 insert 块（实得 ${JSON.stringify(removed.body)}）`)
 }
 
 const warns = logs.filter(([lvl]) => lvl === 'warn')

@@ -9,7 +9,7 @@
 
 import type { MemoryConfig, MemoryEntry } from '../types.js'
 import { isInjectionEligible, injectionRank, shouldPromote } from './scoring.js'
-import { localDate, projectHashOf, type MemoryStore } from './store.js'
+import { isExpired, localDate, projectHashOf, type MemoryStore } from './store.js'
 
 /** 身份/偏好类标签。 */
 const IDENTITY_TAGS = ['身份', 'identity', '偏好', 'preference', '风格', 'style', '人格', 'persona', '习惯', 'habit']
@@ -246,6 +246,27 @@ function sectionHeader(section: keyof InjectionSections): string {
 }
 
 /**
+ * 把条目渲染成注入行（按字符预算截条数）。
+ *
+ * 与 buildInjectionText 的区别：不分 identity/memory/pinned/facts 四段、不加段头。
+ * 检索层用它——那一层是「与当前任务最相关的 top-k」，条目天然跨 scope，按四段
+ * 分桶只会把 8 条拆成三小堆、每堆再带一个段头，预算全花在标题上。
+ *
+ * 超预算时 continue 而不是 break（与主注入同款）：不因一条超长就丢掉后面所有条目。
+ */
+export function renderEntryLines(entries: MemoryEntry[], budget: number): string {
+  const lines: string[] = []
+  let used = 0
+  for (const entry of entries) {
+    const line = entryLine(entry)
+    if (used + line.length + 1 > budget) continue
+    used += line.length + 1
+    lines.push(line)
+  }
+  return lines.join('\n')
+}
+
+/**
  * 全量编译入口：**不再写任何 md 产物**（2026-10-18 起）。
  *
  * 为什么停写：memory.md / facts.md / pinned.md / identity.md 这 6 个产物
@@ -334,8 +355,8 @@ export function isChineseMemoryEntry(entry: MemoryEntry): boolean {
 /**
  * 选出注入可见范围内的中文记忆条目（按 importance 降序）。
  *
- * 与主注入的可见性口径一致：disabled / deprecated 一律排除；scope 只取
- * global 与当前工作区（别的项目的项目层记忆不该出现在这里）。唯一区别是
+ * 与主注入的可见性口径一致：disabled / deprecated / **过期（ttlDays）** 一律排除；
+ * scope 只取 global 与当前工作区（别的项目的项目层记忆不该出现在这里）。唯一区别是
  * **不看项目排除设置**——中文通道按设计就该无视它。
  */
 export function selectChineseEntries(
@@ -344,6 +365,7 @@ export function selectChineseEntries(
 ): MemoryEntry[] {
   return entries
     .filter(entry => entry.disabled !== true && entry.deprecated !== true && entry.pending !== true)
+    .filter(entry => !isExpired(entry))
     .filter(entry => entry.scope === 'global' || (entry.scope === 'project' && entry.projectHash === projectHash))
     .filter(isChineseMemoryEntry)
     .sort((a, b) => injectionRank(b) - injectionRank(a))

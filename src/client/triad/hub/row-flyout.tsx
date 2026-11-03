@@ -64,7 +64,6 @@ export const WORKBENCH_TABS: readonly WorkbenchTabMeta[] = [
   { id: 'memory', label: '记忆', desc: '条目 · 变更 · 修订' },
   { id: 'skills', label: 'SKILL', desc: '技能包与技能开关' },
   { id: 'connectors', label: '连接器', desc: 'MCP 市场与已装连接' },
-  { id: 'usage', label: '用量', desc: 'Token 消耗与活动热力' },
   { id: 'gallery', label: '画廊', desc: '图片 · 网页 · 文档产出' },
   { id: 'vault', label: '档案', desc: '账号 · 支付 · 证件' },
   { id: 'prompt', label: '系统提示词', desc: '发送时带上的那段提示' },
@@ -82,7 +81,6 @@ export const WORKBENCH_TAB_FEATURE: Readonly<Record<WorkbenchTab, string>> = {
   memory: 'work.memory',
   skills: 'work.skills',
   connectors: 'work.connectors',
-  usage: 'work.usage',
   gallery: 'work.gallery',
   vault: 'work.vault',
   prompt: 'work.prompt',
@@ -105,12 +103,11 @@ export function useVisibleWorkbenchTabs(): readonly WorkbenchTabMeta[] {
   const memory = useFeature(WORKBENCH_TAB_FEATURE.memory)
   const skills = useFeature(WORKBENCH_TAB_FEATURE.skills)
   const connectors = useFeature(WORKBENCH_TAB_FEATURE.connectors)
-  const usage = useFeature(WORKBENCH_TAB_FEATURE.usage)
   const gallery = useFeature(WORKBENCH_TAB_FEATURE.gallery)
   const vault = useFeature(WORKBENCH_TAB_FEATURE.vault)
   const prompt = useFeature(WORKBENCH_TAB_FEATURE.prompt)
   const sync = useFeature(WORKBENCH_TAB_FEATURE.sync)
-  const enabled: Record<WorkbenchTab, boolean> = { memory, skills, connectors, usage, gallery, vault, prompt, sync }
+  const enabled: Record<WorkbenchTab, boolean> = { memory, skills, connectors, gallery, vault, prompt, sync }
   return WORKBENCH_TABS.filter(tab => enabled[tab.id])
 }
 
@@ -209,8 +206,9 @@ export function WorkbenchTabIcon({ tab, size = 14 }: { tab: WorkbenchTab; size?:
       return (<svg {...common}><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" /><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" /></svg>)
     case 'skills':
       return (<svg {...common}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" /></svg>)
-    case 'usage':
-      return (<svg {...common}><path d="M18 20V10" /><path d="M12 20V4" /><path d="M6 20v-6" /></svg>)
+    case 'connectors':
+      // 连接器 = 插头：语义是「把外部服务接到模型上」（与 nav-sections 的 tabIcon 同一枚）。
+      return (<svg {...common}><path d="M12 22v-5" /><path d="M9 8V2" /><path d="M15 8V2" /><path d="M18 8v3a6 6 0 0 1-12 0V8Z" /></svg>)
     case 'gallery':
       return (<svg {...common}><rect width="18" height="18" x="3" y="3" rx="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" /></svg>)
     case 'vault':

@@ -3,35 +3,37 @@
  *
  * text 走轻量 Markdown（**粗体**、`行内代码`、- / 1. 列表、> 引文、空行分段、
  * `![alt](src)` 图片），全程拆成 React 节点，不使用 dangerouslySetInnerHTML。
- * task / interactive / call / journal / voice 分别交给对应的卡片组件。
+ * task / interactive / call / journal / voice 分别交给对应的卡片组件；
+ * `call-segment` 是语音通话的折叠条（段内消息本身仍是普通 text 气泡，不包卡）。
  *
- * 工具调用块默认不渲染，唯一例外是 `generate_image` 与 `generate_video`：前者复用
- * Seeker 主对话的 ImageGenerationCard（按比例呼吸点阵 → 出图羽化 → 画廊/lightbox），
- * 后者交给 VideoGenerationBlock（同款点阵占位 → 原生播放器）；两者都不是工具卡外观。
+ * 工具调用的展示分两条路（1.4 / 2.7）：
+ *  · 普通工具 → 连续的一组聚成**一行折叠流水**「N 个动作 · 展开」，展开是中文
+ *    时间线（几点、做了什么、参数、结果、耗时）。过程默认不占正文，但随时可查；
+ *  · computer / browser 类 → 转成**执行态卡**（动作 + 状态 + 步骤 + 截图），
+ *    因为它们回答的是「Bot 此刻在替你做什么」，属于正文级信息。
+ * 生图 / 生视频仍走各自的点阵卡与播放器（`generate_image` / `generate_video`）。
  *
  * 正文里「整段只有文件路径 / 下载链接」的段落渲染成产出物卡（ArtifactCard），
- * 视频 / 音频 / PDF / Office 都能在对话流里直接预览或下载。
+ * 视频 / 音频 / PDF / Office / 网页都能在对话流里直接预览或下载。
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { usePersonal } from '../store.tsx'
 import {
   IconBook,
   IconCheck,
   IconChevronDown,
+  IconChevronRight,
   IconCircleCheck,
   IconCpu,
-  IconFile,
-  IconFolder,
-  IconImage,
-  IconListTodo,
   IconPause,
+  IconPhone,
   IconPlay,
-  IconSearch,
   IconTerminal,
   IconWave,
   IconX,
 } from '../icons.tsx'
 import {
+  formatClock,
   formatDuration,
   type ArtifactRef,
   type Message,
@@ -42,6 +44,7 @@ import {
 } from '../types.ts'
 import { CallMessageCard } from '../call/CallMessageCard.tsx'
 import { InteractiveCard } from './InteractiveCard.tsx'
+import { ConnectorSuggestCard } from './ConnectorSuggestCard.tsx'
 import { ArtifactCard } from './ArtifactCard.tsx'
 import { VideoGenerationBlock } from './VideoGenerationBlock.tsx'
 import {
@@ -50,9 +53,21 @@ import {
   extractArtifactPaths,
   parseArtifactParagraph,
   pathKeyOf,
+  pathOfFileUrl,
 } from './media.ts'
-import { ImageGenerationCard } from '../../generated-images/ImageGenerationCard.tsx'
+import { ImageGenerationCard, DotMatrix } from '../../generated-images/ImageGenerationCard.tsx'
 import { textHasMarkdownImage } from '../../generated-images/layout.ts'
+/*
+ * 生成式 UI 的两个渲染器（```iu 原生卡片 / ```html 沙箱卡片）。
+ *
+ * 为什么 Bot 半身可以直接复用 Work 的组件：这两个渲染器只依赖 react 与纯函数
+ * （scroll-lock / scroll-guard 都没有任何 import），不碰宿主模块表，esbuild
+ * 打包时不会把 personal 半身拖进宿主 runtime。
+ */
+import { IuCard } from '../../iu/IuCard.tsx'
+import { HtmlCard } from '../../html-embed/HtmlCard.tsx'
+import { splitIu, type IuPart } from '../../iu/parse.ts'
+import { splitHtml, type HtmlPart } from '../../html-embed/parse.ts'
 // 只借类型：use-generated-images 会拉 @deepseek-ai/dsh-client-runtime 的运行时，
 // personal 半身不依赖宿主模块表，必须用 import type 让 esbuild 整条剥掉。
 import type { GeneratedImageCall } from '../../generated-images/use-generated-images.ts'
@@ -158,7 +173,16 @@ function trimTrailingBlank(lines: string[]): string[] {
   return next
 }
 
-function Paragraph({ text, prefix }: { text: string; prefix: string }): JSX.Element {
+/**
+ * 旧页面索引（3.1 Pages）：归一化路径 → 最新版本。
+ *
+ * 由 MessageBlockView 按「该 Bot 的 Pages 列表里 updatedAt 晚于本条消息」算出来，
+ * 一路透传给正文里的产出物卡。用 Map 而不是逐条 find：一条消息里可能贴好几张
+ * 页面卡，逐张线性扫列表在长会话里是 O(n²)。
+ */
+type StalePageMap = ReadonlyMap<string, { url: string; updatedAt: number }>
+
+function Paragraph({ text, prefix, stalePages }: { text: string; prefix: string; stalePages?: StalePageMap }): JSX.Element {
   const lines = trimTrailingBlank(text.split('\n'))
   const filled = lines.filter((line) => line.trim() !== '')
   /*
@@ -189,7 +213,12 @@ function Paragraph({ text, prefix }: { text: string; prefix: string }): JSX.Elem
     return (
       <div className="pa-media-group">
         {artifacts.map((item, index) => (
-          <ArtifactCard key={`${item.path}-${index}`} path={item.path} label={item.label} />
+          <ArtifactCard
+            key={`${item.path}-${index}`}
+            path={item.path}
+            label={item.label}
+            stale={stalePages?.get(pathKeyOf(item.path))}
+          />
         ))}
       </div>
     )
@@ -241,26 +270,86 @@ function Paragraph({ text, prefix }: { text: string; prefix: string }): JSX.Elem
   )
 }
 
-function MarkdownText({ text }: { text: string }): JSX.Element {
+function MarkdownText({ text, stalePages }: { text: string; stalePages?: StalePageMap }): JSX.Element {
   const paragraphs = useMemo(() => text.split(/\n{2,}/).filter((part) => part.trim() !== ''), [text])
   return (
     <div className="pa-md">
-      {paragraphs.map((part, index) => <Paragraph key={`p-${index}`} text={part} prefix={`p-${index}`} />)}
+      {paragraphs.map((part, index) => (
+        <Paragraph key={`p-${index}`} text={part} prefix={`p-${index}`} stalePages={stalePages} />
+      ))}
+    </div>
+  )
+}
+
+/* ───────────────────── 生成式 UI：围栏切分 ───────────────────── */
+
+/**
+ * 把一段正文切成「md 片段 / iu 卡片 / html 卡片」三种片段。
+ *
+ * 顺序是「先切 ```html，再在剩下的 md 里切 ```iu」：html 围栏内部可能包含任何
+ * 字符串（包括长得像 iu 围栏的东西），先整段拿走就不会被 iu 解析器误伤；
+ * 反过来 iu 的正文是一行 JSON，不会出现 ```html 围栏。
+ *
+ * 没有围栏时 `splitHtml` / `splitIu` 各自返回单个 md 片段，所以这个函数对普通
+ * 文本是零开销的透传（`RichText` 会据此走原来的 MarkdownText 快路径）。
+ */
+function splitRich(text: string): Array<IuPart | HtmlPart> {
+  const out: Array<IuPart | HtmlPart> = []
+  for (const part of splitHtml(text)) {
+    if (part.kind === 'html') {
+      out.push(part)
+      continue
+    }
+    for (const sub of splitIu(part.text)) out.push(sub)
+  }
+  return out
+}
+
+/**
+ * 正文渲染：有围栏时按片段渲染卡片，没有时保持原来的 Markdown 气泡。
+ *
+ * 之所以在 TextBubble 里整体替换而不是在 Paragraph 里插入：卡片是块级元素，
+ * 夹在段落内部会被 `<p>` 的排版规则挤坏；整段切开后每张卡自己占一块。
+ */
+function RichText({ text, stalePages }: { text: string; stalePages?: StalePageMap }): JSX.Element {
+  const parts = useMemo(() => splitRich(text), [text])
+  const plain = parts.length === 1 && parts[0]?.kind === 'md'
+  if (plain) return <MarkdownText text={text} stalePages={stalePages} />
+  return (
+    <div className="pa-rich">
+      {parts.map((part, index) => {
+        if (part.kind === 'md') {
+          const trimmed = part.text.trim()
+          return trimmed === '' ? null : <MarkdownText key={`md-${index}`} text={trimmed} stalePages={stalePages} />
+        }
+        if (part.kind === 'iu') {
+          return part.pending
+            ? <IuCard key={`iu-${index}`} pending bytes={part.bytes} />
+            : <IuCard key={`iu-${index}`} spec={part.spec} />
+        }
+        return <HtmlCard key={`html-${index}`} spec={part.spec} pending={part.pending} />
+      })}
     </div>
   )
 }
 
 /* ───────────────────────── 文本气泡 ───────────────────────── */
 
-function TextBubble({ text, role }: { text: string; role: MessageRole }): JSX.Element {
+function TextBubble({ text, role, stalePages }: { text: string; role: MessageRole; stalePages?: StalePageMap }): JSX.Element {
   const [open, setOpen] = useState(false)
   const lineCount = useMemo(() => text.split('\n').length, [text])
-  const long = role === 'bot' && (lineCount > 8 || text.length > 680)
+  /*
+   * 带生成式 UI 围栏的消息不折叠：卡片本身有高度，`pa-md--clamp` 会把卡片
+   * 截成半截，而且折叠后用户点「展开」才看到卡，等于把交付物藏起来了。
+   * 判据用 ``` 而不是跑一遍 splitRich：这是渲染前的快速路径，不需要精确。
+   */
+  const hasCard = useMemo(() => text.includes('```'), [text])
+  const long = role === 'bot' && !hasCard && (lineCount > 8 || text.length > 680)
   const folded = long && !open
   return (
     <div className={`pa-bubble pa-bubble--${role}`}>
       <div className={folded ? 'pa-md pa-md--clamp' : undefined}>
-        <MarkdownText text={text} />
+        <RichText text={text} stalePages={stalePages} />
       </div>
       {long ? (
         <div className="pa-foldbar">
@@ -359,18 +448,6 @@ function dedupeToolRuns(blocks: MessageBlock[]): MessageBlock[] {
   return deduped
 }
 
-/** 工具名 → 图标（沿用 icons.tsx 的线性图标，禁止 emoji）。 */
-function ToolGlyph({ name }: { name: string }): JSX.Element {
-  const key = name.toLowerCase()
-  if (/todo|task|plan|checklist/.test(key)) return <IconListTodo size={14} />
-  if (/search|web|browse|fetch|http|url/.test(key)) return <IconSearch size={14} />
-  if (/image|screenshot|vision|photo/.test(key)) return <IconImage size={14} />
-  if (/pwsh|bash|shell|exec|command|terminal|run_code|python|node/.test(key)) return <IconTerminal size={14} />
-  if (/glob|ls\b|list|dir|folder/.test(key)) return <IconFolder size={14} />
-  if (/read|write|edit|file|patch|apply/.test(key)) return <IconFile size={14} />
-  return <IconCpu size={14} />
-}
-
 /** 耗时：318ms / 1.2s / 12s / 1m05s。 */
 function formatToolDuration(ms: number): string {
   const value = Math.max(0, ms)
@@ -401,88 +478,6 @@ function flattenArgValue(value: unknown): string {
   const text = typeof value === 'string' ? value : JSON.stringify(value ?? '')
   const flat = String(text).replace(/\s+/g, ' ').trim()
   return flat.length > 90 ? `${flat.slice(0, 90)}…` : flat
-}
-
-function ToolStatus({ run }: { run: ToolRun }): JSX.Element {
-  if (run.status === 'running') {
-    return (
-      <span className="pa-tool__state" data-state="running" aria-label="执行中">
-        <i className="pa-tool__spinner" aria-hidden="true" />
-      </span>
-    )
-  }
-  if (run.status === 'error') {
-    return (
-      <span className="pa-tool__state" data-state="error">
-        <IconX size={12} />
-        <span>失败</span>
-        {typeof run.durationMs === 'number' ? <span className="pa-tool__dur">{formatToolDuration(run.durationMs)}</span> : null}
-      </span>
-    )
-  }
-  return (
-    <span className="pa-tool__state" data-state="ok">
-      {typeof run.durationMs === 'number'
-        ? <span className="pa-tool__dur">{formatToolDuration(run.durationMs)}</span>
-        : <IconCheck size={12} />}
-    </span>
-  )
-}
-
-function ToolCard({ block }: { block: Extract<MessageBlock, { type: 'tool' }> }): JSX.Element {
-  const run = block.run
-  const [open, setOpen] = useState(false)
-  const args = run.args ?? ''
-  const result = run.result ?? ''
-  const expandable = args !== '' || result !== ''
-  const summary = useMemo(() => summarizeToolArgs(args), [args])
-  const toggle = (): void => {
-    if (expandable) setOpen((value) => !value)
-  }
-  return (
-    <div
-      className="pa-tool"
-      data-status={run.status}
-      data-open={open ? 'true' : 'false'}
-      data-expandable={expandable ? 'true' : 'false'}
-      role={expandable ? 'button' : undefined}
-      tabIndex={expandable ? 0 : undefined}
-      aria-expanded={expandable ? open : undefined}
-      onClick={toggle}
-      onKeyDown={(event) => {
-        if (!expandable) return
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault()
-          toggle()
-        }
-      }}
-    >
-      <div className="pa-tool__head">
-        <span className="pa-tool__glyph"><ToolGlyph name={run.name} /></span>
-        <span className="pa-tool__name">{run.name}</span>
-        {summary !== '' ? <span className="pa-tool__args" title={summary}>{summary}</span> : null}
-        <ToolStatus run={run} />
-        {expandable ? <IconChevronDown size={12} className="pa-tool__caret" /> : null}
-      </div>
-      <div className="pa-tool__body">
-        <div className="pa-tool__inner">
-          {args !== '' ? (
-            <div className="pa-tool__section">
-              <div className="pa-tool__label">参数</div>
-              <div className="pa-tool__code">{args}</div>
-            </div>
-          ) : null}
-          {result !== '' ? (
-            <div className="pa-tool__section">
-              <div className="pa-tool__label">结果</div>
-              <div className="pa-tool__code" data-tone={run.status === 'error' ? 'error' : undefined}>{result}</div>
-            </div>
-          ) : null}
-          {run.status === 'running' && result === '' ? <div className="pa-tool__running">执行中…</div> : null}
-        </div>
-      </div>
-    </div>
-  )
 }
 
 /* ───────────────────────── 生图块（generate_image） ───────────────────────── */
@@ -544,7 +539,203 @@ function ImageGenerationBlock({ block }: { block: Extract<MessageBlock, { type: 
   )
 }
 
+/* ───────────────────────── 执行态块（2.7） ───────────────────────── */
+
+/**
+ * 工具名 → 是否属于「在屏幕上操作」这一类。
+ *
+ * 只有工具名本身就是 computer / browser 一族时才转成执行态卡。ego-browser 在本
+ * 项目里是通过 pwsh 跑脚本用的，工具名仍是 pwsh —— 那种留在可审计流水里（展开
+ * 能看到具体命令），不在这里按参数猜：猜错会让一次普通命令执行变成一张「电脑在
+ * 操作」的假卡，而真正的审计信息反而被藏起来了。
+ */
+function isExecutionTool(name: string): boolean {
+  return /^(?:computer|browser|screenshot|playwright|puppeteer|chrome|devtools|cdp)/i.test(name.trim())
+}
+
+/** 执行态卡的动作描述（中文人话，不把工具名当标题）。 */
+function executionActionOf(name: string): string {
+  const key = name.toLowerCase()
+  if (/computer/.test(key)) return '操作电脑'
+  if (/browser/.test(key)) return '操作浏览器'
+  if (/screenshot/.test(key)) return '截屏'
+  if (/playwright|puppeteer/.test(key)) return '用浏览器自动化操作'
+  return '执行界面操作'
+}
+
+/**
+ * 工具块 → 执行态块。
+ *
+ * computer / browser 类调用的「点哪、输什么」对用户没有审计价值，有价值的是
+ * 「它正在屏幕上做什么」——所以这类调用不进军工具流水，而是渲染成一张执行态卡：
+ * 动作 + 状态 + 可展开步骤 + 截图。与工具卡的分工见 types.ts 里 execution 的注释。
+ */
+function toolRunToExecution(run: ToolRun): MessageBlock {
+  const action = executionActionOf(run.name)
+  const detail = summarizeToolArgs(run.args ?? '')
+  const shot = run.images !== undefined && run.images.length > 0 ? run.images[0] : undefined
+  const failure = run.status === 'error' ? errorMessageOf(run.result) : null
+  return {
+    type: 'execution',
+    status: run.status,
+    label: action,
+    tool: run.name,
+    steps: [{
+      at: run.endedAt ?? run.startedAt,
+      label: detail === '' ? action : `${action}：${detail}`,
+      status: run.status,
+    }],
+    ...(shot !== undefined ? { media: shot } : {}),
+    ...(failure !== null ? { error: failure } : {}),
+  }
+}
+
+/**
+ * 执行态块：状态图标 + 中文动作 + 可展开步骤 + 可选截图。
+ *
+ * 外观比工具卡重一档（card 底 + 圆角），因为它回答的是「Bot 此刻在替你做什么」，
+ * 属于正文级信息；工具卡是审计信息，故意做得更轻。
+ */
+function ExecutionBlock({ block }: { block: Extract<MessageBlock, { type: 'execution' }> }): JSX.Element {
+  const [open, setOpen] = useState(false)
+  const [mediaFailed, setMediaFailed] = useState(false)
+  const media = block.media ?? ''
+  useEffect(() => { setMediaFailed(false) }, [media])
+  const steps = block.steps ?? []
+  const expandable = steps.length > 0
+  const mediaKind = media === '' ? null : artifactKindOf(pathOfFileUrl(media) ?? media)
+  const statusText = block.status === 'running' ? '执行中' : block.status === 'error' ? '失败' : '已完成'
+  const toggle = (): void => {
+    if (expandable) setOpen((value) => !value)
+  }
+  return (
+    <div
+      className="pa-exec"
+      data-status={block.status}
+      data-open={open ? 'true' : 'false'}
+      data-expandable={expandable ? 'true' : 'false'}
+    >
+      <div
+        className="pa-exec__head"
+        role={expandable ? 'button' : undefined}
+        tabIndex={expandable ? 0 : undefined}
+        aria-expanded={expandable ? open : undefined}
+        onClick={toggle}
+        onKeyDown={(event) => {
+          if (!expandable) return
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            toggle()
+          }
+        }}
+      >
+        <span className="pa-exec__glyph" aria-hidden="true"><IconCpu size={15} /></span>
+        <span className="pa-exec__main">
+          <span className="pa-exec__label">{block.label}</span>
+          <span className="pa-exec__meta">
+            {block.tool !== undefined && block.tool !== '' ? <span className="pa-exec__tool">{block.tool}</span> : null}
+            <span className="pa-exec__state-text" data-state={block.status}>{statusText}</span>
+            {steps.length > 1 ? <span>{steps.length} 步</span> : null}
+          </span>
+        </span>
+        {block.status === 'running'
+          ? <span className="pa-exec__spinner" aria-label="执行中" />
+          : block.status === 'error'
+            ? <span className="pa-exec__icon" data-state="error"><IconX size={13} /></span>
+            : <span className="pa-exec__icon" data-state="ok"><IconCheck size={13} /></span>}
+        {expandable ? <IconChevronDown size={12} className="pa-exec__caret" /> : null}
+      </div>
+      {block.status === 'error' && block.error !== undefined && block.error !== ''
+        ? <div className="pa-exec__error">{block.error}</div>
+        : null}
+      {media !== '' && !mediaFailed && (mediaKind === 'image' || mediaKind === 'video') ? (
+        <div className="pa-exec__media">
+          {mediaKind === 'video' ? (
+            <video className="pa-exec__shot" src={media} controls playsInline preload="metadata" />
+          ) : (
+            <a href={media} target="_blank" rel="noreferrer" title="查看大图">
+              <img
+                className="pa-exec__shot"
+                src={media}
+                alt="执行截图"
+                loading="lazy"
+                decoding="async"
+                onError={() => setMediaFailed(true)}
+              />
+            </a>
+          )}
+        </div>
+      ) : null}
+      <div className="pa-exec__body">
+        <div className="pa-exec__inner">
+          <ol className="pa-exec__steps">
+            {steps.map((step, index) => (
+              <li className="pa-exec__step" key={`${step.at}-${index}`} data-status={step.status}>
+                <span className="pa-exec__step-dot" aria-hidden="true" />
+                <span className="pa-exec__step-time">{formatClock(step.at)}</span>
+                <span className="pa-exec__step-label">{step.label}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /* ───────────────────────── 工具产出物（其它工具的 artifacts） ───────────────────────── */
+
+/**
+ * 「正在生成文档」的点阵占位。
+ *
+ * **复用生图卡的整套视觉**（`dgi-stage` 那套类名 + 同一个 DotMatrix）：同一个点阵
+ * 格子、同一个头部布局、同一套呼吸动画。用户明确要求「只要是生成的都要这种点阵图」
+ * ——同一件事在对话流里应该长同一个样子，而不是生图一套、文档另一套。
+ *
+ * 文档生成没有专用工具（模型用 `pwsh` / `run_code` 跑脚本）：占位由模型调用
+ * `document_progress` 声明驱动，模型漏调时由宿主监听工作区里的文档文件兜底
+ * （`ToolRun.docPending`）。完成后这块被产出物卡替换。
+ */
+function DocumentPendingBlock({ run }: { run: ToolRun }): JSX.Element {
+  const label = run.args !== undefined && run.args !== '' ? run.args : run.name
+  return (
+    <div className="pa-genimg">
+      <div className="dgi-stage">
+        <header className="dgi-stage__head">
+          <span className="dgi-stage__badge" aria-hidden="true">
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.7"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M6 3.5h7l5 5V20a1.5 1.5 0 0 1-1.5 1.5h-10A1.5 1.5 0 0 1 5 20V5a1.5 1.5 0 0 1 1-1.5Z" />
+              <path d="M13 3.5V9h5" />
+            </svg>
+          </span>
+          <span className="dgi-stage__title">正在生成文档</span>
+        </header>
+        <p className="dgi-stage__prompt" title={label}>{label}</p>
+        <div className="dgi-stage__groups" data-groups={1}>
+          <div className="dgi-stage__group">
+            <div className="dgi-stage__reveal">
+              <div className="dgi-stage__ghost">
+                {/* 0.77 ≈ A4 竖版比例，占位格子看起来就像一页纸 */}
+                <div className="dgi-stage__cell" style={{ '--dgi-ratio': 0.77 } as CSSProperties}>
+                  <DotMatrix cols={9} rows={11} />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 /**
  * 普通工具（present / pwsh / run_code …）产出的文件。
@@ -583,14 +774,156 @@ function ToolArtifactsBlock({ run, bodyPaths }: { run: ToolRun; bodyPaths: reado
   )
 }
 
+/* ───────────────────────── 可审计执行流水（1.4） ───────────────────────── */
+
+/** 工具名 → 中文动作名（审计流水第一列，不把原始工具名当标题）。 */
+function toolActionName(name: string): string {
+  const key = name.trim().toLowerCase()
+  if (/^(?:pwsh|bash|shell|exec|command|terminal|run_code|python|node|powershell)$/.test(key)) return '执行命令'
+  if (/^read$/.test(key)) return '读取文件'
+  if (/^(?:write|edit|patch|apply_patch|apply|multiedit)$/.test(key)) return '修改文件'
+  if (/^(?:grep|search)$/.test(key)) return '搜索内容'
+  if (/^(?:glob|ls|list|dir)$/.test(key)) return '查找文件'
+  if (/web_search/.test(key)) return '搜索网页'
+  if (/(?:web_fetch|fetch|http|curl)/.test(key)) return '抓取网页'
+  if (/todo/.test(key)) return '更新待办'
+  if (/present/.test(key)) return '交付文件'
+  if (/generate_image/.test(key)) return '生成图片'
+  if (/generate_video/.test(key)) return '生成视频'
+  if (/task_state|working/.test(key)) return '更新任务状态'
+  if (/memory/.test(key)) return '查询记忆'
+  if (/skill/.test(key)) return '调用技能'
+  if (/bot_emit|emit/.test(key)) return '播报消息'
+  if (/subagent|agent/.test(key)) return '派给子任务'
+  return '调用工具'
+}
+
+/** 结果摘要：失败取人话（不是整块 JSON），成功取结果首行。 */
+function toolResultSummary(run: ToolRun): string {
+  const result = run.result ?? ''
+  if (result.trim() === '') return ''
+  if (run.status === 'error') return errorMessageOf(result) ?? ''
+  const firstLine = result.split('\n').map((line) => line.trim()).find((line) => line !== '') ?? ''
+  return firstLine.length > 90 ? `${firstLine.slice(0, 90)}…` : firstLine
+}
+
+/** 一次工具调用在流水里的耗时（host 没给 durationMs 时用起止时间兜底）。 */
+function toolElapsed(run: ToolRun): number {
+  if (typeof run.durationMs === 'number') return Math.max(0, run.durationMs)
+  if (typeof run.endedAt === 'number') return Math.max(0, run.endedAt - run.startedAt)
+  return 0
+}
+
+/**
+ * 这一组里是不是有「独立卡片」工具：生图 / 生视频 / 正在生成文档。
+ *
+ * 这几类有自己的展示形态（点阵占位、播放器、产出物卡），不能混进审计流水 ——
+ * 塞进去会被折叠起来，用户就看不见正在生成的图片了。
+ */
+function isStandaloneTool(run: ToolRun): boolean {
+  if (run.name === 'generate_image' || run.name === 'generate_video') return true
+  return run.docPending === true && run.status === 'running'
+}
+
+/** 折叠行摘要：主要工具名（最多三个）。 */
+function trailToolSummary(runs: readonly ToolRun[]): string {
+  const names = [...new Set(runs.map((run) => run.name))]
+  const head = names.slice(0, 3).join(' · ')
+  return names.length > 3 ? `${head} 等` : head
+}
+
+/**
+ * 整组耗时：逐个累加。
+ *
+ * 并行调用会被重复计（同一段时间算两遍），但流水要回答的是「大概花了多久」，
+ * 精确到毫秒的墙钟时间反而会和单个动作的耗时对不上，用户更容易困惑。
+ */
+function trailElapsed(runs: readonly ToolRun[]): number {
+  return runs.reduce((total, run) => total + toolElapsed(run), 0)
+}
+
+/**
+ * 一组连续的工具调用 → 一行折叠流水。
+ *
+ * 折叠行说三件事：几个动作、主要是什么工具、一共多久；展开后是中文时间线
+ * （几点、做了什么、参数、结果、耗时）。产出物卡**不折叠**——交付文件是结果，
+ * 不该藏在「展开」里（这与 1.4 之前的行为保持一致）。
+ */
+function ToolTrail({ runs, bodyPaths }: { runs: ToolRun[]; bodyPaths: readonly string[] }): JSX.Element {
+  const [open, setOpen] = useState(false)
+  const running = runs.some((run) => run.status === 'running')
+  const failed = runs.some((run) => run.status === 'error')
+  const elapsed = trailElapsed(runs)
+  const tone = failed ? 'error' : running ? 'running' : 'ok'
+  return (
+    <div className="pa-trail" data-open={open ? 'true' : 'false'} data-status={tone}>
+      <button
+        className="pa-trail__head"
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="pa-trail__glyph" aria-hidden="true">
+          {running ? <span className="pa-trail__spinner" /> : failed ? <IconX size={12} /> : <IconTerminal size={13} />}
+        </span>
+        <span className="pa-trail__title">{runs.length} 个动作</span>
+        <span className="pa-trail__summary" title={trailToolSummary(runs)}>{trailToolSummary(runs)}</span>
+        {elapsed > 0 ? <span className="pa-trail__dur">{formatToolDuration(elapsed)}</span> : null}
+        <span className="pa-trail__toggle">
+          {open ? '收起' : '展开'}
+          <IconChevronDown size={12} className="pa-trail__caret" />
+        </span>
+      </button>
+      <div className="pa-trail__body">
+        <div className="pa-trail__inner">
+          <ol className="pa-trail__list">
+            {runs.map((run) => {
+              const args = summarizeToolArgs(run.args ?? '')
+              const summary = toolResultSummary(run)
+              const cost = toolElapsed(run)
+              return (
+                <li className="pa-trail__step" key={run.id} data-status={run.status}>
+                  <span className="pa-trail__dot" aria-hidden="true" />
+                  <span className="pa-trail__time">{formatClock(run.startedAt)}</span>
+                  <span className="pa-trail__step-body">
+                    <span className="pa-trail__step-line">
+                      <span className="pa-trail__step-name">{toolActionName(run.name)}</span>
+                      {args !== '' ? <span className="pa-trail__step-args" title={args}>{args}</span> : null}
+                      {cost > 0 ? <span className="pa-trail__step-dur">{formatToolDuration(cost)}</span> : null}
+                    </span>
+                    {summary !== '' ? (
+                      <span className="pa-trail__step-result" data-tone={run.status === 'error' ? 'error' : undefined}>
+                        {summary}
+                      </span>
+                    ) : null}
+                  </span>
+                </li>
+              )
+            })}
+          </ol>
+        </div>
+      </div>
+      {runs.map((run) => <ToolArtifactsBlock key={`art-${run.id}`} run={run} bodyPaths={bodyPaths} />)}
+    </div>
+  )
+}
+
 /* ───────────────────────── 期刊卡 ───────────────────────── */
 
+/**
+ * 聊天里的期刊卡：横向小卡（72x40 封面缩略图 + 「期刊日记」小标 + 标题 +
+ * 日期 + 一行摘要 + 打开箭头）。
+ *
+ * 用 `pa-journal-mini` 而不是旧的 `pa-journal`：旧类名的样式在 chat.css.ts 里
+ * （本任务不允许改那个文件），换一套新类名后由 journal.css.ts 统一接管，
+ * 避免与聊天样式互相覆盖。颜色走 --pa-* 变量，跟着 Bot 模式亮 / 暗主题走。
+ */
 function JournalCard({ block }: { block: Extract<MessageBlock, { type: 'journal' }> }): JSX.Element {
   const { actions } = usePersonal()
   const open = (): void => actions.openJournal(block.journalId)
   return (
     <div
-      className="pa-journal"
+      className="pa-journal-mini"
       role="button"
       tabIndex={0}
       onClick={open}
@@ -601,25 +934,78 @@ function JournalCard({ block }: { block: Extract<MessageBlock, { type: 'journal'
         }
       }}
     >
-      <span className="pa-journal__cover">
-        {block.image !== undefined && block.image !== '' ? <img src={block.image} alt="" /> : <IconBook size={24} />}
+      <span className="pa-journal-mini__cover">
+        {block.image !== undefined && block.image !== '' ? <img src={block.image} alt="" /> : <IconBook size={20} />}
       </span>
-      <span className="pa-journal__body">
-        <span className="pa-journal__kicker">期刊日记</span>
-        <span className="pa-journal__title">{block.title}</span>
-        <span className="pa-journal__date">{block.date}</span>
-        <span className="pa-journal__summary">{block.summary}</span>
+      <span className="pa-journal-mini__body">
+        <span className="pa-journal-mini__kicker">期刊日记</span>
+        <span className="pa-journal-mini__title">{block.title}</span>
+        <span className="pa-journal-mini__meta">{block.date}</span>
+        <span className="pa-journal-mini__summary">{block.summary}</span>
       </span>
-      <button
-        className="pa-journal__open"
-        type="button"
-        onClick={(event) => {
-          event.stopPropagation()
-          open()
-        }}
-      >
-        打开
-      </button>
+      <span className="pa-journal-mini__open" aria-hidden="true">
+        <IconChevronRight size={16} />
+      </span>
+    </div>
+  )
+}
+
+/* ───────────────────────── 语音通话折叠条 ───────────────────────── */
+
+/**
+ * 一段语音通话的折叠条。
+ *
+ * 语音通话不再包成一张「通话卡」：段内的转写与产物都是**普通消息**，跟打字聊天
+ * 同一个气泡样式。这条只负责把「这一通电话」整段收起来 / 放出来——用户的原话是
+ * 「收起只是把之前语音开始到截止这一段收起，而不是改变 UI 样式」，所以它的视觉
+ * 必须轻：两条发丝线夹一行小字，像时间分隔标记，而不是第二张卡片。
+ *
+ * 收起状态存在 `ui.collapsedCallSegments`（纯视图状态，不进 localStorage）。这里
+ * 只负责读它决定箭头朝向、点它切换；真正的「段内消息不渲染」在 MessageList 里做
+ * （渲染层过滤，段内消息本身一个字节都不改，展开后仍是普通气泡）。
+ */
+function CallSegmentBar({ block }: { block: Extract<MessageBlock, { type: 'call-segment' }> }): JSX.Element {
+  const { ui, actions } = usePersonal()
+  // `?? []`：ui 从旧 localStorage 恢复时可能还没有这个字段（新加的视图状态），
+  // 直接 .includes 会在首帧抛错、把整个消息列表带崩。
+  const collapsed = (ui.collapsedCallSegments ?? []).includes(block.segment)
+  const live = block.live === true
+  const title = block.engine === 'realtime' ? '实时语音通话' : '语音通话'
+  const toggle = (): void => actions.toggleCallSegment(block.segment)
+  return (
+    <div
+      className="pa-callseg"
+      data-open={collapsed ? 'false' : 'true'}
+      data-live={live ? 'true' : 'false'}
+      role="button"
+      tabIndex={0}
+      aria-expanded={!collapsed}
+      aria-label={collapsed ? `展开${title}记录` : `收起${title}记录`}
+      title={collapsed ? `展开${title}记录` : `收起${title}记录`}
+      onClick={toggle}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          toggle()
+        }
+      }}
+    >
+      <span className="pa-callseg__rule" aria-hidden="true" />
+      <span className="pa-callseg__label">
+        <span className="pa-callseg__icon"><IconPhone size={12} /></span>
+        <span className="pa-callseg__title">{title}</span>
+        <span className="pa-callseg__meta">
+          {live ? (
+            <>
+              <i className="pa-callseg__pulse" aria-hidden="true" />
+              通话中
+            </>
+          ) : typeof block.durationMs === 'number' ? formatDuration(block.durationMs) : null}
+        </span>
+        <span className="pa-callseg__count">{block.turns > 0 ? `${block.turns} 条` : null}</span>
+        <IconChevronDown size={12} className="pa-callseg__caret" />
+      </span>
+      <span className="pa-callseg__rule" aria-hidden="true" />
     </div>
   )
 }
@@ -691,6 +1077,24 @@ function mergeTextBlocks(blocks: MessageBlock[]): MessageBlock[] {
 }
 
 export function MessageBlockView({ message }: MessageBlockViewProps): JSX.Element {
+  const { state } = usePersonal()
+  /*
+   * 旧页面索引（3.1）：这个 Bot 的 Pages 里，更新时间**晚于本条消息**的页面 →
+   * 本条消息里的同名页面卡是旧版，卡片上标「已更新到下方」。
+   *
+   * 用消息时间作分界而不是「页面被更新过」：同一轮里最新那条消息的卡片本来就该是
+   * 最新版本，不该也挂一个「已更新」——那会让用户以为刚生成的页面也过期了。
+   */
+  const stalePages = useMemo<StalePageMap>(() => {
+    const map = new Map<string, { url: string; updatedAt: number }>()
+    for (const page of state.pagesByBot?.[message.botId] ?? []) {
+      if (page.updatedAt <= message.at) continue
+      if (page.path === undefined || page.path === '') continue
+      map.set(pathKeyOf(page.path), { url: page.url, updatedAt: page.updatedAt })
+    }
+    return map
+  }, [state.pagesByBot, message.botId, message.at])
+
   /*
    * 工具调用块默认**不渲染**（用户要求：bot 消息里不要出现工具调用卡片）。
    *
@@ -713,7 +1117,15 @@ export function MessageBlockView({ message }: MessageBlockViewProps): JSX.Elemen
     const hasBodyImage = message.blocks.some(
       (block) => block.type === 'text' && textHasMarkdownImage(block.text),
     )
-    return mergeTextBlocks(dedupeToolRuns(message.blocks)).filter((block) => {
+    /*
+     * computer / browser 类工具先转成执行态块（2.7）。它们表达的不是「调用了一次
+     * 工具」，而是「Bot 正在屏幕上替你做一件事」，所以走 execution 通道；转完之后
+     * 下面那段工具过滤就与它们无关了（execution 不是 tool 块）。
+     */
+    const converted = mergeTextBlocks(dedupeToolRuns(message.blocks)).map((block) => (
+      block.type === 'tool' && isExecutionTool(block.run.name) ? toolRunToExecution(block.run) : block
+    ))
+    return converted.filter((block) => {
       if (block.type !== 'tool') return true
       // 生视频：工具块交给 VideoGenerationBlock（占位 / 播放器 / 任务卡）。
       // 已经结束又没有任何可展示内容的块直接丢掉，否则「pending 但无可见块」
@@ -726,8 +1138,15 @@ export function MessageBlockView({ message }: MessageBlockViewProps): JSX.Elemen
           || run.videoTask !== undefined
       }
       if (block.run.name === 'generate_image') return !hasBodyImage || block.run.status === 'running'
-      // 其它工具：只有「产出了可预览文件」才保留，而且只渲染产出物卡（不是工具卡）。
-      return (block.run.artifacts?.length ?? 0) > 0
+      /*
+       * 其它工具：**全部保留**（1.4 可审计流水）。
+       *
+       * 原来这里只保留「产出了可预览文件」的块，其余工具调用完全不渲染 —— 过程
+       * 干净了，可审计性也一起没了：用户想复盘「Bot 怎么得出这个结论」时什么都
+       * 看不到。现在改成全部保留，渲染层再聚成一行「N 个动作 · 展开」，默认折叠、
+       * 点开才是时间线（Grok 的 computer preview 也是点开才看）。
+       */
+      return true
     })
   }, [message.blocks])
 
@@ -756,14 +1175,39 @@ export function MessageBlockView({ message }: MessageBlockViewProps): JSX.Elemen
   )
 
   /*
+   * 渲染单元：把**连续**的工具块聚成一组流水，其它块各占一格（1.4）。
+   *
+   * 分组必须在渲染前做完：在 map 里判断「上一个块是不是工具」只能决定组头长什么样，
+   * 组内第二块开始仍会被单独渲染成一行行，流水就散了。
+   *
+   * 位置必须在下面那个「什么都不剩」的提前 return **之前**：hooks 不能挂在条件
+   * 分支上，否则同一条消息从「空」变成「有内容」时 React 会报 rendered fewer
+   * hooks than expected（流式回复里这是必然发生的）。
+   *
+   * ── 2026-11-02 用户明确要求：Bot 消息里不要出现工具卡 ──
+   * 普通工具调用一律不渲染，**包括**那行「N 个动作 · 展开」的折叠流水。可审计性
+   * 不再放在消息里：computer / browser 类会先转成 execution 块（那是「正在做什么」
+   * 的执行态，不是工具卡），其余工具的审计交给右栏与宿主日志。
+   * 生图 / 生视频 / 文档占位属于**产物**，不是工具卡，仍然保留（见 isStandaloneTool）。
+   */
+  const units = useMemo(() => {
+    const out: MessageBlock[] = []
+    for (const block of blocks) {
+      if (block.type === 'tool' && !isStandaloneTool(block.run)) continue
+      out.push(block)
+    }
+    return out
+  }, [blocks])
+
+  /*
    * 过滤后什么都不剩的兜底。
    *
    * 流式期间 bot 可能先只调工具（pwsh / read …）还没输出正文：这时 message.blocks
    * 非空，MessageList 已经不画三点 typing 了（它只在 blocks 为空时画），而这些
-   * 工具块又被这里过滤掉 —— 不补一个占位，这一段时间消息就是完全空白，用户会
+   * 工具块又被上面过滤掉 —— 不补一个占位，这一段时间消息就是完全空白，用户会
    * 以为「没反应」。pending 结束后仍为空则什么都不渲染。
    */
-  if (blocks.length === 0) {
+  if (units.length === 0) {
     if (message.pending !== true) return <></>
     return (
       <div className="pa-bubble pa-bubble--bot pa-typing" aria-label="正在输入">
@@ -774,8 +1218,9 @@ export function MessageBlockView({ message }: MessageBlockViewProps): JSX.Elemen
 
   return (
     <>
-      {blocks.map((block, index) => {
-        if (block.type === 'text') return <TextBubble key={`text-${index}`} text={block.text} role={message.role} />
+      {units.map((block, index) => {
+        if (block.type === 'text') return <TextBubble key={`text-${index}`} text={block.text} role={message.role} stalePages={stalePages} />
+        if (block.type === 'execution') return <ExecutionBlock key={`exec-${index}`} block={block} />
         if (block.type === 'tool') {
           if (block.run.name === 'generate_video') {
             return (
@@ -789,15 +1234,29 @@ export function MessageBlockView({ message }: MessageBlockViewProps): JSX.Elemen
           if (block.run.name === 'generate_image') {
             return <ImageGenerationBlock key={`genimg-${block.run.id}`} block={block} />
           }
-          // 其它工具：只出产出物卡（工具卡本身不渲染，见 ToolArtifactsBlock）。
-          return <ToolArtifactsBlock key={`toolart-${block.run.id}`} run={block.run} bodyPaths={bodyArtifactPaths} />
+          // 走到这里的工具只剩「正在生成文档」这一类独立卡片（其余都进了流水组）。
+          // 生成中先给一个点阵占位，别让用户对着空白猜。
+          return <DocumentPendingBlock key={`docpend-${block.run.id}`} run={block.run} />
         }
         if (block.type === 'task') return <TaskCard key={`task-${index}`} block={block} />
         if (block.type === 'interactive') return <InteractiveCard key={`int-${index}`} message={message} block={block} />
+        // 连接器推荐：助手主动推荐「连接你的应用」，点一行跳连接器市场。
+        // 它没有提交语义，所以不进 interactive 那条分支（那边会带「已提交」态）。
+        if (block.type === 'connectors') return <ConnectorSuggestCard key={`con-${index}`} block={block} />
+        // 历史记录里的旧通话卡：**保留**。新通话不再产生 call 块（改走 call-segment
+        // 折叠条 + 普通消息），但老会话里存下来的那些仍然要能正常显示。
         if (block.type === 'call') return <CallMessageCard key={`call-${index}`} call={block.call} />
+        if (block.type === 'call-segment') return <CallSegmentBar key={`callseg-${block.segment}`} block={block} />
         if (block.type === 'journal') return <JournalCard key={`journal-${index}`} block={block} />
         if (block.type === 'image') return <ImageBlock key={`img-${index}`} block={block} />
-        return <VoiceBlock key={`voice-${index}`} block={block} />
+        if (block.type === 'voice') return <VoiceBlock key={`voice-${index}`} block={block} />
+        /*
+         * 走到这里只剩 compaction 标记。它不是卡片：对话流里那行居中小字由
+         * MessageList 的 CompactionMark 单独画。这里必须显式返回空，而不是拿
+         * VoiceBlock 当兜底 —— 那个组件要 durationMs / transcript，compaction
+         * 两个都没有，渲染时会直接崩（类型检查也会报 TS2322）。
+         */
+        return <></>
       })}
     </>
   )

@@ -307,7 +307,7 @@ export class WorkbenchSyncEngine {
       this.advanceStep(0, 'done', `私库验证通过（分支: ${branch}）`)
 
       // Step 2: gather
-      this.advanceStep(1, 'running', '正在收集档案、记忆、技能、MCP 与供应商配置...')
+      this.advanceStep(1, 'running', '正在收集档案、记忆（含 Bot 归属）、技能、MCP 与供应商配置...')
       const payload = await gatherWorkbenchAssets({
         includeVault: file.settings.includeVault,
         includeMemory: file.settings.includeMemory,
@@ -322,12 +322,27 @@ export class WorkbenchSyncEngine {
       const mcpCount = payload.mcp?.entries.length ?? 0
       const mcpText = payload.mcp === undefined ? '' : `, MCP 条目 ${mcpCount} 个`
       const providersCount = payload.providers?.patchEntries.length ?? 0
-      const providersText = payload.providers === undefined ? '' : `, 供应商与能力配置 ${providersCount} 项`
-      this.advanceStep(1, 'done', `已收集: 档案 ${vaultCount} 条, 记忆 ${memoryCount} 条, 技能文件 ${skillsCount} 个${mcpText}${providersText}`)
+      // 记忆归属分布（schema v6）：直接用包内自描述的 ownerStats。旧包/旧宿主没有这段，
+      // 此时整段归属都不显示，而不是硬报一个会误导人的「Work 0 · Bot 0」。
+      const ownerStats = payload.memory?.ownerStats
+      const memoryWorkCount = ownerStats?.work ?? 0
+      const memoryBotCount = ownerStats === undefined
+        ? 0
+        : Object.values(ownerStats.bots).reduce((sum, count) => sum + count, 0)
+      const memoryOwnerText = ownerStats === undefined ? '' : `（Work ${memoryWorkCount} · Bot ${memoryBotCount}）`
+      // Live（实时语音）供应商住在 realtime-config.json，不在 cordis.patch.yml 里。
+      // 本机没有这个文件时 liveVendors 为 undefined，同样不显示，避免误报「Live 供应商 0 家」。
+      const liveVendorsCount = payload.providers?.liveVendors?.vendors.length ?? 0
+      const liveText = payload.providers?.liveVendors === undefined ? '' : `, Live 供应商 ${liveVendorsCount} 家`
+      const providersText = payload.providers === undefined ? '' : `, 供应商与能力配置 ${providersCount} 项${liveText}`
+      this.advanceStep(1, 'done', `已收集: 档案 ${vaultCount} 条, 记忆 ${memoryCount} 条${memoryOwnerText}, 技能文件 ${skillsCount} 个${mcpText}${providersText}`)
 
       // Step 3: fingerprint
       this.advanceStep(2, 'running', '比对本地数据指纹与远端提交...')
-      // 业务指纹仅比对实质数据（排除 payload 上的 createdAt 时间戳）
+      // 业务指纹仅比对实质数据（排除 payload 上的 createdAt 时间戳）。
+      // 字段集合、字段顺序必须与 doPull 结尾写回 lastDataHash 时**完全同构**
+      // （hashData 走 JSON.stringify，键序敏感），否则「拉取后立刻上传」会被误判
+      // 成有变更，白跑一次 scrypt 加密上传。
       const currentHash = hashData({
         vault: payload.vault,
         memory: payload.memory,
@@ -524,9 +539,11 @@ export class WorkbenchSyncEngine {
       this.advanceStep(2, 'done', '解密校验通过！')
 
       // Step 4: restore
-      this.advanceStep(3, 'running', '正在写入本地档案、记忆、技能文件与 MCP 配置...')
+      this.advanceStep(3, 'running', '正在写入本地档案、记忆、技能文件、MCP 配置、供应商与实时语音配置...')
       let restoredVault = 0
       let restoredMemory = 0
+      let restoredMemoryWork = 0
+      let restoredMemoryBots = 0
       let restoredSkills = 0
 
       if (payload.vault && file.settings.includeVault) {
@@ -534,8 +551,12 @@ export class WorkbenchSyncEngine {
         restoredVault = vRes.records
       }
       if (payload.memory && file.settings.includeMemory) {
-        const mRes = await restoreMemory(payload.memory)
+        // 归属统计（work / bots）是包格式 v2 才有的返回值：读 v1 包或旧宿主时缺失，
+        // 这里显式标成可选并按 0 兜底，别让进度文案出现 undefined。
+        const mRes: { entries: number; work?: number; bots?: number } = await restoreMemory(payload.memory)
         restoredMemory = mRes.entries
+        restoredMemoryWork = mRes.work ?? 0
+        restoredMemoryBots = mRes.bots ?? 0
       }
       let removedSkills = 0
       if (payload.skills && file.settings.includeSkills) {
@@ -552,19 +573,31 @@ export class WorkbenchSyncEngine {
       }
       let providersAdded = 0
       let providersUpdated = 0
+      let liveAdded = 0
+      let liveUpdated = 0
       if (payload.providers && (file.settings.includeProviders ?? true)) {
         const pRes = await restoreProviders(payload.providers)
         providersAdded = pRes.patchResult.added + pRes.credentialsResult.added
         providersUpdated = pRes.patchResult.updated + pRes.credentialsResult.updated
+        // Live 供应商单独一段（realtime-config.json），按 id 合并；v1 包里没有这段，全零。
+        liveAdded = pRes.liveResult.added
+        liveUpdated = pRes.liveResult.updated
       }
       const removedText = removedSkills > 0 ? ` (已同步清理 ${removedSkills} 个已删技能)` : ''
       const mcpText = payload.mcp === undefined
         ? ''
         : `, MCP 条目 新增 ${mcpAdded} 个 / 更新 ${mcpUpdated} 个`
+      const liveText = payload.providers?.liveVendors === undefined
+        ? ''
+        : `, Live 供应商 新增 ${liveAdded} 家 / 更新 ${liveUpdated} 家`
       const providersText = payload.providers === undefined
         ? ''
-        : `, 供应商/密钥 新增 ${providersAdded} 项 / 更新 ${providersUpdated} 项`
-      this.advanceStep(3, 'done', `已还原: 档案 ${restoredVault} 条, 记忆 ${restoredMemory} 条, 技能文件 ${restoredSkills} 个${removedText}${mcpText}${providersText}`)
+        : `, 供应商/密钥 新增 ${providersAdded} 项 / 更新 ${providersUpdated} 项${liveText}`
+      // 记忆归属：v1 包没有 owner 分布，就不显示括号（避免「Work 0 / Bot 0」的假信息）。
+      const memoryText = payload.memory === undefined
+        ? `记忆 ${restoredMemory} 条`
+        : `记忆 ${restoredMemory} 条（Work ${restoredMemoryWork} / Bot ${restoredMemoryBots}）`
+      this.advanceStep(3, 'done', `已还原: 档案 ${restoredVault} 条, ${memoryText}, 技能文件 ${restoredSkills} 个${removedText}${mcpText}${providersText}`)
 
       // Step 5: reload
       this.advanceStep(4, 'done', '所有资产已就绪并生效！')
@@ -587,11 +620,16 @@ export class WorkbenchSyncEngine {
       await this.persist({
         ...file,
         settings: nextSettings,
+        // ⚠️ 这里的指纹必须与 doUpload 第 3 步的 currentHash **完全同构**：同样的
+        // 五个字段（vault / memory / skills / mcp / providers）、同样的嵌套结构。
+        // 此前漏了 providers —— 拉取后第一次上传会判定「数据已更新」，于是每次
+        // 自动同步都白跑一趟 scrypt 加密 + GitHub 上传（明明什么都没改）。
         lastDataHash: hashData({
           vault: payload.vault,
           memory: payload.memory,
           skills: payload.skills,
           mcp: payload.mcp,
+          providers: payload.providers,
         }),
       })
       await this.recordRun(run)
@@ -715,11 +753,19 @@ export class WorkbenchSyncEngine {
       localTotalBytes: sizes.totalBytes,
       localVaultBytes: sizes.vaultBytes,
       localMemoryBytes: sizes.memoryBytes,
+      // 记忆归属（schema v6）与 Live（实时语音）供应商统计：直接透传 getWorkbenchSizes()，
+      // 面板靠它把「记忆 14 条」拆成 Work / Bot，并把实时语音供应商算进供应商规模。
+      localMemoryEntries: sizes.memoryEntries,
+      localMemoryWorkEntries: sizes.memoryWorkEntries,
+      localMemoryBotEntries: sizes.memoryBotEntries,
+      localMemoryBots: sizes.memoryBots,
       localSkillsBytes: sizes.skillsBytes,
       localMcpBytes: sizes.mcpBytes,
       localMcpEntries: sizes.mcpEntries,
       localProvidersBytes: sizes.providersBytes,
       localProvidersCount: sizes.providersCount,
+      localLiveVendors: sizes.liveVendors,
+      localLiveDefaultVendor: sizes.liveDefaultVendor,
       localWebSearchProvider: sizes.webSearchProvider,
       passphraseSet: passphrase.length >= WORKBENCH_SYNC_MIN_PASSPHRASE,
       tokenSet: token.length > 0,

@@ -108,13 +108,11 @@ body[data-ds-dark-theme] .wb-root {
 /* ── 统一分段胶囊按钮（Segmented Controls & Tabs） ───────────────────
    技能页的筛选行不在此列：它照官方「自动化任务」页的 filter tab 原样
    （纯文字、无边框、选中 = 浅底 + 主文字），不再套主色实心胶囊。 */
-.wb-root .usm-range-btn,
 .wb-root .dsh-memory-view-tab {
   border-radius: 8px !important;
   font-size: 12px !important;
   transition: all 130ms ease !important;
 }
-.wb-root .usm-range-btn[data-active],
 .wb-root .dsh-memory-view-tab[data-active="true"] {
   background: var(--wb-accent) !important;
   color: #fff !important;
@@ -129,7 +127,6 @@ body[data-ds-dark-theme] .wb-root {
    技能条目是「目录行」不是卡片。这条 !important 规则正是「一展开就
    变回旧卡片」的第二个来源：它把插件样式表里刚撤掉的圆角、边框、阴影
    又强行补了回来。条目外观从此只由面板样式表决定。 */
-.wb-root .usm-uc-card,
 .wb-root .dsh-memory-entry-card,
 .wb-root .tg-card {
   border-radius: var(--wb-surface-radius, 12px) !important;
@@ -138,19 +135,10 @@ body[data-ds-dark-theme] .wb-root {
   box-shadow: var(--wb-surface-shadow) !important;
   transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease !important;
 }
-.wb-root .usm-uc-card:hover,
 .wb-root .tg-card:hover {
   border-color: color-mix(in srgb, var(--wb-accent) 45%, var(--wb-surface-border)) !important;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08) !important;
   transform: translateY(-1px) !important;
-}
-
-/* ── 用量统计卡：统一板块质感 ───────────────────────────────────── */
-.wb-root .usm-uc-stat {
-  border-radius: 10px !important;
-  border: 1px solid var(--wb-surface-border) !important;
-  background: var(--wb-surface-bg) !important;
-  padding: 8px 12px !important;
 }
 
 /* ── 彩色标签与徽标降噪（Pills, Tags, Badges） ───────────────────── */
@@ -161,19 +149,6 @@ body[data-ds-dark-theme] .wb-root {
    本层只保留一处真正需要换肤的东西：颜色降噪本身。
    唯一保留的例外是「内置」标记的圆点色 —— 它靠 CSS 变量吃强调色，
    在 .wb-root 里已经是换肤后的值，无需在此重复声明。 */
-
-/* ── 用量嵌入页板块容器（响应式大盘，摆脱狭隘弹窗感） ─────────────── */
-.wb-root .usm-uc {
-  padding: 14px 20px 20px !important;
-  gap: 12px !important;
-  max-width: 1120px !important;
-  width: 100% !important;
-  margin: 0 auto !important;
-  box-sizing: border-box !important;
-}
-.wb-root .usm-uc-stats {
-  gap: 10px !important;
-}
 
 /* ── 画廊与记忆首页板块收敛（Coherent Surfaces） ───────────────
    （画廊类别 Dock 的外观与位置已移交 theme.ts 的 wb2 规则，此处不再接管） ── */

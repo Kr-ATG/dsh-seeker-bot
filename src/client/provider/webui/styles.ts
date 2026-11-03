@@ -60,7 +60,14 @@ export function injectStyles(): () => void {
 .phub-host{display:flex;flex-direction:column;gap:18px;animation:phub-page-in 360ms cubic-bezier(.22,1,.36,1) backwards}
 /* 弹窗放大过程中内容一直在重排，淡入 + 轻微上浮让这一拍读起来是「铺开」而不是「被拉伸」。 */
 @keyframes phub-page-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
-.phub-host[data-wide] > div:first-child{display:flex;align-items:flex-start;gap:16px;min-width:0;width:100%}
+/* ── 模式切换行（模型 / 实时语音）：内容区顶部右对齐 ──
+   用户 2026-11-02 要求「模式切换在右上角打开配置文件左侧」——那个按钮由官方设置弹窗
+   header 渲染，插件只接管内容区 settings.section，无法与它同排；这一行是能做到的
+   最近位置（视觉上紧贴官方按钮下方）。
+   margin 上下各收一点：.phub-host 的 gap 是 18px，直接放会与下方列表隔得太开。 */
+.phub-modebar{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-height:30px;margin:-4px 0 -8px;min-width:0}
+.phub-modebar-label{flex:none;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#8f959e)}
+.phub-host[data-wide] > .phub-hub{display:flex;align-items:flex-start;gap:16px;min-width:0;width:100%}
 /* 宽屏时三个模型设置卡作为 hub 的第三列：宽度随容器走（clamp 560–900），自身可滚。
    写死 380 太窄（下拉被挤成一小截），按容器比例给足宽度。
    切档（窄屏第二行 → 宽屏第三列）时播 phub-col-in：只淡入 + 轻微右移，
@@ -68,19 +75,19 @@ export function injectStyles(): () => void {
    布局一次到位更扎眼；重排本身由这层淡入遮住即可。
    容器自身只播 col-in（带 120ms 延后，等弹窗先铺开），卡片错峰由下面的
    nth-child 承担——容器再播一份 block-in 会和子卡叠成双重淡入，时序全乱。 */
-.phub-host[data-wide] > div:first-child > .phub-blocks{flex:0 0 clamp(560px,44%,900px);width:clamp(560px,44%,900px);max-height:var(--phub-max-h, calc(100vh - 150px));overflow-y:auto;overflow-x:hidden;padding-right:2px;animation:phub-col-in 360ms cubic-bezier(.22,1,.36,1) 120ms backwards}
+.phub-host[data-wide] > .phub-hub > .phub-blocks{flex:0 0 clamp(560px,44%,900px);width:clamp(560px,44%,900px);max-height:var(--phub-max-h, calc(100vh - 150px));overflow-y:auto;overflow-x:hidden;padding-right:2px;animation:phub-col-in 360ms cubic-bezier(.22,1,.36,1) 120ms backwards}
 @keyframes phub-col-in{from{opacity:0;transform:translateX(10px)}}
 /* 窄屏（未打 data-wide）：模型设置卡换行落到第二行，占满整行。
    flex-basis:100% 是换行的关键——只给 flex:1 的话它会被压在同一行里，
    详情面板被挤成一条。容器自身不播动画，错峰淡入由下面的 nth-child 接管。 */
-.phub-host:not([data-wide]) > div:first-child > .phub-blocks{flex:1 1 100%;width:100%}
-.phub-host[data-wide] > div:first-child > .phub-blocks::-webkit-scrollbar{width:8px}
-.phub-host[data-wide] > div:first-child > .phub-blocks::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l3,#c9cdd4);border-radius:4px}
-.phub-host[data-wide] > div:first-child > .phub-blocks::-webkit-scrollbar-track{background:transparent}
+.phub-host:not([data-wide]) > .phub-hub > .phub-blocks{flex:1 1 100%;width:100%}
+.phub-host[data-wide] > .phub-hub > .phub-blocks::-webkit-scrollbar{width:8px}
+.phub-host[data-wide] > .phub-hub > .phub-blocks::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l3,#c9cdd4);border-radius:4px}
+.phub-host[data-wide] > .phub-hub > .phub-blocks::-webkit-scrollbar-track{background:transparent}
 /* 宽屏时详情列与左栏一起收在视口内，底部模型卡跟着右列滚。
    详情面板自身限宽：表单行拉到 1200+ 时「标签—控件」两端的距离已经超出
    扫视范围，模型目录那几行也会变成一条横带。 */
-.phub-host[data-wide] > div:first-child > div:nth-child(2){align-self:stretch;min-width:0}
+.phub-host[data-wide] > .phub-hub > div:nth-child(2){align-self:stretch;min-width:0}
 .phub-host[data-wide] .phub-panel{max-width:1080px}
 .phub-block-title{font-size:14px;font-weight:600;margin-bottom:8px}
 .phub-hint{font-size:12px;color:var(--dsw-alias-label-secondary,#888);margin-bottom:10px}

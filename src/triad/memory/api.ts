@@ -8,11 +8,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { URL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { rejectCrossSite } from '../../shared/csrf.ts'
-import { applyConfigOverrides, DEFAULT_CONFIG, publicConfig, type ConsolidateResult, type MemoryConfig, type MemoryEntry, type MemoryKind } from './types.js'
+import { applyConfigOverrides, DEFAULT_CONFIG, publicConfig, type ConsolidateResult, type MemoryConfig, type MemoryEntry, type MemoryKind, type MemoryOwner } from './types.js'
 import { compileAll } from './engine/compile.js'
 import { consolidateAll, consolidateScope } from './engine/consolidate.js'
 import { searchEntries } from './engine/retrieval.js'
-import { isWorkspacePathAlive, localDate, mergeTags, nowIso, projectHashOf, entryIdOf, summarize, type MemoryStore } from './engine/store.js'
+import { isWorkspacePathAlive, localDate, mergeTags, nowIso, ownerOf, projectHashOf, entryIdOf, summarize, type MemoryStore } from './engine/store.js'
 
 /** Minimal service-shaped view of the webserver route register. */
 declare module '@deepseek-ai/cordis' {
@@ -35,6 +35,13 @@ interface EntryView {
   content: string
   scope: 'global' | 'project'
   projectHash: string | null
+  /**
+   * 归属主体（schema v6）：`work` 或 `bot:<botId>`。
+   *
+   * 面板据此区分「这条是谁的记忆」——主 Bot 的资料库要列出全部子 Bot 并标注来源，
+   * 子 Bot 的资料库只列自己的。缺省语义仍是 `work`，由 `ownerOf()` 统一兜底。
+   */
+  owner: MemoryOwner
   tags: string[]
   pinned: boolean
   /** true = 已禁用（保留但不参与注入/编译）。 */
@@ -43,7 +50,7 @@ interface EntryView {
   deprecated: boolean
   importance: number
   layer: 'short' | 'long'
-  source: 'extract' | 'manual'
+  source: 'extract' | 'manual' | 'bot-working-memory'
   createdAt: string
   updatedAt: string
   /** 条目级版本号（每次内容变更 +1）。 */
@@ -57,7 +64,7 @@ interface EntryView {
   /** 上次注入命中时间（null=从未命中）。 */
   lastHitAt: string | null
   /** 溯源：产生/最近更新该条目的会话（KR 记忆卡「本会话新增」判定用；旧 host 可能缺省）。 */
-  provenance?: { sessionId?: string; turn?: number; snippet?: string }
+  provenance?: { sessionId?: string; turn?: number; userMessageId?: string; snippet?: string }
   /** 待确认（true = 自动抽取但用户尚未确认，不参与检索/注入）。缺省 = 已生效。 */
   pending?: boolean
   /** 进入待确认状态的时间 ISO。 */
@@ -76,6 +83,7 @@ function toView(entry: MemoryEntry): EntryView {
     content: entry.content,
     scope: entry.scope,
     projectHash: entry.projectHash,
+    owner: ownerOf(entry),
     tags: entry.tags,
     pinned: entry.pinned,
     disabled: entry.disabled === true,
@@ -920,6 +928,14 @@ async function handle(
       const importance = typeof body.importance === 'number' && Number.isFinite(body.importance)
         ? Math.max(1, Math.min(10, Math.round(body.importance))) : 8
       const pinned = body.pinned === true
+      /*
+       * 归属：面板在哪个 Bot 的记忆页点「添加」，就写到哪个 owner 上。
+       * 只接受 `work` 或 `bot:<id>`，其余一律落回 `work`——绝不因为前端传了个
+       * 奇怪字符串就把记忆写进一个谁也读不到的归属里。
+       */
+      const owner: MemoryOwner = typeof body.owner === 'string' && body.owner.startsWith('bot:') && body.owner.length > 4
+        ? body.owner as MemoryOwner
+        : 'work'
       // 项目层首次落盘时确保 meta 存在。
       if (scope === 'project' && projectHash !== null) {
         const meta = await store.readProjectMeta(projectHash)
@@ -931,11 +947,12 @@ async function handle(
           })
         }
       }
-      const beforeEntry = await store.getEntry(entryIdOf(content, scope, scope === 'project' ? projectHash : null))
+      const beforeEntry = await store.getEntry(entryIdOf(content, scope, scope === 'project' ? projectHash : null, owner))
       const { created, entry } = await store.upsertEntry({
         content,
         scope,
         projectHash: scope === 'project' ? projectHash : null,
+        owner,
         tags,
         importance,
         pinned,
@@ -1003,15 +1020,21 @@ async function listView(store: MemoryStore, params: URLSearchParams): Promise<{ 
   const entries = await store.readEntries()
   const scope = params.get('scope')
   const project = params.get('project')
+  const owner = params.get('owner')
   const q = params.get('q')?.trim().toLowerCase() ?? ''
   const tag = params.get('tag')
   const includeDeprecated = params.get('includeDeprecated') === '1'
 
-  // 硬过滤：scope / project / tag；deprecated 条目默认不显示（软废弃 = 退出活跃列表）。
+  // 硬过滤：scope / project / owner / tag；deprecated 条目默认不显示（软废弃 = 退出活跃列表）。
   const scoped = entries.filter(entry => {
     if (scope === 'global' && entry.scope !== 'global') return false
     if (scope === 'project' && entry.scope !== 'project') return false
     if (project !== null && project !== '' && entry.projectHash !== project) return false
+    // owner 过滤是「子 Bot 只看自己 / 主 Bot 看全部」在面板侧的落点。
+    // 特殊值 `bots` = 所有 Bot 的（主 Bot 资料库要一次列出全部子 Bot 并标注来源），
+    // 单个 `bot:<id>` 则精确匹配。`work` 与其它值走精确匹配。
+    if (owner !== null && owner !== '' && owner !== 'bots' && ownerOf(entry) !== owner) return false
+    if (owner === 'bots' && !ownerOf(entry).startsWith('bot:')) return false
     if (tag !== null && tag !== '' && !entry.tags.includes(tag)) return false
     if (!includeDeprecated && entry.deprecated === true) return false
     return true

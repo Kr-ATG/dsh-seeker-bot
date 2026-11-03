@@ -1,9 +1,11 @@
 /**
- * Personal Agent — 期刊封面卡。
+ * Personal Agent — 书架封面卡。
  *
- * 左侧期刊列表与聊天里的 journal 消息块共用这一张卡：
- * 16:9 封面（生图结果或 journalCoverSvg 程序化封面）+ 期号 / 日期 / 标题。
- * 纯展示 + 点击回调，不依赖 store，任何容器都能放。
+ * 左侧书架列表用这一张卡：16:9 封面缩略图（生图结果或 journalCoverSvg 程序化封面）
+ * + 期号 / 心情 pill / 标题 / 日期。纯展示 + 点击回调，不依赖 store。
+ *
+ * 视觉全部交给 journal.css.ts 的 `.pa-journal-card*` 规则，这里只负责结构；
+ * 当前正在阅读的一期由 `data-active` 标记（左侧色条 + 描边）。
  */
 import type { KeyboardEvent } from 'react'
 import { journalCoverSvg } from '../engine.ts'
@@ -15,12 +17,27 @@ export interface JournalCardProps {
   onClick?: () => void
   /** 是否为当前正在阅读的一期。 */
   active?: boolean
+  /** 程序化封面的配色；缺省 dark（与旧外观一致）。 */
+  theme?: 'dark' | 'light'
 }
 
-export function JournalCard({ journal, onClick, active = false }: JournalCardProps): JSX.Element {
-  const cover = journal.image !== undefined && journal.image !== ''
-    ? journal.image
-    : journalCoverSvg(journal)
+/** 封面：优先用生图 / 宿主返回的图，没有就退回程序化 SVG。 */
+function coverOf(journal: Journal, theme: 'dark' | 'light'): string {
+  if (journal.image !== undefined && journal.image !== '') return journal.image
+  return journalCoverSvg({
+    title: typeof journal.title === 'string' && journal.title !== '' ? journal.title : '未命名的一期',
+    issue: typeof journal.issue === 'string' && journal.issue !== '' ? journal.issue : 'JOURNAL',
+  }, theme)
+}
+
+export function JournalCard({ journal, onClick, active = false, theme = 'dark' }: JournalCardProps): JSX.Element {
+  const cover = coverOf(journal, theme)
+  const issue = typeof journal.issue === 'string' && journal.issue !== '' ? journal.issue : 'JOURNAL'
+  const title = typeof journal.title === 'string' && journal.title !== '' ? journal.title : '未命名的一期'
+  const mood = typeof journal.mood === 'string' ? journal.mood.trim() : ''
+  const dateLabel = typeof journal.dateLabel === 'string' && journal.dateLabel !== ''
+    ? journal.dateLabel
+    : (typeof journal.date === 'string' ? journal.date : '')
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
     if (onClick === undefined) return
@@ -37,18 +54,20 @@ export function JournalCard({ journal, onClick, active = false }: JournalCardPro
       role={onClick !== undefined ? 'button' : undefined}
       tabIndex={onClick !== undefined ? 0 : undefined}
       aria-current={active ? 'true' : undefined}
+      aria-label={`${issue} ${title}`}
       onClick={onClick}
       onKeyDown={handleKeyDown}
     >
       <div className="pa-journal-card__cover">
-        <img src={cover} alt={journal.title} draggable={false} loading="lazy" />
+        <img src={cover} alt={title} draggable={false} loading="lazy" />
       </div>
       <div className="pa-journal-card__body">
-        <div className="pa-journal-card__meta">
-          <span className="pa-journal-card__issue">{journal.issue}</span>
-          <span className="pa-journal-card__date">{journal.dateLabel}</span>
+        <div className="pa-journal-card__top">
+          <span className="pa-journal-card__issue">{issue}</span>
+          {mood !== '' ? <span className="pa-journal-card__mood">{mood}</span> : null}
         </div>
-        <div className="pa-journal-card__title">{journal.title}</div>
+        <div className="pa-journal-card__title">{title}</div>
+        {dateLabel !== '' ? <div className="pa-journal-card__date">{dateLabel}</div> : null}
       </div>
     </div>
   )

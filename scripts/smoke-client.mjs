@@ -18,7 +18,7 @@
  */
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
-import { resolve, dirname } from 'node:path'
+import { resolve, dirname, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
@@ -328,7 +328,7 @@ const inputTriggersStub = {
   sessionOf: () => ({}),
 }
 const modelDirectoriesStub = { list: () => Promise.resolve([]) }
-// layout 桩：selectPanel 记录调用（下面断言「点用量入口先切回会话」）。
+// layout 桩：selectPanel 记录调用（菜单行切页用）。
 const layoutCalls = []
 const layoutStub = {
   selectPanel: (id) => { layoutCalls.push(id) },
@@ -409,8 +409,10 @@ const expectedStyles = [
   // Personal Agent 全屏应用。applyModeSwitch 在 apply 阶段同步注入。
   'dsh-seeker-bot-mode-switch',
   // Personal Agent 全屏应用（src/client/personal/）：基础设计系统 + 左侧栏/右栏
-  // + 聊天 + 通话 + 期刊五张独立样式表，由 applyPersonalAgent 按顺序注入。
-  'pa-base-styles', 'pa-shell-styles', 'pa-chat-styles', 'pa-call-styles', 'pa-journal-styles',
+  // + 聊天 + 通话 + 期刊 + v3 新增的产出物/设置/任务三张独立样式表，
+  // 由 applyPersonalAgent 按顺序注入。
+  'pa-base-styles', 'pa-shell-styles', 'pa-outputs-styles', 'pa-settings-styles',
+  'pa-task-styles', 'pa-chat-styles', 'pa-call-styles', 'pa-journal-styles',
   // 侧栏文档预览面板样式（src/client/sidebar-doc/index.tsx）。8b1db4b 引入时
   // 漏登本表，导致 smoke 一直报 unexpected extra styles —— 补录。
   'dsh-sdp-styles',
@@ -989,10 +991,100 @@ const cell = (key) => registeredSlots.find((s) => s?.slot === 'conversation.chat
 // 功能恢复而回归，槽位从 11 → 12。
 // 2026-11：工具闸门卡片（conversation.input.left / dsh-tools-gate）按用户要求整块移除，
 // 槽位从 27 → 26。host 半身的闸门仍在，只是不再有可视开关。
-if (registeredSlots.length !== 26) {
-  fail(`expected 26 slot registrations, got ${registeredSlots.length}: ${JSON.stringify(registeredSlots)}`)
+// 2026-11：会话右键菜单「删除会话」（sidebar.workspaces.session.menu.item /
+// session-delete / order 425）随「删除会话」功能新增，槽位从 26 → 27。它排在官方
+// 内置的 归档(400) 之后、复制 Session ID(450) 之前。
+// 同批还加了它的确认弹窗宿主（shell.overlay / session-delete-confirm / order 95）：
+// 弹窗必须挂在常驻席位上，因为官方 Menu 关闭时会把菜单项组件连同 state 一起卸载
+// （挂在菜单项里会「弹一下就消失」）。27 → 28。
+if (registeredSlots.length !== 28) {
+  fail(`expected 28 slot registrations, got ${registeredSlots.length}: ${JSON.stringify(registeredSlots)}`)
 } else {
-  pass('registered 26 seats (11 原有 + 15 对话胶囊：5 overlay + 1 sidebar.footer.action + 9 settings.general.item)')
+  pass('registered 28 seats (11 原有 + 15 对话胶囊：5 overlay + 1 sidebar.footer.action + 9 settings.general.item + 1 会话菜单项 + 1 删除确认弹窗)')
+}
+
+// 会话右键菜单「删除会话」：位置必须紧接「归档会话」之后。
+// 官方内置 order：置顶 100 / 重命名 200 / 分叉 300 / 归档 400 / 复制 Session ID 450。
+// 这条错了不会报错，只会让菜单项跑到「复制 Session ID」下面（或干脆被挤出菜单），
+// 所以必须钉住。
+const sessionMenuDelete = registeredSlots.find(
+  (s) => s?.slot === 'sidebar.workspaces.session.menu.item' && s?.id === 'session-delete',
+)
+if (sessionMenuDelete === undefined) {
+  fail('missing 删除会话 menu item (sidebar.workspaces.session.menu.item / session-delete)')
+} else if (sessionMenuDelete.order !== 425) {
+  fail(`删除会话 order 应为 425（归档 400 之后 / 复制 Session ID 450 之前），实得 ${sessionMenuDelete.order}`)
+} else {
+  pass('会话菜单「删除会话」在位：sidebar.workspaces.session.menu.item / order 425（紧接归档会话之后）')
+}
+
+// 删除会话的确认弹窗宿主：必须在 shell.overlay 上常驻，且顺序排在胶囊那组之后。
+// 这条错了不会抛错，只会让弹窗「刚出现就被卸载」（挂在菜单项里时）或盖住别的东西。
+const deleteDialogSeat = registeredSlots.find(
+  (s) => s?.slot === 'shell.overlay' && s?.id === 'session-delete-confirm',
+)
+if (deleteDialogSeat === undefined) {
+  fail('missing 删除确认弹窗宿主 (shell.overlay / session-delete-confirm)')
+} else if (deleteDialogSeat.order !== 95) {
+  fail(`删除确认弹窗宿主 order 应为 95，实得 ${deleteDialogSeat.order}`)
+} else {
+  pass('删除确认弹窗宿主在位：shell.overlay / order 95（常驻，不随菜单卸载）')
+}
+
+// 自绘确认弹窗的三条硬判据（错了都只在界面上「难看」，不会报错）：
+//  1. 菜单项必须是 danger 危险色（官方 MenuItemButton 的原生 danger 变体）；
+//  2. session-delete 模块内不能再出现 window.confirm（那是 dsh-shell 的系统弹窗，
+//     标题写死 "dsh-shell"，主题脱节）。注意产物里别的模块仍合法使用 confirm，
+//     所以只在**本模块的产物分段**内判，不能全文件判；
+//  3. 弹窗必须自带样式表，且 Esc 能取消。
+const sessionDeleteModule = (() => {
+  // esbuild 会在产物里按源文件留 `// src/client/session-delete/xxx` 分段注释，
+  // 而 `index.tsx` 会**出现两次**（依赖图顺序 + 实际代码位置）。这里取从第一处
+  // session-delete 注释开始、到「下一个不属于 session-delete 的 // src/ 注释」为止，
+  // 覆盖整个模块段（否则只截到 170 字符，什么断言都测不到）。
+  const start = code.indexOf('// src/client/session-delete/')
+  if (start < 0) return ''
+  const marker = /\/\/ src\//g
+  marker.lastIndex = start + 1
+  let end = code.length
+  for (let match = marker.exec(code); match !== null; match = marker.exec(code)) {
+    const line = code.slice(match.index, match.index + 80)
+    if (!line.includes('session-delete')) { end = match.index; break }
+  }
+  return code.slice(start, end)
+})()
+if (!/MenuItemButton[\s\S]{0,300}?danger/.test(code)) {
+  fail('删除会话菜单项没有走 danger 危险色（MenuItemButton 的 danger 变体）')
+} else {
+  pass('删除会话菜单项标了 danger（官方危险色：红字 + hover 底色）')
+}
+if (sessionDeleteModule === '') {
+  fail('产物里找不到 session-delete 模块分段（无法验证确认弹窗实现）')
+} else if (sessionDeleteModule.includes('window.confirm')) {
+  fail('删除确认仍在用 window.confirm（dsh-shell 原生弹窗，主题脱节）')
+} else {
+  pass('删除确认不再使用 window.confirm（改为自绘主题化弹窗）')
+}
+if (!code.includes('dsh-session-delete-dialog-styles') || !/key === "Escape"/.test(code)) {
+  fail('删除确认弹窗缺少自绘样式表或 Esc 关闭')
+} else {
+  pass('删除确认弹窗：自绘样式表 + portal 到 body + Esc 取消')
+}
+// 删除成功后**不要**刷新页面（2026-11-03 用户实测后的定案）。
+//
+// 早先试过「删完 location.reload()」，因为删完界面没变化。但刷新解决不了问题：
+// 会话列表来自 `sessionQuery.listSessions()` 的**内存索引**，刷新只会重新问宿主，
+// 宿主还返回旧列表——用户实测「刷新没用，必须重启才行」。
+//
+// 真正的解法在 host 侧：删完磁盘后**保持归档状态、不 unarchive**。归档集合是
+// registry 的实时状态，写入会推 changed 帧，侧栏立刻按「隐藏已归档」把它藏起来。
+// 所以客户端这边不该有 reload —— 那只会打断用户、丢输入草稿。
+if (sessionDeleteModule === '') {
+  fail('产物里找不到 session-delete 模块分段')
+} else if (sessionDeleteModule.includes('location.reload')) {
+  fail('删除成功后仍在刷新页面（多余且打断用户：归档机制已让列表立即隐藏）')
+} else {
+  pass('删除成功后不刷新页面（靠 host 侧保持归档让列表立即隐藏）')
 }
 
 // 对话完成胶囊（2026-10-28 自 dsh-companion 移植）：15 个座位一个都不能少。
@@ -1814,8 +1906,17 @@ if (krEnabled) {
        */
       fail('卡头名字字号必须是 max(13px, calc(var(--dsh-content-font-size) + 2px))（DSH 正文 +2）')
     } else if (!/\.kr-plain-head__name-row\s*\{[^}]*display:\s*flex/.test(code)
-      || !/\.kr-plain-head--compact \.kr-plain-head__name-row\s*\{[^}]*gap:\s*8px/.test(code)) {
-      fail('卡头名字行必须是 flex 且带有 8px gap')
+      || !/\.kr-plain-head--compact \.kr-plain-head__name-row\s*\{[^}]*flex-direction:\s*column/.test(code)) {
+      /*
+       * 2026-11-03 用户要求「浏览器标识放在 seeker 文字下方」：操作面板的紧凑
+       * 卡头里名字行改成**竖排**（名字在上、图标在下），基础骨架（新对话页 Hero）
+       * 仍是横排。
+       *
+       * 所以这里不再断言「紧凑骨架 gap: 8px」—— 竖排时名字与图标之间是 gap: 0
+       * （图标按钮自带 3px 内边距，视觉间距 3px；再加 gap 会把 64px 的行高顶破，
+       * 实测 gap: 1px 就把卡头从 110px 顶到 111px）。
+       */
+      fail('卡头名字行必须是 flex（Hero 横排）；操作面板紧凑骨架里必须 flex-direction: column（浏览器标志在名字下方）')
     } else if (/\.kr-echo-viewport__zoom/.test(code)) {
       /*
        * 回显样式**不该再进 bundle**（2026-10-31 用户：「移除操作面板的浏览器回显，
@@ -3044,51 +3145,17 @@ if (krEnabled) {
   }
 }
 
-// ── 用量卡片：高度内容自适应 + 卡片内不滚动（用户明确要求） ────────────
+// ── PopoverShell 高度自适应契约 ──────────────────────────────────────
 //
-// 用户原话：「用量页面不能够自动自适应卡片长度，这让我很困惑，我不想要滚动的方式」。
-// 旧实现是 414 / 560 两档写死高度，配上 `.usm-uc { overflow-y:auto }` —— 内容
-// 只有 298px 时卡片仍占 414，多出来的部分既空又带一条滚动条；选中某天后高度
-// 跳一档，长模型名还会被裁。
-//
-// 契约（三条一起才成立）：
-//   1. UsagePanel 不再给 size.height（只给宽度）→ 走内容自适应分支；
-//   2. .usm-uc 不得再有 overflow-y:auto / flex:1（否则内容没超出也留滚动条）；
-//   3. PopoverShell 必须实测卡片高度并据此夹紧 top（否则长卡片会伸出视口下缘）。
+// 弹层卡片（技能 / 记忆 / 画廊等）高度由内容决定，长卡片会伸出视口下缘，
+// 所以外壳必须实测卡片高度并据此夹紧 top。
 {
-  const usageSrc = readFileSync(resolve(ROOT, 'src/client/triad/usage/dashboard/UsagePanel.tsx'), 'utf-8')
   const shellSrc = readFileSync(resolve(ROOT, 'src/client/triad/popover-shell.tsx'), 'utf-8')
-  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/.*$/gm, '$1 ')
-
-  const usageCode = strip(usageSrc)
-  const ucRule = /\.usm-uc\s*\{([^}]*)\}/.exec(usageCode)?.[1] ?? ''
-  const violations = []
-  if (/size=\{\{\s*width:[^}]*height:/.test(usageCode)) violations.push('UsagePanel 不得再给 size.height（卡片高度必须由内容决定）')
-  if (/overflow-y\s*:\s*auto/.test(ucRule)) violations.push('.usm-uc 不得再滚动（overflow-y:auto）')
-  if (/flex\s*:\s*1\s+1\s+auto/.test(ucRule)) violations.push('.usm-uc 不得再 flex:1（内容高度容器里没有剩余空间可分配）')
-  if (!/ResizeObserver/.test(shellSrc)) violations.push('PopoverShell 必须实测卡片高度（ResizeObserver），否则长卡片会伸出视口下缘')
-
-  if (violations.length > 0) {
-    fail(`用量卡片自适应契约被破坏：${violations.join(' / ')}`)
+  if (!/ResizeObserver/.test(shellSrc)) {
+    fail('PopoverShell 必须实测卡片高度（ResizeObserver），否则长卡片会伸出视口下缘')
   } else {
-    pass('用量卡片：高度内容自适应（不给 size.height / 主体不滚动 / 实测高度夹紧定位）')
+    pass('PopoverShell 实测卡片高度并夹紧定位（ResizeObserver）')
   }
-}
-
-// ── 用量「今日」= 24 小时趋势（2026-10-29 用户要求） ──────────────────
-//
-// 用户原话：「用量进来就需要到今日，分类是今日的话这个趋势图要显示24小时」。
-// 三个面缺一不可：默认范围是 today；面板把 hours 传给图表；图表支持 hours。
-// host 的 24 小时桶由 scripts/test-usage-hours.mjs 做行为级验证。
-{
-  const panelSrc = readFileSync(resolve(ROOT, 'src/client/triad/usage/dashboard/ObservePanel.tsx'), 'utf-8')
-  const chartSrc = readFileSync(resolve(ROOT, 'src/client/triad/usage/dashboard/ObserveChart.tsx'), 'utf-8')
-  const reasons = []
-  if (!/useState<RangePreset>\('today'\)/.test(panelSrc)) reasons.push('ObservePanel 默认范围必须是今日')
-  if (!/payload\?\.hours/.test(panelSrc) || !/hours=\{scopedHours\}/.test(panelSrc)) reasons.push('ObservePanel 必须把 hours 传给趋势图')
-  if (!/hours\?: ObserveHourStat\[\]/.test(chartSrc)) reasons.push('ObserveChart 必须接受 hours?: ObserveHourStat[]')
-  if (reasons.length > 0) fail('用量今日 24 小时契约被破坏：' + reasons.join(' / '))
-  else pass('用量：默认今日 + 趋势图 24 小时（hours 通道）')
 }
 
 // ── 任务/操作面板的取数与回填（2026-10-05 修「切换会话后两张卡就空了」）──────
@@ -3269,10 +3336,10 @@ if (krEnabled) {
   // 「系统提示词」(prompt) 是 2026-10-27 新增的第六类：只读视图；
   // 「同步设置」(sync) 是新增的第七类：工作台资产云端双向同步。
   // 「连接器」(connectors) 是 2026-11 新增的第八类：MCP 市场，排在 SKILL 之后
-  // （用户点名「在 skill 菜单下方增加一个连接器菜单」）。
-  // 八类同源（都从 WORKBENCH_TABS 出），侧栏、浮层、⌘N 直切三处同步生效。
-  if (tabIds.join(',') !== 'memory,skills,connectors,usage,gallery,vault,prompt,sync') {
-    reasons.push(`WORKBENCH_TABS 必须是 memory/skills/connectors/usage/gallery/vault/prompt/sync 八项，实得 [${tabIds.join(', ')}]`)
+  // （用户点名「在 skill 菜单下方增加一个连接器菜单」）。用量工作台已下线，
+  // 现为七类。七类同源（都从 WORKBENCH_TABS 出），侧栏、浮层、⌘N 直切三处同步生效。
+  if (tabIds.join(',') !== 'memory,skills,connectors,gallery,vault,prompt,sync') {
+    reasons.push(`WORKBENCH_TABS 必须是 memory/skills/connectors/gallery/vault/prompt/sync 七项，实得 [${tabIds.join(', ')}]`)
   }
   if (!/return 'memory'/.test(flyoutSrc)) {
     reasons.push("readWorkbenchTab 的非法值回落必须是 'memory'")
@@ -3790,17 +3857,17 @@ if (krEnabled) {
     activeChild: () => activeScope,
   })
   // 没有 children 的行 = 不可展开（不画箭头），它的 children 必须是 undefined
-  const flatDispose = registry2.navMenuItem({ id: 'workbench-usage', label: '用量', icon: Icon, section: 'shop', workbenchTab: 'usage' })
+  const flatDispose = registry2.navMenuItem({ id: 'workbench-flat', label: '扁平条目', icon: Icon, section: 'shop', workbenchTab: 'gallery' })
 
   const entryList = registry2.entriesOfSection('shop')
   const memoryEntry = entryList.find((e) => e.id === 'workbench-memory')
-  const usageEntry = entryList.find((e) => e.id === 'workbench-usage')
+  const flatEntry = entryList.find((e) => e.id === 'workbench-flat')
   if (memoryEntry?.children?.length !== 2) reasons.push('navMenuItem 的 children 必须原样落进注册表')
   // 小标题机制已退役：条目定义上不该再有这个字段（传了也应该被忽略）
   if ('childrenTitle' in (memoryEntry ?? {})) {
     reasons.push('二级菜单小标题机制已退役，条目定义上不该再有 childrenTitle')
   }
-  if (usageEntry?.children !== undefined) reasons.push('不传 children 的条目必须没有二级菜单（不画箭头）')
+  if (flatEntry?.children !== undefined) reasons.push('不传 children 的条目必须没有二级菜单（不画箭头）')
   if (memoryEntry && registry2.resolveActiveChild(memoryEntry) !== 'all') {
     reasons.push('高亮项必须来自 activeChild() 的现值')
   }
@@ -3824,14 +3891,14 @@ if (krEnabled) {
     reasons.push('activeChild 抛异常时必须静默降级为不高亮')
   }
   // 不传 activeChild 的行也不该高亮（没有选中态可言）
-  if (registry2.resolveActiveChild(usageEntry) !== null) {
+  if (registry2.resolveActiveChild(flatEntry) !== null) {
     reasons.push('没有 activeChild 的条目必须不高亮')
   }
 
   // 展开态：默认全收起 → toggle 展开 → 持久化 → 陈旧 id 被丢弃
   registry2.toggleExpandedMenu('workbench-memory')
   if (!registry2.readExpandedMenus().has('workbench-memory')) reasons.push('toggleExpandedMenu 必须能展开一行')
-  if (registry2.readExpandedMenus().has('workbench-usage')) reasons.push('只有真带 children 的行才能被展开')
+  if (registry2.readExpandedMenus().has('workbench-flat')) reasons.push('只有真带 children 的行才能被展开')
   if (prefs.get(registry2.NAV_EXPANDED_STORE) !== 'workbench-memory') {
     reasons.push('展开态必须写进持久化层（用户选的是「记住上次展开状态」）')
   }
@@ -3890,7 +3957,7 @@ if (krEnabled) {
     reasons.push(`收起当前展开行后展开态必须清空，实得 ${JSON.stringify([...registry2.readExpandedMenus()])}`)
   }
   // 没有下级的行永远不能被「展开」：连持久化层都不该留下它的 id（否则会盖掉真正展开的那行）
-  registry2.toggleExpandedMenu('workbench-usage')
+  registry2.toggleExpandedMenu('workbench-flat')
   if (prefs.get(registry2.NAV_EXPANDED_STORE) !== undefined) {
     reasons.push('没有二级菜单的行不得被写进展开态（会顶掉真正展开的那一行）')
   }
@@ -3949,8 +4016,8 @@ if (krEnabled) {
       reasons.push(`focusExpandedMenu 必须把持久化层写成单值，实得 ${JSON.stringify(prefs.get(registry2.NAV_EXPANDED_STORE))}`)
     }
     // 没有下级的行同样不能被 focus 成展开项
-    registry2.focusExpandedMenu('workbench-usage')
-    if (registry2.readExpandedMenus().has('workbench-usage')) {
+    registry2.focusExpandedMenu('workbench-flat')
+    if (registry2.readExpandedMenus().has('workbench-flat')) {
       reasons.push('focusExpandedMenu 不得把没有下级的行变成展开项')
     }
     registry2.collapseExpandedMenus()
@@ -5989,7 +6056,7 @@ if (krEnabled) {
     //     现在的形态：开关住在 .skm-skill-card-foot 里，操作组默认
     //     opacity:0 + pointer-events:none，hover/focus-within 时整体变可见可点。
     //     判据因此变成三条：操作组自身隐藏、可见态放开、且开关确实在里面。
-    const skillsPanel = readFileSync(resolve(ROOT, 'src/client/triad/usage/dashboard/SkillsPanel.tsx'), 'utf8')
+    const skillsPanel = readFileSync(resolve(ROOT, 'src/client/triad/skills/SkillsPanel.tsx'), 'utf8')
     const footBase = /\.skm-skill-card-foot\{([^}]*)\}/.exec(skillsPanel)
     const footShow = /\.skm-skill-card:hover \.skm-skill-card-foot,\.skm-skill-card:focus-within \.skm-skill-card-foot\{([^}]*)\}/.exec(skillsPanel)
     const toggleInFoot = /<div className=\{css\.skillCardFoot\}>[\s\S]{0,600}?role="switch"/.test(skillsPanel)
@@ -6011,7 +6078,7 @@ if (krEnabled) {
     //     永远对不齐、每次只改一边另一边就掉队。这里钉死：收起态不许再有独立行组件。
     // 先剥注释：本次改动恰恰在注释里反复提到「旧的 .skm-bundle-preview-chip 已合并」，
     // 拿原文匹配会把说明文字当成残留（本仓第 12 条已经踩过同一类假阳性）。
-    const skillsSrc2 = readFileSync(resolve(ROOT, 'src/client/triad/usage/dashboard/SkillsPanel.tsx'), 'utf8')
+    const skillsSrc2 = readFileSync(resolve(ROOT, 'src/client/triad/skills/SkillsPanel.tsx'), 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/.*$/gm, '$1 ')
     if (/bundlePreviewChip|skm-bundle-preview-chip/.test(skillsSrc2)) {
       fail('收起态又长出了独立的 .skm-bundle-preview-chip —— 收起/展开必须共用 .skm-skill-card')
@@ -6224,6 +6291,104 @@ if (krEnabled) {
   if (mod.textHasMarkdownImage('文件已保存到：D:/AI/Dsh/outputs/a.png')) reasons.push('textHasMarkdownImage：纯路径 / 纯文字不能误判为已有图')
   if (reasons.length > 0) fail('生图实时卡：' + reasons.join('；'))
   else pass('生图实时卡：按比例分格 / 多张点阵 / 运行中点阵 / 出图即显 / 收口交总结卡，三态与样式齐备')
+}
+
+/*
+ * ── BOT 模式（Personal Agent）字号轴：正文必须等于通用设置里的字号 ──────────
+ *
+ * 用户要求（2026-11-03）：「BOT 模式下的所有的字体与字号跟随通用设置里面的」
+ * —— 设置页那两行是「字号大小 14px」+「界面字体 霞鹜新致宋」。
+ *
+ * 字体一直是对的：`.pa-root` 继承 `--dsw-font-family`（界面字体写入的上层槽位
+ * `--dsh-font-family-text` 由官方在 body 上解析成它），实测默认视图 / 右栏 /
+ * 设置面板全部是所选字体。**字号不对**：旧公式是
+ *     --pa-font-delta: calc(var(--dsh-content-font-size, 14px) - 14px)
+ * 配 `.pa-root { font-size: calc(13px + delta) }` —— 通用 14px 时 BOT 正文只有
+ * 13px，比 Work 模式的 14px 正文小一号，切模式肉眼可见「字变小了」。
+ *
+ * 现在把标定线挪到 13px（Bot 正文档的原始设计值）：
+ *     --pa-font-size: var(--dsh-content-font-size, 14px)
+ *     --pa-font-delta: calc(var(--pa-font-size) - 13px)
+ *     .pa-root { font-size: var(--pa-font-size) }
+ * 通用 14px 档下正文 = 14px = 通用字号；其余 300 多处 calc(Npx + delta)
+ * （字号与行高成对出现）一起抬 1px，相对层次不变；通用调到 20px 时整页
+ * 从 14/13 变成 20/19，与 Work 同步平移。
+ *
+ * 三条一起钉（少一条都会静默回退，且没有任何报错）：
+ *  1. 基准公式：正文直接吃 --pa-font-size，delta 以 13px 为标定线；
+ *  2. **所有 font-size 都必须走 delta**（或直接吃 --pa-font-size / inherit）：
+ *     新增元素写死字号后它就不再跟随通用设置，页面上只是「那处字不跟着变」；
+ *  3. 产物里真的带上了这条轴（源码改了但没重新构建，用户看到的还是旧字号）。
+ */
+{
+  const reasons = []
+  const personalRoot = resolve(ROOT, 'src/client/personal')
+  const baseSrc = readFileSync(resolve(personalRoot, 'base.css.ts'), 'utf8')
+  const baseCss = baseSrc.replace(/\/\*[\s\S]*?\*\//g, ' ')
+
+  // 1：基准公式（正文 = 通用字号；delta 以 13px 标定）
+  if (!/--pa-font-size:\s*var\(--dsh-content-font-size,\s*14px\)/.test(baseCss)) {
+    reasons.push('--pa-font-size 必须是 var(--dsh-content-font-size, 14px)（正文要直接等于通用字号）')
+  }
+  if (!/--pa-font-delta:\s*calc\(var\(--pa-font-size\)\s*-\s*13px\)/.test(baseCss)) {
+    reasons.push('--pa-font-delta 必须以 13px 为标定线：calc(var(--pa-font-size) - 13px)'
+      + '（改回 14px 会让正文比通用字号小一号，即本次修复前的行为）')
+  }
+  const rootBlock = /\.pa-root\s*\{([\s\S]*?)\}/.exec(baseCss)
+  if (rootBlock === null) {
+    reasons.push('找不到 .pa-root 规则块')
+  } else {
+    if (!/font-size:\s*var\(--pa-font-size\)/.test(rootBlock[1])) {
+      reasons.push('.pa-root 的 font-size 必须是 var(--pa-font-size)（写成 calc(13px + delta) 会把基准又固定回去）')
+    }
+    if (!/font-family:\s*var\(--dsw-font-family/.test(rootBlock[1])) {
+      reasons.push('.pa-root 的 font-family 必须继承 var(--dsw-font-family)（界面字体靠这条穿透进 Bot 模式）')
+    }
+  }
+
+  // 2：全量扫描 personal 下的样式模板，font-size 一律不许写死 px
+  const cssFiles = []
+  const collect = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = resolve(dir, entry.name)
+      if (entry.isDirectory()) collect(full)
+      else if (entry.name.endsWith('.css.ts')) cssFiles.push(full)
+    }
+  }
+  collect(personalRoot)
+  const offenders = []
+  for (const file of cssFiles) {
+    const raw = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, ' ')
+    // 前置断言排除 --pa-font-size / --dsh-content-font-size 这类**变量名**里
+    // 也含 font-size 的声明（否则变量定义本身会被当成写死的字号）。
+    const re = /(?<![-\w])font-size:\s*([^;{}]+)/g
+    let m
+    while ((m = re.exec(raw)) !== null) {
+      const value = m[1].trim()
+      const follows = value.includes('var(--pa-font-delta)')
+        || value === 'var(--pa-font-size)'
+        || value === 'inherit'
+      if (!follows) offenders.push(relative(ROOT, file).replace(/\\/g, '/') + ' → ' + value)
+    }
+  }
+  if (offenders.length > 0) {
+    reasons.push('这些 font-size 没跟随通用设置（应写成 calc(Npx + var(--pa-font-delta))'
+      + ' 或 var(--pa-font-size)）：' + offenders.slice(0, 5).join('；'))
+  }
+
+  // 3：产物里必须真的有这条轴（改了源码没重建 = 用户看到的仍是旧字号）
+  const bundleText = readFileSync(CLIENT, 'utf8')
+  if (!bundleText.includes('--pa-font-size')) {
+    reasons.push('产物缺少 --pa-font-size（构建没跟上，页面里仍是旧字号轴）')
+  } else if (!bundleText.includes('calc(var(--pa-font-size) - 13px)')) {
+    reasons.push('产物里的 --pa-font-delta 标定线不是 13px（产物与源码不一致）')
+  }
+
+  if (reasons.length > 0) fail('BOT 模式字号轴：' + reasons.join('；'))
+  else {
+    pass('BOT 模式字号轴：正文 = 通用设置字号（14px 档 = 14px），'
+      + '全部 font-size 走 --pa-font-delta，字体继承 --dsw-font-family')
+  }
 }
 
 console.log(`\n${process.exitCode ? 'SMOKE FAILED' : 'SMOKE PASSED'} — ${CLIENT}`)

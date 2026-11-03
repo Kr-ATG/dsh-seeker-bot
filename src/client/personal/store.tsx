@@ -20,11 +20,12 @@ import {
 import {
   buildJournal,
   BOT_COLORS,
-  callReply,
   firstBotMessage,
   followUpForAnswer,
   generateReply,
   journalCoverSvg,
+  journalFeedForSync,
+  journalFeedFromState,
   memoryFromText,
   NEW_BOT_SUGGESTIONS,
   nextRoutineAt,
@@ -44,10 +45,14 @@ import {
   DEFAULT_GROUP_ID,
   MAIN_BOT_ID,
   MODEL_FALLBACK,
+  createIdleCallUi,
+  formatDurationSeconds,
   shortId,
   type AppState,
+  type ArtifactRef,
   type Bot,
   type BotModel,
+  type BotMessageKind,
   type CallRecord,
   type ChatImage,
   type InteractiveUi,
@@ -55,13 +60,597 @@ import {
   type Message,
   type MessageBlock,
   type NewBotInput,
+  type PageItem,
+  type PagesResponse,
+  type PersonalCallUi,
   type PersonalUi,
+  type RealtimeVendorsResponse,
   type Routine,
+  type TaskOverviewStep,
+  type TaskRecord,
+  type TaskRecordStep,
   type ToolRun,
 } from './types.ts'
+import {
+  journalDateKey,
+  journalDateLabel,
+  journalIssue,
+  normalizeJournalRule,
+  sanitizeJournalRecord,
+  type JournalFeed,
+  type JournalFeedStats,
+  type JournalRule,
+  type JournalStatus,
+  type JournalTriggerLog,
+} from '../../shared/journal.ts'
+import {
+  REALTIME_CONFIG_PATH,
+  REALTIME_DEFAULT_VOICE,
+  type RealtimeAgentSpec,
+  type RealtimeArtifact,
+  type RealtimeVendorRecord,
+} from '../../shared/realtime-protocol.ts'
+import { RealtimeCall, type RealtimeCallHandlers } from './call/realtime-client.ts'
+import { sortTurns, takePendingUserTurn, type PendingUserTurn } from './call/call-turns.ts'
+import { relocateToEnd } from './chat/message-order.ts'
+
+/**
+ * 是不是独立演示页（`npm run build:personal-demo` 产出的单文件）。
+ *
+ * 这是**唯一允许走本地模板引擎**的条件：演示页没有宿主，本来就没有 agent 可接，
+ * 用模板是为了让界面可体验。在 DSH 里运行时一律不降级——失败就报错。
+ *
+ * 为什么这么严：本地模板引擎会产出「看起来正常的回复」，一旦它在真实环境里兜底，
+ * 「agent 挂了」就会表现成「Bot 正常回你，只是什么都不做」。实测踩过——一个空壳
+ * 会话让每轮都静默降级，Bot 满口答应「我这就建」，却一个文件都产不出来，
+ * 界面上没有任何报错。
+ */
+function isDemoMode(): boolean {
+  return typeof location !== 'undefined' && location.protocol === 'file:'
+}
+
+/**
+ * 流式字幕合并窗口（毫秒）。
+ *
+ * 全双工的转写增量是几十毫秒一条；每条都 setUi 会让整个 Bot 应用（含 200 条消息
+ * 的列表）每帧重渲染一次，通话时明显掉帧。120ms 合并一次 ≈ 8fps，肉眼看是连续的，
+ * 重渲染成本降到原来的 1/4。定稿（done）时立即 flush，不会出现「说完了字还差半句」。
+ */
+const CALL_DRAFT_FLUSH_MS = 120
+
+/**
+ * 语音任务结束后，状态条在界面上停留多久（毫秒）。
+ *
+ * 成功 6 秒、失败 11 秒：成功只要扫一眼结论，失败得让人读完原因（失败还额外 toast
+ * 一次，见 startCall 的 onTaskDone）。停留结束后先淡出 CALL_TASK_FADE_MS 再移除。
+ */
+const CALL_TASK_LINGER_MS = 6_000
+const CALL_TASK_FAIL_LINGER_MS = 11_000
+
+/** 任务状态条的淡出时长（毫秒），与 call.css.ts 里 .pa-call__task 的 transition 对齐。 */
+const CALL_TASK_FADE_MS = 600
+
+/**
+ * 拼实时通话的 `instructions`：**只放 Bot 人设**。
+ *
+ * 语音通话的约束（口语短句、不要念 Markdown 之类）由宿主 `wrapVoiceInstructions`
+ * 统一追加（见 host/personal/realtime/session.ts）。前端不要重复写一份——两边都写
+ * 会让模型收到两段几乎一样的话，行为上表现为「它把同一件事嘱咐了两遍」。
+ */
+function callInstructions(bot: Bot): string {
+  const lines = [`你是「${bot.name}」${bot.role.trim() === '' ? '。' : `，${bot.role.trim()}。`}`]
+  if (bot.description.trim() !== '') lines.push(bot.description.trim())
+  if (bot.instructions.trim() !== '') lines.push(bot.instructions.trim())
+  return lines.join('\n')
+}
+
+/**
+ * 拼实时通话的 agent 定义（语音里「让它干活」时宿主拿它跑真正的 agent loop）。
+ *
+ * 为什么必须带：Realtime 会话本身**没有** agent 的工具（生图 / 读写文件 / 跑命令 /
+ * 记忆），不带这份定义时用户说「帮我生成一张图」，模型只能回「我这边目前还没有
+ * 直接生成图片的功能」——这是用户实测到的原话。
+ *
+ * 取数方式刻意与 `replyRequestBody` 保持一致（同一个 Bot 记录 + 同一批记忆），否则
+ * 会出现「同一个 Bot 打字时是一个人格、说话干活时是另一个人格」。字段：
+ *  · botId / name / role / description / instructions —— 直接取 Bot 记录；
+ *  · model —— Bot 选的模型（含 effort），宿主据此跑任务；
+ *  · permission —— 工具权限档位，旧数据缺省按 `full`（与 replyRequestBody 同款兜底）；
+ *  · memories —— `state.memories` 里属于这个 Bot 的文本。
+ */
+function callAgentSpec(bot: Bot, state: AppState): RealtimeAgentSpec {
+  const memories = state.memories
+    .filter((entry) => entry.botId === bot.id)
+    .map((entry) => entry.text.trim())
+    .filter((text) => text !== '')
+    // 只带最近 40 条：start 是 WS 文本帧，把上百条记忆全塞进去只会拖慢握手，对任务没有增益
+    .slice(-40)
+  return {
+    botId: bot.id,
+    name: bot.name,
+    role: bot.role,
+    description: bot.description,
+    instructions: bot.instructions,
+    model: {
+      provider: bot.model.provider,
+      model: bot.model.model,
+      ...(bot.model.effort !== undefined && bot.model.effort !== '' ? { effort: bot.model.effort } : {}),
+    },
+    permission: bot.permission ?? 'full',
+    ...(memories.length > 0 ? { memories } : {}),
+  }
+}
+
+/**
+ * 通话段标记块。
+ *
+ * `MessageBlock` 里它是匿名成员（没有单独命名），函数签名需要它，所以在这里取出来。
+ */
+type CallSegmentBlock = Extract<MessageBlock, { type: 'call-segment' }>
+
+/**
+ * 把一条「属于某个通话段」的消息插到段里的**正确位置**（不是简单追加）。
+ *
+ * 为什么不能追加：ASR 是异步的，`user_transcript` 经常晚于 Bot 的转写到达。按到达
+ * 顺序落库，对话流就会变成「Bot 先答、用户后问」——这正是 `call-turns.ts` 在通话
+ * 弹层里修过的问题。转写现在实时进对话流，同一个坑会原样复现，所以插入位置要按
+ * 落库序号（`seqById`）算。
+ *
+ * 规则：插到段内**第一条序号比它大**的消息之前；段内没有更大的就插到段尾。
+ * 产物消息没有序号（它们不是一轮对话），会被自然跳过——新转写插到段尾时排在产物之后，
+ * 与「先出结果、后说话」的真实顺序一致。
+ *
+ * @param messages 现有消息（不修改原数组）。
+ * @param message  要插入的消息。
+ * @param segment  段 id。
+ * @param seq      这条消息的落库序号。
+ * @param seqById  段内消息 id → 落库序号。
+ */
+function insertCallMessage(
+  messages: Message[],
+  message: Message,
+  segment: string,
+  seq: number,
+  seqById: Map<string, number>,
+): Message[] {
+  const markerIndex = messages.findIndex((item) => item.blocks.some(
+    (block) => block.type === 'call-segment' && block.segment === segment,
+  ))
+  // 段标记不见了（历史数据被清、或段标记还没写）：退回追加，宁可顺序差也不能丢消息
+  if (markerIndex < 0) return [...messages, message]
+  let segmentEnd = markerIndex
+  while (segmentEnd + 1 < messages.length && messages[segmentEnd + 1].callSegment === segment) segmentEnd += 1
+  let insertAt = segmentEnd + 1
+  for (let index = markerIndex + 1; index <= segmentEnd; index += 1) {
+    const itemSeq = seqById.get(messages[index].id)
+    if (itemSeq !== undefined && itemSeq > seq) {
+      insertAt = index
+      break
+    }
+  }
+  const next = [...messages]
+  next.splice(insertAt, 0, message)
+  return next
+}
+
+/**
+ * 从宿主的文件 URL 里取回工作区路径。
+ *
+ * 宿主给的是 `/api/personal-agent/file?path=<相对路径>`，而 `ChatImage.path` /
+ * `ArtifactRef.path` 要的是路径本身（随消息带给宿主、也用于去重）。取不到 `path`
+ * 参数时（data URL、外链）退回文件名，至少不是空串。
+ */
+function artifactPathOf(artifact: RealtimeArtifact): string {
+  const query = artifact.url.indexOf('?')
+  if (query >= 0) {
+    const path = new URLSearchParams(artifact.url.slice(query + 1)).get('path')
+    if (path !== null && path !== '') return path
+  }
+  return artifact.name !== undefined && artifact.name !== '' ? artifact.name : artifact.url
+}
+
+/** 产物卡的显示名：优先宿主给的文件名，其次从路径里取末段，最后按类型兜底。 */
+function artifactNameOf(artifact: RealtimeArtifact): string {
+  if (artifact.name !== undefined && artifact.name !== '') return artifact.name
+  /*
+   * data URL / 外链没有文件名可解析：直接按类型兜底。
+   * 不排除的话会把 `data:video/mp4;base64,AAAA` 的末段 `mp4;base64,AAAA` 当文件名
+   * 显示出来（实测就是这么冒出来的）。
+   */
+  const path = artifact.url.startsWith('data:') ? '' : artifactPathOf(artifact)
+  const slash = path.lastIndexOf('/')
+  const base = slash >= 0 ? path.slice(slash + 1) : path
+  if (base !== '') return base
+  if (artifact.kind === 'video') return '视频'
+  if (artifact.kind === 'audio') return '音频'
+  return '文件'
+}
 
 const STORAGE_KEY = 'pa:state:v1'
 const UI_KEY = 'pa:ui:v1'
+
+/*
+ * 右栏宽度：默认 300px，可拖拽范围 240–640。
+ *
+ * 上限按「聊天区至少还能放下两三条消息」定：再宽会把中间的对话压成一条缝。
+ * 窄屏由 shell.css.ts 的媒体查询接管固定宽度，这里的值只在宽屏生效。
+ */
+const DEFAULT_RIGHT_WIDTH = 300
+const MIN_RIGHT_WIDTH = 240
+const MAX_RIGHT_WIDTH = 640
+
+/** 把任意来源的宽度收敛到合法范围；非数字回落默认值。 */
+function clampRightWidth(value: unknown): number {
+  const width = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(width)) return DEFAULT_RIGHT_WIDTH
+  return Math.min(MAX_RIGHT_WIDTH, Math.max(MIN_RIGHT_WIDTH, Math.round(width)))
+}
+
+/*
+ * 对话主列宽度：0 = 自动铺满；手动拖拽后保存具体像素。
+ *
+ * 只限制中间对话列，左右侧栏保持各自宽度——侧栏折叠 / 拖拽不会改变这里的值。
+ */
+const MIN_CHAT_WIDTH = 520
+const MAX_CHAT_WIDTH = 1600
+
+/** 把对话宽度收敛到合法范围；0 / 非数字 / 负值都表示「自动铺满」。 */
+function clampChatWidth(value: unknown): number {
+  const width = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(width) || width <= 0) return 0
+  return Math.min(MAX_CHAT_WIDTH, Math.max(MIN_CHAT_WIDTH, Math.round(width)))
+}
+
+/**
+ * 通话音量（0..1）单独存一个键。
+ *
+ * 为什么不并进 `UI_KEY`：`ui.call` 在挂断时会被整体重置成 idle（finalizeCall），
+ * 音量混在里面会被重置冲掉；而用户显然希望「这通调小了，下一通还是这么小」。
+ */
+const CALL_VOLUME_KEY = 'pa:call-volume:v1'
+
+/** 读回上次的通话音量；没存过 / 数据损坏 / 越界一律回落 1（满音量）。 */
+function loadCallVolume(): number {
+  try {
+    const raw = localStorage.getItem(CALL_VOLUME_KEY)
+    if (raw === null) return 1
+    const value = Number(raw)
+    if (!Number.isFinite(value)) return 1
+    return Math.max(0, Math.min(1, value))
+  } catch {
+    return 1
+  }
+}
+
+/** 记住通话音量（配额满时静默失败：只影响下次的默认值）。 */
+function saveCallVolume(volume: number): void {
+  try {
+    localStorage.setItem(CALL_VOLUME_KEY, String(volume))
+  } catch {
+    /* 配额满 / 隐私模式禁用 localStorage */
+  }
+}
+
+/** 任务记录最多保留多少条（只留最近 300 轮，避免 localStorage 无限膨胀）。 */
+const MAX_TASK_RECORDS = 300
+
+/**
+ * 一条任务最多保留多少个执行步骤。
+ *
+ * 真实 agent 一轮可能跑几十个工具调用，300 条任务 × 几十步会把 localStorage
+ * 撑到配额上限（那时连消息都写不进去）。保留 start + 最近 60 步足够回看，
+ * 更早的中间步骤本来也不是用户关心的。
+ */
+const MAX_TASK_STEPS = 60
+
+/** 追加一步并做条数裁剪：保留第一条（start），超出时丢最早的工具步骤。 */
+function pushTaskStep(steps: TaskRecordStep[], step: TaskRecordStep): TaskRecordStep[] {
+  const next = [...steps, step]
+  if (next.length <= MAX_TASK_STEPS) return next
+  const [first, ...rest] = next
+  return [first, ...rest.slice(rest.length - (MAX_TASK_STEPS - 1))]
+}
+
+/**
+ * 从用户消息自动生成任务主题。
+ *
+ * 为什么用规则而不是再调一次模型：任务记录是每一轮都有的基础能力，额外一次
+ * LLM 调用会让每条消息都变慢、也增加失败面。规则做三件事就够用：
+ *  1. 去掉「请 / 帮我 / 麻烦 / 能不能 / 我想…」这类请求套话；
+ *  2. 取第一句（句号 / 问号 / 换行都算断句）；
+ *  3. 压到 24 个汉字以内，超长补省略号。
+ *
+ * 太短的寒暄（「好的」「收到」「继续」）不构成主题，交给完成时的 bot 回复首句兜底。
+ *
+ * @param text - 用户消息纯文本。
+ * @param hasImages - 本条消息是否带图（纯图片消息文字为空）。
+ * @returns 可上屏的任务主题。
+ */
+export function autoTaskTitle(text: string, hasImages = false): string {
+  const raw = text.replace(/\s+/g, ' ').trim()
+  if (raw === '') return hasImages ? '处理图片' : '未命名任务'
+  let value = raw
+  // 请求套话可能叠着出现（「麻烦帮我」），循环剥到不再命中为止。
+  for (let index = 0; index < 4; index += 1) {
+    const next = value.replace(/^(?:请|帮我|帮忙|麻烦你?|能不能|可不可以|可以帮我|可以|我想让|我想要|我要|我想|给我)\s*/u, '')
+    if (next === value) break
+    value = next
+  }
+  const first = value.split(/[。！？!?；;\n]/u)[0] ?? value
+  const cleaned = first
+    .replace(/[，,、\s]*(?:一下|吧|好吗|可以吗|谢谢你?)[。.!！?？]*$/u, '')
+    .trim()
+  const final = cleaned === '' ? value : cleaned
+  return final.length > 24 ? `${final.slice(0, 24)}…` : final
+}
+
+/**
+ * 这句用户消息是不是「不构成任务主题」的寒暄 / 确认。
+ *
+ * 只覆盖高频的短句；长句哪怕以「好的」开头也不该被误判。
+ */
+export function isTrivialTaskPrompt(text: string): boolean {
+  const value = text.replace(/\s+/g, '').trim()
+  if (value === '') return true
+  if (value.length > 6) return false
+  return /^(好的?|好|嗯+|哦+|收到|知道了|行|可以|继续|谢谢|辛苦了|ok|OK)$/u.test(value)
+}
+
+/** 从消息 blocks 里汇总工具调用（任务详情用）。 */
+function toolRunsOfBlocks(blocks: readonly MessageBlock[]): ToolRun[] {
+  const runs: ToolRun[] = []
+  const seen = new Set<string>()
+  for (const block of blocks) {
+    if (block.type !== 'tool') continue
+    if (seen.has(block.run.id)) continue
+    seen.add(block.run.id)
+    runs.push(block.run)
+  }
+  return runs
+}
+
+/* ───────────────────── 任务概览（task_state） ───────────────────── */
+
+/** 模型写任务概览用的工具名（宿主 working-memory 的写入通道）。 */
+const TASK_STATE_TOOL = 'task_state'
+
+/** 步骤条数上限：与宿主 working-memory 的 WORKING_TASK_MAX_STEPS 对齐。 */
+const TASK_OVERVIEW_MAX_STEPS = 20
+
+/** 允许的步骤状态；模型传别的值一律按 todo 处理。 */
+const TASK_OVERVIEW_STATUSES: ReadonlyArray<TaskOverviewStep['status']> = ['todo', 'doing', 'done']
+
+/**
+ * 把任意形状的 steps 收敛成 TaskOverviewStep[]。
+ *
+ * 不信任模型输入：既可能传 `["查账号","发邮件"]` 这种纯字符串数组，也可能带
+ * 多余字段 / 非法 status。一条有效条目都洗不出来就返回 null——调用方据此保留
+ * 旧清单，避免把「半份 / 空清单」写进任务记录。
+ */
+function normalizeOverviewSteps(raw: unknown): TaskOverviewStep[] | null {
+  if (!Array.isArray(raw)) return null
+  const steps: TaskOverviewStep[] = []
+  for (const item of raw.slice(0, TASK_OVERVIEW_MAX_STEPS)) {
+    if (typeof item === 'string') {
+      const label = item.trim().slice(0, 80)
+      if (label !== '') steps.push({ label, status: 'todo' })
+      continue
+    }
+    if (typeof item !== 'object' || item === null) continue
+    const record = item as Record<string, unknown>
+    const label = String(record.label ?? '').trim().slice(0, 80)
+    if (label === '') continue
+    const statusRaw = String(record.status ?? '').trim()
+    const status = TASK_OVERVIEW_STATUSES.includes(statusRaw as TaskOverviewStep['status'])
+      ? statusRaw as TaskOverviewStep['status']
+      : 'todo'
+    steps.push({ label, status })
+  }
+  return steps.length > 0 ? steps : null
+}
+
+/**
+ * 从 task_state 的 args 里取步骤清单。
+ *
+ * args 正常是 JSON 字符串（也兼容宿主直接给对象）。**末尾带省略号的一律不收**：
+ * 宿主给工具卡做摘要时会把 args clip 到 180 字符，长参数只剩半截 JSON——拿半份
+ * 清单覆盖上一次的完整清单，比不更新更糟。
+ */
+function overviewStepsFromArgs(raw: unknown): TaskOverviewStep[] | null {
+  if (raw === undefined || raw === null) return null
+  let value: unknown = raw
+  if (typeof raw === 'string') {
+    const text = raw.trim()
+    if (text === '' || text.endsWith('…')) return null
+    try {
+      value = JSON.parse(text)
+    } catch {
+      return null
+    }
+  }
+  if (typeof value !== 'object' || value === null) return null
+  const record = value as Record<string, unknown>
+  // 少数链路会把 steps 再序列化一层字符串
+  if (typeof record.steps === 'string') {
+    try {
+      return normalizeOverviewSteps(JSON.parse(record.steps))
+    } catch {
+      return null
+    }
+  }
+  return normalizeOverviewSteps(record.steps)
+}
+
+/**
+ * 从 task_state 的工具结果里兜底还原步骤。
+ *
+ * 为什么需要它：args 被 clip 到 180 字符后经常不是合法 JSON，而结果摘要
+ * （`title（status）：✓a ▸b ·c；facts…`）是宿主按**完整**任务生成的，步骤
+ * 反而齐全。只在 args 解析不出步骤时用。
+ */
+function overviewStepsFromResult(raw: unknown): TaskOverviewStep[] | null {
+  if (raw === undefined || raw === null) return null
+  const text = typeof raw === 'string' ? raw : String(raw)
+  if (text.trim() === '') return null
+  let summary = text
+  // 结果可能是完整 JSON：优先取 summary 字段；截断的 JSON 直接按文本兜底
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>
+    if (typeof parsed.summary === 'string' && parsed.summary !== '') summary = parsed.summary
+  } catch {
+    /* 被截断：按文本兜底 */
+  }
+  /*
+   * describeWorkingTask 的格式：`title（status）：✓a ▸b ·c；facts…`
+   * 中文冒号后是步骤区，分号后是 facts（不取）。符号映射：✓=done / ▸=doing / ·=todo。
+   */
+  const colon = summary.indexOf('：')
+  const body = (colon >= 0 ? summary.slice(colon + 1) : summary).split('；')[0]
+  const steps: TaskOverviewStep[] = []
+  const pattern = /[✓▸·]\s*([^✓▸·]+)/g
+  let match: RegExpExecArray | null = pattern.exec(body)
+  while (match !== null) {
+    const label = match[1].trim().slice(0, 80)
+    const mark = match[0].trim().slice(0, 1)
+    if (label !== '') {
+      steps.push({ label, status: mark === '✓' ? 'done' : mark === '▸' ? 'doing' : 'todo' })
+    }
+    if (steps.length >= TASK_OVERVIEW_MAX_STEPS) break
+    match = pattern.exec(body)
+  }
+  /*
+   * 结果本身也可能被 clip（末尾带省略号）：最后一条 label 可能是半截文字，
+   * 丢掉它——宁可少一条，不要写一条假的。
+   */
+  if (text.endsWith('…') && steps.length > 0) steps.pop()
+  return steps.length > 0 ? steps : null
+}
+
+/** 从消息 blocks 里取最后一段正文（任务「最终回复」用）。 */
+function lastTextOfBlocks(blocks: readonly MessageBlock[]): string {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index]
+    if (block.type === 'text' && block.text.trim() !== '') return block.text.trim()
+  }
+  return ''
+}
+
+/** 从消息 blocks 里数产出物（工具 artifacts + 正文里出现过的文件路径）。 */
+function outputCountOfBlocks(blocks: readonly MessageBlock[]): number {
+  const paths = new Set<string>()
+  for (const block of blocks) {
+    if (block.type === 'tool') {
+      for (const artifact of block.run.artifacts ?? []) paths.add(artifact.path.replace(/\\/g, '/').toLowerCase())
+    }
+  }
+  return paths.size
+}
+
+/**
+ * 把 blocks 里还在 running 的工具调用标成中断。
+ *
+ * 用户点了停止之后，宿主不会再发这个工具的结束事件——留着 running 就是一张永远
+ * 转圈的卡。`ToolRunStatus` 只有 running / ok / error，没有 'stopped'，所以用
+ * 'error' 承载「中断」：它确实不是正常完成。已经拿到的结果一律保留，只有完全
+ * 没有结果的才补一句「已停止」，免得卡片看起来像工具自己崩了。
+ */
+function interruptRunningBlocks(blocks: readonly MessageBlock[]): MessageBlock[] {
+  const at = Date.now()
+  let changed = false
+  const next = blocks.map((block) => {
+    if (block.type !== 'tool' || block.run.status !== 'running') return block
+    changed = true
+    const run = block.run
+    return {
+      type: 'tool' as const,
+      run: {
+        ...run,
+        status: 'error' as const,
+        endedAt: run.endedAt ?? at,
+        durationMs: run.durationMs ?? Math.max(0, at - run.startedAt),
+        ...(run.result !== undefined && run.result !== '' ? {} : { result: '已停止' }),
+      },
+    }
+  })
+  // 没有 running 就返回原数组元素（浅拷贝一次即可，避免改到调用方的数组）
+  return changed ? next : [...blocks]
+}
+
+/**
+ * 「说停止」算不算真的停止。
+ *
+ * ## 为什么需要（2026-11-02 实测）
+ *
+ * 主 Bot 正在跑长任务时，用户在输入框发一句「停止」。前端照常把这句话投给宿主，
+ * 而宿主对运行中的插话走的是 `steer`（改方向）——模型回一句「收到，我按你说的
+ * 调整方向」，任务继续跑，右栏任务记录还是「进行中」。用户以为自己停了，
+ * 实际上只是给正在跑的任务改了个方向。
+ *
+ * ## 判据为什么收得这么窄
+ *
+ * 只认**整句就是一个停止词**（去掉标点和空白后精确匹配）。带宾语或成句的
+ * （「停止发邮件，改成发微信」「先停一下，等我看完」）仍然是改方向，交给宿主
+ * steer 才对——把这些也拦成停止，用户想插话就插不进去了。
+ */
+const STOP_COMMANDS: ReadonlySet<string> = new Set([
+  '停止',
+  '停下',
+  '停下来',
+  '停',
+  '暂停',
+  '中止',
+  '终止',
+  '取消',
+  '取消吧',
+  '别做了',
+  '别干了',
+  '不做了',
+  'stop',
+  'cancel',
+  'abort',
+])
+
+/** 整句是否只是一个停止词（忽略大小写、标点、空白）。 */
+function isStopCommand(text: string): boolean {
+  const flat = text
+    .replace(/[\s。．.!！?？,，、;；:：~～…·"'"'()（）\[\]【】]+/g, '')
+    .toLowerCase()
+  return flat !== '' && STOP_COMMANDS.has(flat)
+}
+
+/**
+ * 一轮正在跑的回复（输入框停止键的作用对象）。
+ *
+ * 只活在内存 ref 里，不进 state / localStorage：停止键要回答的是「现在能不能停」，
+ * 不是「上次停过没有」。`abort()` 幂等——连点两次停止不该报错。
+ */
+interface RunningReplyTurn {
+  botId: string
+  /** 群聊轮次带 roomId（私聊省略）。 */
+  roomId?: string
+  /**
+   * 这一轮对应的任务记录 id。
+   *
+   * 停止键靠它区分「有活着的轮次会自己收口」和「孤儿任务记录」：后者没有
+   * abort 会来调用 finishTaskRecord，必须由 stopReply 直接收口（见那里的
+   * orphanTasks）。没有这个字段时，只能按 botId 粗筛，同一 bot 的多条
+   * running 记录分不清谁是谁。
+   */
+  taskId: string
+  abort(): void
+}
+
+/**
+ * 已排期但还没启动的回复（群聊成员是错峰启动的）。
+ *
+ * 停止键只能 abort「已经开始」的轮次；还躺在 later 定时器里的成员如果不拦，
+ * 用户点完停止过几百毫秒又会冒出一条新回复，看起来像没停掉。
+ */
+interface ScheduledReply {
+  botId: string
+  roomId?: string
+  cancelled: boolean
+}
 
 type AnswerValue = string | string[] | Record<string, string>
 
@@ -72,10 +661,50 @@ export interface PersonalActions {
   setTheme(theme: 'auto' | 'dark' | 'light'): void
   setRightTab(tab: PersonalUi['rightTab']): void
   toggleRightPanel(open?: boolean): void
+  /**
+   * 设置右栏宽度（px）。
+   *
+   * 拖拽过程中由 RightPanel 直接改 CSS 变量（不经过 React 重渲染），松手才
+   * 调这个 action 落进 `pa:ui:v1`——每帧都写 store 会让整棵 Bot 界面重渲染。
+   * 传进来的值会被 clamp 到 240–640。
+   */
+  setRightPanelWidth(width: number): void
+  /**
+   * 设置对话主列宽度（px）；0 = 自动铺满。
+   *
+   * 与右栏同理：拖拽过程直接改 CSS 变量，松手才落库，避免每帧重渲染。
+   * 只影响中间对话列，左右侧栏宽度不受影响。
+   */
+  setChatWidth(width: number): void
+  /**
+   * 收起 / 展开左侧栏（与 Work 模式官方侧栏的折叠语义一致）。
+   *
+   * 不传参 = 取反；传布尔值用于「明确要收起 / 展开」的场景（例如折叠轨道里点
+   * 主 Bot 头像时顺带展开）。纯视图动作：只写 `ui.sidebarCollapsed`。
+   */
+  toggleSidebar(open?: boolean): void
   openNewBot(open: boolean): void
+  /** 打开某个 Bot 的设置卡（null = 关闭）。 */
+  openBotSettings(botId: string | null): void
   openGroupSettings(roomId: string | null): void
+  /** 打开某条任务记录的详情卡（null = 关闭）。 */
+  openTaskDetail(taskId: string | null): void
   openJournal(id: string | null): void
-  sendMessage(text: string, opts?: { botId?: string; roomId?: string; images?: ChatImage[] }): void
+  sendMessage(text: string, opts?: { botId?: string; roomId?: string; images?: ChatImage[]; replyTo?: { id: string; preview: string } }): void
+  /**
+   * 停止当前会话正在进行的回复（输入框停止键）。
+   *
+   * 中止前端流式读取 + 通知宿主 cancel 这一轮，并把 pending 消息与任务记录
+   * 收口成 stopped；群聊会停掉该群里所有正在回复的成员（含还在错峰等待的）。
+   */
+  stopReply(): void
+  /**
+   * 设置 / 取消「正在引用回复的那条消息」。
+   *
+   * 只是输入框的临时状态：用户点某条消息的「回复」后输入框上方出现引用条，
+   * 发送或手动取消时清空。不进 localStorage（刷新后指向旧消息更困惑）。
+   */
+  setReplyTo(target: { id: string; preview: string } | null): void
   createBot(input: NewBotInput): Promise<Bot>
   updateBot(id: string, patch: Partial<Bot>): void
   deleteBot(id: string): void
@@ -102,14 +731,49 @@ export interface PersonalActions {
   proactiveNow(botId: string): void
   /** 清空某个 bot 的全部对话（界面消息 + 宿主侧 agent 会话）。 */
   clearConversation(botId: string): Promise<void>
+  /**
+   * 拉取某个 Bot 的 Pages（3.1）。
+   *
+   * 失败静默：host 路由还没就绪、或这个 Bot 一个页面都没交付过，在界面上是同一个
+   * 结果——右栏不出现「页面」卡。不 toast、不记错误，也不阻塞其它渲染。
+   */
+  refreshPages(botId: string): Promise<void>
   generateJournal(botId: string, opts?: { auto?: boolean; date?: Date }): Promise<Journal>
   runJournalCheck(nowOverride?: number): { ok: boolean; reason: string; journalId?: string }
   startCall(botId: string): void
   endCall(): void
+  /**
+   * 通话里发一条文字（麦克风不可用 / 不方便说话时的兜底）。
+   * 全双工链路下它走 `text` 帧，宿主会把它当成一轮用户消息并触发回复。
+   */
   callUserTurn(text: string): void
+  /** 用户主动打断 Bot（清本地播放 + 让宿主取消上游响应）。 */
+  interruptCall(): void
+  /** 麦克风权限被拒后重试一次（会话仍在，失败也不影响打字）。 */
+  retryCallMicrophone(): void
+  /**
+   * 当前麦克风音量（0..1），供通话弹层画波形。
+   *
+   * 设计成「拉取式」而不是每帧 setState：波形是 60fps 的，走 state 会把整棵应用
+   * 拖到掉帧。调用方在 requestAnimationFrame 里读，不触发任何渲染。
+   */
+  callLevel(): number
   setCallMuted(muted: boolean): void
   setCallSpeaker(speaker: boolean): void
+  /**
+   * 设置通话音量（0..1）：控制 Bot 声音的播放增益，实时生效并跨通话记住。
+   *
+   * 只影响下行；上行麦克风走浏览器 autoGainControl，不在这里调（叠增益会干扰
+   * 服务端 VAD 与 ASR）。
+   */
+  setCallVolume(volume: number): void
   minimizeCall(minimized: boolean): void
+  /**
+   * 收起 / 展开一段语音通话（段 id 见 `MessageBlock` 的 `call-segment`）。
+   *
+   * 纯视图动作：段内消息不改不删，只是渲染层在收起时跳过它们。
+   */
+  toggleCallSegment(segment: string): void
   toast(text: string): void
   clearUnread(id: string, kind?: 'bot' | 'room'): void
 }
@@ -164,7 +828,15 @@ function normalizeState(parsed: AppState): AppState {
       permission: bot.permission === 'approval' ? 'approval' : 'full',
     }))
   if (!bots.some((bot: Bot) => bot.isMain)) bots = [createMainBot(), ...bots]
-
+  /*
+   * 主 Bot 改名迁移：旧版本默认叫「小墨助手」，现在统一叫 Seeker。
+   *
+   * 只改**还是旧默认名**的那一个——用户自己起过名字的不动，否则就是替用户做主。
+   * 迁移放在 normalizeState（每次加载都会跑），所以老 localStorage 也能跟着更新。
+   */
+  bots = bots.map((bot: Bot) => (
+    bot.isMain === true && bot.name === '小墨助手' ? { ...bot, name: 'Seeker' } : bot
+  ))
   const groups = (Array.isArray(raw.groups) ? raw.groups : [])
     .filter((group: any) => group && typeof group.id === 'string' && !legacyGroups.has(group.id))
   if (!groups.some((group: any) => group.id === DEFAULT_GROUP_ID)) {
@@ -178,6 +850,23 @@ function normalizeState(parsed: AppState): AppState {
       && !legacyBots.has(message.botId)
       && !legacyRooms.has(message.roomId)
       && !String(message.id ?? '').startsWith('m-'))
+    /*
+     * 刷新时的 pending 清理：页面刚加载不可能有正在进行的流，历史里残留的
+     * `pending: true` 只可能是上次异常收口留下的（实测会永远显示「正在输入」）。
+     * 一并把 running 的工具卡标成中断，避免刷新后还在转圈。
+     */
+    .map((message: any) => {
+      if (message?.pending !== true) return message
+      return {
+        ...message,
+        pending: false,
+        blocks: (Array.isArray(message.blocks) ? message.blocks : []).map((block: any) => (
+          block?.type === 'tool' && block.run?.status === 'running'
+            ? { ...block, run: { ...block.run, status: 'error', result: '页面刷新，本轮已中断' } }
+            : block
+        )),
+      }
+    })
 
   const rooms = (Array.isArray(raw.rooms) ? raw.rooms : [])
     .filter((room: any) => room && typeof room.id === 'string' && !legacyRooms.has(room.id))
@@ -221,11 +910,38 @@ function normalizeState(parsed: AppState): AppState {
       ? 'auto'
       : (raw.settings?.theme === 'dark' || raw.settings?.theme === 'light' || raw.settings?.theme === 'auto' ? raw.settings.theme : 'auto'),
     showRightPanel: raw.settings?.showRightPanel !== false,
-    journalRule: raw.settings?.journalRule ?? { enabled: true, startHour: 0, endHour: 8, idleMinutes: 30 },
+    /*
+     * 期刊规则统一走 shared 的 `normalizeJournalRule`：旧 localStorage 里可能是缺字段 /
+     * 越界（例如 endHour 小于 startHour）的对象，直接塞给宿主会让调度器判不出触发窗口。
+     */
+    journalRule: normalizeJournalRule(raw.settings?.journalRule),
   }
   const lastUserMessageAt = messages
     .filter((message: Message) => message.role === 'user')
     .reduce((max: number, message: Message) => Math.max(max, message.at), 0)
+  /*
+   * 任务记录：v3 新增。旧状态没有这个字段 → 空数组；旧演示 Bot 的任务一并清掉。
+   * 只按时间倒序保留最近 300 条，其余丢给 localStorage 容错。
+   */
+  const tasks = (Array.isArray(raw.tasks) ? raw.tasks : [])
+    .filter((task: any) => task
+      && typeof task.id === 'string'
+      && typeof task.botId === 'string'
+      && !legacyBots.has(task.botId)
+      && Array.isArray(task.steps))
+    .sort((a: TaskRecord, b: TaskRecord) => b.startedAt - a.startedAt)
+    .slice(0, MAX_TASK_RECORDS)
+    // 旧数据可能超出步数上限：加载时裁掉中间步骤，避免撑爆 localStorage
+    .map((task: TaskRecord) => (task.steps.length > MAX_TASK_STEPS
+      ? { ...task, steps: [task.steps[0], ...task.steps.slice(-(MAX_TASK_STEPS - 1))] }
+      : task))
+    /*
+     * 僵尸任务收口：与上面消息 `pending` 清理同一口径——页面刚加载不可能有轮次
+     * 在跑，还挂着 running 的一定是上次异常收口留下的。**必须在加载时清掉**：
+     * 右栏任务记录读的是 `TaskRecord.status`，与消息的 pending 是两套数据，
+     * 只清一边会让界面永远转着一个齿轮（见 settleStaleTask 的说明）。
+     */
+    .map((task: TaskRecord) => settleStaleTask(task))
 
   return {
     version: 2,
@@ -237,9 +953,63 @@ function normalizeState(parsed: AppState): AppState {
     routines,
     calls,
     journals,
-    journalLogs: [],
+    /*
+     * 触发日志本地也留一份：刷新后规则面板不该立刻变成空的，宿主 `/journal/status`
+     * 回来后再与宿主日志合并（按 at + reason 去重）。
+     */
+    journalLogs: normalizeJournalLogs(raw.journalLogs),
+    tasks,
     settings,
     lastUserMessageAt,
+  }
+}
+
+/**
+ * 加载时被收口的僵尸任务所属的 bot。
+ *
+ * `normalizeState` 是纯函数（不能发请求），但「本地已经标停止」意味着宿主那一轮
+ * 也该停——否则界面说停了、后台还在跑，后续输出会以「无主消息」的形式推过来。
+ * 启动后的挂载 effect 读这份名单补发停止请求（见 usePersonal 里的启动对账）。
+ */
+const staleTaskBotIds = new Set<string>()
+
+/**
+ * 收口一条「僵尸任务」：持久化里还挂着 `status: 'running'`，但页面刚加载，
+ * 不可能有任何轮次在跑。
+ *
+ * ## 为什么必须做（2026-11-02 实测踩到）
+ *
+ * `normalizeState` 早就把消息上的 `pending` 清掉了（见 messages 那段注释），
+ * 但任务记录读的是**另一份数据** `TaskRecord.status`。只清一边的结果是：
+ * 刷新后「正在输入」气泡没了，右栏任务记录却永远转着齿轮——用户点停止也救不
+ * 回来，因为 `stopReply` 的兜底分支只认 `pending` 消息，没有 pending 就提前
+ * return。于是「我说了停止，它还是运行中」。
+ *
+ * ## 为什么标 stopped 而不是 failed
+ *
+ * 这一轮没跑完是页面重载造成的，不是用户操作失误、也不是模型报错；显示成
+ * 失败（红叉）会让人以为出了故障。`stopped` 在 UI 上是中性灰的空心圆。
+ */
+function settleStaleTask(task: TaskRecord): TaskRecord {
+  if (task.status !== 'running') return task
+  /* 记下 botId：宿主那边这一轮可能还在跑，挂载后要补一发停止（见 staleTaskBotIds）。 */
+  staleTaskBotIds.add(task.botId)
+  const lastStep = task.steps.length > 0 ? task.steps[task.steps.length - 1] : undefined
+  const endedAt = Math.max(task.startedAt, lastStep?.at ?? task.startedAt)
+  /* 时间线上还挂着 running 的步骤同样不能留：宿主不会再补结束事件。 */
+  const steps = task.steps.map((step) => (step.status === 'running' ? { ...step, status: 'error' as const } : step))
+  steps.push({
+    at: endedAt,
+    kind: 'end',
+    title: '任务已中断',
+    detail: '页面重新加载，这一轮没有跑完（需要继续就重新说一次要做的事）',
+  })
+  return {
+    ...task,
+    status: 'stopped',
+    endedAt,
+    durationMs: Math.max(0, endedAt - task.startedAt),
+    steps,
   }
 }
 
@@ -248,14 +1018,28 @@ function loadUi(state: AppState): PersonalUi {
     selectedBotId: state.bots.find((bot) => bot.isMain)?.id ?? state.bots[0].id,
     selectedRoomId: null,
     view: 'chat',
+    sidebarCollapsed: false,
     rightPanelOpen: true,
+    rightPanelWidth: DEFAULT_RIGHT_WIDTH,
+    chatWidth: 0,
     rightTab: 'detail',
+    botSettingsOpen: null,
+    taskDetailId: null,
     newBotOpen: false,
     groupSettingsOpen: null,
     journalOpenId: null,
-    call: { status: 'idle', botId: null, startedAt: 0, muted: false, speaker: true, minimized: false, liveTurns: [], thinking: false },
+    call: createIdleCallUi(),
     search: '',
     toast: null,
+    /*
+     * 已收起的通话段：**不持久化**。
+     *
+     * 它是纯视图状态（`types.ts` 的 PersonalUi 注释里写了理由），刷新页面后默认
+     * 全部展开更符合直觉——用户不该为了看一条旧转写先去点开一条折叠条。
+     */
+    collapsedCallSegments: [],
+    // 引用回复同理：刷新后不恢复（指向一条旧消息的引用比没有引用更让人困惑）
+    replyTo: null,
   }
   try {
     const raw = localStorage.getItem(UI_KEY)
@@ -264,8 +1048,14 @@ function loadUi(state: AppState): PersonalUi {
       return {
         ...fallback,
         selectedBotId: parsed.selectedBotId && state.bots.some((bot) => bot.id === parsed.selectedBotId) ? parsed.selectedBotId : fallback.selectedBotId,
+        sidebarCollapsed: parsed.sidebarCollapsed ?? false,
         rightPanelOpen: parsed.rightPanelOpen ?? true,
+        rightPanelWidth: clampRightWidth(parsed.rightPanelWidth),
+        chatWidth: clampChatWidth(parsed.chatWidth),
         rightTab: parsed.rightTab ?? 'detail',
+        // 设置卡 / 任务详情是「这一次打开」的临时态，不跨刷新恢复。
+        botSettingsOpen: null,
+        taskDetailId: null,
       }
     }
   } catch {
@@ -286,6 +1076,8 @@ function blocksToText(blocks: MessageBlock[]): string {
       if (block.type === 'image') return '[图片]'
       if (block.type === 'task') return block.title
       if (block.type === 'call') return '语音通话'
+      // 段标记本身没有正文；不返回点东西的话侧栏摘要会被它清成空白
+      if (block.type === 'call-segment') return '语音通话'
       if (block.type === 'journal') return block.title
       if (block.type === 'interactive') return block.prompt ?? '交互卡片'
       return ''
@@ -309,16 +1101,48 @@ function uiTextForAnswer(uiBlock: InteractiveUi, value: AnswerValue): string {
 }
 
 /**
+ * host 侧的多消息单元（与 `host/personal/agent.ts` 的 `BotMessage` 逐字对齐）。
+ *
+ * 一轮 turn 会被 host 按「模型说话的次数」切成多条：说完调工具、拿到结果再说一段，
+ * 就是两条消息。`kind` 决定前端外观，`id` 用来定位 `message-update`。
+ */
+export interface HostBotMessage {
+  id: string
+  kind: BotMessageKind
+  blocks: MessageBlock[]
+  at: number
+  /**
+   * 所属轮次 id（host 下发；老 host / 老数据没有）。
+   *
+   * 前端按它把同一轮的 bot 消息归进一个轮次容器（2.8）。没有它时按单条渲染，
+   * 不报错——这样 host 与前端可以各自独立上线。
+   */
+  turnId?: string
+  /**
+   * 引用回复（host 下发时才有）。
+   *
+   * 现在 host 还不产生它，但协议已经定好：谁引用了哪条消息由 host 决定（跨设备
+   * 同步时前端本地记的 id 不一定对得上），前端只负责渲染。解析放在这里，将来
+   * host 一上线就不用再改前端。
+   */
+  replyTo?: { id: string; preview: string }
+}
+
+/**
  * 宿主 `/api/personal-agent/reply/stream` 的事件形状（见 host/personal/agent.ts
  * 的 PersonalStreamEvent）。前端按 type 分支处理：
  *
- *  · text  —— 一段正文；同一轮里可能来多次（每个模型步骤一段），渲染时与上一段合并
- *  · tool  —— 工具调用快照；同一 callId 先 running 后 ok / error，按 id 就地替换
- *  · error —— 本轮出错（含「agent 建不起来」这类致命错误）
- *  · done  —— 收口信号。**host 目前会重复发**（runBotTurn 内部一次 + 路由收尾
- *             一次，`!turn.ok` 时 done 后面还会再补一条 error），所以前端必须幂等
+ *  · message        —— 新开一条消息（DOST 式多消息的来源）
+ *  · message-update —— 原地更新已有消息（工具卡状态、生图占位换真图）
+ *  · text / tool    —— **旧的扁平视图**，多消息模式下仍会一起发来，前端忽略即可
+ *  · error          —— 本轮出错（含「agent 建不起来」这类致命错误）
+ *  · done           —— 收口信号。**host 目前会重复发**（runBotTurn 内部一次 + 路由收尾
+ *                      一次，`!turn.ok` 时 done 后面还会再补一条 error），所以前端必须幂等
  */
 export type PersonalStreamEvent =
+  | { type: 'user-message'; messageId: string }
+  | { type: 'message'; message: HostBotMessage }
+  | { type: 'message-update'; message: HostBotMessage }
   | { type: 'text'; text: string }
   | { type: 'tool'; run: ToolRun }
   | { type: 'error'; message: string }
@@ -374,6 +1198,16 @@ export function parseSseEvent(data: string): PersonalStreamEvent | null {
   if (parsed === null || typeof parsed !== 'object') return null
   const raw = parsed as Record<string, unknown>
   const type = typeof raw.type === 'string' ? raw.type : ''
+  if (type === 'user-message') {
+    return typeof raw.messageId === 'string' && raw.messageId !== ''
+      ? { type: 'user-message', messageId: raw.messageId }
+      : null
+  }
+  if (type === 'message' || type === 'message-update') {
+    return parseHostMessage(raw.message) === null
+      ? null
+      : { type, message: parseHostMessage(raw.message) as HostBotMessage }
+  }
   if (type === 'text') {
     return typeof raw.text === 'string' ? { type: 'text', text: raw.text } : null
   }
@@ -390,6 +1224,145 @@ export function parseSseEvent(data: string): PersonalStreamEvent | null {
     return { type: 'done', durationMs: typeof raw.durationMs === 'number' ? raw.durationMs : 0 }
   }
   return null
+}
+
+/**
+ * 解析 host 的多消息载荷。形状不认识时返回 null，由调用方静默跳过。
+ *
+ * `blocks` 直接沿用前端 `MessageBlock` 的形状（host 侧就是按它构造的），这里只做
+ * 最小校验：数组存在且每项是对象。过深的结构校验交给渲染层——流里混进一条脏帧
+ * 不该让整轮回复失败。
+ */
+/** 解析引用回复载荷（host 未下发 / 形状不认识时返回 undefined）。 */
+function parseReplyTo(raw: unknown): { id: string; preview: string } | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined
+  const record = raw as Record<string, unknown>
+  if (typeof record.id !== 'string' || record.id === '') return undefined
+  return { id: record.id, preview: typeof record.preview === 'string' ? record.preview : '' }
+}
+
+function parseHostMessage(raw: unknown): HostBotMessage | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const value = raw as Record<string, unknown>
+  if (typeof value.id !== 'string' || value.id === '') return null
+  if (!Array.isArray(value.blocks)) return null
+  const kind = typeof value.kind === 'string' ? value.kind : 'progress'
+  const allowed: ReadonlyArray<HostBotMessage['kind']> = ['progress', 'finding', 'need-input', 'approval', 'final']
+  const replyTo = parseReplyTo(value.replyTo)
+  const turnId = typeof value.turnId === 'string' && value.turnId !== '' ? value.turnId : undefined
+  return {
+    id: value.id,
+    kind: allowed.includes(kind as HostBotMessage['kind']) ? kind as HostBotMessage['kind'] : 'progress',
+    blocks: value.blocks.filter((block): block is MessageBlock => block !== null && typeof block === 'object'),
+    at: typeof value.at === 'number' ? value.at : Date.now(),
+    ...(turnId !== undefined ? { turnId } : {}),
+    ...(replyTo !== undefined ? { replyTo } : {}),
+  }
+}
+
+/**
+ * 宿主 `bot_create` 账本里的一条记录（SSE 的 `bot-created` 事件与 `GET /bots/created`
+ * 共用同一个形状）。
+ *
+ * 只带身份字段：外观、模型、主动问候这些展示与运行期配置由前端补齐（见
+ * `botFromCreatedRecord`）。宿主不该知道前端长什么样——它连色板都没有，也不该有，
+ * 否则改一次配色就要动宿主。
+ *
+ * 为什么定义在这里而不是 `types.ts`：这是**宿主协议**，只有本文件消费。`types.ts`
+ * 是前端展示模型（Bot / Message / Room…），把协议字段混进去，渲染层迟早会开始直接
+ * 读它，宿主换个字段名就要改一片组件。
+ */
+interface CreatedBotRecord {
+  id: string
+  name: string
+  role: string
+  description: string
+  instructions: string
+  /** 落到哪个分组；缺省由前端塞进默认分组。 */
+  groupId?: string
+  createdAt: number
+  /** 创建者的 botId（正常是主 Bot）。 */
+  createdBy: string
+}
+
+/**
+ * 把宿主推来的记录洗成可用的 `CreatedBotRecord`；认不出就返回 null。
+ *
+ * 宿主与前端不一定同版本发布（插件热更新时页面还开着，旧页面会收到新宿主的事件）。
+ * 字段缺失不能让一条脏帧把整个 SSE 回调抛死——丢掉这一条，后面的消息还要照常收。
+ * 只有 id / name 是硬要求：没有它们既没法去重，也没法在侧栏显示。
+ */
+function sanitizeCreatedBot(raw: unknown): CreatedBotRecord | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const record = raw as Record<string, unknown>
+  if (typeof record.id !== 'string' || record.id === '') return null
+  if (typeof record.name !== 'string' || record.name === '') return null
+  return {
+    id: record.id,
+    name: record.name,
+    role: typeof record.role === 'string' ? record.role : '',
+    description: typeof record.description === 'string' ? record.description : '',
+    instructions: typeof record.instructions === 'string' ? record.instructions : '',
+    ...(typeof record.groupId === 'string' && record.groupId !== '' ? { groupId: record.groupId } : {}),
+    createdAt: typeof record.createdAt === 'number' ? record.createdAt : Date.now(),
+    createdBy: typeof record.createdBy === 'string' && record.createdBy !== '' ? record.createdBy : MAIN_BOT_ID,
+  }
+}
+
+/**
+ * 把一条宿主记录落成前端 `Bot`。
+ *
+ * 默认值照抄 `createBot`：同一个「新 Bot」不该因为来源不同（用户点「+ 新建」vs
+ * 主 Bot 在对话里建）而长得不一样——头像、模型、主动问候都按同一套走，否则侧栏里
+ * 会出现两种风格的 Bot，用户会以为创建失败了一半。
+ *
+ * `unread` 给 0 而不是 1：欢迎消息紧接着由 `appendMessage` 落下，它会把未读加到 1
+ * （见 `absorbCreatedBots`）。这里再给 1 会让同一条消息被数两遍，侧栏显示「2」而
+ * 对话里只有一条。
+ */
+function botFromCreatedRecord(record: CreatedBotRecord): Bot {
+  const appearance = randomBotAppearance()
+  return {
+    id: record.id,
+    name: record.name,
+    role: record.role,
+    description: record.description,
+    instructions: record.instructions,
+    avatar: { shape: appearance.shape, color: appearance.color, tint: appearance.tint },
+    groupId: record.groupId ?? DEFAULT_GROUP_ID,
+    isMain: false,
+    status: 'online',
+    unread: 0,
+    pinned: false,
+    enabled: true,
+    model: MODEL_FALLBACK,
+    skills: [],
+    permission: 'full',
+    proactive: { enabled: true, freq: 'daily', from: '09:00', to: '22:00' },
+    createdAt: record.createdAt,
+    createdBy: record.createdBy,
+  }
+}
+
+/**
+ * 把宿主创建的 Bot 合并进当前花名册，按 id 去重。
+ *
+ * 去重不是防御性冗余：宿主的环形缓冲会让同一条记录从补发里再来一次，启动时的
+ * `/bots/created` 也可能和 SSE 撞在同一条记录上——同一条记录只该有一只 Bot，否则
+ * 侧栏会出现两个同名条目，消息还会各走各的会话。
+ *
+ * 返回 `added` 而不只是新数组：调用方要拿它决定「弹不弹 toast、落不落欢迎消息」。
+ * 让「合并」与「副作用」分开，SSE 与启动拉取才能共用同一份判断。
+ */
+function mergeCreatedBots(bots: Bot[], records: readonly CreatedBotRecord[]): { bots: Bot[]; added: Bot[] } {
+  const known = new Set(bots.map((bot) => bot.id))
+  const added: Bot[] = []
+  for (const record of records) {
+    if (known.has(record.id)) continue
+    known.add(record.id)
+    added.push(botFromCreatedRecord(record))
+  }
+  return added.length === 0 ? { bots, added } : { bots: [...bots, ...added], added }
 }
 
 /**
@@ -433,16 +1406,57 @@ export function applyStreamEventToBlocks(blocks: MessageBlock[], event: Personal
  */
 function replyRequestBody(bot: Bot, text: string, state: AppState, images: ChatImage[] = []): string {
   return JSON.stringify({
-    bot: { id: bot.id, name: bot.name, role: bot.role, description: bot.description, instructions: bot.instructions, model: bot.model },
+    bot: {
+      id: bot.id,
+      name: bot.name,
+      role: bot.role,
+      description: bot.description,
+      instructions: bot.instructions,
+      model: bot.model,
+      /*
+       * 主 Bot 标记：宿主据此决定给谁挂 `bot_create`（只有主 Bot 能建子 Bot）。
+       *
+       * 每轮都带、显式给布尔值：宿主的花名册是「收到就覆盖」的缓存，省略会被当成
+       * 「旧前端不认识这个字段」，回落到「谁都能建」或「谁都别建」——两种回落都错，
+       * 不如永远给一个确定的答案。
+       */
+      isMain: bot.isMain === true,
+    },
     permission: bot.permission ?? 'full',
     text,
+    /*
+     * 全量 Bot 花名册：宿主派活时需要知道「子 Bot 是谁」。
+     *
+     * 为什么每轮都带：宿主只在收到时缓存，不带的话「从没跟用户聊过的 Bot」
+     * 就派不出去。只带身份与模型——memories 每轮变化，缓存旧值会让子 Bot
+     * 用上过期的记忆。
+     */
+    roster: state.bots.map((item) => ({
+      id: item.id,
+      name: item.name,
+      role: item.role,
+      description: item.description,
+      instructions: item.instructions,
+      model: item.model,
+      // 同上：宿主建子 Bot 时要靠花名册认出「谁是主 Bot」，其余成员一律不是
+      isMain: item.isMain === true,
+    })),
     // 只带相对路径：图片已经在 /upload 落盘，宿主据此在 user 消息里提示 read_image。
     ...(images.length > 0 ? { images: images.map((item) => ({ path: item.path, name: item.name })) } : {}),
     history: state.messages
-      .filter((msg) => msg.botId === bot.id && !msg.roomId && !msg.pending)
+      /*
+       * 压缩标记（source='compaction'）不进 history：它没有正文（blocksToText 返回
+       * 空串），带过去只会变成一条空 system 消息；它的语义是「给用户看的提示」，
+       * 不是上下文的一部分。
+       */
+      .filter((msg) => msg.botId === bot.id && !msg.roomId && !msg.pending && msg.source !== 'compaction')
       .slice(-12)
       .map((msg) => ({ role: msg.role, text: blocksToText(msg.blocks) })),
-    memories: state.memories.filter((item) => item.botId === bot.id).slice(-8).map((item) => item.text),
+    /*
+     * 不再带 memories：记忆已统一由宿主记忆引擎注入（schema v6 起按 owner 隔离，
+     * 见 src/triad/memory/engine/visibility.ts）。继续带会形成第二套注入源——
+     * 同一件事在两个库里各存一份、各自衰减，模型还会收到重复的两段。
+     */
   })
 }
 
@@ -490,6 +1504,10 @@ async function hostReply(bot: Bot, text: string, state: AppState, images: ChatIm
  * onEvent 的第二参数是**当前累积出来的 blocks 快照**（不可变，每次内容事件都是新
  * 数组），调用方直接拿它整块替换 pending 消息的 blocks 即可，不必自己再维护一份
  * 累积逻辑。
+ *
+ * `signal` 是用户点「停止」时用的外部中止信号：它只负责断开这次读取，返回值的
+ * 约定不变（已收到的内容照样交回）。要不要降级由调用方决定——停止**不能**降级，
+ * 非流式重跑会把这一轮的工具调用、生图再执行一遍。
  */
 async function hostReplyStream(
   bot: Bot,
@@ -497,6 +1515,7 @@ async function hostReplyStream(
   state: AppState,
   onEvent: (event: PersonalStreamEvent, blocks: MessageBlock[]) => void,
   images: ChatImage[] = [],
+  signal?: AbortSignal,
 ): Promise<MessageBlock[] | null> {
   if (typeof location !== 'undefined' && location.protocol === 'file:') return null
   let received = 0
@@ -504,6 +1523,15 @@ async function hostReplyStream(
   try {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 300_000)
+    /*
+     * 外部信号并入内部 controller，而不是用 AbortSignal.any：后者在老 WebView /
+     * 旧 Chromium 里没有，会把「点停止」变成一次 TypeError，反而停不下来。
+     */
+    const abortFromOutside = (): void => controller.abort()
+    if (signal !== undefined) {
+      if (signal.aborted) controller.abort()
+      else signal.addEventListener('abort', abortFromOutside, { once: true })
+    }
     try {
       const res = await fetch('/api/personal-agent/reply/stream', {
         method: 'POST',
@@ -554,6 +1582,7 @@ async function hostReplyStream(
       return received === 0 ? null : blocks
     } finally {
       clearTimeout(timer)
+      if (signal !== undefined) signal.removeEventListener('abort', abortFromOutside)
     }
   } catch {
     /*
@@ -585,6 +1614,323 @@ async function hostJournalImage(journal: Journal): Promise<string | null> {
   return null
 }
 
+/* ───────────────────── 期刊：宿主 API 对接 ───────────────────── */
+
+/**
+ * 把宿主返回的期刊洗成前端可渲染的 `Journal`（并强制 `origin='host'`）。
+ *
+ * 宿主落盘的 JSON 也可能被手工改坏 / 是旧版本写的，所以照样过一遍 shared 的
+ * `sanitizeJournalRecord`；返回 null 表示这份数据连标题和正文都没有，不能上屏。
+ */
+function sanitizeHostJournal(raw: unknown): Journal | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const record = raw as Record<string, unknown>
+  const journal = sanitizeJournalRecord(raw, {
+    origin: 'host',
+    ...(typeof record.model === 'string' && record.model !== '' ? { model: record.model } : {}),
+  })
+  if (journal === null) return null
+  // 宿主只给 date 时补一个可读日期；期号缺省按第一期兜底，界面上不会出现空白行
+  if (journal.dateLabel === '' && journal.date !== '') {
+    const parsed = new Date(`${journal.date}T00:00:00`)
+    if (!Number.isNaN(parsed.getTime())) journal.dateLabel = journalDateLabel(parsed)
+  }
+  if (journal.issue === '') journal.issue = journalIssue(0)
+  return journal
+}
+
+/** GET /journal/list：宿主落盘的期刊；读不到（旧宿主 / 网络失败）返回空数组。 */
+async function hostJournalList(): Promise<Journal[]> {
+  if (isDemoMode()) return []
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 20_000)
+  try {
+    const res = await fetch('/api/personal-agent/journal/list', {
+      headers: { accept: 'application/json' },
+      signal: controller.signal,
+    })
+    if (!res.ok) return []
+    const data = (await res.json()) as { ok?: boolean; journals?: unknown }
+    if (data.ok === false || !Array.isArray(data.journals)) return []
+    const journals: Journal[] = []
+    for (const raw of data.journals) {
+      const journal = sanitizeHostJournal(raw)
+      if (journal !== null) journals.push(journal)
+    }
+    return journals
+  } catch {
+    return []
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** `/journal/status` 的归一化结果（`rule: null` = 宿主没给，保留本地规则）。 */
+interface HostJournalStatus extends Omit<JournalStatus, 'rule'> {
+  rule: JournalRule | null
+}
+
+/** 把任意来源的触发日志洗成合法列表（宿主 / localStorage 都可能不干净）。 */
+function normalizeJournalLogs(raw: unknown): JournalTriggerLog[] {
+  if (!Array.isArray(raw)) return []
+  const logs: JournalTriggerLog[] = []
+  for (const item of raw) {
+    if (item === null || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    const at = typeof record.at === 'number' && Number.isFinite(record.at) ? record.at : 0
+    if (at <= 0) continue
+    logs.push({
+      at,
+      ok: record.ok === true,
+      reason: typeof record.reason === 'string' ? record.reason.slice(0, 300) : '',
+      ...(typeof record.journalId === 'string' && record.journalId !== '' ? { journalId: record.journalId } : {}),
+    })
+  }
+  return logs.sort((a, b) => b.at - a.at).slice(0, 40)
+}
+
+/** GET /journal/status：宿主规则 / 日志 / 生成中标志；读不到返回 null。 */
+async function hostJournalStatus(): Promise<HostJournalStatus | null> {
+  if (isDemoMode()) return null
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 20_000)
+  try {
+    const res = await fetch('/api/personal-agent/journal/status', {
+      headers: { accept: 'application/json' },
+      signal: controller.signal,
+    })
+    if (!res.ok) return null
+    const data = (await res.json()) as {
+      ok?: boolean
+      rule?: unknown
+      logs?: unknown
+      generating?: unknown
+      lastGeneratedAt?: unknown
+    }
+    if (data.ok === false) return null
+    // 三个字段都没有 = 跑着的宿主还是旧版本（没这条路由的响应体），按读不到处理
+    if (data.rule === undefined && data.logs === undefined && data.generating === undefined) return null
+    return {
+      rule: data.rule === undefined ? null : normalizeJournalRule(data.rule),
+      logs: normalizeJournalLogs(data.logs),
+      generating: data.generating === true,
+      ...(typeof data.lastGeneratedAt === 'number' ? { lastGeneratedAt: data.lastGeneratedAt } : {}),
+    }
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** 合并本地与宿主的触发日志：按 `at + reason` 去重，新的在前，最多 40 条。 */
+function mergeJournalLogs(
+  local: readonly JournalTriggerLog[],
+  remote: readonly JournalTriggerLog[],
+): JournalTriggerLog[] {
+  const byKey = new Map<string, JournalTriggerLog>()
+  for (const log of [...local, ...remote]) byKey.set(`${String(log.at)}:${log.reason}`, log)
+  return [...byKey.values()].sort((a, b) => b.at - a.at).slice(0, 40)
+}
+
+/** 按 id upsert 一期期刊（宿主推送与本地生成走同一条路，不会出现两个同 id 卡片）。 */
+function upsertJournal(journals: readonly Journal[], journal: Journal): Journal[] {
+  const index = journals.findIndex((item) => item.id === journal.id)
+  if (index < 0) return [journal, ...journals]
+  const next = journals.slice()
+  next[index] = journal
+  return next
+}
+
+/** 同一天的两期期刊谁优先：宿主生成优先，其次 generatedAt 更大的。 */
+function preferJournal(candidate: Journal, current: Journal): boolean {
+  const candidateHost = candidate.origin === 'host' ? 1 : 0
+  const currentHost = current.origin === 'host' ? 1 : 0
+  if (candidateHost !== currentHost) return candidateHost > currentHost
+  return candidate.generatedAt > current.generatedAt
+}
+
+/**
+ * 合并宿主期刊与本地期刊。
+ *
+ * 两条规则：
+ *  1. 同 id：宿主优先（落盘的那份是权威，可能比本地多图 / 多模型信息）；
+ *  2. 同 bot + 同日期：只留一份，`origin='host'` 优先，否则留 generatedAt 更大的。
+ *     第二条兜住「宿主不可用时本地先生成了一份，宿主恢复后又生成一份」——只按 id
+ *     去重会留下两期同一天的期刊，界面上像重影。
+ */
+function mergeJournals(local: readonly Journal[], incoming: readonly Journal[]): Journal[] {
+  const byId = new Map<string, Journal>()
+  for (const journal of local) byId.set(journal.id, journal)
+  for (const journal of incoming) byId.set(journal.id, journal)
+  const byDay = new Map<string, Journal>()
+  for (const journal of byId.values()) {
+    const key = `${journal.botId}:${journal.date}`
+    const prev = byDay.get(key)
+    if (prev === undefined || preferJournal(journal, prev)) byDay.set(key, journal)
+  }
+  return [...byDay.values()].sort((a, b) => b.generatedAt - a.generatedAt)
+}
+
+/** `POST /journal/generate` 的请求体（字段与 shared 的 `JournalFeed` 对齐）。 */
+interface JournalGenerateBody {
+  botId: string
+  botName: string
+  botRole: string
+  botModel?: BotModel
+  date: string
+  auto: boolean
+  messages: JournalFeed['messages']
+  stats: JournalFeedStats
+  lastUserMessageAt: number
+}
+
+/**
+ * POST /journal/generate：让宿主用真实模型生成期刊。
+ *
+ * 返回 null = 宿主不可用 / 非 2xx / 生成失败 / 返回体洗不出期刊，调用方走本地回退。
+ * 超时给 180 秒：宿主可能顺带生图，十几秒掐断会把正常生成误判成失败。
+ */
+async function hostJournalGenerate(body: JournalGenerateBody): Promise<Journal | null> {
+  if (isDemoMode()) return null
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 180_000)
+  try {
+    const res = await fetch('/api/personal-agent/journal/generate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+    if (!res.ok) return null
+    const data = (await res.json()) as { ok?: boolean; journal?: unknown; error?: string }
+    if (data.ok !== true) return null
+    if (data.journal === null || typeof data.journal !== 'object') return null
+    const raw = data.journal as Record<string, unknown>
+    const journal = sanitizeJournalRecord(data.journal, {
+      botId: body.botId,
+      date: body.date,
+      auto: body.auto,
+      origin: 'host',
+      ...(typeof raw.model === 'string' && raw.model !== '' ? { model: raw.model } : {}),
+    })
+    if (journal === null) return null
+    if (journal.dateLabel === '' && journal.date !== '') {
+      const parsed = new Date(`${journal.date}T00:00:00`)
+      if (!Number.isNaN(parsed.getTime())) journal.dateLabel = journalDateLabel(parsed)
+    }
+    if (journal.issue === '') journal.issue = journalIssue(0)
+    return journal
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** `/journal/check` 的结果（宿主判定 + 可能已生成）。 */
+interface HostJournalCheckResult {
+  ok: boolean
+  reason: string
+  journalId?: string
+}
+
+/**
+ * POST /journal/check：宿主按规则判定，满足条件时**在宿主侧**生成期刊。
+ *
+ * 返回 null = 宿主不可用（旧宿主没有这条路由 / 非 2xx / 网络失败），调用方走本地回退。
+ * `ok:false` 是**正常结果**（不满足触发条件），不是失败。
+ */
+async function hostJournalCheck(now: number): Promise<HostJournalCheckResult | null> {
+  if (isDemoMode()) return null
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 180_000)
+  try {
+    const res = await fetch('/api/personal-agent/journal/check', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ now }),
+      signal: controller.signal,
+    })
+    if (!res.ok) return null
+    const data = (await res.json()) as { ok?: unknown; reason?: unknown; journalId?: unknown }
+    if (typeof data.ok !== 'boolean') return null
+    return {
+      ok: data.ok,
+      reason: typeof data.reason === 'string' && data.reason !== ''
+        ? data.reason
+        : (data.ok ? '宿主已生成期刊' : '宿主未生成期刊'),
+      ...(typeof data.journalId === 'string' && data.journalId !== '' ? { journalId: data.journalId } : {}),
+    }
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** POST /journal/rule：把规则同步给宿主调度器（失败静默，本地规则仍然生效）。 */
+async function hostJournalRule(rule: JournalRule, lastUserMessageAt: number): Promise<void> {
+  if (isDemoMode()) return
+  try {
+    await fetch('/api/personal-agent/journal/rule', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ rule, lastUserMessageAt }),
+    })
+  } catch {
+    /* 宿主没起来：规则留在本地，下次挂载再同步 */
+  }
+}
+
+/** POST /journal/feed：把最近 48 小时的素材同步给宿主（失败静默，下次消息变化再试）。 */
+async function hostJournalFeed(feed: JournalFeed): Promise<void> {
+  if (isDemoMode()) return
+  try {
+    await fetch('/api/personal-agent/journal/feed', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(feed),
+    })
+  } catch {
+    /* 同上：素材留在本地，不阻塞任何交互 */
+  }
+}
+
+/**
+ * 本地规则判定（**只判定，不生成**）。
+ *
+ * 宿主可用时真正的判定在宿主（`/journal/check`）；这里只在宿主不可用（或演示页）时
+ * 兜底。它同时给同步签名的 `runJournalCheck` 一个即时反馈——调用方（规则面板 / 侧栏）
+ * 不能等 HTTP 回来才显示原因。
+ */
+function evaluateJournalRule(state: AppState, nowMs: number): { ok: boolean; reason: string; journalId?: string } {
+  const rule = normalizeJournalRule(state.settings.journalRule)
+  if (!rule.enabled) return { ok: false, reason: '日记规则已关闭' }
+  const now = new Date(nowMs)
+  const hour = now.getHours()
+  const minute = now.getMinutes()
+  const clock = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+  if (hour < rule.startHour || hour >= rule.endHour) {
+    return { ok: false, reason: `当前 ${clock} 不在 ${String(rule.startHour)}:00–${String(rule.endHour)}:00 触发窗内` }
+  }
+  const idle = nowMs - state.lastUserMessageAt
+  if (idle < rule.idleMinutes * 60_000) {
+    return {
+      ok: false,
+      reason: `距上次用户主动消息仅 ${String(Math.max(0, Math.round(idle / 60_000)))} 分钟，未满 ${String(rule.idleMinutes)} 分钟`,
+    }
+  }
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+  const dateKey = journalDateKey(yesterday)
+  const exists = state.journals.find((journal) => journal.botId === MAIN_BOT_ID && journal.date === dateKey)
+  if (exists !== undefined) return { ok: false, reason: `昨天的日记已生成（${exists.title}）`, journalId: exists.id }
+  return {
+    ok: true,
+    reason: `满足条件：${String(rule.startHour)}:00–${String(rule.endHour)}:00 且已静默 ${String(Math.round(idle / 60_000))} 分钟，正在生成昨天的期刊`,
+  }
+}
+
 /** 撤回后插进消息流的系统提示文案。 */
 const RECALL_NOTICE_TEXT = '你撤回了一条消息'
 
@@ -614,6 +1960,8 @@ export interface RecallPlan {
   text: string
   /** 通知宿主用的时间戳：被撤回那条用户消息的 at。 */
   at: number
+  /** 这条用户消息在 host 侧的原始 id（新消息才有；撤回靠它精确定位）。 */
+  hostMessageId?: string
 }
 
 /**
@@ -670,6 +2018,7 @@ export function planRecall(messages: Message[], messageId: string): RecallPlan |
     ...(roomId !== undefined ? { roomId } : {}),
     text: blocksToText(target.blocks),
     at: target.at,
+    ...(target.hostId !== undefined ? { hostMessageId: target.hostId } : {}),
   }
 }
 
@@ -724,10 +2073,17 @@ export function applyRecall(prev: AppState, plan: RecallPlan): AppState {
   const memories = prev.memories.filter((entry) => !(participants.has(entry.botId)
     && entry.createdAt >= plan.from
     && entry.createdAt <= plan.to))
+  /*
+   * 任务记录同理：这一轮的任务（按开始时间落在同一窗口）一并撤回。
+   * 否则对话已经撤了，任务记录里还挂着一段「已删除的对话」的详情。
+   */
+  const tasks = prev.tasks.filter((task) => !(participants.has(task.botId)
+    && task.startedAt >= plan.from
+    && task.startedAt <= plan.to))
   const lastUserMessageAt = messages
     .filter((message) => message.role === 'user')
     .reduce((max, message) => Math.max(max, message.at), 0)
-  return { ...prev, messages, bots, rooms, memories, lastUserMessageAt }
+  return { ...prev, messages, bots, rooms, memories, tasks, lastUserMessageAt }
 }
 
 /**
@@ -737,11 +2093,10 @@ export function applyRecall(prev: AppState, plan: RecallPlan): AppState {
  * 宿主那一半只是让模型之后的上下文里也不再出现这段对话。所以路由不存在、返回
  * 4xx/5xx、网络断了一律静默——用户看到的本地结果不受任何影响。
  *
- * body 只有 botId / text / at 三样：text 是这条用户消息的纯文本，at 是它的时间戳，
- * 宿主靠这两样在会话日志里反查要遮蔽的那一段（见 host/personal/agent.ts 的
- * recallBotTurn）。
+ * body 带 botId / text / at / messageId：messageId 是 host 给这条用户消息分配的
+ * 原始 id（新消息才有），宿主优先按它精确定位；旧消息没有 id 时才退回 text + at。
  */
-async function hostRecallTurn(botId: string, text: string, at: number): Promise<void> {
+async function hostRecallTurn(botId: string, text: string, at: number, bot?: Bot, messageId?: string): Promise<void> {
   if (typeof location !== 'undefined' && location.protocol === 'file:') return
   try {
     const controller = new AbortController()
@@ -750,7 +2105,29 @@ async function hostRecallTurn(botId: string, text: string, at: number): Promise<
       await fetch('/api/personal-agent/recall', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ botId, text, at }),
+        /*
+         * 带上 bot 档案：宿主在会话不在内存里时会 resume；只传 botId 会让它
+         * 用默认「助手 / 通用助手」档案重建提示词，撤回顺手把 Bot 身份改掉。
+         */
+        body: JSON.stringify({
+          botId,
+          text,
+          at,
+          ...(messageId !== undefined ? { messageId } : {}),
+          ...(bot !== undefined
+            ? {
+              bot: {
+                id: bot.id,
+                name: bot.name,
+                role: bot.role,
+                description: bot.description,
+                instructions: bot.instructions,
+                model: bot.model,
+              },
+              permission: bot.permission ?? 'full',
+            }
+            : {}),
+        }),
         signal: controller.signal,
       })
     } finally {
@@ -769,11 +2146,94 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
   const uiRef = useRef(ui)
   uiRef.current = ui
   const timersRef = useRef<number[]>([])
+  /**
+   * 当前这通实时会话。
+   *
+   * 放 ref 而不是 state：`RealtimeCall` 是命令式对象，持有 WebSocket、麦克风与
+   * AudioContext；把它塞进 state 会让每次 setUi 都重建一次连接（等于挂断重拨）。
+   */
+  const callRef = useRef<RealtimeCall | null>(null)
+  /** 未定稿的流式字幕缓冲（见 CALL_DRAFT_FLUSH_MS）。 */
+  const callDraftRef = useRef({ bot: '', thinking: '' })
+  const callDraftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /**
+   * 这一轮是否已经开始收到「语音转写」（bot_transcript_*）。
+   *
+   * 文本模态（bot_text_delta）与语音转写是同一句话的两份来源，内容几乎相同。
+   * 谁先到不确定，所以定一条规则：**音频转写优先**——它才是「用户实际听到的话」；
+   * 音频转写一旦开始，就丢掉之前由文本模态攒的字幕，否则同一句话会出现两遍。
+   */
+  const callAudioTranscriptRef = useRef(false)
+  /**
+   * 待配对的**用户**轮次占位（见 call-turns.ts 的文件头）。
+   *
+   * 服务端 ASR 是异步的：`user_transcript` 经常晚于 `bot_transcript_done` 到达，
+   * 按到达顺序 append 就会变成「Bot 先答、用户后问」——用户实测截图里就是这个错序。
+   *
+   * 做法：`speech_stopped`（一定早于模型响应）时先分配一个落库序号占位，
+   * 等转写到了按 `item_id` 配对补上文本，最后按序号排序。
+   */
+  const callPendingUsersRef = useRef<PendingUserTurn[]>([])
+  /** 通话内单调递增的落库序号（每通电话从 0 开始）。 */
+  const callSeqRef = useRef(0)
+  /**
+   * 当前这通电话在对话流里的**段 id**（见 `MessageBlock` 的 `call-segment`）。
+   *
+   * 转写与产物现在都以**普通消息**实时进对话流，靠它标记「属于同一通电话」；
+   * 渲染层据此把整段收起 / 展开（`ui.collapsedCallSegments`）。`null` = 没有通话。
+   */
+  const callSegmentRef = useRef<string | null>(null)
+  /** 段内已经落了消息几条（折叠条上显示「N 条」）。 */
+  const callSegmentTurnsRef = useRef(0)
+  /**
+   * 段内消息 id → 落库序号。
+   *
+   * 只用于**排序**（见 `insertCallMessage`）：ASR 是异步的，用户那句常常晚于 Bot 的
+   * 转写到达，按到达顺序追加会变成「Bot 先答、用户后问」。序号不进 `Message` 字段——
+   * 那要改类型契约，而它是通话期间的临时状态：页面一刷新通话就结束了，落下来的
+   * 消息顺序已经是正确的，不需要再排。
+   */
+  const callMessageSeqRef = useRef<Map<string, number>>(new Map())
+  /**
+   * 宿主期刊检查是否在飞（防止 30 秒定时器叠加请求）。
+   *
+   * 宿主 `/journal/check` 满足条件时会顺带生成期刊（模型 + 生图），一次请求可能跑
+   * 几十秒；不加这个标志时下一次 tick 会再发一条，前端会白白堆起一串请求。
+   */
+  const journalCheckInFlightRef = useRef(false)
+  /**
+   * 正在跑的回复轮次（输入框停止键的作用对象）。
+   *
+   * 放 ref 而不是 state：它持的是 AbortController 与「本轮已被停止」这类命令式
+   * 状态，塞进 state 会让每个流式事件都重渲染一次；而「要不要显示停止键」本来
+   * 就由 pending 消息决定，不需要再存一份。
+   */
+  const runningReplyTurnsRef = useRef<Set<RunningReplyTurn>>(new Set())
+  /**
+   * 停止键的实际实现（由下面的 `stopReply` 每次渲染后灌进来）。
+   *
+   * 为什么要转一手：`sendMessage` 需要调用它——用户在运行中发「停止」时必须走
+   * 真停止，而不是把这句话投给宿主当 steer。但 `sendMessage` 定义在
+   * `stopReply` 之前，直接引用会踩 TDZ（`Cannot access before initialization`），
+   * 所以用 ref 桥接。
+   */
+  const stopReplyRef = useRef<() => void>(() => {})
+  /** 已排期、尚未启动的群聊成员回复（见 ScheduledReply）。 */
+  const scheduledRepliesRef = useRef<Set<ScheduledReply>>(new Set())
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+        /*
+         * 落盘前剥掉两样东西：
+         *  · mergedSegments —— 只在流式期间有用（刷新后不会再有 message-update），
+         *    存下来等于把同一份 blocks 写两遍，长会话里会把 localStorage 配额翻倍；
+         *  · pagesByBot —— Pages 的权威源是宿主（每次打开右栏重新拉），前端这份只是
+         *    运行时缓存，存了也不会被 normalizeState 恢复，白白占空间。
+         */
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state, (key, value) => (
+          key === 'mergedSegments' || key === 'pagesByBot' ? undefined : value
+        )))
       } catch {
         /* 配额满：只影响持久化 */
       }
@@ -785,16 +2245,86 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     try {
       localStorage.setItem(UI_KEY, JSON.stringify({
         selectedBotId: ui.selectedBotId,
+        sidebarCollapsed: ui.sidebarCollapsed,
         rightPanelOpen: ui.rightPanelOpen,
+        rightPanelWidth: ui.rightPanelWidth,
+        chatWidth: ui.chatWidth,
         rightTab: ui.rightTab,
       }))
     } catch {
       /* ignore */
     }
-  }, [ui.selectedBotId, ui.rightPanelOpen, ui.rightTab])
+  }, [ui.selectedBotId, ui.sidebarCollapsed, ui.rightPanelOpen, ui.rightPanelWidth, ui.chatWidth, ui.rightTab])
+
+  /*
+   * 启动对账：刷新时被收口的僵尸任务，宿主那边也要停。
+   *
+   * 与 normalizeState 的消息 `pending` 清理同一口径——页面重载后前端已经不在
+   * 监听那一轮了，让它继续跑只会产生「无主消息」（界面显示任务已停止，输出却
+   * 还在往对话流里冒）。409 = 宿主本来就没在跑，不算错误。
+   *
+   * 名单由 settleStaleTask 在加载时填（normalizeState 是纯函数，不能发请求），
+   * 这里取走即清空，只发一次。
+   */
+  useEffect(() => {
+    if (isDemoMode()) return
+    const botIds = [...staleTaskBotIds]
+    staleTaskBotIds.clear()
+    if (botIds.length === 0) return
+    void Promise.all(botIds.map((botId) => fetch('/api/personal-agent/stop', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ botId }),
+    }).catch(() => null)))
+  }, [])
+
+  /*
+   * 启动时与宿主同步期刊（只跑一次）。
+   *
+   *  · `/journal/list`：宿主落盘的期刊是权威（刷新 / 清缓存 / 换标签页都不该丢），
+   *    合并时按 id 去重、宿主优先；
+   *  · `/journal/status`：把宿主规则与触发日志并回来，规则面板才有内容。
+   *
+   * 只依赖挂载：之后的新期刊走 SSE 与本地动作，不需要反复拉列表。
+   */
+  useEffect(() => {
+    if (isDemoMode()) return undefined
+    let alive = true
+    void (async () => {
+      const journals = await hostJournalList()
+      if (!alive) return
+      if (journals.length > 0) {
+        setState((prev) => ({ ...prev, journals: mergeJournals(prev.journals, journals) }))
+      }
+      const status = await hostJournalStatus()
+      if (!alive || status === null) return
+      setState((prev) => ({
+        ...prev,
+        settings: {
+          ...prev.settings,
+          journalRule: status.rule ?? prev.settings.journalRule,
+        },
+        journalLogs: mergeJournalLogs(prev.journalLogs, status.logs),
+        // 规则面板据此显示「宿主正在生成 / 上次生成时间」
+        journalStatus: {
+          generating: status.generating,
+          ...(status.lastGeneratedAt !== undefined ? { lastGeneratedAt: status.lastGeneratedAt } : {}),
+        },
+      }))
+    })()
+    return () => {
+      alive = false
+    }
+  }, [])
 
   useEffect(() => () => {
     for (const timer of timersRef.current) window.clearTimeout(timer)
+    // 卸载（切到 Work 模式 / 热更新）时必须把通话掐掉：否则 WebSocket、麦克风与
+    // AudioContext 会留在这个已经没人渲染的组件树里继续跑，用户会听见「幽灵通话」。
+    const session = callRef.current
+    callRef.current = null
+    if (session !== null) void session.stop()
+    if (callDraftTimerRef.current !== null) clearTimeout(callDraftTimerRef.current)
   }, [])
 
   const later = useCallback((ms: number, run: () => void): void => {
@@ -807,28 +2337,107 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
 
   const toast = useCallback((text: string): void => {
     setUi((prev) => ({ ...prev, toast: text }))
-    later(2600, () => setUi((prev) => (prev.toast === text ? { ...prev, toast: null } : prev)))
+    /*
+     * 停留时间按文案长度给：固定 2.6 秒对「Live 供应商……还没配：在设置页里粘贴
+     * API Key，或到 DSH 凭据里补上」这种五六十字的报错根本读不完。基础 2.2 秒，
+     * 每字加 45ms，封顶 9 秒——短提示仍然干脆，长报错能停下来读完再消失。
+     */
+    const linger = Math.min(9_000, Math.max(2_600, 2_200 + text.length * 45))
+    later(linger, () => setUi((prev) => (prev.toast === text ? { ...prev, toast: null } : prev)))
   }, [later])
 
-  const appendMessage = useCallback((message: Message): void => {
+  /**
+   * 追加一条消息（并按需更新侧栏摘要 / 未读）。
+   *
+   * @param insert 语音通话段内的消息要带上它：消息按落库序号插到段里的正确位置，
+   *   而不是追加到末尾（理由见 `insertCallMessage`）。缺省 = 追加。
+   */
+  const appendMessage = useCallback((message: Message, insert?: { segment: string; seq: number }): void => {
     setState((prev) => {
       const bots = prev.bots.map((bot) => {
         if (bot.id !== message.botId) return bot
+        /*
+         * 段内消息可能插到**更早**的位置（ASR 迟到）：此时它不该抢走侧栏摘要，
+         * 否则侧栏会显示一条比当前最新消息还早的内容。
+         */
+        const newer = bot.lastAt === undefined || message.at >= bot.lastAt
         return {
           ...bot,
-          lastMessage: truncate(blocksToText(message.blocks)),
-          lastAt: message.at,
+          lastMessage: newer ? truncate(blocksToText(message.blocks)) : bot.lastMessage,
+          lastAt: newer ? message.at : bot.lastAt,
           unread: message.role === 'bot' && !message.pending && uiRef.current.selectedBotId !== bot.id && !message.roomId
             ? bot.unread + 1
             : bot.unread,
         }
       })
       const rooms = prev.rooms.map((room) => (room.id === message.roomId
-        ? { ...room, lastMessage: truncate(blocksToText(message.blocks)), lastAt: message.at, unread: message.role === 'bot' ? room.unread + 1 : room.unread }
+        ? {
+          ...room,
+          lastMessage: room.lastAt === undefined || message.at >= room.lastAt ? truncate(blocksToText(message.blocks)) : room.lastMessage,
+          lastAt: room.lastAt === undefined || message.at >= room.lastAt ? message.at : room.lastAt,
+          unread: message.role === 'bot' ? room.unread + 1 : room.unread,
+        }
         : room))
-      return { ...prev, bots, rooms, messages: [...prev.messages, message] }
+      const messages = insert === undefined
+        ? [...prev.messages, message]
+        : insertCallMessage(prev.messages, message, insert.segment, insert.seq, callMessageSeqRef.current)
+      return { ...prev, bots, rooms, messages }
     })
   }, [])
+
+  /**
+   * 本次页面会话里已经吸收过哪些宿主创建的 Bot（按 id）。
+   *
+   * 只用 state 去重不够：SSE 事件与启动拉取可能在同一帧到达，那时 `stateRef`
+   * 还没更新，两次合并都会把同一条记录算成「新增」；而 `appendMessage` 不像
+   * setState 那样有 prev 可查，会落出两条一模一样的欢迎消息。用 ref 兜住这个
+   * 窗口——它只活在这一份页面会话里，刷新后由 state 自己接管去重。
+   */
+  const absorbedBotIdsRef = useRef<Set<string>>(new Set())
+  /**
+   * 把宿主创建的子 Bot 吸收进本地状态（SSE `bot-created` 与启动拉取共用）。
+   *
+   * 为什么不是简单往 `state.bots` 里 push：新 Bot 的欢迎消息必须和它一起落地。
+   * 分两次 setState 时，侧栏会先出现一个没有摘要的空壳（头像下面一片空白），
+   * 下一帧才补上欢迎语——用户看到的就是「刚建好的 Bot 抽了一下」。
+   *
+   * 欢迎消息用 `firstBotMessage` 本地生成，不调模型：主 Bot 在建它的那一轮里
+   * 已经回过话了，再让新 Bot 自我介绍一次等于同一件事说两遍，还要多付一次模型
+   * 调用；而「侧栏别空着」这个目的，一句本地文案就够。
+   */
+  const absorbCreatedBots = useCallback((records: readonly CreatedBotRecord[]): void => {
+    const merged = mergeCreatedBots(stateRef.current.bots, records)
+    /*
+     * 分组兜底：宿主（模型）给的 `group_id` 可能是它自己编的。前端侧栏是按分组
+     * 遍历 Bot 的，落进一个不存在的分组就等于「一个分组都进不去」——建好了却
+     * 看不见。退回默认组至少让它出现在列表里，用户还能自己拖走。
+     */
+    const groupIds = new Set(stateRef.current.groups.map((group) => group.id))
+    const fresh = merged.added
+      .filter((bot) => !absorbedBotIdsRef.current.has(bot.id))
+      .map((bot) => (groupIds.has(bot.groupId) ? bot : { ...bot, groupId: DEFAULT_GROUP_ID }))
+    if (fresh.length === 0) return
+    for (const bot of fresh) absorbedBotIdsRef.current.add(bot.id)
+    setState((prev) => {
+      // 再用 prev 过滤一次：真正落进 state 的以最新一份为准
+      const insert = fresh.filter((bot) => !prev.bots.some((item) => item.id === bot.id))
+      return insert.length === 0 ? prev : { ...prev, bots: [...prev.bots, ...insert] }
+    })
+    for (const bot of fresh) {
+      appendMessage({
+        id: shortId('msg'),
+        botId: bot.id,
+        role: 'bot',
+        at: Date.now(),
+        blocks: firstBotMessage(bot),
+        source: 'proactive',
+      })
+    }
+    const only = fresh[0]
+    toast(fresh.length === 1 && only !== undefined
+      ? `主 Bot 创建了新的子 Bot「${only.name}」`
+      : `主 Bot 创建了 ${fresh.length} 个新的子 Bot`)
+  }, [appendMessage, toast])
 
   const replaceMessage = useCallback((id: string, blocks: MessageBlock[]): void => {
     setState((prev) => ({
@@ -836,6 +2445,458 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       messages: prev.messages.map((message) => (message.id === id ? { ...message, blocks, pending: false } : message)),
     }))
   }, [])
+
+  /* ───────────────────────── 任务记录（每轮一条） ───────────────────────── */
+
+  /** 改一条任务记录（函数式，避免闭包读到旧 state）。 */
+  const patchTask = useCallback((id: string, patch: (task: TaskRecord) => TaskRecord): void => {
+    setState((prev) => ({
+      ...prev,
+      tasks: prev.tasks.map((task) => (task.id === id ? patch(task) : task)),
+    }))
+  }, [])
+
+  /**
+   * 开一条任务记录（replyAsBot 开头调用）。
+   *
+   * 标题在开始时先用用户请求生成，完成时如果只是寒暄再拿 bot 回复兜底——
+   * 任务列表要**立刻**有一行可见，不能等整轮跑完才出现。
+   */
+  const createTaskRecord = useCallback((
+    bot: Bot,
+    text: string,
+    target: { roomId?: string },
+    images: ChatImage[],
+  ): string => {
+    const id = shortId('task')
+    const hasImages = images.length > 0
+    const prompt = text.trim() !== '' ? text.trim() : (hasImages ? '[图片]' : '')
+    const at = Date.now()
+    const record: TaskRecord = {
+      id,
+      botId: bot.id,
+      ...(target.roomId !== undefined ? { roomId: target.roomId } : {}),
+      title: autoTaskTitle(prompt, hasImages),
+      prompt,
+      status: 'running',
+      startedAt: at,
+      steps: [{ at, kind: 'start', title: '开始处理', ...(prompt !== '' ? { detail: prompt.slice(0, 300) } : {}) }],
+    }
+    setState((prev) => ({ ...prev, tasks: [record, ...prev.tasks].slice(0, MAX_TASK_RECORDS) }))
+    return id
+  }, [])
+
+  /**
+   * 把一次工具调用写进任务详情。
+   *
+   * 工具事件会来很多次（running → ok），按 callId 就地更新同一步；同一个工具名
+   * 调用多次时不会互相覆盖。
+   *
+   * `task_state` 是例外：它是「任务概览」的写入通道，不是执行轨迹。只更新
+   * `TaskRecord.overview`，不往 steps 里塞一行「task_state」——用户看不懂，
+   * 任务概览卡左栏也只需要任务清单本身。
+   */
+  const upsertTaskToolStep = useCallback((taskId: string, run: ToolRun): void => {
+    if (run.name === TASK_STATE_TOOL) {
+      /*
+       * running 事件只有 args、ok 事件才带 result：两次都走同一份逻辑，后到的
+       * 覆盖前面的（以最新进度为准）；解析不出有效 steps 时保留旧清单。
+       */
+      const overview = overviewStepsFromArgs(run.args) ?? overviewStepsFromResult(run.result)
+      if (overview !== null) patchTask(taskId, (task) => ({ ...task, overview }))
+      return
+    }
+    patchTask(taskId, (task) => {
+      const detail = run.status === 'running'
+        ? (run.args ?? '')
+        : (run.result ?? run.args ?? '')
+      const step: TaskRecordStep = {
+        at: run.endedAt ?? run.startedAt,
+        id: run.id,
+        kind: 'tool',
+        title: run.name,
+        ...(detail !== '' ? { detail: detail.slice(0, 220) } : {}),
+        status: run.status,
+      }
+      const index = task.steps.findIndex((item) => item.kind === 'tool' && item.id === run.id)
+      if (index < 0) return { ...task, steps: pushTaskStep(task.steps, step) }
+      const steps = task.steps.slice()
+      // 保留最初的 startedAt 排序位置，只刷新状态与结果文本。
+      steps[index] = { ...step, at: steps[index].at }
+      return { ...task, steps }
+    })
+  }, [patchTask])
+
+  /**
+   * 把一条过程消息的文字写进任务记录（任务详情卡的过程时间线正文）。
+   *
+   * 用户口径（2026-11-02）：「Work 模式那种表达很舒服，搬到任务详情」——Work 的
+   * 回合过程是「图标 + 标题 + 一段自然语言」，正文就来自模型每段 progress 消息。
+   * 这里按 host 消息 id 去重：同一条消息的 message-update 会反复到达，只更新那一步
+   * 的正文，不新增步骤。
+   *
+   * final 消息不进这里：它的文字是「最终回复」，收口时单独取（lastTextOfBlocks），
+   * 重复进时间线会让同一段话在卡里出现两遍。
+   */
+  const upsertTaskTextStep = useCallback((taskId: string, hostId: string, text: string, kind: BotMessageKind): void => {
+    const detail = text.trim()
+    if (detail === '') return
+    const title = kind === 'finding'
+      ? '发现'
+      : kind === 'need-input'
+        ? '询问'
+        : kind === 'approval'
+          ? '待确认'
+          : kind === 'connector-suggest'
+            ? '建议'
+            : '分析'
+    patchTask(taskId, (task) => {
+      const index = task.steps.findIndex((item) => item.kind === 'text' && item.id === hostId)
+      const step: TaskRecordStep = {
+        at: index >= 0 ? task.steps[index].at : Date.now(),
+        id: hostId,
+        kind: 'text',
+        title,
+        detail: detail.slice(0, 2000),
+      }
+      if (index < 0) return { ...task, steps: pushTaskStep(task.steps, step) }
+      const steps = task.steps.slice()
+      steps[index] = step
+      return { ...task, steps }
+    })
+  }, [patchTask])
+
+  /**
+   * 收口一条任务记录。
+   *
+   * 这一轮**没有任何实质动作**（没有工具调用、没有过程说明、没有产出）时整条丢弃：
+   * 用户口径（2026-11-02）「不是每一个对话都需要给一个任务记录」——纯寒暄 /
+   * 一句问答不该在任务记录卡里留一条空壳。任务详情卡展示的是过程时间线（工具 +
+   * 过程文字），没有过程就没有可看的内容。
+   *
+   * @param status done / stopped / failed（stopped = 用户主动停止，是正常操作，不是出错）
+   * @param blocks 这一轮最终落地的全部 blocks（用来汇总工具、产出数与最终回复）
+   * @param error 失败 / 停止原因
+   */
+  const finishTaskRecord = useCallback((taskId: string, status: 'done' | 'stopped' | 'failed', blocks: MessageBlock[], error?: string): void => {
+    const runs = toolRunsOfBlocks(blocks)
+    /** 把一条任务记录补成收口态（纯函数：setState 里按 id 应用）。 */
+    const applyFinish = (task: TaskRecord): TaskRecord => {
+      // 把最终工具状态补进去（收口时可能还有 running 没被 update 的）
+      let steps = task.steps.slice()
+      for (const run of runs) {
+        // task_state 只写 overview，不进执行轨迹（见 upsertTaskToolStep）
+        if (run.name === TASK_STATE_TOOL) continue
+        const detail = run.result ?? run.args ?? ''
+        const step: TaskRecordStep = {
+          at: run.endedAt ?? run.startedAt,
+          id: run.id,
+          kind: 'tool',
+          title: run.name,
+          ...(detail !== '' ? { detail: detail.slice(0, 220) } : {}),
+          status: run.status,
+        }
+        const index = steps.findIndex((item) => item.kind === 'tool' && item.id === run.id)
+        if (index < 0) steps = pushTaskStep(steps, step)
+        else steps[index] = { ...step, at: steps[index].at }
+      }
+      /*
+       * 收口时还挂着 running 的步骤一律标中断：宿主不会再补结束事件，留着就是
+       * 时间线上永远转圈的一步。停止与失败都适用（done 时出现 running 说明宿主
+       * 漏发了 update，同样不能留）。
+       */
+      steps = steps.map((step) => (step.status === 'running' ? { ...step, status: 'error' as const } : step))
+      const reply = lastTextOfBlocks(blocks)
+      const title = isTrivialTaskPrompt(task.prompt) && reply !== ''
+        ? autoTaskTitle(reply)
+        : task.title
+      const endedAt = Date.now()
+      const endStep: TaskRecordStep = {
+        at: endedAt,
+        kind: 'end',
+        title: status === 'done' ? '任务完成' : status === 'stopped' ? '任务已停止' : '任务失败',
+        ...(error !== undefined && error !== '' ? { detail: error.slice(0, 300) } : {}),
+        /*
+         * 停止不设 status：时间线上的圆点保持中性灰，与状态 pill 的灰一致。
+         * 标成 'error' 会把它渲染成红色，看起来像这一轮出了错。
+         */
+        ...(status === 'done' ? { status: 'ok' as const } : status === 'failed' ? { status: 'error' as const } : {}),
+      }
+      return {
+        ...task,
+        title,
+        status,
+        endedAt,
+        durationMs: Math.max(0, endedAt - task.startedAt),
+        steps: [...steps, endStep],
+        outputCount: outputCountOfBlocks(blocks),
+        ...(reply !== '' ? { reply: reply.slice(0, 500) } : {}),
+        ...(error !== undefined && error !== '' ? { error: error.slice(0, 300) } : {}),
+      }
+    }
+    setState((prev) => {
+      const target = prev.tasks.find((task) => task.id === taskId)
+      if (target === undefined) return prev
+      /*
+       * 这一轮没有任何实质动作（工具 / 过程说明 / 产出）→ 纯寒暄，整条丢弃。
+       * 用户口径（2026-11-02）：「不是每一个对话都需要给一个任务记录」——任务
+       * 记录卡只留「做了事」的轮次，聊天不必留一条空壳。
+       */
+      const hasSubstance = target.steps.some((step) => step.kind === 'tool' || step.kind === 'text' || step.kind === 'output')
+      if (!hasSubstance) {
+        return { ...prev, tasks: prev.tasks.filter((task) => task.id !== taskId) }
+      }
+      return { ...prev, tasks: prev.tasks.map((task) => (task.id === taskId ? applyFinish(task) : task)) }
+    })
+    /*
+     * 通知右栏产出物卡刷新：这一轮可能刚刚往产出物文件夹里写了文件。
+     * 用 window 事件而不是把刷新状态塞进 store，产出物卡自己能决定怎么拉。
+     */
+    if (typeof window !== 'undefined') window.dispatchEvent(new Event('pa:outputs-refresh'))
+  }, [])
+
+  /*
+   * 常驻事件订阅（SSE）：宿主侧例行任务、后台发现、审批到期都从这里推过来。
+   *
+   * 这是「Bot 在用户没发消息时也能说话」的唯一入口——没有它，例行任务只能等用户
+   * 下次打开页面才发现结果。宿主的环形缓冲会补发断线期间的事件（`since` 参数），
+   * 但这里只用「连上之后」的增量；离线更久的补发走 `/messages` 接口。
+   */
+  /*
+   * host 消息 id → 前端消息 id 的**全局共享映射**。
+   *
+   * 为什么不能用「见过就跳过」的 Set：同一条消息会从两条路各来一次——`/reply/stream`
+   * 的响应体，和常驻 SSE（多窗口同步靠后者）。Set 只能判断「见过」，却答不出
+   * 「它对应界面上哪一条」，于是后来的那条只能再 append 一个新气泡，同一句话就
+   * 出现两遍（实测踩过）。用映射表，先到的落地、后到的原地 update。
+   */
+  const hostMessageIds = useRef<Map<string, string>>(new Map())
+  /**
+   * 每个 Bot 已经收到过的最大事件序号（`botId → seq`），重连时当 `since` 用。
+   *
+   * 为什么必须记：连接断了再重连时，宿主只会补发 `seq > since` 的那一段。不带
+   * `since` 就从「当前」开始收，断开那一小段时间里宿主推的例行任务结果、主动
+   * 询问会永久丢失，界面上表现为「后台任务跑了，但对话里没有」。
+   *
+   * 为什么是**逐 Bot 的表**而不是一个数字：现在是一条连接订阅全部 Bot，而各通道
+   * 的序号是独立的（各自从 1 开始）。共用一个 since 等于拿 A 的进度去截 B 的历史。
+   *
+   * 只活在内存里，刷新页面后归零：宿主重启过的话序号会从头计，带一个陈旧的大
+   * `since` 反而会让我们**永远收不到**新事件。更久之前的补发交给 `/messages`。
+   */
+  const hostEventSeqRef = useRef<Map<string, number>>(new Map())
+  useEffect(() => {
+    // 独立演示页（file://）没有宿主，EventSource 也连不上任何东西
+    if (typeof location !== 'undefined' && location.protocol === 'file:') return undefined
+    if (typeof EventSource === 'undefined') return undefined
+    /*
+     * **一条连接订阅全部 Bot**（`botId=*`）。
+     *
+     * 原来这里是 `for (const bot of state.bots)` 每个 Bot 建一条常驻 SSE。SSE 是
+     * 长连接，而浏览器对同一 origin 的 HTTP/1.1 并发上限只有 6 条：主 Bot + 3 个
+     * 子 Bot 就是 4 条，再叠上页面自己的请求；而 effect 依赖 `botIdKey`，**新建或
+     * 删除任意一个 Bot 都会关掉全部连接再重建全部**，那个瞬时翻倍直接顶破上限，
+     * 之后的请求全部排队——表现就是「一创建子 Bot 服务就断了」（实测复现）。
+     *
+     * 合并成一条之后：Bot 数量与连接数解耦，effect 依赖也空了——**Bot 增删再也
+     * 不会重连 SSE**。事件自带 `botId`，按它分发即可。
+     *
+     * 补发游标也随之变成逐 Bot 的表（`botA:5,botB:3`）：各通道序号独立，共用
+     * 一个 since 会拿 A 的进度去截 B 的历史。
+     */
+    const encodeSince = (): string => {
+      const parts: string[] = []
+      for (const [botId, seq] of hostEventSeqRef.current) {
+        if (seq > 0) parts.push(`${botId}:${seq}`)
+      }
+      return parts.join(',')
+    }
+    const since = encodeSince()
+    const source = new EventSource(
+      `/api/personal-agent/events?botId=*${since !== '' ? `&since=${encodeURIComponent(since)}` : ''}`,
+    )
+    source.onmessage = (raw: MessageEvent): void => {
+      let payload: any
+      try {
+        payload = JSON.parse(String(raw.data))
+      } catch {
+        return
+      }
+      /*
+       * 推进游标：**只认真正收到的事件**，`hello` 不算。
+       *
+       * `hello` 带的是「宿主当前序号」，不是「我收到了这些事件」。拿它推进游标，
+       * 一旦补发在到达前断线，那一段会被永久跳过——比不补发更糟。游标只增不减：
+       * 重复补发会带来更小的 seq，不能把游标退回去。
+       *
+       * 合并连接下按事件自己的 `botId` 记，各通道互不干扰。
+       */
+      const eventBotId = typeof payload?.botId === 'string' && payload.botId !== '' && payload.botId !== '*'
+        ? payload.botId
+        : undefined
+      if (payload?.type !== 'hello' && eventBotId !== undefined) {
+        const seq = typeof payload?.seq === 'number' ? payload.seq : 0
+        if (seq > (hostEventSeqRef.current.get(eventBotId) ?? 0)) hostEventSeqRef.current.set(eventBotId, seq)
+      }
+        /*
+         * 期刊事件：宿主调度器生成完一期后推过来（source='auto'），或手动生成后回推。
+         * 它不是一条对话消息，处理完必须 return，否则会被下面的消息分支当成脏帧丢掉。
+         */
+        if (payload?.type === 'journal') {
+          const journal = sanitizeHostJournal(payload.journal)
+          if (journal === null) return
+          const known = stateRef.current.journals.some((item) => item.id === journal.id)
+          if (!known) {
+            setState((prev) => ({
+              ...prev,
+              journals: prev.journals.some((item) => item.id === journal.id) ? prev.journals : [journal, ...prev.journals],
+              journalStatus: { generating: false, lastGeneratedAt: journal.generatedAt },
+            }))
+            if (payload.source === 'auto' && uiRef.current.view !== 'journal') toast('昨日期刊已生成')
+          }
+          return
+        }
+        /*
+         * 压缩标记（1.1）：宿主 compaction 结束后推一条 `{ type: 'compaction', at, summary? }`，
+         * 前端落成一条 `role: 'system'`、`source: 'compaction'` 的消息。
+         *
+         * 不走 appendMessage：那条路径会更新侧栏摘要与未读数，而「上下文已压缩」
+         * 不是一条对话内容——它不该抢侧栏摘要、也不该让 Bot 冒出未读小红点。
+         * 重复事件（断线重连补发）按 at 去重，同一时刻只留一条。
+         */
+        if (payload?.type === 'compaction') {
+          const at = typeof payload.at === 'number' ? payload.at : Date.now()
+          const folded = typeof payload.folded === 'number' && payload.folded >= 0
+            ? Math.round(payload.folded)
+            : undefined
+          const summary = typeof payload.summary === 'string' ? payload.summary : ''
+          setState((prev) => {
+            if (prev.messages.some((message) => message.source === 'compaction' && message.at === at)) return prev
+            const message: Message = {
+              id: shortId('msg'),
+              botId: String(payload.botId ?? MAIN_BOT_ID),
+              role: 'system',
+              at,
+              source: 'compaction',
+              blocks: [{
+                type: 'compaction',
+                at,
+                ...(folded !== undefined ? { folded } : {}),
+                ...(summary !== '' ? { summary } : {}),
+              }],
+            }
+            /*
+             * 按时间插到正确位置：SSE 断线补发的事件 at 可能早于当前最后一条，
+             * 直接追加会让「压缩标记」出现在它压缩之后的消息下面。
+             */
+            const index = prev.messages.findIndex((item) => item.at > at)
+            const messages = index < 0
+              ? [...prev.messages, message]
+              : [...prev.messages.slice(0, index), message, ...prev.messages.slice(index)]
+            return { ...prev, messages }
+          })
+          return
+        }
+        /*
+         * 主 Bot 在对话里建出了一个子 Bot（`bot_create`）。
+         *
+         * 事件发在**创建者**的通道上，不是新 Bot 的：新 Bot 的会话此时还不存在，
+         * 它自己的通道也没人订阅。所以这里不用按 botId 过滤——能收到这条事件，就
+         * 说明当前连接属于主 Bot。
+         *
+         * 去重交给 `absorbCreatedBots`：补发 / 多窗口都可能让同一条记录再来一次；
+         * 这里只负责把载荷洗成记录。
+         */
+        if (payload?.type === 'bot-created') {
+          const record = sanitizeCreatedBot(payload.bot)
+          if (record === null) return
+          absorbCreatedBots([record])
+          return
+        }
+        if (payload?.type !== 'message' && payload?.type !== 'message-update') return
+        if (payload.message === undefined) return
+        const hostId = String(payload.message.id ?? '')
+        if (hostId === '') return
+        const blocks: MessageBlock[] = Array.isArray(payload.message.blocks) ? payload.message.blocks : []
+        const kind = typeof payload.message.kind === 'string' ? payload.message.kind as BotMessageKind : undefined
+        const replyTo = parseReplyTo(payload.message.replyTo)
+        const turnId = typeof payload.message.turnId === 'string' && payload.message.turnId !== ''
+          ? payload.message.turnId
+          : undefined
+        // 已经落地过（多半是本窗口的流式请求先到）：原地更新，不再新建气泡
+        const known = hostMessageIds.current.get(hostId)
+        if (known !== undefined) {
+          updateMessageBlocks(known, blocks, kind, hostId, replyTo, turnId)
+          return
+        }
+        const id = shortId('msg')
+        hostMessageIds.current.set(hostId, id)
+        const sourceKind = payload.source === 'routine'
+          ? 'routine' as const
+          : payload.source === 'proactive'
+            ? 'proactive' as const
+            // 审批卡 / 问答卡都不是用户对话，用 control 让 UI 不把它当成普通聊天
+            : (payload.source === 'approval' || payload.source === 'question')
+              ? 'control' as const
+              : 'chat' as const
+        appendMessage({
+          id,
+          botId: String(payload.botId ?? MAIN_BOT_ID),
+          role: 'bot',
+          at: typeof payload.message.at === 'number' ? payload.message.at : Date.now(),
+          blocks,
+          source: sourceKind,
+          ...(kind !== undefined ? { kind } : {}),
+          ...(replyTo !== undefined ? { replyTo } : {}),
+          ...(turnId !== undefined ? { turnId } : {}),
+          // 原始 host id 必须留着：审批卡 / 问答卡点击时要凭它回传
+          hostId,
+        })
+    }
+    return () => source.close()
+    /*
+     * 依赖刻意留空：连接只有一条，Bot 增删不该影响它。
+     *
+     * 旧实现在这里依赖 `botIdKey`，于是「新建一个子 Bot」= 关掉全部 SSE 再重建
+     * 全部，正是那次连接数顶破浏览器上限、界面卡死的直接原因。
+     */
+  }, [])
+
+  /*
+   * 启动时补拉「宿主建过的 Bot」。
+   *
+   * 页面关着的时候主 Bot 也可能在后台建 Bot（例行任务、别的窗口），那些事件早已
+   * 不在 SSE 的环形缓冲里；`/bots/created` 是账本，打开页面时合并一次就够，之后
+   * 的创建走 SSE 增量。
+   *
+   * 失败静默：宿主没起 / 路由还是旧版本 / 独立演示页（file://），在界面上都等价于
+   * 「没有要补的 Bot」。这里 toast 报错只会让用户去查一个并不存在的问题，而 Bot
+   * 列表本身仍然是可用的。
+   *
+   * 依赖只有 `absorbCreatedBots`（它由两个稳定回调组成），所以实际只跑一次；不能
+   * 把 state 放进来：每条消息都会换引用，会把整本账重拉一遍。
+   */
+  useEffect(() => {
+    if (isDemoMode()) return undefined
+    let alive = true
+    void (async () => {
+      try {
+        const response = await fetch('/api/personal-agent/bots/created', { cache: 'no-store' })
+        if (!response.ok) return
+        const payload = (await response.json()) as { ok?: boolean; bots?: unknown }
+        if (!alive || payload.ok === false || !Array.isArray(payload.bots)) return
+        const records: CreatedBotRecord[] = []
+        for (const raw of payload.bots as unknown[]) {
+          const record = sanitizeCreatedBot(raw)
+          if (record !== null) records.push(record)
+        }
+        if (records.length > 0) absorbCreatedBots(records)
+      } catch {
+        /* 宿主未就绪 / 网络失败：静默跳过，下次打开页面再补 */
+      }
+    })()
+    return () => { alive = false }
+  }, [absorbCreatedBots])
 
   /**
    * 就地更新一条消息的 blocks，**保持 pending 状态**。
@@ -846,17 +2907,119 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
    *
    * 用 setState 的函数式更新而不是读 stateRef：同一时刻可能有多个 bot 在
    * 各聊各的，闭包里的 state 随时是旧的，按 id 就地改才是安全的。
+   *
+   * 合并过的 progress 消息（带 `mergedSegments`）走另一条分支：`blocks` 是几条
+   * host 消息拼起来的，`message-update` 只负责其中一段。整块替换会把别的段冲掉
+   * （实测表现是「前面几条进度突然消失，只剩最后一句话」），所以按 hostId 换段
+   * 再重拼。
    */
-  const updateMessageBlocks = useCallback((id: string, blocks: MessageBlock[]): void => {
+  const updateMessageBlocks = useCallback((
+    id: string,
+    blocks: MessageBlock[],
+    kind?: BotMessageKind,
+    hostId?: string,
+    replyTo?: { id: string; preview: string },
+    turnId?: string,
+    relocate?: { at?: number; toEnd?: boolean },
+  ): void => {
+    setState((prev) => {
+      const messages = prev.messages.map((message) => {
+        if (message.id !== id) return message
+        /*
+         * 认领占位时要一并校正时间戳：占位的 `at` 是「用户发消息那一刻」，而它
+         * 最终承载的是几十秒后才产生的正文。不校正的话，时间分隔与待办判定都会
+         * 用错时刻（见下面 relocate 的说明）。
+         */
+        const stamp = relocate?.at !== undefined ? { at: relocate.at } : {}
+        const segments = message.mergedSegments
+        if (segments !== undefined) {
+          /*
+           * 段表里找不到这次更新（hostId 缺省 / 旧数据）：只更新 kind，不动 blocks。
+           * 宁可让这一段稍旧，也不能把整条消息塌成一段。
+           */
+          if (hostId === undefined || segments[hostId] === undefined) {
+            return kind !== undefined ? { ...message, kind, ...stamp } : { ...message, ...stamp }
+          }
+          const nextSegments = { ...segments, [hostId]: blocks }
+          return {
+            ...message,
+            blocks: Object.values(nextSegments).flat(),
+            mergedSegments: nextSegments,
+            ...(kind !== undefined ? { kind } : {}),
+            ...(turnId !== undefined ? { turnId } : {}),
+            ...stamp,
+          }
+        }
+        // kind / hostId / replyTo / turnId 只在明确传入时改：`message-update` 可能只更新 blocks
+        return {
+          ...message,
+          blocks,
+          ...(kind !== undefined ? { kind } : {}),
+          ...(hostId !== undefined ? { hostId } : {}),
+          ...(replyTo !== undefined ? { replyTo } : {}),
+          ...(turnId !== undefined ? { turnId } : {}),
+          ...stamp,
+        }
+      })
+      if (relocate?.toEnd !== true) return { ...prev, messages }
+      /*
+       * 把刚认领的那条挪到队尾。
+       *
+       * 「正在输入」占位是在**用户发消息那一刻**插进消息流的，位置固定在当时
+       * 的队尾。可这一轮里还有另一类消息走的是**常驻 SSE**（问答卡 / 审批卡 /
+       * 例行任务结果）——它们由 `appendMessage` 直接追加，追加时会落在占位**后面**。
+       *
+       * 于是同一轮里出现这种错位（实测 2026-11-03「创建一个互联网营销bot」）：
+       *  · 15.6s 问答卡 → SSE 追加 → 排在占位之后；
+       *  · 137.6s 正文 → `/reply/stream` 认领占位 → 填回占位原来的位置；
+       * 结果正文显示在卡片**上面**，用户看到的是「先给结论、后提问题」。
+       *
+       * 占位承载的永远是「这一轮最新到达的那条消息」，所以认领时它就该待在队尾，
+       * 而不是死守用户发消息时的位置。规则本身在 `relocateToEnd`（纯函数、可测）。
+       */
+      const ordered = relocateToEnd(messages, id)
+      return ordered === messages ? { ...prev, messages } : { ...prev, messages: ordered }
+    })
+  }, [])
+
+  /**
+   * 把一条 host 消息的 blocks **追加**进已有的 progress 消息（2.5 progress 合并）。
+   *
+   * 为什么在数据层合并而不是渲染层：一条 turn 会被 host 按模型说话次数切成多条
+   * progress 消息，全部落地就是「一句话一个气泡」，对话流被过程文字淹没。在数据层
+   * 合掉之后，刷新、侧栏摘要、任务记录看到的都是一条，不需要每处再各写一遍合并。
+   *
+   * 分段表是必需的：后续 `message-update` 会按 hostId 只替换自己那一段（见
+   * updateMessageBlocks），不会把整条消息覆盖掉。
+   */
+  const mergeMessageBlocks = useCallback((id: string, hostId: string, blocks: MessageBlock[], kind?: BotMessageKind): void => {
     setState((prev) => ({
       ...prev,
-      messages: prev.messages.map((message) => (message.id === id ? { ...message, blocks } : message)),
+      messages: prev.messages.map((message) => {
+        if (message.id !== id) return message
+        /*
+         * 第一次合并时补一条「基线段」：这条消息原本的 blocks 来自它自己的 host
+         * 消息（message.hostId）。用固定键 `__base` 兜住 hostId 缺失的中间态
+         * （SSE 先落地、流式后接管时可能出现）。
+         */
+        const segments = message.mergedSegments
+          ?? (message.hostId !== undefined
+            ? { [message.hostId]: message.blocks }
+            : { __base: message.blocks })
+        const nextSegments = { ...segments, [hostId]: blocks }
+        return {
+          ...message,
+          blocks: Object.values(nextSegments).flat(),
+          mergedSegments: nextSegments,
+          ...(kind !== undefined ? { kind } : {}),
+        }
+      }),
     }))
   }, [])
 
   const botById = useCallback((id: string): Bot | undefined => stateRef.current.bots.find((bot) => bot.id === id), [])
 
-  const replyAsBot = useCallback((bot: Bot, text: string, target: { roomId?: string; source?: Message['source'] } = {}, images: ChatImage[] = []): void => {
+  const replyAsBot = useCallback((bot: Bot, text: string, target: { roomId?: string; source?: Message['source'] } = {}, images: ChatImage[] = [], userMessageId?: string): void => {
     const pendingId = shortId('msg')
     appendMessage({
       id: pendingId,
@@ -868,6 +3031,96 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       pending: true,
       source: target.source ?? 'chat',
     })
+    // 每轮对话一条任务记录：先落 running，收口时再补状态/耗时/产出。
+    const taskId = createTaskRecord(bot, text, target, images)
+
+    /*
+     * ── 停止控制 ────────────────────────────────────────────────────
+     *
+     * 停止要同时做两件事：断开前端流式读取（不再等），以及让 finish() 短路降级链
+     * ——非流式 / 本地引擎会把这一轮的工具调用与生图**再执行一遍**，用户看到的
+     * 就是「按了停止，反而多扣一次费」。
+     *
+     * 登记进 ref 是为了让输入框的停止键能按会话找到「现在在跑的是哪几轮」：
+     * 群聊里 sendMessage 会为每个被 @ 的成员各起一轮，可能同时在跑。
+     */
+    const stopController = new AbortController()
+    let stopped = false
+    /** 停止收口只做一次：abort() 与 finish() 都会触发它。 */
+    let stoppedSettled = false
+    /*
+     * 多消息模式的两张表定义在本轮作用域（不是 finish 内部）：停止时要立刻摘掉
+     * pending，那一刻 finish 可能还没走到 await 之后的收口点。
+     */
+    /** host 消息 id → 前端消息 id（message-update 靠它定位要改哪一条）。 */
+    const messageIdMap = new Map<string, string>()
+    /** 本轮每条 host 消息的 blocks（收口时汇总任务执行详情用）。 */
+    const taskBlocksById = new Map<string, MessageBlock[]>()
+
+    /**
+     * 用户主动停止后的收口。
+     *
+     * 只落地「已经收到的东西」：摘掉 pending、把还在 running 的工具卡标中断、补
+     * 一条「已停止」，任务记录收口成 stopped。**不重试、不补请求**（理由见上）。
+     *
+     * 幂等：abort() 与 finish() 都会调用它，谁先到谁收口。
+     */
+    const finalizeStopped = (): void => {
+      if (stoppedSettled) return
+      stoppedSettled = true
+      const stopNote: MessageBlock = { type: 'text', text: '已停止' }
+      setState((prev) => {
+        const landed = new Set(messageIdMap.values())
+        const order = [...messageIdMap.values()]
+        // 停止提示挂在最后一条落地消息上；一条都没有就挂在占位消息上
+        const noteTarget = order.length > 0 ? order[order.length - 1] : pendingId
+        return {
+          ...prev,
+          messages: prev.messages.map((message) => {
+            const mine = message.id === pendingId || landed.has(message.id)
+            if (!mine) return message
+            /*
+             * 占位从未被认领、真实内容已经在别的消息里：清空隐藏（与
+             * finalizeStreamMessages 同口径），别留一个空气泡。
+             */
+            if (message.id === pendingId && !landed.has(pendingId) && landed.size > 0) {
+              return { ...message, pending: false, blocks: [] }
+            }
+            const blocks = interruptRunningBlocks(message.blocks)
+            const withNote = message.id === noteTarget && !blocks.some((block) => block.type === 'text' && block.text === '已停止')
+              ? [...blocks, stopNote]
+              : blocks
+            return { ...message, pending: false, blocks: withNote }
+          }),
+        }
+      })
+      /*
+       * 任务记录汇总用「已落地的 blocks」：多消息模式分散在 taskBlocksById 里；
+       * 单消息模式还在 pending 占位消息上（流式事件每来一次就写进去了）。
+       */
+      const collected = [...taskBlocksById.values()].flat()
+      const pendingNow = stateRef.current.messages.find((message) => message.id === pendingId)
+      const blocks = collected.length > 0 ? collected : (pendingNow?.blocks ?? [])
+      // 任务记录里的工具步骤同样不能留 running（收口时会再兜一层，这里先补结果摘要）
+      finishTaskRecord(taskId, 'stopped', interruptRunningBlocks(blocks), '已停止')
+    }
+
+    const turn: RunningReplyTurn = {
+      botId: bot.id,
+      ...(target.roomId !== undefined ? { roomId: target.roomId } : {}),
+      taskId,
+      abort: () => {
+        if (stopped) return
+        stopped = true
+        stopController.abort()
+        /*
+         * 立刻收口，不等 finish 从 abort 的异常里绕回来：reader.read() 在个别
+         * 浏览器上不会马上 reject，气泡多转半秒就会让人以为没点上。
+         */
+        finalizeStopped()
+      },
+    }
+    runningReplyTurnsRef.current.add(turn)
 
     /*
      * 三级降级：流式 → 非流式 → 本地引擎。
@@ -887,15 +3140,215 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
      */
     const finish = async (): Promise<void> => {
       let streamError = ''
+      /*
+       * ── 多消息模式 ────────────────────────────────────────────────
+       * host 每开一条消息就 emit 一个 `message` 事件，这里为它落地一条**独立**的
+       * 前端消息。第一条复用 pending 占位（否则「正在输入」气泡会先闪一下再被
+       * 替换成两条），后续的逐条 append。
+       *
+       * `messageIdMap` / `taskBlocksById` 定义在 finish 外面（见上面的停止控制）：
+       * 停止收口要在 finish 之外读写它们。
+       */
+      let firstMessageClaimed = false
+      let sawMessageEvent = false
+      /**
+       * 本轮最后一条落地的 progress 消息（前端 id）；null = 合并链已断开。
+       *
+       * 2.5 progress 合并：host 把一次 turn 按「模型说话的次数」切成多条消息，
+       * 其中大多数是 progress（说完调工具、拿到结果再说一段）。这些过程文字不该
+       * 每条都开一个气泡——只保留一条，后续 progress 的 blocks 追进去原地增长。
+       *
+       * 合并链在遇到 finding / need-input / approval / final 时断开：那几类是
+       * 「需要用户注意 / 需要用户动作 / 收口」的独立消息，必须有自己的气泡。
+       */
+      let lastProgressId: string | null = null
+
+      const applyHostMessage = (hostMessage: HostBotMessage): void => {
+        sawMessageEvent = true
+        taskBlocksById.set(hostMessage.id, hostMessage.blocks)
+        for (const block of hostMessage.blocks) {
+          if (block.type === 'tool') upsertTaskToolStep(taskId, block.run)
+        }
+        /*
+         * 过程消息的文字进任务记录（任务详情卡的过程时间线）：final 不进——
+         * 它是「最终回复」，收口时单独取，重复进时间线会让同一段话出现两遍。
+         */
+        if (hostMessage.kind !== 'final') {
+          const text = hostMessage.blocks
+            .filter((block): block is Extract<MessageBlock, { type: 'text' }> => block.type === 'text')
+            .map((block) => block.text)
+            .join('\n')
+          upsertTaskTextStep(taskId, hostMessage.id, text, hostMessage.kind)
+        }
+        /*
+         * 先查全局映射：SSE 可能已经先一步把这条消息落地了（两条路各推一次，
+         * 到达顺序不保证）。这时只做 update，绝不再 append——否则同一句话会在
+         * 界面上出现两个气泡（实测踩过）。
+         */
+        const globalKnown = hostMessageIds.current.get(hostMessage.id)
+        if (globalKnown !== undefined) {
+          // 记进本轮映射：收口时要按它把 pending 摘掉
+          messageIdMap.set(hostMessage.id, globalKnown)
+          updateMessageBlocks(globalKnown, hostMessage.blocks, hostMessage.kind, hostMessage.id, hostMessage.replyTo, hostMessage.turnId)
+          return
+        }
+        const known = messageIdMap.get(hostMessage.id)
+        if (known !== undefined) {
+          updateMessageBlocks(known, hostMessage.blocks, hostMessage.kind, hostMessage.id, hostMessage.replyTo, hostMessage.turnId)
+          return
+        }
+        if (!firstMessageClaimed) {
+          firstMessageClaimed = true
+          messageIdMap.set(hostMessage.id, pendingId)
+          hostMessageIds.current.set(hostMessage.id, pendingId)
+          /*
+           * 认领占位时把它挪到队尾、并校正时间戳。
+           *
+           * 占位是在用户发消息那一刻插进去的；本轮若还有走常驻 SSE 的消息
+           * （问答卡 / 审批卡）已经追加在它后面，正文再填回占位原位就会排到那些
+           * 消息**前面**——用户看到的就是「结论在上、提问在下」的颠倒顺序。
+           * 详见 updateMessageBlocks 里 `relocate` 的说明。
+           */
+          updateMessageBlocks(
+            pendingId,
+            hostMessage.blocks,
+            hostMessage.kind,
+            hostMessage.id,
+            hostMessage.replyTo,
+            hostMessage.turnId,
+            { at: hostMessage.at, toEnd: true },
+          )
+          lastProgressId = hostMessage.kind === 'progress' ? pendingId : null
+          return
+        }
+        /*
+         * 连续 progress：并进上一条，不再新开气泡。host 消息 id 也映射到同一条
+         * 前端消息——后续它的 `message-update` 才能定位到「合并后的那一条」，
+         * 由 updateMessageBlocks 按 hostId 换段。
+         */
+        if (hostMessage.kind === 'progress' && lastProgressId !== null) {
+          messageIdMap.set(hostMessage.id, lastProgressId)
+          hostMessageIds.current.set(hostMessage.id, lastProgressId)
+          mergeMessageBlocks(lastProgressId, hostMessage.id, hostMessage.blocks, hostMessage.kind)
+          return
+        }
+        const id = shortId('msg')
+        messageIdMap.set(hostMessage.id, id)
+        hostMessageIds.current.set(hostMessage.id, id)
+        appendMessage({
+          id,
+          botId: bot.id,
+          ...(target.roomId ? { roomId: target.roomId, senderId: bot.id, senderName: bot.name } : {}),
+          role: 'bot',
+          at: hostMessage.at,
+          blocks: hostMessage.blocks,
+          pending: true,
+          source: target.source ?? 'chat',
+          kind: hostMessage.kind,
+          ...(hostMessage.turnId !== undefined ? { turnId: hostMessage.turnId } : {}),
+          ...(hostMessage.replyTo !== undefined ? { replyTo: hostMessage.replyTo } : {}),
+          hostId: hostMessage.id,
+        })
+        // 只有 progress 能成为下一次合并的目标；其它类别落地即打断合并链
+        lastProgressId = hostMessage.kind === 'progress' ? id : null
+      }
+
+      /**
+       * 多消息收口：把本轮落地的每条消息都摘掉 pending（「正在输入」停止转动）。
+       *
+       * pendingId 必须无条件一起收口：常驻 SSE（`/api/personal-agent/events`）与
+       * `/reply/stream` 会同时推送同一条 host 消息。SSE 先到时 `applyHostMessage`
+       * 走 `globalKnown` 分支，只会 update 那条 SSE 落地的消息，**不会认领** pending
+       * 占位——不在这里兜底，界面上就会留一个永久转圈的「正在输入」气泡（实测见
+       * 2026-11-02「创建一个AI咨询的子bot」：两条 pending 气泡一直不消失）。
+       */
+      const finalizeStreamMessages = (): void => {
+        const ids = new Set(messageIdMap.values())
+        setState((prev) => ({
+          ...prev,
+          messages: prev.messages.map((message) => {
+            if (ids.has(message.id)) return { ...message, pending: false }
+            if (message.id === pendingId && message.pending === true) {
+              // 未被认领的占位：真实内容已经在 SSE 落地的消息里，清空即可隐藏
+              return { ...message, pending: false, blocks: [] }
+            }
+            return message
+          }),
+        }))
+      }
+
       try {
+        // 停止发生在「保留正在输入手感」的延迟里：一次请求都还没发，直接收口
+        if (stopped) {
+          finalizeStopped()
+          return
+        }
         const streamed = await hostReplyStream(bot, text, stateRef.current, (event, blocks) => {
+          /*
+           * 已停止：abort 之后仍可能有一批已缓冲的事件被派发。这里一律丢弃——
+           * 多消息模式的 `message` 事件会 append 一条新的 pending 消息，放进来
+           * 就是一颗永远转圈的「正在输入」气泡。
+           */
+          if (stopped) return
+          if (event.type === 'user-message') {
+            /*
+             * host 回传它给这条用户消息分配的原始 id。撤回要靠它精确定位——
+             * steer 插话时 host 会加前缀，文本匹配既可能失败也可能误伤下一句。
+             */
+            if (userMessageId !== undefined) {
+              setState((prev) => ({
+                ...prev,
+                messages: prev.messages.map((message) => (
+                  message.id === userMessageId ? { ...message, hostId: event.messageId } : message
+                )),
+              }))
+            }
+            return
+          }
           if (event.type === 'error') {
             streamError = event.message
             return
           }
+          if (event.type === 'message' || event.type === 'message-update') {
+            applyHostMessage(event.message)
+            return
+          }
+          if (event.type === 'tool') upsertTaskToolStep(taskId, event.run)
           if (event.type !== 'text' && event.type !== 'tool') return
+          /*
+           * 多消息已接管：text/tool 是同一批内容的扁平视图。再按它覆盖 pending
+           * 会把刚刚切好的多条消息又合并回一条，多消息就白做了。
+           */
+          if (sawMessageEvent) return
           updateMessageBlocks(pendingId, blocks)
-        }, images)
+        }, images, stopController.signal)
+
+        /*
+         * 流式过程中点了停止：不再看 streamed、不再降级，直接按停止收口。
+         * 这是「停止后不能重跑」的关键短路——放在多消息判断之前，多消息模式
+         * 也走同一条停止收口。
+         */
+        if (stopped) {
+          finalizeStopped()
+          return
+        }
+
+        /*
+         * 多消息模式优先收口：只要收到过 message 事件，各条消息就已经在界面上
+         * 落地了。此时**不能**再走下面的 replaceMessage(pendingId, …)——那会把
+         * 多条消息塌回一条。也要在「流式返回空」之前判断：`streamed` 是扁平
+         * blocks，与多消息是否成功无关。
+         */
+        if (sawMessageEvent) {
+          finalizeStreamMessages()
+          finishTaskRecord(
+            taskId,
+            streamError === '' ? 'done' : 'failed',
+            [...taskBlocksById.values()].flat(),
+            streamError === '' ? undefined : streamError,
+          )
+          return
+        }
 
         if (streamed !== null && streamed.length > 0) {
           /*
@@ -906,23 +3359,136 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
             ? [...streamed, { type: 'text' as const, text: `本轮出错：${streamError}` }]
             : streamed
           replaceMessage(pendingId, finalBlocks)
+          finishTaskRecord(taskId, streamError === '' ? 'done' : 'failed', finalBlocks, streamError === '' ? undefined : streamError)
           return
         }
 
-        // 流式没拿到东西：退回原来的非流式链路（createBot / routine / proactive / call 也还在用它）
+        /*
+         * 流式没拿到东西：再试一次非流式（同样是真 agent，只是不带流）。
+         *
+         * **到此为止**。这里原来还有第三层降级——退回 `engine.ts` 的本地模板引擎，
+         * 用固定话术假装回复。那条路径已经删掉：它会让「agent 挂了」表现成
+         * 「Bot 正常回你，只是不做任何事」，用户完全无感（实测踩过：一个空壳会话
+         * 让每轮都静默降级，Bot 满口答应「我这就建」却一个文件都产不出来）。
+         * 失败就必须看得见。
+         */
         const remote = await hostReply(bot, text, stateRef.current, images)
-        const blocks = remote ?? generateReply(bot, text, stateRef.current)
-        replaceMessage(pendingId, blocks)
+        // 停止发生在降级请求期间：结果直接丢弃，这一轮已经不该继续了
+        if (stopped) {
+          finalizeStopped()
+          return
+        }
+        if (remote !== null && remote.length > 0) {
+          replaceMessage(pendingId, remote)
+          finishTaskRecord(taskId, 'done', remote)
+          return
+        }
+        // 独立演示页没有宿主，本地引擎是它唯一的回复来源（不是降级）
+        if (isDemoMode()) {
+          const demoBlocks = generateReply(bot, text, stateRef.current)
+          replaceMessage(pendingId, demoBlocks)
+          finishTaskRecord(taskId, 'done', demoBlocks)
+          return
+        }
+        const failureText = `这一轮没能完成：${streamError !== '' ? streamError : '宿主没有返回任何内容（agent 可能没起来，详见宿主日志）'}`
+        replaceMessage(pendingId, [{ type: 'text', text: failureText }])
+        finishTaskRecord(taskId, 'failed', [], failureText)
       } catch (error) {
+        /*
+         * 停止会让 abort 以异常形式冒出来（fetch / reader 都会抛）：按停止收口，
+         * 不要报成「这一轮没能完成」。这也是最后一道防降级的闸门。
+         */
+        if (stopped) {
+          finalizeStopped()
+          return
+        }
         // 兜底：降级链自己出错也不能让 pending 消息永远挂着
         const reason = streamError !== '' ? streamError : (error instanceof Error ? error.message : String(error))
+        /*
+         * 多消息模式下，pending 标记留在任何一条消息上都会让它在下一轮的 history
+         * 过滤里被丢掉（`!msg.pending`），表现为「Bot 记不住刚说过的话」。
+         * 所以先统一摘掉，再给占位消息补一条错误文本。
+         */
+        if (sawMessageEvent) finalizeStreamMessages()
         replaceMessage(pendingId, [{ type: 'text', text: `这一轮没能完成：${reason}` }])
+        finishTaskRecord(taskId, 'failed', [...taskBlocksById.values()].flat(), reason)
+      } finally {
+        // 本轮结束（无论怎么结束）就从停止键的作用范围里摘掉
+        runningReplyTurnsRef.current.delete(turn)
       }
     }
 
     // 保留「正在输入」的手感：稍等一下再开流，避免 pending 气泡一闪而过
     later(300 + Math.random() * 300, () => { void finish() })
-  }, [appendMessage, later, replaceMessage, updateMessageBlocks])
+  }, [appendMessage, createTaskRecord, finishTaskRecord, later, mergeMessageBlocks, replaceMessage, updateMessageBlocks, upsertTaskToolStep, upsertTaskTextStep])
+
+  /**
+   * 拉取某个 Bot 的 Pages（3.1），写回 `state.pagesByBot`。
+   *
+   * 为什么放在 store 而不是右栏卡自己 useState：消息里的旧页面卡（ArtifactCard）
+   * 也要读这份列表判断「这张卡是否已被更新过」。两处各拉一次会不同步，而且会
+   * 把同一个请求打两遍。
+   *
+   * 失败一律静默：host 路由还没上线、或这个 Bot 一个页面都没交付过，在界面上
+   * 应该是同一个结果——右栏不出现「页面」卡。为此不 toast、不记错误状态。
+   */
+  const refreshPages = useCallback(async (botId: string): Promise<void> => {
+    // 独立演示页（file://）没有宿主：直接当「没有页面」处理，不发请求
+    if (typeof location !== 'undefined' && location.protocol === 'file:') return
+    const bot = stateRef.current.bots.find((item) => item.id === botId)
+    if (bot === undefined) return
+    try {
+      const query = `botId=${encodeURIComponent(botId)}&name=${encodeURIComponent(bot.name)}`
+      const response = await fetch(`/api/personal-agent/pages?${query}`, { cache: 'no-store' })
+      if (!response.ok) return
+      const payload = (await response.json()) as PagesResponse
+      if (payload.ok === false || !Array.isArray(payload.items)) return
+      /*
+       * 逐条洗数据：host 版本可能比前端新 / 旧，字段缺失时不能让整张卡崩掉。
+       * slug 与 url 是必须的（没有它们既不能展示也不能打开），其余给默认值。
+       */
+      const items: PageItem[] = []
+      for (const raw of payload.items as unknown[]) {
+        if (raw === null || typeof raw !== 'object') continue
+        const record = raw as Record<string, unknown>
+        if (typeof record.slug !== 'string' || record.slug === '') continue
+        if (typeof record.url !== 'string' || record.url === '') continue
+        items.push({
+          slug: record.slug,
+          url: record.url,
+          title: typeof record.title === 'string' && record.title !== '' ? record.title : record.slug,
+          updatedAt: typeof record.updatedAt === 'number' ? record.updatedAt : Date.now(),
+          ...(typeof record.id === 'string' ? { id: record.id } : {}),
+          ...(typeof record.path === 'string' ? { path: record.path } : {}),
+          ...(typeof record.createdAt === 'number' ? { createdAt: record.createdAt } : {}),
+          ...(typeof record.sourceMessageId === 'string' ? { sourceMessageId: record.sourceMessageId } : {}),
+        })
+      }
+      items.sort((a, b) => b.updatedAt - a.updatedAt)
+      setState((prev) => ({ ...prev, pagesByBot: { ...(prev.pagesByBot ?? {}), [botId]: items } }))
+    } catch {
+      /* host 未就绪 / 网络失败：保持现状（右栏不显示页面卡），不打扰用户 */
+    }
+  }, [])
+
+  /**
+   * Pages 拉取时机（3.1）。
+   *
+   *  · 切换 Bot：拉一次当前 Bot 的页面；
+   *  · `pa:outputs-refresh`：host 在文件系统变化 / 每轮回复收口后广播，页面可能刚
+   *    被更新，重拉一次（与右栏产出物卡同一个事件源）。
+   *
+   * 必须定义在 refreshPages 之后：effect 的依赖数组在渲染时求值，引用一个尚未
+   * 初始化的 const 会直接抛「Cannot access before initialization」。
+   */
+  useEffect(() => {
+    void refreshPages(ui.selectedBotId)
+  }, [refreshPages, ui.selectedBotId])
+  useEffect(() => {
+    const onRefresh = (): void => { void refreshPages(uiRef.current.selectedBotId) }
+    window.addEventListener('pa:outputs-refresh', onRefresh)
+    return () => { window.removeEventListener('pa:outputs-refresh', onRefresh) }
+  }, [refreshPages])
 
   const clearUnread = useCallback((id: string, kind: 'bot' | 'room' = 'bot'): void => {
     setState((prev) => ({
@@ -953,7 +3519,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     setState((prev) => ({ ...prev, settings: { ...prev.settings, theme } }))
   }, [])
 
-  const sendMessage = useCallback((text: string, opts: { botId?: string; roomId?: string; images?: ChatImage[] } = {}): void => {
+  const sendMessage = useCallback((text: string, opts: { botId?: string; roomId?: string; images?: ChatImage[]; replyTo?: { id: string; preview: string } } = {}): void => {
     const value = text.trim()
     const images = opts.images ?? []
     // 只发图不打字也要能发出去
@@ -964,12 +3530,70 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     const botId = opts.botId ?? (room ? (room.memberIds[0] ?? MAIN_BOT_ID) : uiRef.current.selectedBotId)
     const bot = current.bots.find((item) => item.id === botId)
     if (!bot) return
+    /*
+     * 引用回复（2.3）：优先用调用方显式传的，其次读输入框当前挂着的引用。
+     * 消息上记下被引用消息的 id 与一小段摘要——只存 id 的话，被引用的消息删掉后
+     * 引用条就只剩一行空白；摘要让引用条在任何时候都能自己说清在引用什么。
+     */
+    const replyTo = opts.replyTo ?? uiRef.current.replyTo ?? undefined
     const at = Date.now()
+    const userMessageId = shortId('msg')
     const blocks: MessageBlock[] = []
     if (value !== '') blocks.push({ type: 'text', text: value })
     for (const image of images) blocks.push({ type: 'image', image })
-    appendMessage({ id: shortId('msg'), botId, ...(roomId ? { roomId } : {}), role: 'user', at, blocks, source: 'chat' })
-    setState((prev) => ({ ...prev, lastUserMessageAt: at }))
+
+    /** 把这条用户消息落进对话流（正常发送与「停止」拦截两条路共用）。 */
+    const landUserMessage = (): void => {
+      appendMessage({
+        id: userMessageId,
+        botId,
+        ...(roomId ? { roomId } : {}),
+        role: 'user',
+        at,
+        blocks,
+        source: 'chat',
+        ...(replyTo !== undefined ? { replyTo } : {}),
+      })
+      // 引用只对下一条消息生效：发出去就清掉，否则后面每条都会带着同一条引用
+      if (uiRef.current.replyTo !== null) setUi((prev) => ({ ...prev, replyTo: null }))
+      setState((prev) => ({ ...prev, lastUserMessageAt: at }))
+    }
+
+    /**
+     * 当前会话有没有东西在跑（与停止键同一口径）：活着的轮次 / pending 消息 /
+     * 还挂着 running 的任务记录，三者任一即可。
+     */
+    const scopeHasRunning = (): boolean => {
+      const nowUi = uiRef.current
+      const scopeRoom = nowUi.selectedRoomId ?? undefined
+      const inScope = (target: { botId: string; roomId?: string }): boolean => (scopeRoom !== undefined
+        ? target.roomId === scopeRoom
+        : target.botId === nowUi.selectedBotId && target.roomId === undefined)
+      for (const turn of runningReplyTurnsRef.current) {
+        if (inScope(turn)) return true
+      }
+      const pending = current.messages.some((message) => message.role === 'bot'
+        && message.pending === true
+        && inScope({ botId: message.botId, ...(message.roomId !== undefined ? { roomId: message.roomId } : {}) }))
+      if (pending) return true
+      return current.tasks.some((task) => task.status === 'running'
+        && inScope({ botId: task.botId, ...(task.roomId !== undefined ? { roomId: task.roomId } : {}) }))
+    }
+
+    /*
+     * 「说停止」要真的停止（判据见 isStopCommand 的说明）。
+     *
+     * 只在当前会话确实有东西在跑时拦截：平时说「停止」是正常对话，不该被吞掉。
+     * 拦截后这条消息照常落在对话流里（用户看得见自己发了什么），但不投给模型
+     * ——投过去只会换来一句「收到，我按你说的调整方向」，任务继续跑。
+     */
+    if (value !== '' && images.length === 0 && isStopCommand(value) && scopeHasRunning()) {
+      landUserMessage()
+      stopReplyRef.current()
+      return
+    }
+
+    landUserMessage()
 
     if (room) {
       const mentioned = room.memberIds
@@ -977,12 +3601,139 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
         .filter((item): item is Bot => item !== undefined && (value.includes(item.name) || value.includes(`@${item.name}`)))
       const responders = mentioned.length > 0 ? mentioned.slice(0, 2) : [current.bots.find((item) => item.id === room.memberIds[0]) ?? bot]
       responders.forEach((responder, index) => {
-        later(300 + index * 700, () => replyAsBot(responder, value, { roomId, source: 'chat' }, images))
+        /*
+         * 登记已排期的成员：停止键要能把还没启动的这几轮一起取消，否则用户
+         * 点完停止后第二个成员还会在 700ms 后开始回复。
+         */
+        const scheduled: ScheduledReply = {
+          botId: responder.id,
+          ...(roomId !== undefined ? { roomId } : {}),
+          cancelled: false,
+        }
+        scheduledRepliesRef.current.add(scheduled)
+        later(300 + index * 700, () => {
+          scheduledRepliesRef.current.delete(scheduled)
+          if (scheduled.cancelled) return
+          replyAsBot(responder, value, { roomId, source: 'chat' }, images, userMessageId)
+        })
       })
       return
     }
-    replyAsBot(bot, value, {}, images)
+    replyAsBot(bot, value, {}, images, userMessageId)
   }, [appendMessage, later, replyAsBot])
+
+  /**
+   * 停止当前会话正在进行的回复（输入框的停止键）。
+   *
+   * 三件事缺一不可：
+   *  · 中止前端流式读取——否则 fetch 一直挂着，pending 消息永远不收口；
+   *  · 通知宿主 cancel 这一轮——宿主侧的 10 分钟超时只管前端等待，agent 会继续
+   *    跑工具、占着会话，用户再发消息只能排队；
+   *  · 本地立刻收口——宿主返回 409（本来就没在跑）或请求根本没送达时，界面也
+   *    必须停下来：用户点了停止，看到的就是停。
+   *
+   * 作用范围按**当前会话**算：私聊是该 Bot 的一条流，群聊是该群里所有正在回复
+   * 的成员（sendMessage 会为每个被 @ 的成员各起一轮，还有几个在错峰等待）。
+   */
+  const stopReply = useCallback((): void => {
+    const current = stateRef.current
+    const nowUi = uiRef.current
+    const roomId = nowUi.selectedRoomId ?? undefined
+    const inScope = (target: { botId: string; roomId?: string }): boolean => (roomId !== undefined
+      ? target.roomId === roomId
+      : target.botId === nowUi.selectedBotId && target.roomId === undefined)
+
+    // 还在定时器里的群聊成员：直接取消，不再启动
+    for (const scheduled of scheduledRepliesRef.current) {
+      if (inScope(scheduled)) scheduled.cancelled = true
+    }
+
+    const turns: RunningReplyTurn[] = []
+    for (const turn of runningReplyTurnsRef.current) {
+      if (inScope(turn)) turns.push(turn)
+    }
+    const botIds = new Set<string>()
+    for (const turn of turns) botIds.add(turn.botId)
+    /** 有活着的轮次会自己收口的任务：不能再收一次，否则时间线会多一条「结束」。 */
+    const liveTaskIds = new Set<string>()
+    for (const turn of turns) liveTaskIds.add(turn.taskId)
+
+    /*
+     * 兜底一：界面上还有 pending 消息，但没有活着的轮次（例如这一轮是在别的窗口
+     * 发起的、或状态恢复了一半）。没有任何 finish() 会来收口它们，这里自己把
+     * 消息收掉，不能让界面永远转圈。
+     */
+    const staleBotIds = new Set<string>()
+    for (const message of current.messages) {
+      if (message.role !== 'bot' || message.pending !== true) continue
+      const scoped = inScope({ botId: message.botId, ...(message.roomId !== undefined ? { roomId: message.roomId } : {}) })
+      if (!scoped || botIds.has(message.botId)) continue
+      staleBotIds.add(message.botId)
+      botIds.add(message.botId)
+    }
+
+    /*
+     * 兜底二：**孤儿任务记录**——状态还挂着 running，但没有任何轮次会来收口它。
+     *
+     * 这条路径以前是缺口（2026-11-02 实测）：只要界面上的 pending 消息已经被
+     * 清掉（页面重载后 normalizeState 会清、多窗口同步会清、宿主补发也会把它
+     * 收口），上面的 staleBotIds 就是空的，于是 `if (botIds.size === 0) return`
+     * 直接返回——用户点一百次停止都没反应，右栏那条任务记录永远转齿轮。
+     * 停止键必须能把孤儿任务收掉，哪怕一条 pending 消息都没有。
+     */
+    const orphanTasks = current.tasks.filter((task) => task.status === 'running'
+      && !liveTaskIds.has(task.id)
+      && inScope({ botId: task.botId, ...(task.roomId !== undefined ? { roomId: task.roomId } : {}) }))
+    /* 孤儿任务说明宿主那一轮可能还在跑：也给它所在的 bot 发停止请求。 */
+    for (const task of orphanTasks) botIds.add(task.botId)
+
+    if (botIds.size === 0) return
+
+    for (const turn of turns) turn.abort()
+
+    /* 孤儿任务没有 abort 会来收口，这里直接标停止（幂等：只有 running 才动）。 */
+    for (const task of orphanTasks) finishTaskRecord(task.id, 'stopped', [], '已停止')
+
+    if (staleBotIds.size > 0) {
+      setState((prev) => ({
+        ...prev,
+        messages: prev.messages.map((message) => {
+          if (message.role !== 'bot' || message.pending !== true || !staleBotIds.has(message.botId)) return message
+          const blocks = interruptRunningBlocks(message.blocks)
+          return { ...message, pending: false, blocks: [...blocks, { type: 'text' as const, text: '已停止' }] }
+        }),
+      }))
+    }
+
+    /*
+     * 宿主侧停止：群聊可能有多个成员同时在跑，逐个 bot 发。409 = 宿主本来就没
+     * 在跑（已经跑完 / 已停过），不算错误；网络失败也照样收口，但要告诉用户
+     * 「宿主可能还在跑」——本地停了不等于上游停了。
+     */
+    void Promise.all([...botIds].map(async (botId) => {
+      try {
+        const response = await fetch('/api/personal-agent/stop', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ botId }),
+        })
+        return response.ok || response.status === 409
+      } catch {
+        return false
+      }
+    })).then((results) => {
+      const failed = results.filter((ok) => !ok).length
+      toast(failed === 0 ? '已停止' : '已停止显示；宿主侧可能还在跑（停止请求没送达）')
+    })
+  }, [finishTaskRecord, toast])
+
+  /*
+   * 把停止键的实现交给 sendMessage（见 stopReplyRef 的说明）。
+   * 放 effect 而不是渲染期直接赋值：effect 里写 ref 不会在并发渲染下读到半成品。
+   */
+  useEffect(() => {
+    stopReplyRef.current = stopReply
+  }, [stopReply])
 
   const createBot = useCallback(async (input: NewBotInput): Promise<Bot> => {
     const suggestion = NEW_BOT_SUGGESTIONS[Math.floor(Math.random() * NEW_BOT_SUGGESTIONS.length)]
@@ -1004,6 +3755,10 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       enabled: true,
       model: MODEL_FALLBACK,
       skills: [],
+      // 新建时可以顺手选音色；空串 = 跟随全局默认，就不落这个字段
+      ...(input.voice !== undefined && input.voice !== '' ? { voice: input.voice } : {}),
+      // 通话用的 Live 供应商同理：空串 = 跟随全局默认，不落字段
+      ...(input.liveVendor !== undefined && input.liveVendor !== '' ? { liveVendor: input.liveVendor } : {}),
       permission: 'full',
       proactive: { enabled: true, freq: 'daily', from: '09:00', to: '22:00' },
       createdAt: Date.now(),
@@ -1024,7 +3779,12 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       source: 'proactive',
     })
     const remote = await hostReply(bot, '你刚刚被创建。请用你的岗位和简介做一次简短自我介绍，并问我希望你先做什么。', stateRef.current)
-    const blocks = remote ?? firstBotMessage(bot)
+    // 失败就直说，不用本地模板假装自我介绍（见 isDemoMode 的说明）
+    const blocks: MessageBlock[] = remote !== null && remote.length > 0
+      ? remote
+      : isDemoMode()
+        ? firstBotMessage(bot)
+        : [{ type: 'text', text: '自我介绍没能生成：宿主没有返回内容（agent 可能没起来，详见宿主日志）。' }]
     replaceMessage(firstId, blocks)
     setState((prev) => ({
       ...prev,
@@ -1045,8 +3805,36 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       rooms: prev.rooms.map((room) => ({ ...room, memberIds: room.memberIds.filter((memberId) => memberId !== id) })),
       memories: prev.memories.filter((item) => item.botId !== id),
       routines: prev.routines.filter((item) => item.botId !== id),
+      // 任务记录跟着 Bot 一起删：留下一条指向不存在 Bot 的任务只会让详情卡出空数据
+      tasks: prev.tasks.filter((task) => task.botId !== id),
     }))
     setUi((prev) => ({ ...prev, selectedBotId: prev.selectedBotId === id ? MAIN_BOT_ID : prev.selectedBotId }))
+    /*
+     * 让宿主把它的痕迹一起清掉。
+     *
+     * 只删本地状态是不够的：会话历史、派活花名册、工作记忆、产出物映射、Bot 页面、
+     * 记忆条目、例行任务配置全都还在宿主侧。其中最要命的是花名册——主 Bot 的可派
+     * 名单读的就是它，不摘的话用户明明删了 Bot，主 Bot 下一轮还能往那个「已删除」的
+     * Bot 派活。
+     *
+     * 这条路由**内部已经包含抹账本**（否则下次打开页面启动补发会把它建回来），
+     * 所以不再单独调 `DELETE /bots/created`。
+     *
+     * 产出物目录默认**保留**（那是用户让它生成的真实文件），响应里带回绝对路径，
+     * 这里补一条提示让用户知道东西还在哪。失败静默：本地删除已经生效，不该因为
+     * 一次清理请求没送达就弹红。
+     */
+    if (!isDemoMode()) {
+      void fetch(`/api/personal-agent/bots?botId=${encodeURIComponent(id)}`, { method: 'DELETE' })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (data?.ok !== true) return
+          if (typeof data.outputDir === 'string' && data.outputPurged !== true) {
+            toast(`产出物文件还在：${data.outputDir}`)
+          }
+        })
+        .catch(() => undefined)
+    }
     toast('已删除该 Bot')
   }, [toast])
 
@@ -1079,16 +3867,32 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
 
   const createRoom = useCallback((name: string, memberIds: string[]): string => {
     const id = shortId('room')
+    const members = memberIds.length > 0 ? memberIds : [MAIN_BOT_ID]
     setState((prev) => ({
       ...prev,
       rooms: [...prev.rooms, {
         id,
         name: name.trim() || '新群聊',
-        memberIds: memberIds.length > 0 ? memberIds : [MAIN_BOT_ID],
+        memberIds: members,
         unread: 0,
         modelMode: 'inherit',
         createdAt: Date.now(),
       }],
+    }))
+    /*
+     * 创建即选中：不能等调用方再 selectRoom(id)。
+     *
+     * selectRoom 从 stateRef.current.rooms 里找房间，而 stateRef 要到下一轮 render
+     * 才更新；刚创建的房间还不在里面，右栏的 selectedBotId 会继续停在上一个私聊
+     * 对象上（聊天头已经是新群聊、右栏却是别的 Bot）。这里在同一个批次里把
+     * selectedRoomId / selectedBotId 一起写好，右栏立刻落到群主成员。
+     */
+    setUi((prev) => ({
+      ...prev,
+      selectedRoomId: id,
+      selectedBotId: members[0] ?? prev.selectedBotId,
+      view: 'chat',
+      rightTab: 'detail',
     }))
     return id
   }, [])
@@ -1108,6 +3912,58 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     if (!message) return
     const block = message.blocks.find((item) => item.type === 'interactive')
     if (!block || block.type !== 'interactive') return
+    /*
+     * 审批卡 / 问答卡：决定必须回传给宿主——那里各挂着一个 Promise，agent 在等它。
+     *
+     * 判断依据是 **hostId** 而不是 `message.id`：前端消息 id 是 shortId 生成的，
+     * 与 host 无关；凭它永远匹配不上 `apmsg-` / `qmsg-` 前缀，于是会掉进下面的
+     * 本地「回答交互卡」逻辑——表现为「选了以后本地追加一条用户消息、再跑一轮」，
+     * 而宿主那边仍在原地等（实测用户报「选择了但被挂起，没发出去」）。
+     *
+     * 回传后**直接 return**：卡片的已决定状态由宿主推 `message-update` 过来，
+     * 本地再改一次会和它打架；也**不**追加用户消息、不再发一轮——答案本身已经
+     * 让宿主那一轮继续跑了，用户要的只是「卡片上显示我选了哪个」。
+     */
+    const hostId = message.hostId ?? ''
+    if (hostId.startsWith('apmsg-')) {
+      const approvalId = hostId.slice('apmsg-'.length)
+      if (approvalId === '') return
+      /*
+       * 按按钮 id **原样**回传：allow / allow-always / deny。
+       *
+       * 这里曾经写成 `value === 'allow' ? 'allow' : 'deny'`——任何非 allow 的按钮
+       * 都会被静默变成拒绝：用户点「以后都允许」，操作反而被拒，还没有任何提示。
+       * 只放行白名单，其余（旧卡片 / 脏数据）一律 deny，绝不让未知值意外放行。
+       */
+      const decision = value === 'allow' || value === 'allow-always' || value === 'deny' ? value : 'deny'
+      void fetch('/api/personal-agent/approval/decide', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ approvalId, decision }),
+      })
+        .then((response) => {
+          if (!response.ok) toast('这条审批已经失效（超时或已处理）')
+        })
+        .catch(() => toast('审批回传失败'))
+      return
+    }
+    if (hostId.startsWith('qmsg-')) {
+      const questionId = hostId.slice('qmsg-'.length)
+      if (questionId === '') return
+      void fetch('/api/personal-agent/question/answer', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          questionId,
+          selected: typeof value === 'string' && value !== '' ? [value] : [],
+        }),
+      })
+        .then((response) => {
+          if (!response.ok) toast('这个问题已经失效（超时或已回答）')
+        })
+        .catch(() => toast('回答回传失败'))
+      return
+    }
     const label = uiTextForAnswer(block.ui, value)
     const bot = current.bots.find((item) => item.id === message.botId)
     if (!bot) return
@@ -1136,10 +3992,16 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
 
     // 特定动作的真实副作用
     if (typeof value === 'string' && value === 'save-memory') {
-      setState((prev) => ({
-        ...prev,
-        memories: [...prev.memories, memoryFromText(bot.id, block.prompt ?? label, ['交互卡'])],
-      }))
+      /*
+       * 写进宿主记忆引擎（owner = 该 Bot），不再往 localStorage 的 memories 里塞。
+       * 后者已退出注入与面板两条链路，再写只会产生「用户看不到、模型也读不到」
+       * 的幽灵记忆。
+       */
+      void fetch('/api/personal-agent/memory/remember', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ botId: bot.id, content: block.prompt ?? label, tags: ['交互卡'] }),
+      }).catch(() => undefined)
     }
     if (block.ui.kind === 'form' && typeof value === 'object' && !Array.isArray(value)) {
       const record = value as Record<string, string>
@@ -1162,7 +4024,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     }
 
     later(500 + Math.random() * 400, () => replyAsBot(bot, `用户选择了：${label}`, { ...replyTarget }))
-  }, [appendMessage, later, replyAsBot])
+  }, [appendMessage, later, replyAsBot, toast])
 
   /**
    * 撤回一条用户消息（连带这一轮的回复、记忆与上下文入口）。
@@ -1176,8 +4038,16 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     // 不是用户消息 / 消息已经不在了：没有可撤回的东西
     if (plan === null) return
     setState((prev) => applyRecall(prev, plan))
-    // 本地已经撤干净了，最后再尽力让宿主把模型上下文也遮蔽掉（失败静默）
-    void hostRecallTurn(plan.botId, plan.text, plan.at)
+    /*
+     * 本地已经撤干净了，最后再尽力让宿主把模型上下文也遮蔽掉（失败静默）。
+     *
+     * 群聊里这一轮可能不止一个 bot 接话：逐个会话撤回，否则主发言 bot 的
+     * 上下文干净了，其他成员仍然记得这条消息。
+     */
+    const botsById = new Map(stateRef.current.bots.map((bot) => [bot.id, bot]))
+    for (const botId of plan.botIds) {
+      void hostRecallTurn(botId, plan.text, plan.at, botsById.get(botId), plan.hostMessageId)
+    }
   }, [])
 
   const addMemory = useCallback((botId: string, text: string, tags: string[] = ['手动']): void => {
@@ -1293,25 +4163,46 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     const bot = stateRef.current.bots.find((item) => item.id === botId)
     if (!bot) return
     /*
-     * 真主动：让 agent 自己判断现在有什么值得说，而不是从三句模板里抽一句。
-     * 模板只留作降级（宿主不可用 / 模型没返回），保证按钮不会点了没反应。
+     * 走宿主执行，与定时那条共用同一份提示词与执行路径。
+     *
+     * 为什么不在这里直接调 /reply：宿主跑完会把消息经 SSE 推回来，前端只需接住
+     * ——如果这里再自己 append 一次，同一条主动消息会出现两遍。
+     *
+     * 宿主没接上时**不再退回本地模板**：那会变成「按钮点了，冒出一条看似正常的
+     * 消息，其实什么都没发生」。演示页（file://）例外，那里本来就没有宿主。
      */
     void (async () => {
-      const prompt = [
-        '现在轮到你主动找用户说话。',
-        '基于你了解的上下文（你们的对话、你的岗位、你记得的关于用户的事），说一句真正有价值的话：',
-        '一个提醒、一个你注意到的变化、或一件需要用户拍板的事。',
-        '要求：不要客套，不要说「我在」「有什么可以帮你」，直接说正事。一两句话即可。',
-      ].join('\n')
-      let blocks: MessageBlock[]
       try {
-        const remote = await hostReply(bot, prompt, stateRef.current)
-        blocks = remote ?? proactiveMessage(bot)
+        const response = await fetch('/api/personal-agent/proactive/run', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            botId,
+            botName: bot.name,
+            botRole: bot.role,
+            ...(bot.model !== undefined ? { botModel: bot.model } : {}),
+          }),
+        })
+        if (response.ok) {
+          toast(`「${bot.name}」发来一条主动询问`)
+          return
+        }
       } catch {
-        blocks = proactiveMessage(bot)
+        /* 落到下面的失败分支 */
       }
-      appendMessage({ id: shortId('msg'), botId, role: 'bot', at: Date.now(), blocks, source: 'proactive' })
-      toast(`「${bot.name}」发来一条主动询问`)
+      if (isDemoMode()) {
+        appendMessage({ id: shortId('msg'), botId, role: 'bot', at: Date.now(), blocks: proactiveMessage(bot), source: 'proactive' })
+        toast(`「${bot.name}」发来一条主动询问`)
+        return
+      }
+      appendMessage({
+        id: shortId('msg'),
+        botId,
+        role: 'bot',
+        at: Date.now(),
+        blocks: [{ type: 'text', text: '主动询问没能发起：宿主没接上（agent 可能没起来，详见宿主日志）。' }],
+        source: 'proactive',
+      })
     })()
   }, [appendMessage, toast])
 
@@ -1339,6 +4230,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
         bots: prev.bots.map((item) => (item.id === botId
           ? { ...item, lastMessage: '', lastAt: undefined, unread: 0 }
           : item)),
+        tasks: prev.tasks.filter((task) => task.botId !== botId),
       }
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
@@ -1381,163 +4273,988 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     }, 260)
   }, [toast])
 
+  /**
+   * 生成一期期刊（**宿主模型优先，本地模板兜底**）。
+   *
+   * 时序：
+   *  1. 先按当天真实消息构建素材（`journalFeedFromState`）；
+   *  2. 非演示页 POST `/journal/generate` 让宿主用真实模型生成；成功就采用宿主返回的期刊；
+   *  3. 宿主不可用 / 生成失败 → `buildJournal` 本地回退（真实统计 + 真实摘录），并 toast 说明；
+   *  4. 缺图时补图：宿主生成成功但没图 → `/journal/image`，失败 / 本地回退 → 程序化封面；
+   *  5. upsert 进 `state.journals`（**不重复 append**）、在会话里放期刊卡、按 auto 决定是否打开阅读器。
+   */
   const generateJournal = useCallback(async (botId: string, opts: { auto?: boolean; date?: Date } = {}): Promise<Journal> => {
-    const journal = buildJournal(stateRef.current, botId, { auto: opts.auto, date: opts.date })
-    journal.image = journalCoverSvg(journal)
-    setState((prev) => ({ ...prev, journals: [journal, ...prev.journals] }))
-    const remote = await hostJournalImage(journal)
-    if (remote) {
-      journal.image = remote
-      setState((prev) => ({ ...prev, journals: prev.journals.map((item) => (item.id === journal.id ? { ...item, image: remote } : item)) }))
+    const date = opts.date ?? new Date()
+    const state = stateRef.current
+    const bot = state.bots.find((item) => item.id === botId)
+    const feed = journalFeedFromState(state, botId, date)
+
+    let hostJournal: Journal | null = null
+    if (!isDemoMode()) {
+      hostJournal = await hostJournalGenerate({
+        botId,
+        botName: bot?.name ?? 'Seeker',
+        botRole: bot?.role ?? '',
+        ...(bot !== undefined ? { botModel: bot.model } : {}),
+        date: journalDateKey(date),
+        auto: opts.auto ?? false,
+        messages: feed.messages,
+        stats: feed.stats,
+        lastUserMessageAt: state.lastUserMessageAt,
+      })
     }
+
+    // 宿主不可用（且不是演示页）才提示回退；演示页本来就没有宿主
+    const hostFailed = hostJournal === null && !isDemoMode()
+    let journal: Journal = hostJournal ?? buildJournal(stateRef.current, botId, { auto: opts.auto, date })
+
+    if (journal.image === undefined || journal.image === '') {
+      if (hostJournal !== null) {
+        // 宿主生成成功但没带图：补一次生图，失败就用程序化封面
+        const remote = await hostJournalImage(journal)
+        journal = { ...journal, image: remote ?? journalCoverSvg(journal) }
+      } else {
+        // 本地回退：宿主都不可用，生图大概率也不可用，直接用程序化封面，不额外等超时
+        journal = { ...journal, image: journalCoverSvg(journal) }
+      }
+    }
+
+    /*
+     * 按 id upsert，不 append：宿主生成时 SSE 可能已经把同一期推过来了，再插一份
+     * 界面上就会出现两期同 id 的期刊（旧实现踩过）。
+     */
+    const record = journal
+    setState((prev) => ({
+      ...prev,
+      journals: upsertJournal(prev.journals, record),
+      journalStatus: { generating: false, lastGeneratedAt: record.generatedAt },
+    }))
+
     // 主 bot 的会话里放一张期刊卡，便于从对话直接打开
     appendMessage({
       id: shortId('msg'),
       botId,
       role: 'bot',
       at: Date.now(),
-      blocks: [{ type: 'journal', journalId: journal.id, title: journal.title, date: journal.dateLabel, image: journal.image, summary: journal.summary }],
+      blocks: [{ type: 'journal', journalId: record.id, title: record.title, date: record.dateLabel, image: record.image, summary: record.summary }],
       source: 'system',
     })
     if (opts.auto !== true) {
-      setUi((prev) => ({ ...prev, journalOpenId: journal.id, view: 'journal' }))
+      setUi((prev) => ({ ...prev, journalOpenId: record.id, view: 'journal' }))
     } else {
       setUi((prev) => ({ ...prev, view: 'chat' }))
     }
-    toast(opts.auto === true ? '已自动生成昨天的期刊' : '期刊日记已生成')
-    return journal
+    // 宿主回退时把「这是本地版」说清楚，避免用户以为模型真的写了这一期
+    toast(hostFailed
+      ? '宿主模型不可用，已生成本地版期刊'
+      : (opts.auto === true ? '已自动生成昨天的期刊' : '期刊日记已生成'))
+    return record
   }, [appendMessage, toast])
 
+  /**
+   * 检查期刊触发条件。
+   *
+   * 签名保持**同步**：调用方（规则面板 / 侧栏 / 30 秒定时器）拿返回值直接 toast，
+   * 不能等 HTTP。因此这里分两段：
+   *  · 同步返回本地规则判定（只判定，不生成）——给界面即时反馈；
+   *  · 非演示页把判定交给宿主（`/journal/check`，宿主满足条件时会自己生成并落盘），
+   *    宿主结果异步写入 `state.journalLogs`；宿主不可用才走本地生成（保留 fallback）。
+   *
+   * 为什么非演示页不在本地生成：宿主调度器才是触发者，前端再生成一份会出现两期
+   * 同一天的期刊（本地版与宿主版），合并时只能靠日期去重兜底。
+   */
   const runJournalCheck = useCallback((nowOverride?: number): { ok: boolean; reason: string; journalId?: string } => {
-    const now = new Date(nowOverride ?? Date.now())
-    const rule = stateRef.current.settings.journalRule
-    const log = (ok: boolean, reason: string, journalId?: string): { ok: boolean; reason: string; journalId?: string } => {
+    const nowMs = nowOverride ?? Date.now()
+    const localResult = evaluateJournalRule(stateRef.current, nowMs)
+    const appendLog = (ok: boolean, reason: string, journalId?: string): void => {
       setState((prev) => ({
         ...prev,
-        journalLogs: [{ at: Date.now(), ok, reason, ...(journalId ? { journalId } : {}) }, ...prev.journalLogs].slice(0, 40),
+        journalLogs: [{ at: Date.now(), ok, reason, ...(journalId !== undefined ? { journalId } : {}) }, ...prev.journalLogs].slice(0, 40),
       }))
-      return { ok, reason, journalId }
     }
-    if (!rule.enabled) return log(false, '日记规则已关闭')
-    const hour = now.getHours()
-    if (hour < rule.startHour || hour >= rule.endHour) {
-      return log(false, `当前 ${String(hour).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')} 不在 ${rule.startHour}:00–${rule.endHour}:00 触发窗内`)
+
+    // 独立演示页没有宿主：保持旧行为（本地判定 + 本地生成）
+    if (isDemoMode()) {
+      appendLog(localResult.ok, localResult.reason, localResult.journalId)
+      if (localResult.ok) {
+        const now = new Date(nowMs)
+        const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+        void generateJournal(MAIN_BOT_ID, { auto: true, date: yesterday })
+      }
+      return localResult
     }
-    const idle = now.getTime() - stateRef.current.lastUserMessageAt
-    if (idle < rule.idleMinutes * 60_000) {
-      return log(false, `距上次用户主动消息仅 ${Math.max(0, Math.round(idle / 60_000))} 分钟，未满 ${rule.idleMinutes} 分钟`)
-    }
-    const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
-    const dateKey = yesterday.toISOString().slice(0, 10)
-    const exists = stateRef.current.journals.find((journal) => journal.botId === MAIN_BOT_ID && journal.date === dateKey)
-    if (exists) return log(false, `昨天的日记已生成（${exists.title}）`, exists.id)
-    void generateJournal(MAIN_BOT_ID, { auto: true, date: yesterday })
-    return log(true, `满足条件：${rule.startHour}:00–${rule.endHour}:00 且已静默 ${Math.round(idle / 60_000)} 分钟，正在生成昨天的期刊`)
+
+    // 上一次宿主检查还没回来就不叠加请求：下一次 tick 再试
+    if (journalCheckInFlightRef.current) return localResult
+    journalCheckInFlightRef.current = true
+    void (async () => {
+      try {
+        const remote = await hostJournalCheck(nowMs)
+        if (remote !== null) {
+          appendLog(remote.ok, remote.reason, remote.journalId)
+          // 宿主生成了：主动拉一次列表合并（SSE 也会推，但事件可能还没到 / 丢过）
+          if (remote.ok && remote.journalId !== undefined) {
+            const journals = await hostJournalList()
+            if (journals.length > 0) {
+              setState((prev) => ({ ...prev, journals: mergeJournals(prev.journals, journals) }))
+            }
+          }
+          return
+        }
+        /*
+         * 宿主不可用 → 本地回退：判定 + 生成（保留旧版能力，页面开着也能出期刊）。
+         * 注意用**异步回来时的最新 state**，不是发起请求那一刻的快照。
+         */
+        const fallback = evaluateJournalRule(stateRef.current, nowMs)
+        appendLog(fallback.ok, fallback.reason, fallback.journalId)
+        if (fallback.ok) {
+          const now = new Date(nowMs)
+          const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+          void generateJournal(MAIN_BOT_ID, { auto: true, date: yesterday })
+        }
+      } finally {
+        journalCheckInFlightRef.current = false
+      }
+    })()
+
+    return localResult
   }, [generateJournal])
 
-  const startCall = useCallback((botId: string): void => {
-    setUi((prev) => ({
-      ...prev,
-      call: { status: 'ringing', botId, startedAt: Date.now(), muted: false, speaker: true, minimized: false, liveTurns: [], thinking: false },
-    }))
-    later(1200, () => setUi((prev) => (prev.call.status === 'ringing' ? { ...prev, call: { ...prev.call, status: 'active' } } : prev)))
-  }, [later])
+  /*
+   * ── 全双工实时通话 ──
+   *
+   * 旧链路（点按录音 → DSH ASR → /reply → Edge TTS）已整条移除，**不留开关**：
+   * 两套并存会让「点通话到底走哪条链路」变成一个要看设置才能回答的问题，而且旧链路
+   * 那 1.2 秒假响铃会让真实建连失败看起来像「接通了但没声音」。
+   *
+   * 现在分工是：RealtimeCall（call/realtime-client.ts）管 WS 与音频引擎；这里只把
+   * 它的回调翻译成 ui.call，并在通话结束时落一条 CallRecord。
+   */
 
-  const endCall = useCallback((): void => {
+  /** 未定稿字幕合并写回 ui（节流，见 CALL_DRAFT_FLUSH_MS）。 */
+  const flushCallDraft = useCallback((immediate = false): void => {
+    const push = (): void => {
+      const draft = callDraftRef.current
+      setUi((prev) => (prev.call.status === 'idle' || (prev.call.botDraft === draft.bot && prev.call.thinkingDraft === draft.thinking)
+        ? prev
+        : { ...prev, call: { ...prev.call, botDraft: draft.bot, thinkingDraft: draft.thinking } }))
+    }
+    if (immediate) {
+      if (callDraftTimerRef.current !== null) {
+        clearTimeout(callDraftTimerRef.current)
+        callDraftTimerRef.current = null
+      }
+      push()
+      return
+    }
+    if (callDraftTimerRef.current !== null) return
+    callDraftTimerRef.current = setTimeout(() => {
+      callDraftTimerRef.current = null
+      push()
+    }, CALL_DRAFT_FLUSH_MS)
+  }, [])
+
+  /** 清空流式缓冲与排序状态（新一通电话 / 收尾时调用）。 */
+  const resetCallDraft = useCallback((): void => {
+    callDraftRef.current = { bot: '', thinking: '' }
+    callAudioTranscriptRef.current = false
+    // 未消费的占位与序号一并作废：新一轮通话不该继承上一通的排序
+    callPendingUsersRef.current = []
+    callSeqRef.current = 0
+    // 段 id 与段内序号同理：上一通的段标记已经收尾，新通话必须是新的一段
+    callSegmentRef.current = null
+    callSegmentTurnsRef.current = 0
+    callMessageSeqRef.current = new Map()
+    if (callDraftTimerRef.current !== null) {
+      clearTimeout(callDraftTimerRef.current)
+      callDraftTimerRef.current = null
+    }
+  }, [])
+
+  /**
+   * 往通话转写里落一条，并按落库序号排序（见 call-turns.ts）。
+   *
+   * @param seq 落库序号。用户轮次用 `speech_stopped` 时预分配的那个，Bot 轮次现取。
+   */
+  const appendCallTurn = useCallback((role: 'user' | 'bot', text: string, seq: number): void => {
+    const value = text.trim()
+    if (value === '') return
+    const at = Date.now()
+    const turn = { id: shortId('turn'), role, text: value, at, seq }
+    setUi((prev) => (prev.call.status === 'idle'
+      ? prev
+      : { ...prev, call: { ...prev.call, liveTurns: sortTurns([...prev.call.liveTurns, turn]) } }))
+  }, [])
+
+  /**
+   * 原地更新一条段标记消息（**不新增消息**）。
+   *
+   * 段标记在通话开始时写一次，之后只改它的字段：进行中改 `turns`，ready 后补
+   * `model` / `voice`，挂断时补 `endedAt` / `durationMs` 并把 `live` 置 false。
+   *
+   * @param segment 段 id。
+   * @param update  纯函数式的改写。
+   */
+  const patchCallSegment = useCallback((segment: string, update: (block: CallSegmentBlock) => CallSegmentBlock): void => {
+    setState((prev) => {
+      const index = prev.messages.findIndex((message) => message.blocks.some(
+        (block) => block.type === 'call-segment' && block.segment === segment,
+      ))
+      // 段标记被清掉了（清空对话 / 历史数据）：没有可更新的对象，静默跳过
+      if (index < 0) return prev
+      const target = prev.messages[index]
+      const blocks = target.blocks.map((block) => (
+        block.type === 'call-segment' && block.segment === segment ? update(block) : block
+      ))
+      const messages = [...prev.messages]
+      messages[index] = { ...target, blocks }
+      return { ...prev, messages }
+    })
+  }, [])
+
+  /**
+   * 删掉一条段标记消息。
+   *
+   * 只在一句都没说成时用（连不上 / 刚接通就挂断）：那种情况段内一条消息都没有，
+   * 留在对话流里就是一条「语音通话 · 0 条」的空折叠条，点开什么都没有——比不留更糟。
+   */
+  const removeCallSegment = useCallback((segment: string): void => {
+    setState((prev) => {
+      const messages = prev.messages.filter((message) => !message.blocks.some(
+        (block) => block.type === 'call-segment' && block.segment === segment,
+      ))
+      return messages.length === prev.messages.length ? prev : { ...prev, messages }
+    })
+  }, [])
+
+  /**
+   * 一轮已定稿的转写 → 一条**普通消息**进对话流（与打字聊天同一个气泡样式）。
+   *
+   * 这是这次改造的核心：语音不再只把转写塞在通话弹层里、等挂断才落一张通话卡。
+   * 用户要的是「对话还是之前的 UI 形式」——所以这里落普通 `text` 块，只加一个
+   * `callSegment` 归属标记，收起时由渲染层整段隐藏，展开后与普通消息一模一样。
+   *
+   * `ui.call.liveTurns` 仍然照旧维护（通话弹层里那份实时字幕还在用），两条路并存。
+   *
+   * @param role 谁说的。
+   * @param text 定稿文本（空串直接丢弃，避免出现空气泡）。
+   * @param seq  落库序号，决定它在段里的位置（见 `insertCallMessage`）。
+   */
+  const appendCallTranscript = useCallback((role: 'user' | 'bot', text: string, seq: number): void => {
+    const value = text.trim()
+    if (value === '') return
+    const botId = uiRef.current.call.botId
+    if (botId === null) return
+    const segment = callSegmentRef.current
+    const message: Message = {
+      id: shortId('msg'),
+      botId,
+      role,
+      at: Date.now(),
+      blocks: [{ type: 'text', text: value }],
+      source: 'call',
+      ...(segment !== null ? { callSegment: segment } : {}),
+    }
+    if (segment === null) {
+      appendMessage(message)
+      return
+    }
+    // 先登记序号再插：insertCallMessage 要拿它跟段内已有消息比位置
+    callMessageSeqRef.current.set(message.id, seq)
+    appendMessage(message, { segment, seq })
+    callSegmentTurnsRef.current += 1
+    patchCallSegment(segment, (block) => ({ ...block, turns: callSegmentTurnsRef.current }))
+  }, [appendMessage, patchCallSegment])
+
+  /**
+   * 语音里干活的产物 → 一条 bot 消息进对话流。
+   *
+   * 为什么产物必须进对话流：用户说「帮我生成一张图」，如果只在通话弹层里念一句
+   * 「生成好了」，挂断之后那张图就再也找不到了。产物要作为一张卡留在对话里。
+   *
+   * 块类型的选择（`RealtimeArtifact.kind` 与现有块对应关系）：
+   *  · `image` → `image` 块（`ChatImage`），与用户发图共用同一个渲染器；
+   *  · `video` / `audio` / `file` → `tool` 块的 `run.artifacts`（`ArtifactRef`）：
+   *    这是**现有的产出物卡通道**（`ToolArtifactsBlock` → `ArtifactCard`），渲染层
+   *    不用为语音产物另开一套样式，也不存在「没有块类型可放」的问题。
+   */
+  const appendCallArtifacts = useCallback((artifacts: RealtimeArtifact[]): void => {
+    const botId = uiRef.current.call.botId
+    if (botId === null) return
+    const segment = callSegmentRef.current
+    const at = Date.now()
+    const blocks: MessageBlock[] = []
+    const files: ArtifactRef[] = []
+    for (const artifact of artifacts) {
+      if (artifact.url === '') continue
+      if (artifact.kind === 'image') {
+        const name = artifactNameOf(artifact)
+        blocks.push({ type: 'image', image: { url: artifact.url, path: artifactPathOf(artifact), name } })
+        continue
+      }
+      files.push({
+        path: artifactPathOf(artifact),
+        url: artifact.url,
+        name: artifactNameOf(artifact),
+        kind: artifact.kind,
+      })
+    }
+    if (files.length > 0) {
+      blocks.push({
+        type: 'tool',
+        run: {
+          id: shortId('run'),
+          name: '语音产物',
+          status: 'ok',
+          startedAt: at,
+          endedAt: at,
+          artifacts: files,
+        },
+      })
+    }
+    if (blocks.length === 0) return
+    appendMessage({
+      id: shortId('msg'),
+      botId,
+      role: 'bot',
+      at,
+      blocks,
+      source: 'call',
+      ...(segment !== null ? { callSegment: segment } : {}),
+    })
+    if (segment !== null) {
+      callSegmentTurnsRef.current += 1
+      patchCallSegment(segment, (block) => ({ ...block, turns: callSegmentTurnsRef.current }))
+    }
+  }, [appendMessage, patchCallSegment])
+
+  /**
+   * 收尾：停会话 → 把已定稿的转写落成 CallRecord → 重置 ui.call。
+   *
+   * @param note 给用户的一句话（链路失败原因 / 到期提示）。有内容时会 toast。
+   *             一句都没说成就**不落记录**：连不上却多出一条空通话，比什么都不留更糟。
+   */
+  const finalizeCall = useCallback((note?: string): void => {
     const call = uiRef.current.call
-    if (call.botId === null || call.status === 'idle') return
-    const bot = stateRef.current.bots.find((item) => item.id === call.botId)
-    if (!bot) return
+    const session = callRef.current
+    callRef.current = null
+    if (session !== null) void session.stop()
+    // 被打断时最后一句往往还没定稿：先取出来再清缓冲，否则通话记录里会少一句
+    const draftText = callDraftRef.current.bot.trim()
+    // 段 id 必须在 resetCallDraft 之前取：它会清掉 callSegmentRef
+    const segment = callSegmentRef.current
+    if (call.status === 'idle' || call.botId === null) {
+      resetCallDraft()
+      return
+    }
+    const bot = stateRef.current.bots.find((item) => item.id === call.botId) ?? null
     const endedAt = Date.now()
     const durationMs = Math.max(1000, endedAt - call.startedAt)
+    /*
+     * 未定稿的最后一句也要进对话流：它在通话弹层里已经显示给用户看过了，挂断时
+     * 直接丢掉会让人以为「刚才那句话没了」。序号现取，落在段尾。
+     */
+    if (draftText !== '') appendCallTranscript('bot', draftText, (callSeqRef.current += 1))
+    const messageTurns = callSegmentTurnsRef.current
+    const recordTurns = [...call.liveTurns]
+    if (draftText !== '') recordTurns.push({ id: shortId('turn'), role: 'bot', text: draftText, at: endedAt })
+    resetCallDraft()
+    setUi((prev) => ({ ...prev, call: createIdleCallUi() }))
+    /*
+     * 段标记收尾：**更新那一条**，不新增。
+     *
+     * 无论这通电话说没说成话都要收尾——段标记在通话开始时就写进对话流了，不收尾
+     * 它会永远停在「通话中」。收尾放在 bot 判空之前，也是这个原因：它跟 Bot 记录
+     * 在不在没关系。
+     *
+     * 一句都没说成时直接删掉：留一条「0 条」的空折叠条比不留更糟（点开什么都没有）。
+     */
+    if (segment !== null) {
+      if (messageTurns === 0) {
+        removeCallSegment(segment)
+      } else {
+        patchCallSegment(segment, (block) => ({ ...block, endedAt, durationMs, turns: messageTurns, live: false }))
+      }
+    }
+    if (bot === null) return
+    if (recordTurns.length === 0) {
+      // 一句都没说成（连不上 / 刚接通就挂断）：不产生通话记录，但要有交代
+      toast(note !== undefined && note !== '' ? note : '通话已结束（没有产生转写）')
+      return
+    }
     const record: CallRecord = {
       id: shortId('call'),
       botId: bot.id,
       startedAt: call.startedAt,
       endedAt,
       durationMs,
-      turns: call.liveTurns,
+      turns: recordTurns,
       status: 'ended',
+      engine: 'realtime',
+      ...(call.realtime.model !== '' ? { model: call.realtime.model } : {}),
+      ...(call.realtime.voice !== '' ? { voice: call.realtime.voice } : {}),
     }
     setState((prev) => ({ ...prev, calls: [...prev.calls, record] }))
+    /*
+     * 这里**不再写** `{ type: 'call', call: record }` 那种「通话卡」消息：转写与
+     * 产物已经逐条以普通消息进了对话流，再补一张卡等于同一段对话出现两遍。
+     * `state.calls` 里照旧落 CallRecord（通话记录还在用它）；历史数据里存下来的
+     * call 块仍然照常渲染（见 MessageBlockView 与 CallMessageCard）。
+     */
+    /*
+     * 秒数走 `formatDurationSeconds`（向下取整），与折叠条上的 mm:ss 同一个口径。
+     * 这里原来用的是**四舍五入**：16.5 秒的通话，折叠条按 floor 显示 00:16、
+     * 提示却按 round 说「17 秒」——同一通电话两个数，看着像计时错了。
+     * 所有「N 秒」文案都必须复用这个函数，别再就地取整。
+     */
+    toast(note !== undefined && note !== '' ? note : `通话已结束 · ${formatDurationSeconds(durationMs)} 秒`)
+  }, [appendCallTranscript, patchCallSegment, removeCallSegment, resetCallDraft, toast])
+
+  const startCall = useCallback((botId: string): void => {
+    const bot = stateRef.current.bots.find((item) => item.id === botId)
+    if (bot === undefined) return
+    /*
+     * 上一通还在跑（用户直接点了另一个 Bot 的通话）：先把它的段标记收尾，否则
+     * 那条折叠条会永远停在「通话中」。这里不补 CallRecord —— 与原来「直接 stop
+     * 旧会话」的行为一致；旧会话的转写已经以普通消息留在对话流里了。
+     */
+    const previousSegment = callSegmentRef.current
+    if (previousSegment !== null) {
+      if (callSegmentTurnsRef.current === 0) {
+        // 上一通还一句话都没说：连折叠条一起撤掉，别留一条空的
+        removeCallSegment(previousSegment)
+      } else {
+        const previousEndedAt = Date.now()
+        patchCallSegment(previousSegment, (block) => ({
+          ...block,
+          endedAt: previousEndedAt,
+          durationMs: Math.max(1000, previousEndedAt - block.startedAt),
+          live: false,
+        }))
+      }
+    }
+    // 已经有一通在跑：先干净收掉旧的，避免两份麦克风 / 播放器叠在一起
+    const previous = callRef.current
+    callRef.current = null
+    if (previous !== null) void previous.stop()
+    resetCallDraft()
+    const startedAt = Date.now()
+    /*
+     * 音量在**建会话之前**读：PcmPlayer 在 `session.start()` 里就建好了，
+     * 之后再设会让第一片音频按 100% 播出来（用户上一通明明调小了）。
+     */
+    const volume = loadCallVolume()
+    /*
+     * 段标记：这一通电话在对话流里的**起点**。
+     *
+     * 为什么一开始就写它，而不是等挂断：转写从第一轮起就以普通消息实时进对话流
+     * （见 appendCallTranscript），没有这个标记，渲染层无从知道「哪几条属于同一通
+     * 电话」，也就没法整段收起。
+     *
+     * 它自己**不带** `Message.callSegment`：折叠时它必须留在外面当折叠条，被一起
+     * 藏掉就没有「展开」的入口了。
+     */
+    const segment = shortId('seg')
+    callSegmentRef.current = segment
+    callSegmentTurnsRef.current = 0
+    callMessageSeqRef.current = new Map()
     appendMessage({
       id: shortId('msg'),
-      botId: bot.id,
+      botId,
       role: 'bot',
-      at: endedAt,
-      blocks: [{ type: 'call', call: record }],
+      at: startedAt,
+      blocks: [{
+        type: 'call-segment',
+        segment,
+        startedAt,
+        turns: 0,
+        live: true,
+        engine: 'realtime',
+        // 实际生效的音色要等宿主 ready 才确定（上游可能回落），先按 Bot 的选择显示
+        voice: bot.voice !== undefined && bot.voice !== '' ? bot.voice : REALTIME_DEFAULT_VOICE,
+      }],
       source: 'call',
     })
-    setUi((prev) => ({ ...prev, call: { status: 'idle', botId: null, startedAt: 0, muted: false, speaker: true, minimized: false, liveTurns: [], thinking: false } }))
-    toast(`通话已结束 · ${Math.round(durationMs / 1000)} 秒`)
-  }, [appendMessage, toast])
+    setUi((prev) => ({
+      ...prev,
+      call: {
+        ...createIdleCallUi(),
+        status: 'ringing',
+        botId,
+        startedAt,
+        volume,
+        realtime: {
+          phase: 'connecting',
+          model: '',
+          // ready 之前先显示这个 Bot 自己选的音色；没选就显示全局默认的名字。
+          // 宿主 ready 后会回传**实际生效**的音色（上游可能拒绝某个音色并回落），
+          // 届时以那个为准，见 onReady。
+          voice: bot.voice !== undefined && bot.voice !== '' ? bot.voice : REALTIME_DEFAULT_VOICE,
+        },
+      },
+    }))
+
+    let session: RealtimeCall | null = null
+    /** 只处理「当前这通」的事件：旧会话的迟到回调一律丢弃。 */
+    const alive = (): boolean => session !== null && callRef.current === session
+    const patch = (update: (call: PersonalCallUi) => PersonalCallUi): void => {
+      if (!alive()) return
+      setUi((prev) => (prev.call.status === 'idle' ? prev : { ...prev, call: update(prev.call) }))
+    }
+
+    const handlers: RealtimeCallHandlers = {
+      onLinkState: (link) => {
+        patch((call) => ({ ...call, realtime: { ...call.realtime, phase: link === 'idle' ? 'connecting' : link } }))
+      },
+      onReady: (info) => {
+        /*
+         * 重连后 onReady 会再来一次。段状态（段 id / 落库序号 / 已落条数）必须跨
+         * 重连保留：清掉的话后续转写会失去段归属（不再参与折叠），序号也会从 1
+         * 重新开始，把新消息插到段中间。所以这里只重置「这一轮的流式缓冲」。
+         */
+        const segment = callSegmentRef.current
+        const seq = callSeqRef.current
+        const turns = callSegmentTurnsRef.current
+        const seqById = callMessageSeqRef.current
+        resetCallDraft()
+        callSegmentRef.current = segment
+        callSeqRef.current = seq
+        callSegmentTurnsRef.current = turns
+        callMessageSeqRef.current = seqById
+        callAudioTranscriptRef.current = false
+        // 折叠条补上**实际生效**的模型与音色：上游可能拒绝某个音色并回落，以宿主为准
+        if (segment !== null && alive()) {
+          patchCallSegment(segment, (block) => ({ ...block, model: info.model, voice: info.voice }))
+        }
+        patch((call) => ({
+          ...call,
+          status: 'listening',
+          thinking: false,
+          realtime: {
+            ...call.realtime,
+            phase: 'open',
+            model: info.model,
+            voice: info.voice,
+            sampleRate: info.sampleRate,
+            error: undefined,
+            expiresInMs: undefined,
+            // 麦克风是 ready 之后才打开的：先置 undefined（= 正在打开），等 onMicReady
+            micReady: undefined,
+          },
+        }))
+      },
+      onSpeechStarted: () => {
+        // 用户开口 = 打断 Bot：丢掉未定稿的 Bot 字幕，立刻切回「在听」
+        callDraftRef.current = { ...callDraftRef.current, bot: '' }
+        callAudioTranscriptRef.current = false
+        flushCallDraft(true)
+        patch((call) => ({ ...call, status: 'listening', thinking: false, botDraft: '' }))
+      },
+      onSpeechStopped: (itemId) => {
+        // 用户说完：服务端在跑 ASR + 推理，界面进「在想」；新一轮的思考文本从这里重新攒
+        callDraftRef.current = { bot: '', thinking: '' }
+        callAudioTranscriptRef.current = false
+        flushCallDraft(true)
+        /*
+         * 先给这一轮**分配落库序号**（见 call-turns.ts 的文件头）：此刻一定早于模型
+         * 响应，而 ASR 转写常常晚于 Bot 的转写到达。不预分配序号的话，通话记录会
+         * 变成「Bot 先答、用户后问」。
+         */
+        callSeqRef.current += 1
+        callPendingUsersRef.current.push({ itemId: itemId ?? null, seq: callSeqRef.current })
+        patch((call) => ({ ...call, status: 'thinking', thinking: true, thinkingDraft: '' }))
+        /*
+         * 兜底：模型偶尔会「想完决定不说话」（或服务端没触发响应），界面不能一直
+         * 停在「正在想」。15 秒还没有任何后续事件就退回「在听」。
+         * alive() 保证旧通话的定时器不会污染新通话。
+         */
+        later(15_000, () => {
+          if (!alive() || uiRef.current.call.status !== 'thinking') return
+          patch((call) => ({ ...call, status: 'listening', thinking: false }))
+        })
+      },
+      onUserTranscript: (text, itemId) => {
+        // 按 item_id 配对（不是假设 FIFO：连说两句时转写也可能逆序返回）
+        const taken = takePendingUserTurn(callPendingUsersRef.current, itemId)
+        callPendingUsersRef.current = taken.rest
+        // 配对不上（上游没给 item_id / 占位已被消费）：现取一个序号，至少不丢这句话
+        const seq = taken.entry?.seq ?? (callSeqRef.current += 1)
+        appendCallTurn('user', text, seq)
+        // 实时进对话流：用户这一句立刻以**普通气泡**出现，不等挂断（与弹层字幕并存）
+        appendCallTranscript('user', text, seq)
+      },
+      onBotTranscript: (text, final) => {
+        if (!alive()) return
+        if (!final) {
+          // 音频转写一旦开始就丢掉之前由文本模态攒的字幕（见 callAudioTranscriptRef）
+          if (!callAudioTranscriptRef.current) {
+            callAudioTranscriptRef.current = true
+            callDraftRef.current.bot = ''
+          }
+          callDraftRef.current.bot += text
+          flushCallDraft()
+          return
+        }
+        const full = text.trim()
+        callDraftRef.current.bot = ''
+        callAudioTranscriptRef.current = false
+        flushCallDraft(true)
+        const seq = (callSeqRef.current += 1)
+        appendCallTurn('bot', full, seq)
+        // 定稿才进对话流：增量还可能是半句话，落进去会看到气泡文字自己变长
+        appendCallTranscript('bot', full, seq)
+      },
+      onBotText: (delta) => {
+        // 文本模态兜底字幕：音频转写开始后就不再叠加，否则同一句话会出现两遍
+        if (!alive() || callAudioTranscriptRef.current) return
+        callDraftRef.current.bot += delta
+        flushCallDraft()
+      },
+      onThinkingDelta: (delta) => {
+        if (!alive()) return
+        callDraftRef.current.thinking += delta
+        flushCallDraft()
+      },
+      onThinkingDone: (thinking) => {
+        if (!alive()) return
+        callDraftRef.current.thinking = thinking
+        flushCallDraft(true)
+      },
+      onSpeakingStart: () => {
+        // 真正开始出声才切「在说」：response.created 只说明它在生成，可能还在思考
+        patch((call) => (call.status === 'speaking' ? call : { ...call, status: 'speaking', thinking: false }))
+      },
+      onResponseCreated: () => {
+        callAudioTranscriptRef.current = false
+        patch((call) => (call.status === 'thinking' ? call : { ...call, status: 'thinking', thinking: true }))
+      },
+      onResponseDone: (status) => {
+        // 一轮结束：字幕已定稿，回到「在听」。failed/incomplete 说明这轮没说完
+        const failed = status === 'failed' || status === 'incomplete'
+        patch((call) => ({ ...call, status: failed ? 'thinking' : 'listening', thinking: failed }))
+      },
+      onInterrupted: () => {
+        patch((call) => ({ ...call, status: 'listening', thinking: false }))
+      },
+      /*
+       * 语音里「让 Bot 干活」的三个事件（见 callAgentSpec 与 realtime-client 文件头）。
+       *
+       * 任务与对话是**并行**的：这里只更新展示状态，绝不碰 status / muted / 麦克风，
+       * 否则会出现「一让它干活就听不见我说话」——那正是全双工要避免的。
+       */
+      onTaskStarted: (task, callId) => {
+        // 新任务直接占展示位：模型可能连续派活，界面上只留最近一条
+        patch((call) => ({
+          ...call,
+          realtime: {
+            ...call.realtime,
+            task: { callId, label: task, phase: 'running', startedAt: Date.now() },
+          },
+        }))
+      },
+      onTaskProgress: (note, callId) => {
+        patch((call) => {
+          const task = call.realtime.task
+          // 旧任务迟到的进度：丢掉，不能覆盖正在展示的新任务
+          if (task === undefined || task.callId !== callId) return call
+          return { ...call, realtime: { ...call.realtime, task: { ...task, note } } }
+        })
+      },
+      onTaskDone: (ok, text, callId, artifacts) => {
+        patch((call) => {
+          const task = call.realtime.task
+          if (task === undefined || task.callId !== callId) return call
+          return {
+            ...call,
+            realtime: {
+              ...call.realtime,
+              task: { ...task, phase: ok ? 'done' : 'failed', note: text, endedAt: Date.now() },
+            },
+          }
+        })
+        /*
+         * 产物进对话流：语音里让它干活生成的东西（图 / 视频 / 文件）必须留下来。
+         * 只让模型念一句「生成好了」是不够的——挂断之后用户要能回头看到那张图。
+         * 失败时不落（artifacts 一般是空的，这里再判一次 ok 更保险）。
+         */
+        if (ok && artifacts !== undefined && artifacts.length > 0) appendCallArtifacts(artifacts)
+        // 失败不能静默：状态条留着（11 秒），同时 toast 一次，避免用户正盯着字幕时漏掉
+        if (!ok && alive()) toast(text === undefined ? '任务执行失败' : `任务执行失败：${text}`)
+        // 停留几秒 → 先淡出 → 再移除：直接删一块正在显示的内容会「啪」一下消失
+        later(ok ? CALL_TASK_LINGER_MS : CALL_TASK_FAIL_LINGER_MS, () => {
+          patch((call) => {
+            const task = call.realtime.task
+            if (task === undefined || task.callId !== callId) return call
+            return { ...call, realtime: { ...call.realtime, task: { ...task, fading: true } } }
+          })
+          later(CALL_TASK_FADE_MS, () => {
+            patch((call) => {
+              const task = call.realtime.task
+              if (task === undefined || task.callId !== callId) return call
+              return { ...call, realtime: { ...call.realtime, task: undefined } }
+            })
+          })
+        })
+      },
+      onExpiring: (inMs) => {
+        patch((call) => ({ ...call, realtime: { ...call.realtime, expiresInMs: inMs } }))
+        if (alive()) toast(`这通电话还能聊 ${Math.max(1, Math.round(inMs / 60_000))} 分钟`)
+      },
+      onError: (error) => {
+        patch((call) => ({ ...call, realtime: { ...call.realtime, error: error.message } }))
+        if (alive()) toast(error.message)
+      },
+      onClosed: (reason) => {
+        if (!alive()) return
+        // 链路彻底结束：落通话记录并如实说明原因（没内容就不落，见 finalizeCall）
+        finalizeCall(reason)
+      },
+      onMicUnavailable: (message) => {
+        patch((call) => ({ ...call, realtime: { ...call.realtime, micReady: false, micError: message } }))
+        if (alive()) toast(`${message}，可以直接打字提问`)
+      },
+      onMicReady: () => {
+        patch((call) => ({ ...call, realtime: { ...call.realtime, micReady: true, micError: undefined } }))
+      },
+    }
+
+    session = new RealtimeCall(handlers)
+    callRef.current = session
+    // 播放器还没建（start 内部才建），这里先把音量存进会话，preparePlayer 会应用它
+    session.setVolume(volume)
+    /*
+     * 音色覆盖：这个 Bot 自己选了就随 start 帧带上（宿主原样写进上游的
+     * `session.update.voice`）；没选就**不带这个字段**，让宿主走全局默认
+     * （settings 的 `personal-realtime.voice`，再兜底 `linjiajiejie`）。
+     * 注意不能传空串占位——宿主对「带了但为空」与「没带」的处理不同。
+     */
+    void session.start({
+      botId,
+      instructions: callInstructions(bot),
+      /*
+       * agent 定义：语音里「让它干活」的入口。不带它，Realtime 模型手里只有联网搜索，
+       * 用户说「帮我生成一张图」时它只能回「我没有这个功能」（用户实测）。
+       * 每次 start（含自动重连）都重新拼一份：重连后的新会话同样需要它。
+       */
+      agent: callAgentSpec(bot, stateRef.current),
+      /*
+       * Live 供应商：这个 Bot 自己选了就随 start 帧带上它的 id；没选就**不带这个字段**，
+       * 让宿主按「全局默认 → 供应商列表第一条」回落。空值不能写进帧——宿主对
+       * 「字段缺失」和「显式给空 id」的处理不同（见 RealtimeStartOptions.vendor）。
+       */
+      ...(bot.liveVendor !== undefined && bot.liveVendor !== '' ? { vendor: bot.liveVendor } : {}),
+      ...(bot.voice !== undefined && bot.voice !== '' ? { voice: bot.voice } : {}),
+      /*
+       * `route` 已废弃（宿主忽略）：Live 配置不再按聊天供应商路由读取，改由
+       * 「Live 供应商列表 + 上面的 vendor」决定。保留透传只为兼容还没升级的旧宿主。
+       */
+      ...(bot.model.provider !== '' ? { route: bot.model.provider } : {}),
+    })
+  }, [appendCallArtifacts, appendCallTranscript, appendCallTurn, appendMessage, finalizeCall, flushCallDraft, later, patchCallSegment, removeCallSegment, resetCallDraft, toast])
+
+  const endCall = useCallback((): void => {
+    finalizeCall()
+  }, [finalizeCall])
 
   const callUserTurn = useCallback((text: string): void => {
     const value = text.trim()
     if (value === '') return
     const call = uiRef.current.call
-    if (call.botId === null) return
-    const bot = stateRef.current.bots.find((item) => item.id === call.botId)
-    if (!bot) return
-    const at = Date.now()
-    setUi((prev) => ({
-      ...prev,
-      call: {
-        ...prev.call,
-        thinking: true,
-        liveTurns: [...prev.call.liveTurns, { id: shortId('turn'), role: 'user', text: value, at }],
-      },
-    }))
-    // 通话走与聊天相同的真实模型链路；host 不可用时才退回本地短句。
-    later(250, () => {
-      void (async () => {
-        const remote = await hostReply(bot, value, stateRef.current)
-        const reply = remote !== null
-          ? remote.map((block) => (block.type === 'text' ? block.text : '')).filter((line) => line !== '').join('\n')
-          : callReply(bot, value)
-        if (uiRef.current.call.status === 'idle') return
-        setUi((prev) => ({
-          ...prev,
-          call: {
-            ...prev.call,
-            thinking: false,
-            liveTurns: [
-              ...prev.call.liveTurns,
-              { id: shortId('turn'), role: 'bot', text: reply !== '' ? reply : '我在。', at: Date.now() },
-            ],
-          },
-        }))
-      })()
-    })
-  }, [later])
+    if (call.status === 'idle' || call.botId === null) return
+    const session = callRef.current
+    if (session === null) return
+    if (!session.isReady) {
+      toast('实时语音还在接通，稍等一下再发')
+      return
+    }
+    // 打字走 text 帧：服务端不会为文本输入回 user_transcript，本地先落一条用户轮次。
+    // 同样要占一个落库序号，否则这条会因为没有 seq（按 0 处理）排到整段转写最前面。
+    const seq = (callSeqRef.current += 1)
+    appendCallTurn('user', value, seq)
+    // 打字这一轮也进对话流：否则用户会看到自己打的字只出现在通话弹层里、对话流里没有
+    appendCallTranscript('user', value, seq)
+    session.sendText(value)
+  }, [appendCallTranscript, appendCallTurn, toast])
+
+  const interruptCall = useCallback((): void => {
+    callRef.current?.interrupt()
+  }, [])
+
+  const retryCallMicrophone = useCallback((): void => {
+    const session = callRef.current
+    if (session === null) return
+    void session.retryMicrophone()
+  }, [])
+
+  const callLevel = useCallback((): number => callRef.current?.level() ?? 0, [])
 
   const setCallMuted = useCallback((muted: boolean): void => {
+    callRef.current?.setMuted(muted)
     setUi((prev) => ({ ...prev, call: { ...prev.call, muted } }))
   }, [])
 
   const setCallSpeaker = useCallback((speaker: boolean): void => {
+    callRef.current?.setSpeaker(speaker)
     setUi((prev) => ({ ...prev, call: { ...prev.call, speaker } }))
+  }, [])
+
+  /**
+   * 通话音量：实时改播放增益 + 落 localStorage（下一通沿用）。
+   *
+   * 不走宿主配置：音量是**这台设备上的听感**，换设备本来就该按那边扬声器重调，
+   * 同步到云端反而会让用户在另一台机器上莫名其妙听不见。
+   */
+  const setCallVolume = useCallback((volume: number): void => {
+    const next = Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 1
+    callRef.current?.setVolume(next)
+    saveCallVolume(next)
+    setUi((prev) => ({ ...prev, call: { ...prev.call, volume: next } }))
   }, [])
 
   const minimizeCall = useCallback((minimized: boolean): void => {
     setUi((prev) => ({ ...prev, call: { ...prev.call, minimized } }))
   }, [])
 
-  /* ── 定时调度：每 30 秒跑一次例行任务 + 日记检查 ── */
+  /**
+   * 收起 / 展开一段语音通话（点折叠条时调用）。
+   *
+   * 只动 `ui.collapsedCallSegments`：段内那些消息本身一个字节都不改，展开后还是
+   * 普通气泡（用户的原话是「收起只是把这一段收起，而不是改变 UI 样式」）。
+   * 放 ui 不放 state 的理由见 `types.ts` 的 PersonalUi 注释。
+   *
+   * `?? []` 兜住「ui 还没初始化这个字段」的中间态（旧 localStorage / 首帧）。
+   */
+  const toggleCallSegment = useCallback((segment: string): void => {
+    setUi((prev) => {
+      const collapsed = prev.collapsedCallSegments ?? []
+      return {
+        ...prev,
+        collapsedCallSegments: collapsed.includes(segment)
+          ? collapsed.filter((id) => id !== segment)
+          : [...collapsed, segment],
+      }
+    })
+  }, [])
+
+  /*
+   * ── 定时调度：只留日记检查，例行任务已搬到宿主 ──
+   *
+   * 例行任务从前端 `setInterval` 搬走的原因（三个都是实测会出问题的）：
+   *   1. 页面关掉就停 —— 用户合上笔记本，Bot 就再也不主动做事；
+   *   2. 多标签页各跑一遍 —— 同一条例行任务被重复执行、重复扣费；
+   *   3. 状态在 localStorage —— 换设备、清缓存全没。
+   * 现在由 `host/personal/scheduler.ts` 在常驻宿主进程里跑，结果经 SSE 推回来。
+   *
+   * 这里**绝不能**保留前端那份例行任务循环：两边都在跑等于每个任务执行两次。
+   */
   useEffect(() => {
     const tick = (): void => {
-      const now = Date.now()
-      const current = stateRef.current
-      for (const routine of current.routines) {
-        if (!routine.enabled || routine.nextAt === undefined || routine.nextAt > now) continue
-        executeRoutine(routine)
-      }
       // 日记只在北京时间凌晨 0–8 点自动检查；页面一直开着时也符合规则
       runJournalCheck()
     }
     const timer = window.setInterval(tick, 30_000)
     return () => window.clearInterval(timer)
-  }, [executeRoutine, runJournalCheck])
+  }, [runJournalCheck])
+
+  /*
+   * 把例行任务定义同步给宿主（全量覆盖）。
+   *
+   * 前端是「定义」的唯一入口（用户在界面上建/改/删），宿主是「执行」的唯一场所。
+   * 只在定义变化时同步，不跟消息走——`state.routines` 每条消息都会换引用。
+   */
+  const routineSyncKey = state.routines
+    .map((routine) => `${routine.id}:${routine.enabled ? 1 : 0}:${routine.nextAt ?? 0}`)
+    .join(',')
+  useEffect(() => {
+    if (typeof location !== 'undefined' && location.protocol === 'file:') return
+    const payload = state.routines
+      // 宿主只认 interval / daily / weekly；once 由前端到点跑一次，不交给宿主
+      .filter((routine) => routine.schedule.kind !== 'once')
+      .map((routine) => {
+        const bot = state.bots.find((item) => item.id === routine.botId)
+        return {
+          id: routine.id,
+          botId: routine.botId,
+          botName: bot?.name ?? 'Bot',
+          botRole: bot?.role ?? '',
+          ...(bot?.model !== undefined ? { botModel: bot.model } : {}),
+          name: routine.name,
+          instruction: routine.instruction,
+          schedule: routine.schedule,
+          enabled: routine.enabled,
+          ...(routine.nextAt !== undefined ? { nextAt: routine.nextAt } : {}),
+        }
+      })
+    void fetch('/api/personal-agent/routines', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ routines: payload }),
+    }).catch(() => undefined)
+    // 只按「定义指纹」同步：routines / bots 每次渲染都可能换引用
+  }, [routineSyncKey])
+
+  /*
+   * 把主动询问配置同步给宿主（全量覆盖）。
+   *
+   * 窗口与频率由前端定（用户在右栏改），**到点说话由宿主做**——页面关掉也要能
+   * 主动找用户，这是 always-on 的另一半。
+   */
+  const proactiveSyncKey = state.bots
+    .map((bot) => `${bot.id}:${bot.proactive.enabled ? 1 : 0}:${bot.proactive.freq}:${bot.proactive.from}:${bot.proactive.to}`)
+    .join(',')
+  useEffect(() => {
+    if (typeof location !== 'undefined' && location.protocol === 'file:') return
+    const configs = state.bots.map((bot) => ({
+      botId: bot.id,
+      botName: bot.name,
+      botRole: bot.role,
+      ...(bot.model !== undefined ? { botModel: bot.model } : {}),
+      enabled: bot.proactive.enabled,
+      freq: bot.proactive.freq,
+      from: bot.proactive.from,
+      to: bot.proactive.to,
+    }))
+    void fetch('/api/personal-agent/proactive', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ configs }),
+    }).catch(() => undefined)
+    // 只按「配置指纹」同步，理由同上
+  }, [proactiveSyncKey])
+
+  /*
+   * ── 期刊：素材与规则同步（宿主调度器用它们生成第二天的期刊）──
+   *
+   * 两条同步都只依赖「指纹」而不是整个 state：
+   *  · feed 看消息条数与最后一条消息的文本长度（流式更新时文本会变长）；
+   *  · rule 看规则四个字段与 lastUserMessageAt。
+   *
+   * 都做防抖（feed 5 秒 / rule 1 秒）：对话期间消息连续变化，逐条 POST 只会把请求
+   * 打满；停下来之后再同步最终状态即可。
+   */
+  const lastMessage = state.messages.length > 0 ? state.messages[state.messages.length - 1] : null
+  const journalFeedSyncKey = lastMessage === null
+    ? '0'
+    : `${String(state.messages.length)}:${lastMessage.id}:${String(blocksToText(lastMessage.blocks).length)}`
+  useEffect(() => {
+    if (isDemoMode()) return undefined
+    // 空状态不同步：新设备 / 清过缓存的浏览器会用空 feed 覆盖宿主已有的素材
+    if (state.messages.length === 0) return undefined
+    const handle = window.setTimeout(() => {
+      void hostJournalFeed(journalFeedForSync(stateRef.current, MAIN_BOT_ID))
+    }, 5_000)
+    return () => window.clearTimeout(handle)
+  }, [journalFeedSyncKey])
+
+  const journalRuleSyncKey = `${state.settings.journalRule.enabled ? 1 : 0}:${String(state.settings.journalRule.startHour)}:${String(state.settings.journalRule.endHour)}:${String(state.settings.journalRule.idleMinutes)}:${String(state.lastUserMessageAt)}`
+  useEffect(() => {
+    if (isDemoMode()) return undefined
+    const handle = window.setTimeout(() => {
+      const current = stateRef.current
+      void hostJournalRule(normalizeJournalRule(current.settings.journalRule), current.lastUserMessageAt)
+    }, 1_000)
+    return () => window.clearTimeout(handle)
+  }, [journalRuleSyncKey])
 
   const activeBot = useMemo(() => {
     return state.bots.find((bot) => bot.id === ui.selectedBotId) ?? state.bots[0]
@@ -1563,10 +5280,17 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     setTheme,
     setRightTab: (rightTab) => setUi((prev) => ({ ...prev, rightTab })),
     toggleRightPanel: (open) => setUi((prev) => ({ ...prev, rightPanelOpen: open ?? !prev.rightPanelOpen })),
+    setRightPanelWidth: (width) => setUi((prev) => ({ ...prev, rightPanelWidth: clampRightWidth(width) })),
+    setChatWidth: (width) => setUi((prev) => ({ ...prev, chatWidth: clampChatWidth(width) })),
+    toggleSidebar: (open) => setUi((prev) => ({ ...prev, sidebarCollapsed: open === undefined ? !prev.sidebarCollapsed : !open })),
     openNewBot: (newBotOpen) => setUi((prev) => ({ ...prev, newBotOpen })),
+    openBotSettings: (botSettingsOpen) => setUi((prev) => ({ ...prev, botSettingsOpen })),
     openGroupSettings: (groupSettingsOpen) => setUi((prev) => ({ ...prev, groupSettingsOpen })),
+    openTaskDetail: (taskDetailId) => setUi((prev) => ({ ...prev, taskDetailId })),
     openJournal: (journalOpenId) => setUi((prev) => ({ ...prev, journalOpenId, view: journalOpenId ? 'journal' : 'chat' })),
     sendMessage,
+    stopReply,
+    setReplyTo: (replyTo) => setUi((prev) => ({ ...prev, replyTo })),
     createBot,
     updateBot,
     deleteBot,
@@ -1580,6 +5304,12 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     deleteRoom,
     answerInteractive,
     recallMessage,
+    /*
+     * 补漏：接口里有、依赖数组里也有，但这个对象漏了它——ChatPanel 的「清空对话」
+     * 直接调 `actions.clearConversation`，不补就是点击必崩（tsc 也会报 TS2741）。
+     */
+    clearConversation,
+    refreshPages,
     addMemory,
     deleteMemory,
     createRoutine,
@@ -1592,18 +5322,25 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     startCall,
     endCall,
     callUserTurn,
+    interruptCall,
+    retryCallMicrophone,
+    callLevel,
     setCallMuted,
     setCallSpeaker,
+    setCallVolume,
     minimizeCall,
+    toggleCallSegment,
     toast,
     clearUnread,
   }), [
-    selectBot, selectRoom, setTheme, sendMessage, createBot, updateBot, deleteBot, setBotEnabled, moveBot,
+    selectBot, selectRoom, setTheme, sendMessage, stopReply, createBot, updateBot, deleteBot, setBotEnabled, moveBot,
     createGroup, renameGroup, deleteGroup, createRoom, updateRoom, deleteRoom, answerInteractive,
     recallMessage,
     addMemory, deleteMemory, createRoutine, toggleRoutine, runRoutine, deleteRoutine, proactiveNow, clearConversation,
-    generateJournal, runJournalCheck, startCall, endCall, callUserTurn, setCallMuted, setCallSpeaker,
-    minimizeCall, toast, clearUnread,
+    refreshPages,
+    generateJournal, runJournalCheck, startCall, endCall, callUserTurn, interruptCall, retryCallMicrophone,
+    callLevel, setCallMuted, setCallSpeaker, setCallVolume,
+    minimizeCall, toggleCallSegment, toast, clearUnread,
   ])
 
   const value: PersonalContextValue = useMemo(() => ({
@@ -1627,6 +5364,75 @@ export function usePersonal(): PersonalContextValue {
 /** 当前会话是否为群聊。 */
 export function useActiveRoom(): { id: string; name: string; memberIds: string[] } | null {
   return usePersonal().activeRoom
+}
+
+/**
+ * Live 供应商列表的读取状态（Bot 设置的三处入口共用）。
+ *
+ * 数据源是 `GET /api/personal-agent/realtime/config`：这份列表由用户在「设置 →
+ * 供应商 → 实时语音」里维护，属于**宿主配置**而不是 Bot 数据，所以不进 localStorage，
+ * 每次打开设置入口时现拉一次（`enabled` 从 false 变 true 就重拉）。
+ *
+ * 降级：接口不可用（宿主还没重启到新版本 / 独立演示页 / 404）时 `vendors` 保持
+ * `null`、`error` 给出原因，调用方据此把下拉置灰并显示一行提示——**不能因为拉不到
+ * 就挡住其它设置项**。
+ */
+export interface LiveVendorsState {
+  /** 供应商列表；`null` = 还没读到（加载中或读取失败）。 */
+  vendors: readonly RealtimeVendorRecord[] | null
+  /** 全局默认供应商 id；空串 = 宿主没配（会回落到列表第一条）。 */
+  defaultVendor: string
+  loading: boolean
+  /** 读不到时的原因；`null` = 一切正常。 */
+  error: string | null
+}
+
+export function useLiveVendors(enabled: boolean): LiveVendorsState {
+  const [vendors, setVendors] = useState<readonly RealtimeVendorRecord[] | null>(null)
+  const [defaultVendor, setDefaultVendor] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!enabled) return undefined
+    let alive = true
+    setLoading(true)
+    setError(null)
+    void (async () => {
+      try {
+        const res = await fetch(REALTIME_CONFIG_PATH, { headers: { accept: 'application/json' } })
+        const data = (await res.json()) as RealtimeVendorsResponse
+        if (data.ok !== true) throw new Error(data.error ?? `读取失败（HTTP ${res.status}）`)
+        const raw = data.config?.vendors
+        if (!Array.isArray(raw)) {
+          /*
+           * 接口通了但**没有 vendors 字段**：跑着的宿主还是旧版本（Live 供应商列表是
+           * 新加的，只有重启到新宿主才有）。这跟「列表是空的」不是一回事，要分开说，
+           * 否则用户会以为自己的供应商被删了。
+           */
+          if (!alive) return
+          setVendors(null)
+          setError('宿主还没提供 Live 供应商列表（可能版本较旧，重启宿主后可用）')
+          return
+        }
+        if (!alive) return
+        setVendors(raw)
+        setDefaultVendor(data.config?.defaultVendor ?? '')
+      } catch (err) {
+        if (!alive) return
+        // 读不到就回到「未知」状态：下拉置灰，由调用方显示原因
+        setVendors(null)
+        setError(err instanceof Error ? err.message : String(err))
+      } finally {
+        if (alive) setLoading(false)
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [enabled])
+
+  return { vendors, defaultVendor, loading, error }
 }
 
 export { STORAGE_KEY as PERSONAL_STORAGE_KEY }

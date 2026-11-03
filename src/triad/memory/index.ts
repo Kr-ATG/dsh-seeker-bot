@@ -17,12 +17,12 @@ import { compileAll, workspaceHashOf } from './engine/compile.js'
 import { prepareMemoryContent } from './engine/content-hygiene.js'
 import { extractCandidatesWithOutcome, isDuplicateContent, transcriptFromEvents } from './engine/extract.js'
 import { createMemoryInjector } from './engine/inject.js'
-import { MemoryStore, entryIdOf, summarize } from './engine/store.js'
+import { MemoryStore, entryIdOf, ownerOf, ownerOfSessionId, summarize } from './engine/store.js'
 import { createTodoClosure, type TurnStoppingAgent } from './engine/todo-closure.js'
 import { setWebuiMemoryStore } from '../memory-store-singleton.js'
 import { createTicker } from './engine/ticker.js'
 import { registerMemoryTools } from './tools.js'
-import { applyConfigOverrides, DEFAULT_CONFIG, type MemoryConfig, type SessionTickerState } from './types.js'
+import { applyConfigOverrides, DEFAULT_CONFIG, type ExtractCandidate, type MemoryConfig, type SessionTickerState } from './types.js'
 
 /** Stable Cordis plugin name。 */
 export const name = 'dsh-memory'
@@ -114,6 +114,9 @@ export function applyMemory(ctx: Context, input: Partial<MemoryConfig> | undefin
   ctx.on('session/event', (session, event) => {
     if (event.type === 'turn/start') {
       turnBuffers.set(session.id, [])
+      // 新的一轮：清掉「本轮已重注过」的标记，让记忆变更在下一轮还能再触发一次
+      // 重注（inject.ts 的 noteTurnStart 注释里说明了为什么需要区分轮次）。
+      injector.noteTurnStart(session.id)
       return
     }
     // 压缩后重新注入：注入按设计只在会话首步做一次，而官方压缩
@@ -147,7 +150,11 @@ export function applyMemory(ctx: Context, input: Partial<MemoryConfig> | undefin
       }).catch(error => logError('extractTurn', error))
       return
     }
-    if (event.type === 'user/message' || event.type === 'assistant/message') {
+    // 工具调用与结果也进缓冲：文件路径、执行结论只出现在工具结果里，而它们
+    // 正是「上次那个文件在哪」这类问题的答案（收窄与截断规则见 extract.ts 的
+    // transcriptFromEvents：中间过程类只留路径、单条 2000 字符、回合内合计预算）。
+    if (event.type === 'user/message' || event.type === 'assistant/message'
+      || event.type === 'tool/call' || event.type === 'tool/result') {
       const buffer = turnBuffers.get(session.id)
       if (buffer === undefined) return
       buffer.push({ type: event.type, data: event.data })
@@ -169,6 +176,60 @@ export function applyMemory(ctx: Context, input: Partial<MemoryConfig> | undefin
   ctx.logger?.info?.('[dsh-memory] memory engine mounted')
 }
 
+/**
+ * 一轮里按「真人 user/message」切段。
+ *
+ * Bot 允许用户在执行中插话（`agent.steer()`）：第 2 句还没跑完时第 3 句就会
+ * 作为同一个 turn 的 user/message 进来。如果整轮只抽一次，候选只能记一个
+ * `turn`，撤回第 2 句时无法区分第 3 句的记忆。切段后每段各抽一次，provenance
+ * 带上该段起点的 userMessageId，撤回就能按消息精确回收。
+ */
+interface TurnSegment {
+  /** 该段起点的真人消息 id；拿不到时缺省，撤回侧退回 turn / 时间。 */
+  userMessageId?: string
+  events: Array<{ type: string; data: unknown }>
+}
+
+function splitTurnBuffer(buffer: Array<{ type: string; data: unknown }>): TurnSegment[] {
+  const segments: TurnSegment[] = []
+  let current: TurnSegment | null = null
+  let leading: Array<{ type: string; data: unknown }> = []
+  for (const event of buffer) {
+    const data = event.data as { id?: unknown; source?: { kind?: unknown } } | undefined
+    const isHuman = event.type === 'user/message' && data?.source?.kind === 'user'
+    if (isHuman) {
+      if (current !== null) segments.push(current)
+      current = {
+        ...(typeof data?.id === 'string' && data.id !== '' ? { userMessageId: data.id } : {}),
+        events: [...leading, event],
+      }
+      leading = []
+      continue
+    }
+    if (current !== null) current.events.push(event)
+    else leading.push(event)
+  }
+  if (current !== null) segments.push(current)
+  else if (leading.length > 0) segments.push({ events: leading })
+  return segments
+}
+
+/**
+ * 这一段是否已被撤回。
+ *
+ * 优先按消息墓碑判断（steer 场景下同一 turn 里只撤第 2 句，第 3 句的段必须
+ * 继续抽取）；没有消息墓碑时才看整轮墓碑（旧数据 / 拿不到消息 id 的撤回）。
+ */
+function isRecalledSegment(
+  store: MemoryStore,
+  sessionId: string,
+  turn: number,
+  userMessageId: string | undefined,
+): boolean {
+  if (store.isMessageRecalled(sessionId, userMessageId)) return true
+  return store.isTurnRecalled(sessionId, turn)
+}
+
 /** 一轮的提取与入库（提取频率由 extractEveryTurns 控制）。 */
 async function extractTurn(
   ctx: Context,
@@ -178,8 +239,18 @@ async function extractTurn(
   buffer: Array<{ type: string; data: unknown }>,
   turnNumber: number,
 ): Promise<void> {
-  const transcript = transcriptFromEvents(buffer)
-  if (transcript.trim() === '') return
+  /*
+   * 该轮已被撤回：不要再调用模型提取。撤回可能发生在 turn/end 之后、本条
+   * 提取任务真正执行之前——这时 buffer 里还留着被撤回的对话，如果照常跑，
+   * 记忆会在撤回之后又被写回来。
+   */
+  if (store.isTurnRecalled(agent.session.id, turnNumber)) return
+  const segments = splitTurnBuffer(buffer)
+    .map(segment => ({ ...segment, transcript: transcriptFromEvents(segment.events) }))
+    .filter(segment => segment.transcript.trim() !== '')
+    .filter(segment => !isRecalledSegment(store, agent.session.id, turnNumber, segment.userMessageId))
+  if (segments.length === 0) return
+  const totalChars = segments.reduce((total, segment) => total + segment.transcript.length, 0)
   // 工作区自动记忆开关：该工作区关闭自动记忆时跳过提取（手动记忆/注入不受影响）。
   // cwd 判定失败（hash=null）时同样跳过——无法查开关就宁可不记，避免关了开关
   // 的项目因 cwd 缺失而把记忆以 global 层漏进来。
@@ -211,21 +282,29 @@ async function extractTurn(
   const logLine = (line: string): void => {
     void store.appendExtractLog(line).catch(() => { /* 诊断日志写不进去就当没有 */ })
   }
-  logLine(`turn=${turnNumber} chars=${transcript.length} route=${agent.options.provider ?? 'default'} start`)
+  logLine(`turn=${turnNumber} chars=${totalChars} route=${agent.options.provider ?? 'default'} start`)
   // 四态结果（ok / ok-empty / parse-fail / llm-error）必须分开记：旧实现把所有
   // 路径塌缩成空数组，于是「模型说没啥可记」和「LLM 挂了」在退避逻辑里等价，
   // 正常空结果把会话打成降频态，而真失败反倒淹没在噪音里。
   //
   // 诊断日志下沉给 extract 自己写（log 参数）：失败路径也要留痕，否则线上只有
   // debug 日志时根本分不清「没调用」和「调用了但挂了」。
-  const result = await extractCandidatesWithOutcome(ctx, agent, transcript, config, store)
-  const candidates = result.candidates
-  logLine(`turn=${turnNumber} done ${Date.now() - startedAt}ms outcome=${result.outcome} candidates=${candidates.length}`)
-  ctx.logger?.debug?.(`[dsh-memory] extract turn=${turnNumber} chars=${transcript.length} outcome=${result.outcome} candidates=${candidates.length} route=${agent.options.provider ?? 'default'}`)
-  if (candidates.length === 0) {
+  const batches: Array<{ userMessageId?: string; candidates: ExtractCandidate[] }> = []
+  let anyCandidates = false
+  let anyFailed = false
+  for (const segment of segments) {
+    const result = await extractCandidatesWithOutcome(ctx, agent, segment.transcript, config, store)
+    if (result.candidates.length > 0) anyCandidates = true
+    if (result.outcome === 'parse-fail' || result.outcome === 'llm-error') anyFailed = true
+    batches.push({ ...(segment.userMessageId !== undefined ? { userMessageId: segment.userMessageId } : {}), candidates: result.candidates })
+  }
+  const outcome = anyCandidates ? 'ok' : anyFailed ? 'llm-error' : 'ok-empty'
+  logLine(`turn=${turnNumber} done ${Date.now() - startedAt}ms outcome=${outcome} candidates=${batches.reduce((total, batch) => total + batch.candidates.length, 0)}`)
+  ctx.logger?.debug?.(`[dsh-memory] extract turn=${turnNumber} chars=${totalChars} outcome=${outcome} candidates=${batches.reduce((total, batch) => total + batch.candidates.length, 0)} route=${agent.options.provider ?? 'default'}`)
+  if (!anyCandidates) {
     // 只有真失败才推高退避计数；正常空结果单独记，只用来观察「这个会话不太产
     // 记忆」的趋势，不参与降频判定。两者一旦有结果就互相清零，语义不重叠。
-    const failed = result.outcome === 'parse-fail' || result.outcome === 'llm-error'
+    const failed = anyFailed
     const latest = await store.readState()
     const per: SessionTickerState = latest.perSession[agent.id] ?? { turnCount: 0 }
     if (failed) {
@@ -243,72 +322,107 @@ async function extractTurn(
   let updated = 0
   let deduped = 0
   let rejected = 0
+  /*
+   * 本轮抽取的记忆归属：`pa-bot-v2-<botId>` → `bot:<botId>`，其余 → `work`。
+   *
+   * 整个 turn 只算一次（一个会话的归属不会中途变），并且**所有写入路径都必须带它**：
+   * 改造前 bot 的对话会被抽成 Work 的项目记忆（两者共用 `D:\Seeker-Bot` 之外的
+   * 判断只有 cwd，而 bot 的 cwd 是固定的），于是 Work 模式里突然冒出 bot 的闲聊。
+   */
+  const owner = ownerOfSessionId(agent.session.id)
   // 语义去重：读一次已有条目作快照；候选与已有高度重复则跳过（降 churn）。
   const existingEntries = await store.readEntries()
-  for (const rawCandidate of candidates) {
-    // 内容卫生：先清洗形式噪声，再硬拒确定垃圾（占位词 / 纯称呼元信息 / 空）。
-    // 放在去重之前是刻意的：清洗会改内容，先洗后比才能让「同一句话带不带 markdown
-    // 残符」落进同一个 id（entryIdOf 由 content 推导，洗与不洗会得到两个不同的 id，
-    // 于是同一句话能存两条）。拒绝则连比都不用比。
-    const prepared = prepareMemoryContent(rawCandidate.content)
-    if ('rejected' in prepared) {
-      rejected += 1
-      ctx.logger?.debug?.(`[dsh-memory] candidate rejected (${prepared.rejected}): ${rawCandidate.content.slice(0, 60)}`)
-      continue
-    }
-    const candidate = { ...rawCandidate, content: prepared.content }
-    // 工作区判定失败 → 回退 global（design §8）。
-    let scope: 'global' | 'project' = candidate.scope
-    let hash: string | null = null
-    if (scope === 'project') {
-      hash = workspaceHashOf(agent.session.header)
-      if (hash === null) scope = 'global'
-    }
-    // 语义去重：跳过与已有记忆高度重复的候选（不写 change，避免提取→consolidate 再删的浪费）。
-    const sameScope = existingEntries.filter(entry => entry.scope === scope && (scope === 'global' || entry.projectHash === hash))
-    if (isDuplicateContent(candidate.content, sameScope)) {
-      deduped += 1
-      continue
-    }
-    // 变更对比：update 时记录旧内容（before，必须在 upsert 前读取）。
-    const beforeEntry = await store.getEntry(entryIdOf(candidate.content, scope, hash))
-    const { created, entry } = await store.upsertEntry({
-      content: candidate.content,
-      scope,
-      projectHash: hash,
-      tags: candidate.tags,
-      importance: candidate.importance,
-      source: 'extract',
-      // 溯源：记下产生该条目的会话与轮次（KR 右栏记忆卡按 sessionId 判定
-      // 「本会话新增」，不再用浏览器时间基线猜）。
-      provenance: { sessionId: agent.session.id, turn: turnNumber },
-      // 待确认制：开启时自动抽取的条目挂 pending，不检索/不注入/不编译，
-      // 等用户在面板确认。关闭时（默认）直接生效，保持旧行为。
-      pending: config.extractRequireConfirm === true ? true : undefined,
-    })
-    existingEntries.push(entry)
-    // 项目层首次落盘时确保 meta.json 存在（否则面板项目列表看不到该项目）。
-    if (scope === 'project' && hash !== null) {
-      const meta = await store.readProjectMeta(hash)
-      if (meta === undefined) {
-        await store.writeProjectMeta(hash, {
-          path: agent.session.header?.cwd ?? '未知工作区',
-          alias: null,
-          locked: false,
-        })
+  for (const batch of batches) {
+    if (isRecalledSegment(store, agent.session.id, turnNumber, batch.userMessageId)) continue
+    for (const rawCandidate of batch.candidates) {
+      // 候选循环里再查一次：LLM 提取可能跑几秒，期间用户可能刚好撤回。
+      if (isRecalledSegment(store, agent.session.id, turnNumber, batch.userMessageId)) break
+      // 内容卫生：先清洗形式噪声，再硬拒确定垃圾（占位词 / 纯称呼元信息 / 空）。
+      // 放在去重之前是刻意的：清洗会改内容，先洗后比才能让「同一句话带不带 markdown
+      // 残符」落进同一个 id（entryIdOf 由 content 推导，洗与不洗会得到两个不同的 id，
+      // 于是同一句话能存两条）。拒绝则连比都不用比。
+      const prepared = prepareMemoryContent(rawCandidate.content)
+      if ('rejected' in prepared) {
+        rejected += 1
+        ctx.logger?.debug?.(`[dsh-memory] candidate rejected (${prepared.rejected}): ${rawCandidate.content.slice(0, 60)}`)
+        continue
       }
+      const candidate = { ...rawCandidate, content: prepared.content }
+      // 工作区判定失败 → 回退 global（design §8）。
+      let scope: 'global' | 'project' = candidate.scope
+      let hash: string | null = null
+      if (scope === 'project') {
+        hash = workspaceHashOf(agent.session.header)
+        if (hash === null) scope = 'global'
+      }
+      // 语义去重：跳过与已有记忆高度重复的候选（不写 change，避免提取→consolidate 再删的浪费）。
+      // 去重范围必须与写入范围一致：同 owner 同 scope 同项目才算「已有」，
+      // 否则两个 bot 说同一句话会互相把对方的候选判成重复而都不落库。
+      const sameScope = existingEntries.filter(entry =>
+        ownerOf(entry) === owner
+        && entry.scope === scope
+        && (scope === 'global' || entry.projectHash === hash))
+      if (isDuplicateContent(candidate.content, sameScope)) {
+        deduped += 1
+        continue
+      }
+      // 变更对比：update 时记录旧内容（before，必须在 upsert 前读取）。
+      const beforeEntry = await store.getEntry(entryIdOf(candidate.content, scope, hash, owner))
+      const { created, entry } = await store.upsertEntry({
+        content: candidate.content,
+        scope,
+        projectHash: hash,
+        owner,
+        tags: candidate.tags,
+        importance: candidate.importance,
+        source: 'extract',
+        // 溯源：记下产生该条目的会话与轮次（KR 右栏记忆卡按 sessionId 判定
+        // 「本会话新增」，不再用浏览器时间基线猜）。userMessageId 用于 steer
+        // 插话场景：同一个 turn 里第 2/3 句都能按消息精确撤回。
+        provenance: {
+          sessionId: agent.session.id,
+          turn: turnNumber,
+          ...(batch.userMessageId !== undefined ? { userMessageId: batch.userMessageId } : {}),
+        },
+        // 待确认制：开启时自动抽取的条目挂 pending，不检索/不注入/不编译，
+        // 等用户在面板确认。关闭时（默认）直接生效，保持旧行为。
+        pending: config.extractRequireConfirm === true ? true : undefined,
+        // 临时信息有效期（「今天要发 36 条」这类）：入库但到点后不再注入。
+        // 缺省不传 = 永久有效；提取 prompt 已要求模型对能界定有效期的内容标它。
+        ttlDays: candidate.ttlDays,
+      })
+      /*
+       * 落库后再查一次：撤回可能发生在上面的 await 期间。新条目直接删掉；
+       * 更新已有条目的情况保留旧条目内容（无法无损回滚时不把旧记忆一起误删）。
+       */
+      if (isRecalledSegment(store, agent.session.id, turnNumber, batch.userMessageId)) {
+        if (created) await store.removeEntry(entry.id)
+        continue
+      }
+      existingEntries.push(entry)
+      // 项目层首次落盘时确保 meta.json 存在（否则面板项目列表看不到该项目）。
+      if (scope === 'project' && hash !== null) {
+        const meta = await store.readProjectMeta(hash)
+        if (meta === undefined) {
+          await store.writeProjectMeta(hash, {
+            path: agent.session.header?.cwd ?? '未知工作区',
+            alias: null,
+            locked: false,
+          })
+        }
+      }
+      if (created) added += 1
+      else updated += 1
+      await store.appendChange({
+        action: created ? 'add' : 'update',
+        entryId: entry.id,
+        scope: entry.scope,
+        projectHash: entry.projectHash,
+        summary: summarize(entry.content),
+        before: beforeEntry?.content,
+        after: entry.content,
+      })
     }
-    if (created) added += 1
-    else updated += 1
-    await store.appendChange({
-      action: created ? 'add' : 'update',
-      entryId: entry.id,
-      scope: entry.scope,
-      projectHash: entry.projectHash,
-      summary: summarize(entry.content),
-      before: beforeEntry?.content,
-      after: entry.content,
-    })
   }
   // 成功（有候选）：两套计数一起清零——有产出就既不是失败、也不再是连续空结果。
   const successState = await store.readState()

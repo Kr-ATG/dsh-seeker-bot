@@ -22,7 +22,7 @@ import type {
 } from '../types.js'
 import { compileAll, writeDailyLog } from './compile.js'
 import { isSensitiveContent, resolveRoute, type MinimalAgent } from './extract.js'
-import { entryIdOf, nowIso, summarize, type MemoryStore } from './store.js'
+import { entryIdOf, nowIso, ownerOf, summarize, type MemoryStore } from './store.js'
 
 /** 整理用伪 agent：无显式 provider/model，resolveRoute 回退默认模型。 */
 const CONSOLIDATE_AGENT: MinimalAgent = {
@@ -264,15 +264,22 @@ function applyOps(
         if (content === '' || isSensitiveContent(content)) break
         const scope = sources[0].scope
         const projectHash = sources[0].projectHash
+        /*
+         * 归属取第一条源条目：合并只在同一 owner 的条目之间发生（consolidateScope
+         * 按 owner 分组喂进来），所以这里不会把两个 bot 的记忆搅在一起。
+         * 若将来放开跨 owner 合并，这一行必须改成「拒绝合并」而不是取第一条。
+         */
+        const owner = ownerOf(sources[0])
         // 字段合成必须尊重源条目已有的事实，不能一律取第一条或写死默认值：
         // 旧实现写死 verified=false、source=sources[0].source、createdAt=now，
         // 把用户手写并确认过的记忆合并成「未确认的自动提取」，创建时间还被刷新成
         // 今天——合并越频繁，时间线与可信度失真越严重。
         const merged: MemoryEntry = {
-          id: entryIdOf(content, scope, projectHash),
+          id: entryIdOf(content, scope, projectHash, owner),
           content,
           scope,
           projectHash: scope === 'project' ? projectHash : null,
+          owner,
           tags: sanitizeTags(op.tags),
           pinned: false,
           // 合并条目代表这组事实最早被记录的时间点。
@@ -351,7 +358,7 @@ function applyOps(
         // id 由 content+scope+projectHash 派生：改内容必须换 id，否则 id 与内容脱钩，
         // 后续 upsertEntry 会把同一条记忆再插一遍。撞上已有同内容条目则跳过本次改写
         // （目标内容已经存在，改写没有信息增量）。
-        const nextId = entryIdOf(content, entry.scope, entry.projectHash)
+        const nextId = entryIdOf(content, entry.scope, entry.projectHash, ownerOf(entry))
         if (nextId !== entry.id && byId.has(nextId)) break
         const before = entry.content
         entry.id = nextId
@@ -450,7 +457,7 @@ function applyOps(
           // 内容变了 id 必须跟着变（id 由 content 派生），否则 id 与内容脱钩，
           // 后续 upsertEntry 会把同一条记忆再插一遍。目标 id 已被别人占用时
           // 宁可不追加时间线（裁决保留/废弃已经生效），也不制造 id 与内容不一致。
-          const nextId = entryIdOf(nextContent, keeper.scope, keeper.projectHash)
+          const nextId = entryIdOf(nextContent, keeper.scope, keeper.projectHash, ownerOf(keeper))
           if (!byId.has(nextId)) {
             byId.delete(keeper.id)
             keeper.content = nextContent

@@ -30,9 +30,13 @@ import { ChatProviderDetail } from './chat/ChatProviderDetail.tsx'
 import type { ChatProviderMode, ChatProviderTarget } from './chat/ChatProviderDetail.tsx'
 import { ModelsSettingsStore, deriveKeyRef } from './chat/store.ts'
 import type { ModelsSettingsState, ProviderRow } from './chat/store.ts'
+import { inlineCapGroupStyle, inlineCapPillOnStyle, inlineCapPillStyle } from './chat/ModelListEditor.tsx'
 import { injectStyles, hideOfficialModelsNav } from './styles.ts'
 import { ImageModelBlock } from './image/ImageModelBlock.tsx'
 import { VideoModelBlock } from './video/VideoModelBlock.tsx'
+import { LiveVendorList } from './voice/LiveVendorList.tsx'
+import { LiveVendorDetail } from './voice/LiveVendorDetail.tsx'
+import { useLiveVendorStore } from './voice/store.ts'
 import { createLegacyApi } from './api-adapter.ts'
 import { ProxyPanel } from '../panel/proxy-panel.tsx'
 import { getService } from '../../client-ctx.js'
@@ -264,6 +268,20 @@ export function applySupplierSection(ctx: ClientContext): void {
 /** 三栏布局的宽度阈值（px）：低于它模型设置卡回到上下堆叠。 */
 const WIDE_LAYOUT_PX = 1280
 
+/** 供应商页的两种配置模式（页面级切换，左右两栏整体换内容）。 */
+type HubMode = 'chat' | 'live'
+
+/**
+ * 模式分段控件的两项（顺序即展示顺序）。
+ *
+ * 「模型」是这一页的原职，放前面；「实时语音」是第二套内容——左栏换成 Live 供应商
+ * 列表、右栏换成它的编辑表单，页面骨架与交互方式一字不动。
+ */
+const HUB_MODES: readonly { id: HubMode; label: string; title: string }[] = [
+  { id: 'chat', label: '模型', title: '模型：聊天供应商的 API Key、Base URL、协议与模型列表' },
+  { id: 'live', label: '实时语音', title: '实时语音：Live 供应商（Realtime 端点 + key + 模型）与通话默认' },
+]
+
 function Loaded({ injected }: { injected: SupplierInjected }): unknown {
   const { controller, api } = injected
   const state: ModelsSettingsState = useSnapshot(controller.store)
@@ -305,9 +323,36 @@ function Loaded({ injected }: { injected: SupplierInjected }): unknown {
   }, [])
   const [selected, setSelected] = useState<string | undefined>(undefined)
   const [addingCustom, setAddingCustom] = useState(false)
+  /*
+   * 页面模式：「模型」/「实时语音」。
+   *
+   * 用户 2026-11-02 原话：「模式切换应该是在右上角打开配置文件左侧，并且还是沿用
+   * 左侧供应商与添加供应商的方式，只不过是里面的内容全部换掉了」。
+   *
+   * ⚠ 那个「打开配置文件」按钮是**官方设置弹窗 header** 渲染的，不在我们的代码里
+   * （插件只接管内容区 `settings.section` 座位）。所以能做到的最近位置是**内容区
+   * 顶部右对齐**——视觉上紧贴官方按钮下方一行，这是这套座位下物理上最近的地方。
+   */
+  const [mode, setMode] = useState<HubMode>('chat')
+  /*
+   * Live 供应商的共享 store。**始终调用**（hooks 不能条件调用），但只在「实时语音」
+   * 模式渲染；切换模式时清掉选中态与未保存草稿，两套内容不串台。
+   */
+  const live = useLiveVendorStore()
   useEffect(() => {
     if (state.status === 'idle') void controller.load()
   }, [controller, state.status])
+  /** 切换模式：左右两栏整体换内容，并清掉各自的选中态（不跨模式保留详情）。 */
+  const switchMode = (next: HubMode): void => {
+    if (next === mode) return
+    setMode(next)
+    setSelected(undefined)
+    setAddingCustom(false)
+    live.resetSelection()
+    // 切到实时语音时重拉一次 Live 列表：store 随页面常驻，长时间停在模型模式时
+    // 配置可能已被别的窗口改过（旧块每次进入都拉一次，行为保持一致）。
+    if (next === 'live') live.reload()
+  }
   const closeDetail = (changed: boolean): void => {
     setSelected(undefined)
     setAddingCustom(false)
@@ -333,21 +378,38 @@ function Loaded({ injected }: { injected: SupplierInjected }): unknown {
   // 详情滑入：key 随目标变化重播 phub-slide-in（打开/切换/关闭回占位都滑一次）。
   const animKey = addingCustom ? 'custom' : (selected ?? 'placeholder')
   const animDetail = h('div', { key: `anim:${animKey}`, className: 'phub-detail-in' }, [detail])
-  const panelBody = hasDetail
-    ? [
-      h('div', { key: 'toolbar', style: panelToolbarStyle }, [
-        h('button', {
-          key: 'back', type: 'button', title: '返回供应商列表',
-          style: panelBackBtnStyle, onClick: () => { closeDetail(false) },
-        }, '← 供应商列表'),
-        h('button', {
-          key: 'close', type: 'button', title: '关闭', 'aria-label': '关闭',
-          style: panelCloseBtnStyle, onClick: () => { closeDetail(false) },
-        }, '✕'),
-      ]),
-      animDetail,
-    ]
+  /**
+   * 详情面板顶部工具条：返回列表在左、关闭在右。
+   *
+   * 打开详情时左栏收起（800×800 弹窗里两栏并排太挤），返回入口必须在面板里，
+   * 否则用户会被困在详情里。两种模式共用同一套按钮，只是回调不同。
+   */
+  const renderToolbar = (onBack: () => void): unknown => h('div', { key: 'toolbar', style: panelToolbarStyle }, [
+    h('button', {
+      key: 'back', type: 'button', title: '返回供应商列表',
+      style: panelBackBtnStyle, onClick: onBack,
+    }, '← 供应商列表'),
+    h('button', {
+      key: 'close', type: 'button', title: '关闭', 'aria-label': '关闭',
+      style: panelCloseBtnStyle, onClick: onBack,
+    }, '✕'),
+  ])
+  const chatPanelBody = hasDetail
+    ? [renderToolbar(() => { closeDetail(false) }), animDetail]
     : [animDetail]
+  /*
+   * 实时语音模式的右栏：选中项的编辑表单；未选中时是占位 + 「通话默认（全局）」。
+   * 全局设置在两种状态下都渲染——音色 / 语速 / 联网不属于任何一条供应商，
+   * 但用户切到这一页就要能改。
+   */
+  const liveHasDetail = live.editing !== null
+  const liveAnimKey = live.editing === null ? 'placeholder' : (live.editing.id ?? 'new')
+  const liveAnimDetail = h('div', { key: `anim:live:${liveAnimKey}`, className: 'phub-detail-in' }, [
+    h(LiveVendorDetail, { key: 'live-detail', store: live }),
+  ])
+  const livePanelBody = liveHasDetail
+    ? [renderToolbar(() => { live.cancelEdit() }), liveAnimDetail]
+    : [liveAnimDetail]
   // 左栏固定宽度（工作台里不再受设置弹窗宽度约束，也不需要收窄态）。
   const navStyle: Record<string, string | number> = {
     flex: `0 0 ${NAV_WIDTH}px`,
@@ -363,29 +425,61 @@ function Loaded({ injected }: { injected: SupplierInjected }): unknown {
   const proxyBlock = h('div', { key: 'proxy', className: 'phub-proxy phub-block-in' }, [
     h(ProxyPanel),
   ])
+  /*
+   * 模式切换：**放在左栏标题的位置**，替换原来的「模型供应商」文字。
+   *
+   * 用户 2026-11-02：「切换按钮替换这个文字」——所以它不再是内容区顶部单独一行，
+   * 而是作为两个列表的 headerSlot 传进去（聊天列表与 Live 列表共用同一个控件）。
+   */
+  const modeSwitchNode = h('div', {
+    key: 'group', className: 'dsh-cap-group', style: inlineCapGroupStyle,
+    role: 'group', 'aria-label': '配置模式',
+  }, HUB_MODES.map(item => h('button', {
+    key: item.id,
+    type: 'button',
+    className: 'dsh-cap-pill',
+    'aria-pressed': mode === item.id,
+    style: mode === item.id ? inlineCapPillOnStyle : inlineCapPillStyle,
+    title: item.title,
+    onClick: () => { switchMode(item.id) },
+  }, item.label)))
+  const navNode = mode === 'chat'
+    ? h(ChatProviderList, {
+      key: 'nav', state, selected,
+      onSelect: (p: string) => { setSelected(p); setAddingCustom(false) },
+      onAddCustom: () => { setAddingCustom(true) },
+      onRetry: () => { void controller.load() },
+      headerSlot: modeSwitchNode,
+    })
+    : h(LiveVendorList, { key: 'nav-live', store: live, headerSlot: modeSwitchNode })
+  // 右栏：模型模式沿用原详情面板（占位时虚线），Live 模式始终是实面板
+  // （里面除了表单/占位还有「通话默认（全局）」）。
+  const detailNode = mode === 'chat'
+    ? h('div', {
+      key: 'panel',
+      className: hasDetail ? 'phub-panel' : 'phub-panel phub-placeholder',
+      style: detailPanelStyle,
+    }, chatPanelBody)
+    : h('div', { key: 'panel-live', className: 'phub-panel', style: detailPanelStyle }, livePanelBody)
+  // 打开详情时收起左栏（800×800 弹窗里两栏并排太挤，收起后右侧独占整行）。
+  const editingNow = mode === 'chat' ? hasDetail : liveHasDetail
   return h('div', {
     className: 'phub-host',
     ref: hostRef,
     'data-wide': wide ? 'true' : undefined,
-    // 打开详情时收起左栏（800×800 弹窗里两栏并排太挤，收起后右侧独占整行）。
-    'data-editing': hasDetail ? 'true' : undefined,
+    'data-mode': mode,
+    'data-editing': editingNow ? 'true' : undefined,
   }, [
-    h('div', { key: 'hub', style: hubLayoutStyle }, [
-      h('div', { key: 'navWrap', className: 'phub-navwrap', style: navStyle }, [
-        h(ChatProviderList, {
-          key: 'nav', state, selected,
-          onSelect: (p: string) => { setSelected(p); setAddingCustom(false) },
-          onAddCustom: () => { setAddingCustom(true) },
-          onRetry: () => { void controller.load() },
-        }),
-      ]),
-      h('div', { key: 'detail', style: detailColStyle }, [
-        h('div', { key: 'panel', className: hasDetail ? 'phub-panel' : 'phub-panel phub-placeholder', style: detailPanelStyle }, panelBody),
-      ]),
+    h('div', { key: 'hub', className: 'phub-hub', style: hubLayoutStyle }, [
+      h('div', { key: 'navWrap', className: 'phub-navwrap', style: navStyle }, [navNode]),
+      h('div', { key: 'detail', style: detailColStyle }, [detailNode]),
       // 模型设置卡：宽屏成为第三列，窄屏被 flexWrap 挤到第二行（全宽）。
-      // 两种形态共用同一份 DOM，切档不重建子树。
-      blocks,
+      // 两种形态共用同一份 DOM，切档不重建子树。生图/生视频属于聊天模型那套，
+      // 「实时语音」模式下整体不渲染。
+      mode === 'chat' ? blocks : null,
     ]),
-    proxyBlock,
+    // 代理同理：它是聊天请求的出口，实时语音走宿主自己的上游地址，摆在这里只会
+    // 让人以为它对这个模式也生效。
+    mode === 'chat' ? proxyBlock : null,
   ])
 }

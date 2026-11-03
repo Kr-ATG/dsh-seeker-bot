@@ -208,7 +208,6 @@ export function ChatProviderDetail(props: ChatProviderDetailProps): ReactNode {
   const [failure, setFailure] = useState<string | undefined>(undefined)
   const [saved, setSaved] = useState(false)
   const [deleteArmed, setDeleteArmed] = useState(false)
-
   // 展开编辑 UI 的共享伪类样式（focus/placeholder/hover/disabled）。
   useEffect(() => { ensureProviderFieldStyles() }, [])
 
@@ -650,41 +649,54 @@ export function ChatProviderDetail(props: ChatProviderDetailProps): ReactNode {
           {saved ? <span style={{ fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-success-primary, #00b42a)' }}>{chatCopy.saved}</span> : null}
         </div>
 
-        {/* 右侧代理开关 */}
-        {proxyKey !== undefined ? (
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-            <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary, #8f959e)' }}>走代理</span>
-            <div className="dsh-cap-group" style={inlineCapGroupStyle}>
-              <button
-                type="button"
-                className="dsh-cap-pill"
-                aria-pressed={isThisProxied}
-                style={isThisProxied ? inlineCapPillOnStyle : inlineCapPillStyle}
-                disabled={disabled}
-                onClick={() => {
-                  if (!isThisProxied) void setProviderProxied(proxyKey, true)
-                }}
-                title="该供应商走代理转发"
-              >
-                是
-              </button>
-              <button
-                type="button"
-                className="dsh-cap-pill"
-                aria-pressed={!isThisProxied}
-                style={!isThisProxied ? inlineCapPillOnStyle : inlineCapPillStyle}
-                disabled={disabled}
-                onClick={() => {
-                  if (isThisProxied) void setProviderProxied(proxyKey, false)
-                }}
-                title="该供应商直连"
-              >
-                否
-              </button>
-            </div>
-          </div>
-        ) : null}
+        {/* 右侧：代理开关。
+            实时语音（Live 供应商）不在这张卡片里——它由供应商页顶部的
+            「模型 / 实时语音」模式切换承载，两套内容各占整页，不再混排。 */}
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 14, flexShrink: 0, flexWrap: 'wrap' }}>
+          {proxyKey !== undefined
+            ? (
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary, #8f959e)' }}>走代理</span>
+                <div className="dsh-cap-group" style={inlineCapGroupStyle}>
+                  <button
+                    type="button"
+                    className="dsh-cap-pill"
+                    aria-pressed={isThisProxied}
+                    style={isThisProxied ? inlineCapPillOnStyle : inlineCapPillStyle}
+                    disabled={disabled}
+                    onClick={() => {
+                      if (!isThisProxied) void setProviderProxied(proxyKey, true)
+                    }}
+                    title="该供应商走代理转发"
+                  >
+                    是
+                  </button>
+                  <button
+                    type="button"
+                    className="dsh-cap-pill"
+                    aria-pressed={!isThisProxied}
+                    style={!isThisProxied ? inlineCapPillOnStyle : inlineCapPillStyle}
+                    disabled={disabled}
+                    onClick={() => {
+                      if (isThisProxied) void setProviderProxied(proxyKey, false)
+                    }}
+                    title="该供应商直连"
+                  >
+                    否
+                  </button>
+                </div>
+              </div>
+            )
+            : null}
+        </div>
       </div>
+
+      {/*
+        Live 供应商已整体搬到供应商页顶部的「模型 / 实时语音」模式切换里
+        （左栏列表 + 右栏详情，见 webui/voice/**）。聊天供应商详情卡只剩
+        普通供应商配置：API Key / API 地址 / 协议 / 模型目录。
+      */}
+      <>
       {layout === 'unknown' && target.mode !== 'custom'
         ? <p style={hintStyle}>{`其他字段在 settings.yaml 中（${target.settingsNs}）`}</p>
         : null}
@@ -943,6 +955,7 @@ export function ChatProviderDetail(props: ChatProviderDetailProps): ReactNode {
           {busy ? (target.mode === 'custom' ? chatCopy.creating : chatCopy.saving) : (target.mode === 'custom' ? chatCopy.create : chatCopy.save)}
         </button>
       </div>
+      </>
     </div>
   )
 }

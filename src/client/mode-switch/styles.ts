@@ -41,7 +41,12 @@ body[data-skb-mode="work"] .skb-console {
 }
 
 /* ── Bot 模式：官方侧栏子元素让位，只留这枚分段控件（侧栏空白）──────── */
-body[data-skb-mode="bot"] [data-skb-native-hide="true"] { display: none !important; }
+/*
+ * 隐藏标记对两种模式都生效：Bot 模式下用它让官方侧栏整体让位；Work 模式下
+ * 用它藏掉混进官方会话列表的 Bot 宿主会话行（data-row-key="session:pa-bot-v2-…"）。
+ * 属性只由本插件写，不会误伤官方自己的折叠状态。
+ */
+[data-skb-native-hide="true"] { display: none !important; }
 /*
  * Bot 模式下降级态（Personal Agent 没渲染出来时，侧栏里只剩这枚分段）：
  * 顶部留出与 .pa-sidebar__top 等高的 66px，分段仍落在 y=74，
@@ -73,7 +78,8 @@ body[data-skb-mode="bot"] .pI_x6G_frame:not([data-sidebar-collapsed]) .hHd-Xa_ro
   width: 300px !important;
 }
 body[data-skb-mode="bot"] [data-slot="sidebar"] .hHd-Xa_root {
-  background: #F7F7F7;
+  /* 跟随官方侧栏底色：与 Bot 侧栏 .pa-sidebar、Work 模式同源，深浅主题自动切。 */
+  background: var(--dsw-specific-sidebar-fill, #F7F7F7);
 }
 
 /* ── 自绘容器（Bot 模式下是空白侧栏的底色）─────────────────────────── */
@@ -86,7 +92,8 @@ body[data-skb-mode="bot"] [data-slot="sidebar"] .hHd-Xa_root {
   overflow-x: hidden;
   padding: 0 4px 10px;
   box-sizing: border-box;
-  background: #F7F7F7;
+  /* 底色与官方侧栏同源（Bot 应用没渲染时的降级态也不会出现色差）。 */
+  background: var(--dsw-specific-sidebar-fill, #F7F7F7);
   color: var(--dsw-alias-label-primary, #1F1F1F);
   font-size: 14px;
   line-height: 1.45;
@@ -184,11 +191,12 @@ body:not([data-ds-dark-theme]) .skb-seg__btn:disabled:hover {
 }
 
 /* ── 暗色主题：Bot 模式侧栏底色（分段配色已是深色基准，这里只收底色）──── */
+/* 同样优先用官方侧栏底色变量；变量缺失时才回退到深色值。 */
 body[data-ds-dark-theme][data-skb-mode="bot"] [data-slot="sidebar"] .hHd-Xa_root {
-  background: #1B1B1C;
+  background: var(--dsw-specific-sidebar-fill, #1B1B1C);
 }
 body[data-ds-dark-theme] .skb-console {
-  background: #1B1B1C;
+  background: var(--dsw-specific-sidebar-fill, #1B1B1C);
   color: var(--dsw-alias-label-primary, #E6E7E9);
 }
 `

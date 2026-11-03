@@ -3,7 +3,7 @@
  *
  * 每一个用户可见的细粒度能力，都必须先在这里登记一行；它是内部实现视角，
  * 不是用户看到的开关粒度 —— 用户在插件页面看到的是 src/shared/components.ts
- * 里的 15 个「包含的组件」行，每项功能通过 FEATURE_COMPONENT 归到某一行。
+ * 里的 14 个「包含的组件」行，每项功能通过 FEATURE_COMPONENT 归到某一行。
  * 三处消费同一份表，不允许各自另写一张：
  *
  *   1. host 半身：src/features/host.ts 用它生成默认值与 /api/chat-flow/features 回包；
@@ -114,7 +114,6 @@ export const FEATURES: ReadonlyArray<FeatureDef> = [
   { id: 'work.memory', group: 'workbench', label: '记忆', desc: '长期记忆工作台（自动沉淀、检索、置顶与按项目分层）。', default: true, apply: 'live' },
   { id: 'work.skills', group: 'workbench', label: 'SKILL', desc: '技能管理工作台（安装 / 停用 / 分类 / 查看说明）。', default: true, apply: 'live' },
   { id: 'work.connectors', group: 'workbench', label: '连接器', desc: 'MCP 连接器市场（精选目录 / 搜索 / 一键安装与启停）。', default: true, apply: 'live' },
-  { id: 'work.usage', group: 'workbench', label: '观测 / 用量', desc: 'Token、请求、缓存与速度的观测大盘。', default: true, apply: 'live' },
   { id: 'work.gallery', group: 'workbench', label: '画廊', desc: '跨会话的图片 / 网页 / 视频 / 文档产出物索引。', default: true, apply: 'live' },
   { id: 'work.vault', group: 'workbench', label: '档案', desc: '账号密码 / 支付方式 / 联系方式 / 证件的加密档案。', default: true, apply: 'live' },
   { id: 'work.prompt', group: 'workbench', label: '系统提示词', desc: '查看本次会话真正发送给模型的系统提示词快照。', default: true, apply: 'live' },

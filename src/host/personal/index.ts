@@ -1,33 +1,70 @@
 /**
  * Personal Agent — host 半身。
  *
- * 为前端 Personal Agent 提供三件真实能力（全部可选，失败时前端自动降级）：
+ * 为前端 Personal Agent 提供真实能力（全部可选，失败时前端自动降级）：
  *
  *   1. POST /api/personal-agent/reply          → 走宿主 ctx.llm.stream 的真实模型回复
  *   2. POST /api/personal-agent/journal/image  → 调用当前生图模型生成期刊宽幅配图（16:9）
- *   3. POST /api/personal-agent/tts            → Edge 在线 TTS（本机 edge-tts CLI）转 mp3
+ *   3. WS   /api/personal-agent/realtime       → 全双工实时语音（StepFun Realtime 代理，
+ *                                                见 ./realtime/；取代了原 Edge TTS 半双工通话）
  *   4. POST /api/personal-agent/asr            → 宿主 speechController（SenseVoice）转写
  *   5. GET  /api/personal-agent/journal/asset  → 已生成期刊配图的静态文件
- *   6. GET  /api/personal-agent/file           → bot 工作区里的媒体文件（图片 / 视频 / 音频 /
+ *   6. 期刊日记（宿主生成 + 落盘 + 调度，全部实现见 ./journal.ts）：
+ *      GET    /api/personal-agent/journal/list     → 全部期刊（按 generatedAt 倒序）
+ *      GET    /api/personal-agent/journal/status   → 规则 / 触发日志 / 是否正在生成
+ *      POST   /api/personal-agent/journal/generate → 真实模型生成一期并落盘
+ *      POST   /api/personal-agent/journal/check    → 规则判定（与调度器 tick 同一实现）
+ *      POST   /api/personal-agent/journal/rule     → 保存触发规则
+ *      POST   /api/personal-agent/journal/feed     → 同步当天对话素材（48h / 500 条）
+ *      DELETE /api/personal-agent/journal?id=      → 删除一期期刊
+ *   7. GET  /api/personal-agent/file           → bot 工作区里的媒体文件（图片 / 视频 / 音频 /
  *                                                PDF / Office 文档；视频与音频支持 HTTP Range）
- *   7. GET  /api/personal-agent/office/info    → 产出物可否预览（复用 src/office 的扩展名表）
- *   8. GET  /api/personal-agent/office/page    → Office / PDF 的第 N 页 PNG（复用 src/office 引擎）
- *   9. GET  /api/personal-agent/office/pdf     → 整份 PDF（.pdf 原样转发，Office 走引擎转换）
+ *   8. GET  /api/personal-agent/office/info    → 产出物可否预览（复用 src/office 的扩展名表）
+ *   9. GET  /api/personal-agent/office/page    → Office / PDF 的第 N 页 PNG（复用 src/office 引擎）
+ *  10. GET  /api/personal-agent/office/pdf     → 整份 PDF（.pdf 原样转发，Office 走引擎转换）
  *
  * 设计约束：
  *  - 不引入 @deepseek-ai/* 运行时依赖（本仓库 host 产物必须自包含）；
  *  - 所有路由失败一律 JSON，不抛穿；跨站写请求拒绝；
  *  - 大模型回复只回纯文本 blocks；任何异常都让前端回退到本地引擎，不影响演示。
  */
-import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { homedir } from 'node:os'
 import { extname, isAbsolute, join, resolve, sep } from 'node:path'
-import { botWorkspaceDir, ensureBotAgent, getLastTurnDebug, resetBotConversation, runBotTurn, type BotAgentSpec, type PersonalStreamEvent } from './agent.ts'
+import { botWorkspaceDir, cancelBotTurn, ensureBotAgent, getLastTurnDebug, resetBotConversation, runBotTurn, type BotAgentSpec, type PersonalStreamEvent } from './agent.ts'
+import { scanBotOutputs } from './outputs.ts'
 import { recallBotTurn } from './recall.ts'
+import { addApprovalRule, approvalRulesFile, decideApproval, pendingApprovalCount, readApprovalRules, removeApprovalRule, type ApprovalChoice, type ApprovalRisk } from './approval.ts'
+import { answerQuestion, pendingQuestionCount } from './questions.ts'
+import { currentSeq, parseSinceByBot, publish, subscribe, subscribeAll } from './events.ts'
+import { readCreatedBots, removeCreatedBot } from './bot-create.ts'
+import { purgeBot } from './bot-delete.ts'
+import { applyPersonalAgentScheduler, nextProactiveAt, nextRoutineAt, normalizeNoDataPolicy, normalizeRetryPolicy, readProactive, readRoutines, readServerMessages, runProactiveNow, writeProactive, writeRoutines, type HostProactive, type HostRoutine } from './scheduler.ts'
+import { buildWorkingMemoryBlock, injectWorkingMemoryIntoAgent, pruneWorkingTasks, readWorkingTasks, resetWorkingMemoryInjection, upsertWorkingTask, workingMemoryFile, type WorkingTask } from './working-memory.ts'
+import { listPages, readPage, writePage } from './pages.ts'
+import {
+  checkJournalTrigger,
+  deleteJournalRecord,
+  generateJournalImage,
+  generateJournalWithModel,
+  isJournalGenerating,
+  journalDir,
+  readJournalLogs,
+  readJournalRuleState,
+  readJournals,
+  writeJournalFeed,
+  writeJournalRuleState,
+  type GenerateJournalRequest,
+} from './journal.ts'
+import type { JournalStatus } from '../../shared/journal.ts'
+import { getWebuiMemoryStore } from '../../triad/memory-store-singleton.ts'
+import { projectHashOf } from '../../triad/memory/engine/store.ts'
 import { decodeDataUrl, extensionFor, looksLikeImage, materializeRoot } from '../../spill/materialize.ts'
 import { __test as officeInternals, officeEngineAvailable, renderOfficePages, renderOfficePdf } from '../../office/index.ts'
+import { applyPersonalAgentRealtime, type PersonalRealtimeConfig } from './realtime/mount.ts'
+import { rememberBotSpec, startPersonalRuntime } from './runtime/host.ts'
+import { personalRuntime } from './runtime/registry.ts'
 
 const ROUTE = '/api/personal-agent'
 const MAX_BODY = 32 * 1024 * 1024
@@ -100,6 +137,18 @@ const MEDIA_CONTENT_TYPES: Readonly<Record<string, string>> = {
 }
 
 /**
+ * 工具结果全文的扩展名白名单（**只对 tool-results 根生效**）。
+ *
+ * 为什么不能把 `.txt` 加进 `MEDIA_CONTENT_TYPES`：那会让 bot 工作区里的任意
+ * 文本文件都能通过 `/file` 读出来。工作区是用户的交付物目录，`.txt` 里有可能是
+ * 随手记的敏感内容；而 tool-results 是插件自己写的「模型看到的同一段文本」，
+ * 前端点「查看完整结果」必须能读回来，两者不是一回事。
+ */
+const TOOL_RESULT_CONTENT_TYPES: Readonly<Record<string, string>> = {
+  '.txt': 'text/plain; charset=utf-8',
+}
+
+/**
  * 可渲染的 Office / PDF 扩展名表：**直接用 src/office 的那一份**。
  *
  * 各留一份拷贝迟早漂移（office 那边加一个格式，这边仍判「不可渲染」），所以从
@@ -119,16 +168,11 @@ function normalizeForCompare(value: string): string {
   return resolve(value).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
 }
 
-function dshHome(): string {
-  const env = process.env.DSH_HOME
-  return typeof env === 'string' && env !== '' ? env : join(homedir(), '.dsh')
-}
-
-function journalDir(): string {
-  const dir = join(dshHome(), 'storages', 'dsh-seeker-bot', 'personal-agent', 'journals')
-  mkdirSync(dir, { recursive: true })
-  return dir
-}
+/*
+ * journalDir() / dshHome() 已搬到 ./journal.ts：期刊的存储、生成、生图现在都在
+ * 同一个模块里，index.ts 只 import 它导出的 `journalDir`（/journal/asset 与
+ * 文件准入的允许根还要用）。
+ */
 
 function sendJson(res: any, status: number, payload: unknown): void {
   try {
@@ -179,9 +223,26 @@ function crossSite(req: any): boolean {
 
 /* ───────────────────── 文件 / 媒体路由的准入与工具 ───────────────────── */
 
-/** 一次路径准入的结果：通过时给绝对路径，失败时给 HTTP 状态与错误码。 */
+/**
+ * 工具结果全文的根目录（与 agent.ts 的 `toolResultFile` 同口径）。
+ *
+ * 必须与 agent.ts 的落盘路径**逐字对齐**：那边写
+ * `<dshHome>/storages/dsh-seeker-bot/personal-agent/tool-results/<sessionId>/<callId>.txt`，
+ * 这里少一层目录就会出现「模型说完整结果在某个路径、前端一点就 403」的割裂。
+ *
+ * 为什么把它加进允许根：工具结果被摘要化（1.3）之后，完整内容只在这里，前端
+ * 「查看完整结果」只能靠 `/file` 读回来。但**只放开这一个子树**——
+ * `storages/` 下还有记忆库、插件状态等，整目录放开等于开了个任意读。
+ */
+function toolResultsRoot(): string {
+  const env = process.env.DSH_HOME
+  const home = typeof env === 'string' && env !== '' ? env : join(homedir(), '.dsh')
+  return join(home, 'storages', 'dsh-seeker-bot', 'personal-agent', 'tool-results')
+}
+
+/** 一次路径准入的结果：通过时给绝对路径与命中的允许根，失败时给 HTTP 状态与错误码。 */
 type AdmitVerdict =
-  | { readonly ok: true; readonly path: string }
+  | { readonly ok: true; readonly path: string; readonly root: string }
   | { readonly ok: false; readonly status: number; readonly error: string }
 
 /**
@@ -189,21 +250,25 @@ type AdmitVerdict =
  *
  * 安全面三道闸（缺一道就等于开了个任意文件读）：
  *  1. 相对路径以 bot 工作区为基准解析；绝对路径照收，但**必须**落在允许根
- *     （bot 工作区 / 期刊目录 / 生图落盘根）之内 —— 解析后的路径要等于根或
- *     在「根 + 分隔符」之内，防止 `..` 与同前缀兄弟目录（Seeker-Bot2）越界；
- *  2. 扩展名白名单（调用方各自判）；
+ *     （bot 工作区 / 期刊目录 / 生图落盘根 / 工具结果全文根）之内 —— 解析后的
+ *     路径要等于根或在「根 + 分隔符」之内，防止 `..` 与同前缀兄弟目录
+ *     （Seeker-Bot2）越界；
+ *  2. 扩展名白名单（调用方各自判；工具结果根多认一个 `.txt`）；
  *  3. 必须是存在的普通文件、且在各自的大小上限内（调用方各自判）。
+ *
+ * 返回命中的 `root` 让调用方做**按根区分的策略**（比如 `.txt` 只在工具结果根
+ * 下允许），而不是把不同根的权限混成一张全局白名单。
  */
 function admitWorkspaceFile(raw: string): AdmitVerdict {
   if (raw === '') return { ok: false, status: 400, error: 'empty path' }
   const target = resolve(isAbsolute(raw) ? raw : join(botWorkspaceDir(), raw))
   const normalized = normalizeForCompare(target)
-  const allowed = [botWorkspaceDir(), journalDir(), materializeRoot()].some((root) => {
+  const hit = [botWorkspaceDir(), journalDir(), materializeRoot(), toolResultsRoot()].find((root) => {
     const base = normalizeForCompare(root)
     return normalized === base || normalized.startsWith(`${base}/`)
   })
-  if (!allowed) return { ok: false, status: 403, error: 'forbidden' }
-  return { ok: true, path: target }
+  if (hit === undefined) return { ok: false, status: 403, error: 'forbidden' }
+  return { ok: true, path: target, root: hit }
 }
 
 /** stat 一个普通文件；失败（不存在 / 是目录 / 无权限）返回 null。 */
@@ -312,10 +377,34 @@ interface ReplyBody {
     description?: string
     instructions?: string
     model?: { provider?: string; model?: string; effort?: string }
+    /**
+     * 是不是用户的主 Bot。决定宿主给不给它挂 `bot_create`（创建子 Bot）。
+     * 缺省按 `false`——宁可少给一个工具，也不能把全局权限发错人。
+     */
+    isMain?: boolean
   }
   text?: string
   history?: Array<{ role?: string; text?: string }>
   memories?: string[]
+  /**
+   * 本轮附带的「全量 Bot 花名册」（可选，向后兼容）。
+   *
+   * 为什么需要：派活时宿主必须知道「子 Bot 是谁」，而 Bot 配置一直由前端持有。
+   * 只靠 `/reply` 里那一个 `bot` 缓存，会让「从没跟用户聊过的 Bot」派不出去。
+   * 前端带上这份名单后，派活就不再有这个盲区。
+   *
+   * 只要求身份 + 模型字段；`memories` 不要带——那些每轮变化，缓存旧值会让子 Bot
+   * 用上过期的记忆。
+   */
+  roster?: Array<{
+    id?: string
+    name?: string
+    role?: string
+    description?: string
+    instructions?: string
+    model?: { provider?: string; model?: string; effort?: string }
+    isMain?: boolean
+  }>
   /**
    * 本轮用户附带的图片（前端先走 /upload 落盘，这里只带相对路径）。
    *
@@ -345,9 +434,33 @@ function toBotSpec(body: ReplyBody): BotAgentSpec {
     instructions: String(bot.instructions ?? ''),
     model: bot.model,
     permission: body.permission === 'approval' ? 'approval' : 'full',
+    isMain: bot.isMain === true,
     memories: Array.isArray(body.memories)
       ? body.memories.filter((item): item is string => typeof item === 'string')
       : undefined,
+  }
+}
+
+/**
+ * 把请求带来的「全量 Bot 花名册」记进宿主的配置缓存。
+ *
+ * 派活要能派给一个**从没在这个对话里出现过**的 Bot，所以不能只靠 `/reply` 里
+ * 那一个 `bot` 字段。字段缺失时静默跳过（老前端不带这个字段，行为不变）。
+ */
+function rememberRoster(roster: ReplyBody['roster']): void {
+  if (!Array.isArray(roster)) return
+  for (const item of roster) {
+    const id = String(item?.id ?? '').trim()
+    if (id === '') continue
+    rememberBotSpec({
+      botId: id,
+      name: String(item?.name ?? '助手'),
+      role: String(item?.role ?? '通用助手'),
+      description: String(item?.description ?? ''),
+      instructions: String(item?.instructions ?? ''),
+      ...(item?.model === undefined ? {} : { model: item.model }),
+      isMain: item?.isMain === true,
+    })
   }
 }
 
@@ -400,254 +513,234 @@ function registeredProvider(ctx: any, wanted: string | undefined): string | unde
   }
 }
 
-async function collectLlmText(ctx: any, options: any): Promise<string> {
-  let text = ''
-  let reasoning = ''
-  const stream = ctx.llm.stream(options)
-  for await (const chunk of stream) {
-    if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
-    else if (chunk?.type === 'reasoning-delta' && typeof chunk.text === 'string') reasoning += chunk.text
+/* ───────────────────── 记忆写入 / 工作记忆（路线图 0.2）───────────────────── */
+
+/**
+ * 把一条内容写进该 Bot 自己的记忆库（owner = `bot:<botId>`，项目 = bot 工作区）。
+ *
+ * 为什么不让调用方直接调 `/api/dsh-memory/remember`：那条路由要求显式
+ * `projectHash`，而前端 / 工作记忆都不该硬编码 bot 工作区的 hash——它随盘符和
+ * 安装位置变化，写死一份会在换机器后把记忆写到另一个项目下。这里用
+ * `botWorkspaceDir()` 现算，owner 由 botId 推导。
+ *
+ * 面板「添加记忆」与「工作记忆任务完成后的工作日志」共用这一个实现：两处各写
+ * 一份，迟早会出现 owner / provenance 字段漂移，然后一半记忆在面板里看不见。
+ *
+ * @returns `ok=false` 时 `error` 说明为什么没写进去（引擎未启动 / 写入异常）。
+ */
+async function rememberBotMemory(
+  store: any,
+  botId: string,
+  content: string,
+  options?: { tags?: string[]; importance?: number; source?: string },
+): Promise<{ ok: boolean; created: boolean; id: string; error?: string }> {
+  if (store === undefined || store === null || typeof store.upsertEntry !== 'function') {
+    return { ok: false, created: false, id: '', error: 'memory engine unavailable' }
   }
-  return text.trim() || ''
+  try {
+    const projectHash = projectHashOf(botWorkspaceDir())
+    // 项目档案不存在时补一份，否则面板「项目」列表里看不到 bot 工作区。
+    try {
+      const meta = typeof store.readProjectMeta === 'function' ? await store.readProjectMeta(projectHash) : undefined
+      if (meta === undefined && typeof store.writeProjectMeta === 'function') {
+        await store.writeProjectMeta(projectHash, {
+          path: botWorkspaceDir(),
+          alias: 'Seeker-Bot',
+          locked: false,
+        })
+      }
+    } catch {
+      /* 档案补写失败不影响记忆本身落库 */
+    }
+    const { created, entry } = await store.upsertEntry({
+      content,
+      scope: 'project',
+      projectHash,
+      owner: `bot:${botId}`,
+      tags: options?.tags ?? [],
+      importance: typeof options?.importance === 'number' && Number.isFinite(options.importance)
+        ? Math.max(1, Math.min(10, Math.round(options.importance)))
+        : 8,
+      source: options?.source ?? 'manual',
+      provenance: { sessionId: `pa-bot-v2-${botId}` },
+    })
+    return { ok: true, created, id: String(entry?.id ?? '') }
+  } catch (error: any) {
+    return { ok: false, created: false, id: '', error: String(error?.message ?? error) }
+  }
 }
 
-async function generateReply(ctx: any, body: ReplyBody): Promise<{ ok: boolean; blocks?: any[]; error?: string; model?: string }> {
-  const bot = body.bot ?? {}
-  const text = withImageHints(String(body.text ?? '').trim(), body.images)
-  if (text === '') return { ok: false, error: 'empty message' }
+/**
+ * 在跑一轮回复之前把工作记忆投给 agent（路线图 0.2 的「每轮注入」）。
+ *
+ * 为什么放在 `runBotTurn` 之前、而不是拼进用户消息：`agent.inject()` 写入的是
+ * 「面向模型的上下文」，前端看不到，也不会被记忆提取当成用户原话。先注入、
+ * 再 followup 用户消息，模型第一步就能看到任务状态——不依赖历史有没有被压缩。
+ *
+ * 失败一律吞掉：工作记忆是增强项，它坏了不能连累对话本身（runBotTurn 会
+ * 自己把「agent 建不起来」的错误报出来）。
+ */
+async function injectWorkingMemoryForReply(ctx: any, spec: BotAgentSpec): Promise<void> {
+  try {
+    const agent = await ensureBotAgent(ctx, spec)
+    await injectWorkingMemoryIntoAgent(agent, spec.botId)
+  } catch {
+    /* agent 建不起来：交给 runBotTurn 报错 */
+  }
+}
 
-  const provider = registeredProvider(ctx, bot.model?.provider)
-  if (provider === undefined || provider === '') return { ok: false, error: 'no LLM provider registered' }
-  let model = String(bot.model?.model ?? '').trim()
-  if (model === '' || provider !== bot.model?.provider) {
-    try {
-      const models = await ctx.llm.listModels(provider)
-      model = String(models?.[0]?.id ?? DEFAULT_MODEL)
-    } catch {
-      model = DEFAULT_MODEL
+/**
+ * 把前端 / 模型传来的任务对象收敛成合法的 `WorkingTask`。
+ *
+ * 工作记忆是**每轮进上下文**的东西，字段不收敛会一路放大：超长标题白占 token、
+ * 坏 status 让注入文本出现「undefined 状态」、非字符串 facts 让 join 出
+ * `[object Object]`。这里逐字段夹取，缺 title 返回 null（路由回 400）。
+ */
+function normalizeWorkingTask(input: unknown, now: number): WorkingTask | null {
+  if (input === null || typeof input !== 'object') return null
+  const record = input as Record<string, any>
+  const title = typeof record.title === 'string' ? record.title.trim().slice(0, 200) : ''
+  if (title === '') return null
+  const rawId = typeof record.id === 'string' ? record.id.trim().slice(0, 64) : ''
+  const id = rawId !== '' ? rawId : `task-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  const status: WorkingTask['status'] = record.status === 'waiting' || record.status === 'done' || record.status === 'failed'
+    ? record.status
+    : 'active'
+
+  const steps: WorkingTask['steps'] = Array.isArray(record.steps)
+    ? record.steps.slice(0, 20).flatMap((item: unknown): Array<{ label: string; status: 'todo' | 'doing' | 'done' }> => {
+      if (item === null || typeof item !== 'object') return []
+      const step = item as Record<string, unknown>
+      const label = typeof step.label === 'string' ? step.label.trim().slice(0, 120) : ''
+      if (label === '') return []
+      const stepStatus: 'todo' | 'doing' | 'done' = step.status === 'done' || step.status === 'doing' ? step.status : 'todo'
+      return [{ label, status: stepStatus }]
+    })
+    : []
+
+  const facts: Record<string, string> = {}
+  if (record.facts !== null && typeof record.facts === 'object' && !Array.isArray(record.facts)) {
+    for (const [key, value] of Object.entries(record.facts as Record<string, unknown>).slice(0, 20)) {
+      const safeKey = String(key).trim().slice(0, 40)
+      if (safeKey === '') continue
+      facts[safeKey] = String(value ?? '').slice(0, 200)
     }
   }
 
-  const memories = Array.isArray(body.memories) ? body.memories.filter((item) => typeof item === 'string').slice(-10) : []
-  const historyLines = Array.isArray(body.history)
-    ? body.history
-        .filter((item) => item && typeof item.text === 'string' && item.text.trim() !== '')
-        .slice(-14)
-        .map((item) => {
-          const text = String(item.text ?? '')
-          return `${item.role === 'user' ? '用户' : '你'}：${text.replace(/\s+/g, ' ').slice(0, 400)}`
-        })
-    : []
-  const now = new Date()
-  const timeText = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+  const stringList = (value: unknown, limit: number, maxLength: number): string[] => (
+    Array.isArray(value)
+      ? value
+        .filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+        .map((item) => item.trim().slice(0, maxLength))
+        .slice(0, limit)
+      : []
+  )
 
-  const system = [
-    `你是「${String(bot.name ?? '助手')}」，岗位：${String(bot.role ?? '通用助手')}。`,
-    String(bot.description ?? '') !== '' ? `档案：${String(bot.description)}` : '',
-    String(bot.instructions ?? '') !== '' ? `行为约定：${String(bot.instructions)}` : '',
-    memories.length > 0 ? `你记得关于用户的事：\n- ${memories.join('\n- ')}` : '',
-    `现在是 ${timeText}（Asia/Shanghai）。`,
-    /*
-     * 与 agent 路径（host/personal/agent.ts 的 buildBotPrompt）保持同一份契约：
-     * bot 是聊天，不是交报告。两处漂移会让「同一个 bot 换个入口就换了语气」。
-     */
-    '你在跟用户聊天，不是在交报告。回复硬要求：',
-    '- 简体中文，默认 1–3 句，最多两小段；先给结论或直接回答，再补一句必要说明。',
-    '- 不用加粗当小标题，不用多级清单、表格、代码块，不写「首先 / 其次 / 综上」这类汇报腔。',
-    '- 不贴文件路径、命令、参数、URL；用户明确要看才贴。',
-    '- 过程一句带过（「我看了下」），不要逐条复述步骤；结尾最多一句下一步或一个具体问题。',
-    '不要声称自己已经执行了你没有真正执行的操作；可以说明下一步计划，或提出一个具体问题。',
-  ].filter((line) => line !== '').join('\n')
-
-  const prompt = [
-    historyLines.length > 0 ? `最近的对话（供你参考语气和上下文）：\n${historyLines.join('\n')}` : '',
-    `用户现在说：${text}`,
-    '请直接回复用户。',
-  ].filter((line) => line !== '').join('\n\n')
-
-  try {
-    const reply = await collectLlmText(ctx, {
-      provider,
-      model,
-      system,
-      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
-      maxTokens: 1200,
-      temperature: 0.8,
-    })
-    if (reply === '') return { ok: false, error: 'empty model reply', model: `${provider}/${model}` }
-    return { ok: true, blocks: [{ type: 'text', text: reply }], model: `${provider}/${model}` }
-  } catch (error: any) {
-    return { ok: false, error: String(error?.message ?? error), model: `${provider}/${model}` }
+  const updatedAt = typeof record.updatedAt === 'number' && Number.isFinite(record.updatedAt) ? record.updatedAt : now
+  const ttlRaw = Number(record.ttlDays)
+  const ttlDays = Number.isFinite(ttlRaw) ? Math.max(1, Math.min(365, Math.round(ttlRaw))) : undefined
+  return {
+    id,
+    title,
+    status,
+    steps,
+    facts,
+    artifacts: stringList(record.artifacts, 20, 500),
+    blockers: stringList(record.blockers, 10, 200),
+    updatedAt,
+    ...(ttlDays !== undefined ? { ttlDays } : {}),
   }
 }
+
+/** 把一条完成的任务翻译成「工作日志」记忆正文（标题 + 产出 + 日期）。 */
+function workingLogContent(task: WorkingTask, now = Date.now()): string {
+  /*
+   * 日期用**本地时区**而不是 `toISOString()`：后者是 UTC，东八区晚上 8 点之后
+   * 会写成「明天」，用户回看工作日志时日期对不上。
+   */
+  const date = new Date(now)
+  const dateText = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+  const lines = [`工作日志（${dateText}）：${task.title}`]
+  if (task.artifacts.length > 0) lines.push(`产出：${task.artifacts.slice(0, 10).join('、')}`)
+  const factText = Object.entries(task.facts).map(([key, value]) => `${key}=${value}`).join('，')
+  if (factText !== '') lines.push(`关键数据：${factText}`)
+  lines.push('状态：已完成')
+  return lines.join('\n')
+}
+
 
 /* ───────────────────────────── 生图 ───────────────────────────── */
 
-function readModelCapabilities(ctx: any): Record<string, any> {
-  // 优先 settings 命名空间；失败再读 ~/.dsh/model-capabilities.json
-  try {
-    const section = typeof ctx.settings?.get === 'function' ? ctx.settings.get('model-capabilities') : null
-    if (section && typeof section === 'object') return section as Record<string, any>
-  } catch { /* ignore */ }
-  try {
-    const file = join(dshHome(), 'model-capabilities.json')
-    if (existsSync(file)) return JSON.parse(readFileSync(file, 'utf8')) as Record<string, any>
-  } catch { /* ignore */ }
-  return {}
-}
+/*
+ * 生图（期刊封面）已搬到 ./journal.ts。
+ *
+ * `generateJournalImage` 与它的辅助函数（model-capabilities 读取 / provider 配置
+ * 解析 / 凭据解析 / 远程图转 data URL）现在都在那边，index.ts 只保留
+ * `/journal/image` 路由并 import 它——同一份逻辑留两处，迟早会漂移成
+ * 「按钮生成的图和期刊封面用的模型不一样」。
+ */
 
-function providerProfile(ctx: any, providerId: string): any {
-  try {
-    const entries = ctx.llm.listConfigurableProviders() as any[]
-    const entry = entries.find((item) => item.provider === providerId)
-    if (!entry) return null
-    const section = typeof ctx.settings?.get === 'function' ? ctx.settings.get(entry.settingsNs) : null
-    if (!section || typeof section !== 'object') return null
-    let node: any = section
-    for (const key of Array.isArray(entry.settingsPath) ? entry.settingsPath : []) {
-      if (node && typeof node === 'object' && key in node) node = node[key]
-      else return null
-    }
-    return node && typeof node === 'object' ? node : null
-  } catch {
-    return null
-  }
-}
+/*
+ * generateJournalImage 的实体在 ./journal.ts（见上方注释）。这里只保留路由，
+ * 由路由把请求体转交给它，行为逐字未变。
+ */
 
-async function resolveCredential(ctx: any, envName: unknown): Promise<string | null> {
-  if (typeof envName !== 'string' || envName === '') return null
-  try {
-    const credentials = ctx.get?.('credentials') ?? ctx.credentials
-    if (!credentials || typeof credentials.resolve !== 'function') return null
-    const resolved = await credentials.resolve(envName)
-    return resolved ? String(resolved.value) : null
-  } catch {
-    return null
-  }
-}
-
-function splitKey(key: string): { provider: string; model: string } | null {
-  const index = key.indexOf('/')
-  if (index <= 0 || index >= key.length - 1) return null
-  return { provider: key.slice(0, index), model: key.slice(index + 1) }
-}
-
-async function fetchImageAsDataUrl(url: string): Promise<string | null> {
-  try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(120_000) })
-    if (!response.ok) return null
-    const buffer = Buffer.from(await response.arrayBuffer())
-    if (buffer.length < 256) return null
-    const type = response.headers.get('content-type') ?? 'image/png'
-    return `data:${type};base64,${buffer.toString('base64')}`
-  } catch {
-    return null
-  }
-}
-
-async function generateJournalImage(ctx: any, body: { prompt?: string; title?: string; date?: string }): Promise<{ ok: boolean; image?: string; error?: string; model?: string }> {
-  const caps = readModelCapabilities(ctx)
-  const activeKey = typeof caps.imageActive === 'string' ? caps.imageActive : ''
-  const active = splitKey(activeKey)
-  if (active === null) return { ok: false, error: '尚未配置生图模型（model-capabilities.imageActive 为空）' }
-  const profile = providerProfile(ctx, active.provider)
-  if (!profile || typeof profile.baseURL !== 'string' || profile.baseURL === '') {
-    return { ok: false, error: `生图 provider "${active.provider}" 未配置 baseURL` }
-  }
-  const apiKey = await resolveCredential(ctx, profile.apiKeyEnv)
-  if (apiKey === null) return { ok: false, error: `未找到生图凭据 ${String(profile.apiKeyEnv ?? '')}` }
-  const imagePath = typeof caps.imagePath === 'string' && caps.imagePath !== '' ? caps.imagePath : 'images/generations'
-  const url = `${String(profile.baseURL).replace(/[\\/]+$/, '')}/${imagePath.replace(/^[\\/]+/, '')}`
-  const prompt = String(body.prompt ?? '').trim()
-  if (prompt === '') return { ok: false, error: '缺少生图提示词' }
-
-  const payload: Record<string, unknown> = {
-    model: active.model,
-    prompt,
-    n: 1,
-    size: '1792x1024',
-    response_format: 'b64_json',
-  }
-  try {
-    const call = async (requestBody: Record<string, unknown>): Promise<{ response: Response; rawText: string }> => {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify(requestBody),
-        signal: AbortSignal.timeout(180_000),
-      })
-      return { response, rawText: await response.text() }
-    }
-    let attempt = await call(payload)
-    // 部分 OpenAI 兼容网关不认 size / response_format：按报错自动降参重试一次。
-    if (!attempt.response.ok && /size|response_format|unknown|invalid|unsupported/i.test(attempt.rawText)) {
-      const relaxed = { ...payload }
-      delete relaxed.size
-      delete relaxed.response_format
-      attempt = await call(relaxed)
-    }
-    const { response, rawText } = attempt
-    if (!response.ok) {
-      return { ok: false, error: `生图接口 ${response.status}：${rawText.slice(0, 240)}` }
-    }
-    let data: any
-    try { data = JSON.parse(rawText) } catch { return { ok: false, error: '生图接口返回非 JSON' } }
-    const first = Array.isArray(data?.data) ? data.data[0] : undefined
-    let image = ''
-    if (first && typeof first.b64_json === 'string' && first.b64_json.length > 32) {
-      image = `data:image/png;base64,${first.b64_json}`
-    } else if (first && typeof first.url === 'string' && first.url !== '') {
-      image = (await fetchImageAsDataUrl(first.url)) ?? ''
-      if (image === '') image = first.url
-    }
-    if (image === '') return { ok: false, error: '生图接口返回空结果' }
-    let imageUrl = image
-    if (image.startsWith('data:')) {
-      const comma = image.indexOf(',')
-      const meta = image.slice(5, comma)
-      const mime = meta.split(';')[0] || 'image/png'
-      const ext = mime.includes('jpeg') ? '.jpg' : mime.includes('webp') ? '.webp' : '.png'
-      const hash = createHash('sha1').update(image).digest('hex').slice(0, 16)
-      const file = join(journalDir(), `journal-${hash}${ext}`)
-      if (!existsSync(file)) writeFileSync(file, Buffer.from(image.slice(comma + 1), 'base64'))
-      imageUrl = `${ROUTE}/journal/asset?name=${encodeURIComponent(file.split(sep).pop() as string)}`
-    }
-    return { ok: true, image: imageUrl, model: `${active.provider}/${active.model}` }
-  } catch (error: any) {
-    return { ok: false, error: String(error?.message ?? error) }
-  }
-}
-
-/* ───────────────────────────── Edge TTS ───────────────────────────── */
-
-function runEdgeTts(text: string, voice: string): Promise<{ ok: boolean; audio?: string; error?: string }> {
-  return new Promise((resolvePromise) => {
-    const out = join(tmpdir(), `pa-tts-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.mp3`)
-    const command = process.platform === 'win32' ? 'edge-tts.exe' : 'edge-tts'
-    execFile(command, ['--voice', voice, '--text', text, '--write-media', out], { timeout: 45_000, windowsHide: true }, (error, _stdout, stderr) => {
-      if (error) {
-        resolvePromise({ ok: false, error: `${error.message}${stderr ? ` — ${String(stderr).slice(0, 200)}` : ''}` })
-        return
-      }
-      try {
-        const buffer = readFileSync(out)
-        resolvePromise({ ok: true, audio: `data:audio/mpeg;base64,${buffer.toString('base64')}` })
-      } catch (readError: any) {
-        resolvePromise({ ok: false, error: String(readError?.message ?? readError) })
-      }
-    })
-  })
-}
 
 /* ───────────────────────────── 路由装配 ───────────────────────────── */
 
 /**
+ * 把 bot 会话从 Work 的工作区里**摘掉**（会话列表隔离）。
+ *
+ * 早先这里做的是反过来的事：把每个 `pa-bot-*` 会话 attach 进 Seeker-Bot 工作区，
+ * 于是 Bot 的对话出现在 Work 侧栏的会话列表里。既然两边是两套隔离的 agent，
+ * 列表就不该混在一起。
+ *
+ * 光「不再 attach」不够——**历史上已经挂上去的还在**（workspace 的 sessionIds
+ * 是持久化的），所以启动时要主动 detach 一遍。
+ */
+async function detachBotSessions(ctx: any, workspace: any): Promise<void> {
+  if (workspace === undefined || workspace === null) return
+  if (typeof workspace.detachSession !== 'function') return
+
+  const ids = new Set<string>()
+  try {
+    const persistence = typeof ctx.get === 'function' ? ctx.get('sessionPersistence') : undefined
+    if (typeof persistence?.list === 'function') {
+      const list = await persistence.list()
+      for (const snapshot of Array.isArray(list) ? list : []) {
+        const id = String(snapshot?.header?.id ?? snapshot?.id ?? '')
+        if (id.startsWith('pa-bot-')) ids.add(id)
+      }
+    }
+  } catch {
+    /* 列举失败：只处理实时注册表里的 */
+  }
+  try {
+    const agents = typeof ctx.get === 'function' ? ctx.get('agents') : undefined
+    if (typeof agents?.list === 'function') {
+      for (const agent of agents.list() ?? []) {
+        const id = String(agent?.session?.id ?? agent?.id ?? '')
+        if (id.startsWith('pa-bot-')) ids.add(id)
+      }
+    }
+  } catch {
+    /* 忽略 */
+  }
+
+  for (const id of ids) {
+    try {
+      await workspace.detachSession(id)
+    } catch {
+      /* 单个会话不在该工作区 / 服务拒绝：跳过 */
+    }
+  }
+}
+
+/**
  * 把已有的 bot 会话一次性挂到 Seeker-Bot 工作区下。
  *
- * 侧栏的工作区分组看的是 `workspace.sessionIds`，而官方 Web 会话由
- * `session-controller` 负责 attachSession——我们直接调 `ctx.agents.create()`
- * 建的会话绕过了那条路，所以历史会话全掉进「未分组」。这里在启动时补挂一遍，
- * 用户不用重建对话。
+ * @deprecated 已停用（2026-11-02）。Bot 与 Work 是两套隔离的 agent，Bot 的会话
+ * 不该出现在 Work 侧栏的会话列表里。函数保留只为需要回退时改一行调用即可。
  */
 async function attachBotSessions(ctx: any, workspace: any): Promise<void> {
   if (workspace === undefined || workspace === null) return
@@ -687,7 +780,11 @@ async function attachBotSessions(ctx: any, workspace: any): Promise<void> {
   }
 }
 
-/** 把一个新会话挂到 Seeker-Bot 工作区（每轮对话后调用，保证新会话立刻归位）。 */
+/**
+ * 把一个新会话挂到 Seeker-Bot 工作区（每轮对话后调用，保证新会话立刻归位）。
+ *
+ * @deprecated 已停用（2026-11-02），理由同 {@link attachBotSessions}。
+ */
 async function attachOneSession(ctx: any, sessionId: string | undefined): Promise<void> {
   if (sessionId === undefined || sessionId === '') return
   try {
@@ -704,7 +801,151 @@ async function attachOneSession(ctx: any, sessionId: string | undefined): Promis
   }
 }
 
-export function applyPersonalAgentHost(ctx: any): void {
+/* ───────────────────── 压缩事件（路线图 1.1）───────────────────── */
+
+/**
+ * 一次压缩的待结算状态。
+ *
+ * 宿主在压缩事务里先 append `compaction/summary`（摘要内容落地），再 append
+ * `compaction/end`（事务结束，失败时带 error）。两个事件都可能单独出现：
+ * · 只听 end —— 摘要可能还没解析出来；
+ * · 只听 summary —— 进程被杀在两者之间时 end 永远不会来。
+ * 所以这里「summary 缓存 + 短兜底定时器 + end 权威结算」，并用 compactionId 去重。
+ */
+interface PendingCompaction {
+  compactionId: string
+  summary: string
+  shadowedTokenCount?: number
+  timer?: NodeJS.Timeout
+}
+
+const pendingCompactions = new Map<string, PendingCompaction>()
+
+/** 已经推送过的压缩 id：兜底定时器与 end 都触发时只推一条标记。 */
+const settledCompactionIds = new Set<string>()
+
+/** summary 之后等 end 的宽限（end 是同一事务里同步 append 的，正常远小于这个值）。 */
+const COMPACTION_SETTLE_MS = 1_500
+
+/** 去重集合上限：压缩是低频事件，200 足够；超了整体清空，不维护 LRU。 */
+const COMPACTION_ID_MEMORY = 200
+
+/** `pa-bot-<botId>` → botId；不是 Bot 会话返回 null（Work 会话不归这里管）。 */
+function botIdOfSession(sessionId: string): string | null {
+  const prefix = 'pa-bot-'
+  if (!sessionId.startsWith(prefix)) return null
+  const botId = sessionId.slice(prefix.length)
+  return botId === '' ? null : botId
+}
+
+/**
+ * 推送一条压缩事件。
+ *
+ * 走事件总线（`/events` 的常驻 SSE）而不是 `/reply/stream`：压缩可能发生在后台
+ * （例行任务跑长会话时触发压力压缩），那一刻未必有聊天请求连着；事件总线带
+ * seq，前端断线重连还能补发。
+ *
+ * `events.ts` 的 BotEvent 联合类型暂未收录这个事件（本任务的写作用域只有
+ * index.ts + pages.ts），所以这里用断言推。前端按 `payload.type` 分支，未知
+ * 类型会被安全忽略（store.tsx 只认 message / message-update / journal）。
+ */
+function publishCompactionEvent(botId: string, payload: {
+  compactionId: string
+  summary: string
+  shadowedTokenCount?: number
+  failed?: boolean
+}): void {
+  if (payload.compactionId !== '') {
+    if (settledCompactionIds.has(payload.compactionId)) return
+    settledCompactionIds.add(payload.compactionId)
+    if (settledCompactionIds.size > COMPACTION_ID_MEMORY) settledCompactionIds.clear()
+  }
+  publish(botId, {
+    type: 'compaction',
+    at: Date.now(),
+    summary: payload.summary,
+    ...(payload.shadowedTokenCount !== undefined ? { shadowedTokenCount: payload.shadowedTokenCount } : {}),
+    ...(payload.failed === true ? { failed: true } : {}),
+  } as any)
+}
+
+/**
+ * 监听宿主的压缩生命周期，转成 SSE 事件（路线图 1.1）。
+ *
+ * 为什么注册在 root ctx：`compaction/*` 是 session 级事件，Bot 的会话与 Work 的
+ * 会话走同一条总线，必须按 session id 认领（`pa-bot-` 前缀）才不会把 Work 的
+ * 压缩标记推进 Bot 对话里。
+ *
+ * 失败不抛穿：收不到标记最多是少一个提示，不该连累插件挂载。
+ */
+function installCompactionWatcher(ctx: any): void {
+  if (typeof ctx?.on !== 'function') return
+  ctx.on('session/event', (session: any, event: any) => {
+    const type = String(event?.type ?? '')
+    if (type !== 'compaction/summary' && type !== 'compaction/end') return
+    const sessionId = String(session?.id ?? '')
+    const botId = botIdOfSession(sessionId)
+    if (botId === null) return
+    const data = (event?.data ?? {}) as Record<string, any>
+    const compactionId = String(data.compactionId ?? '')
+
+    if (type === 'compaction/summary') {
+      const previous = pendingCompactions.get(sessionId)
+      if (previous?.timer !== undefined) clearTimeout(previous.timer)
+      const pending: PendingCompaction = {
+        compactionId,
+        // 任务要求：取 summary 事件里的摘要，没有就给空字符串
+        summary: typeof data.summary === 'string' ? data.summary : '',
+        ...(typeof data.shadowedTokenCount === 'number' ? { shadowedTokenCount: data.shadowedTokenCount } : {}),
+      }
+      /*
+       * 兜底定时器：end 迟迟不来（进程被杀 / 宿主版本只发 summary）时，至少让
+       * 前端知道「压缩发生过」。unref 不钉住事件循环。
+       */
+      pending.timer = setTimeout(() => {
+        pendingCompactions.delete(sessionId)
+        publishCompactionEvent(botId, {
+          compactionId: pending.compactionId,
+          summary: pending.summary,
+          ...(pending.shadowedTokenCount !== undefined ? { shadowedTokenCount: pending.shadowedTokenCount } : {}),
+        })
+      }, COMPACTION_SETTLE_MS)
+      pending.timer.unref?.()
+      pendingCompactions.set(sessionId, pending)
+      return
+    }
+
+    // compaction/end：压缩事务结束（失败时也发，带 error）
+    const pending = pendingCompactions.get(sessionId)
+    if (pending?.timer !== undefined) clearTimeout(pending.timer)
+    pendingCompactions.delete(sessionId)
+    publishCompactionEvent(botId, {
+      // summary 没赶在 end 之前落地时给空串（前端只显示「上下文已压缩」）
+      compactionId: pending !== undefined && pending.compactionId !== '' ? pending.compactionId : compactionId,
+      summary: pending?.summary ?? '',
+      ...(pending?.shadowedTokenCount !== undefined ? { shadowedTokenCount: pending.shadowedTokenCount } : {}),
+      ...(data.error !== undefined ? { failed: true } : {}),
+    })
+  })
+}
+
+export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: PersonalRealtimeConfig }): void {
+  /*
+   * 全双工实时语音（Bot 模式通话）：浏览器同源 WebSocket ⇄ 宿主 ⇄ StepFun Realtime。
+   *
+   * 它取代了原来的半双工链路（点按录音 → SenseVoice ASR → 模型 → Edge TTS），
+   * 所以这里不再有 TTS 路由。凭据/上游/音色由插件 config 的 personalRealtime
+   * 或 settings 命名空间 personal-realtime 控制，一个字段都不配也能跑
+   * （默认 STEPPLAN_API_KEY + 官方地址 + 模型回退链）。
+   *
+   * 失败不阻塞插件挂载：实时语音起不来最多是「通话不可用」，不该连累 Bot 模式本身。
+   */
+  try {
+    applyPersonalAgentRealtime(ctx, config?.personalRealtime ?? {})
+  } catch (error) {
+    console.warn('[personal-agent] 实时语音路由挂载失败（通话将不可用）:', error instanceof Error ? error.message : error)
+  }
+
   /*
    * 先把 bot 的共享工作目录建出来：所有 bot 与群聊都在这个文件夹里干活
    * （用户要求）。放在插件挂载时做，而不是等第一次对话——这样用户打开文件管理器
@@ -717,32 +958,83 @@ export function applyPersonalAgentHost(ctx: any): void {
   }
 
   /*
-   * 把这个目录登记成 DSH 的 workspace，让它出现在侧栏「工作区」列表里。
+   * 例行任务调度器：宿主侧常驻，页面关掉也照跑。
    *
-   * `meta.cwd` 只决定 agent 在哪干活，**不会**让目录出现在侧栏——那是
-   * workspaceRegistry 的职责。create() 对已登记的目录幂等（直接返回现有项目），
-   * 所以每次启动调用都安全。
+   * 失败不阻塞插件挂载——调度起不来最多是「例行任务不自动跑」，而整个 Bot 模式
+   * 起不来是更严重的故障。留痕是为了让这种情况可排查。
+   */
+  try {
+    const disposeScheduler = applyPersonalAgentScheduler(ctx)
+    ctx?.effect?.(() => disposeScheduler)
+  } catch (error) {
+    console.warn('[personal-agent] 例行任务调度器启动失败（例行任务将不会自动执行）:', error instanceof Error ? error.message : error)
+  }
+
+  /*
+   * 作业运行时：把 Bot 的执行从「一次函数调用」变成「一条持久记录」。
+   *
+   * 它是「主 Bot 能给子 Bot 派活、能等结果、进程重启后还知道谁做到哪」的前提。
+   * 启动顺序有讲究：`open()` 必须在第一次 tick 之前跑（要做崩溃恢复），
+   * `startPersonalRuntime` 内部已经保证。
+   *
+   * 失败不阻塞插件挂载：运行时起不来最多是「不能派活」，Bot 照常能对话。
+   */
+  try {
+    const started = startPersonalRuntime(ctx)
+    if (started !== undefined) {
+      ctx?.effect?.(() => started.runtime.close())
+    }
+  } catch (error) {
+    console.warn('[personal-agent] 作业运行时启动失败（Bot 将不能派活）:', error instanceof Error ? error.message : error)
+  }
+
+  /*
+   * 压缩事件推送（路线图 1.1）：前端据此在对话流里插入「上下文已压缩 · N 条消息
+   * 折叠」标记。注册在这里而不是 `/events` 路由里，是因为压缩可能发生在后台
+   * （例行任务跑长会话时触发压力压缩），那一刻未必有 HTTP 连接。
+   */
+  try {
+    installCompactionWatcher(ctx)
+  } catch (error) {
+    console.warn('[personal-agent] 压缩事件监听注册失败（前端不会收到上下文压缩标记）:', error instanceof Error ? error.message : error)
+  }
+
+  /*
+   * Work 侧栏的工作区列表里**不要出现 Seeker-Bot**。
+   *
+   * Bot 与 Work 是两套隔离的 agent：Bot 的工作目录（`D:\Seeker-Bot`）只给 bot
+   * 干活用，不该在 Work 的工作区列表里占一个条目——那里既没有 Bot 的会话，
+   * 也不该成为进入 Bot 世界的入口。
+   *
+   * 光「不再 create」不够：早先版本登记过，`workspace` 的注册是持久化的。
+   * 所以启动时主动把路径等于 bot 工作目录的那条注册删掉（`delete()` 只删注册，
+   * 目录和会话日志都保留），顺带把其它工作区里残留的 `pa-bot-*` 会话摘干净。
    */
   try {
     ctx.inject(['workspaceRegistry'], (wsCtx: any) => {
       void (async () => {
         try {
-          const workspace = await wsCtx.workspaceRegistry.create(botWorkspaceDir(), 'Seeker-Bot')
-          /*
-           * 光登记工作区还不够：**会话也要挂进去**，否则侧栏会把它们归到「未分组」。
-           *
-           * 官方 Web 会话由 `session-controller` 负责 attachSession；我们是用
-           * `ctx.agents.create()` 直接建的会话，绕过了那条路径，所以得自己补。
-           * 这里把历史遗留的 `pa-bot-*` 会话一次性补挂，用户不用重建对话。
-           */
-          await attachBotSessions(wsCtx, workspace)
+          const registry = wsCtx.workspaceRegistry
+          if (registry === undefined || registry === null) return
+          const target = botWorkspaceDir()
+          const workspaces = typeof registry.list === 'function' ? (registry.list() ?? []) : []
+          for (const workspace of workspaces) {
+            if (String(workspace?.path ?? '') === target) {
+              if (typeof registry.delete === 'function' && typeof workspace.id === 'string') {
+                await registry.delete(workspace.id)
+              }
+              continue
+            }
+            // 其它工作区：只摘 bot 会话，工作区本身保留
+            await detachBotSessions(wsCtx, workspace)
+          }
         } catch {
-          /* 注册失败（目录被占 / 服务拒绝）：不影响 Bot 本身能干活 */
+          /* 服务不可用：Bot 本身照常能干活，只是侧栏可能还留着旧条目 */
         }
       })()
     })
   } catch {
-    /* workspace 服务不存在：跳过，只是侧栏看不到这个工作区 */
+    /* workspace 服务不存在：跳过 */
   }
 
   let speechController: any = null
@@ -777,11 +1069,520 @@ export function applyPersonalAgentHost(ctx: any): void {
             ok: true,
             routes: [
               'reply', 'reply/stream', 'reset', 'recall', 'models',
-              'journal/image', 'journal/asset', 'tts', 'asr',
-              'file', 'upload',
+              'journal/image', 'journal/asset',
+              'journal/list', 'journal/status', 'journal/generate', 'journal/check', 'journal/rule', 'journal/feed',
+              'asr',
+              'realtime', 'realtime/diagnose',
+              'file', 'upload', 'outputs',
               'office/info', 'office/page', 'office/pdf',
+              'memory/remember',
+              'working-memory',
+              'approval/rules',
+              'pages',
+              'events', 'routines', 'messages', 'bots/created', 'bots',
             ],
           })
+        }
+
+        /*
+         * 常驻事件流（SSE）：bot 在用户没发消息时也能推消息过来。
+         *
+         * 这是从「请求-响应」跨到 always-on 的唯一硬门槛——例行任务结果、后台发现、
+         * 审批到期都靠它落地。`since` 用于断线重连补发（见 events.ts 的有界缓冲）。
+         *
+         * 注意这里**不走 sendJson**：它要一条不结束的响应。
+         */
+        if (tail === '/events' && method === 'GET') {
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          const botId = url.searchParams.get('botId') ?? ''
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          /*
+           * `botId=*` = 一条连接订阅全部 Bot。
+           *
+           * 前端原来给每个 Bot 建一条常驻 SSE，而浏览器对同一 origin 的 HTTP/1.1
+           * 并发上限只有 6 条：4 个 Bot 就吃掉 4 条，新建 Bot 时前端「关掉全部再建
+           * 全部」的瞬时翻倍会顶破上限，之后所有请求排队，界面看起来就是「服务断了」。
+           * 合并成一条连接后，Bot 数量与连接数彻底解耦。
+           *
+           * 补发游标也随之从单个数字变成逐 Bot 的表（`botA:5,botB:3`）：一条连接
+           * 覆盖多个通道，而各通道的序号是独立的，共用一个 since 会补错。
+           */
+          const sinceRaw = url.searchParams.get('since') ?? '0'
+          res.writeHead?.(200, {
+            'content-type': 'text/event-stream; charset=utf-8',
+            'cache-control': 'no-cache, no-transform',
+            connection: 'keep-alive',
+            // 反代（nginx / Cloudflare）默认缓冲响应体，事件会被攒着不发
+            'x-accel-buffering': 'no',
+          })
+          const write = (payload: unknown): void => {
+            try {
+              res.write(`data: ${JSON.stringify(payload)}\n\n`)
+            } catch {
+              /* 连接已断：订阅会在 close 时被清掉 */
+            }
+          }
+          let unsubscribe: () => void
+          if (botId === '*') {
+            // 合并连接没有「单一序号」可言，hello 只用于告知连接已就绪
+            write({ type: 'hello', botId: '*', seq: 0 })
+            unsubscribe = subscribeAll(write, parseSinceByBot(sinceRaw))
+          } else {
+            const sinceNum = Number(sinceRaw)
+            const since = Number.isFinite(sinceNum) && sinceNum > 0 ? Math.round(sinceNum) : 0
+            // 先把当前序号告诉前端，便于它下次重连时带上 since
+            write({ type: 'hello', botId, seq: currentSeq(botId) })
+            unsubscribe = subscribe(botId, write, since)
+          }
+          const heartbeat = setInterval(() => {
+            try {
+              res.write(': ping\n\n')
+            } catch {
+              /* 连接已断 */
+            }
+          }, 25_000)
+          // 不把 Node 事件循环钉住：宿主常驻时无所谓，但测试/一次性脚本会退不出去
+          heartbeat.unref?.()
+          const cleanup = (): void => {
+            clearInterval(heartbeat)
+            unsubscribe()
+            try {
+              res.end()
+            } catch {
+              /* 已结束 */
+            }
+          }
+          req.on?.('close', cleanup)
+          req.on?.('error', cleanup)
+          return
+        }
+
+        /*
+         * 宿主建过的子 Bot（`bot_create` 的账本）。
+         *
+         * 为什么前端要拉一次：SSE 只在页面**开着**的时候才送达。用户关着页面时
+         * 主 Bot 照样可能建 Bot（例行任务触发的轮次、手机上另一个窗口），那一次
+         * 广播就丢了。启动时拉一遍这个账本，才能把「建过但没见过」的补齐。
+         * 前端按 id 去重，重复拉无害。
+         */
+        if (tail === '/bots/created' && method === 'GET') {
+          return sendJson(res, 200, { ok: true, bots: readCreatedBots() })
+        }
+        /*
+         * 前端删掉子 Bot 时顺手抹账本。
+         *
+         * 不抹的话，下次页面加载 `/bots/created` 会把它重新补回来——用户会看到
+         * 一个「删不掉的 Bot」。这是补发机制必须配对的另一半。
+         */
+        if (tail === '/bots/created' && method === 'DELETE') {
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          const botId = (url.searchParams.get('botId') ?? '').trim()
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          return sendJson(res, 200, { ok: true, removed: removeCreatedBot(botId) })
+        }
+
+        /*
+         * 彻底删除一个 Bot：宿主侧的全部残留（会话历史 / 花名册 / 工作记忆 /
+         * 产出物映射 / Bot 页面 / 记忆条目 / 例行任务 / 账本）。
+         *
+         * 为什么不复用上面那条 `DELETE /bots/created`：那条只抹**账本**（防补发），
+         * 是「前端已经删了」的配套动作；这条是把 Bot 真正从宿主抹掉。两者语义
+         * 差着一个数量级，混在一起会让「只想防补发」的调用意外删光数据。
+         *
+         * `purgeFiles=1` 才连产出物目录一起删——默认保留用户的文件。
+         */
+        if (tail === '/bots' && method === 'DELETE') {
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          const botId = (url.searchParams.get('botId') ?? '').trim()
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          const result = await purgeBot(botId, { purgeFiles: url.searchParams.get('purgeFiles') === '1' })
+          return sendJson(res, result.ok ? 200 : 400, result)
+        }
+
+        /* 例行任务：前端定义、宿主执行。GET 看当前定义，POST 全量覆盖。 */
+        if (tail === '/routines' && method === 'GET') {
+          return sendJson(res, 200, { ok: true, routines: readRoutines() })
+        }
+        if (tail === '/routines' && method === 'POST') {
+          const body = await readJsonBody(req) as Record<string, unknown>
+          const incoming = Array.isArray(body.routines) ? body.routines : []
+          const now = Date.now()
+          /*
+           * 旧定义按 id 建索引：`lastResult` 是宿主自己写回的执行结果，
+           * 前端同步定义时不会带它，不继承的话每次保存例行任务都会把界面上
+           * 的「部分完成 / 无新数据」徽标抹掉。
+           */
+          const previousById = new Map(readRoutines().map((routine) => [routine.id, routine]))
+          const normalized: HostRoutine[] = []
+          for (const raw of incoming) {
+            if (raw === null || typeof raw !== 'object') continue
+            const item = raw as Record<string, any>
+            const id = typeof item.id === 'string' ? item.id.trim() : ''
+            const botId = typeof item.botId === 'string' ? item.botId.trim() : ''
+            if (id === '' || botId === '') continue
+            const scheduleRaw = item.schedule
+            if (scheduleRaw === null || typeof scheduleRaw !== 'object') continue
+            const kind = scheduleRaw.kind
+            if (kind !== 'interval' && kind !== 'daily' && kind !== 'weekly') continue
+            const schedule = kind === 'interval'
+              ? {
+                kind: 'interval' as const,
+                everyMinutes: Math.max(1, Math.round(Number(scheduleRaw.everyMinutes) || 60)),
+              }
+              : kind === 'weekly'
+                ? {
+                  kind: 'weekly' as const,
+                  time: String(scheduleRaw.time ?? '09:00'),
+                  weekdays: Array.isArray(scheduleRaw.weekdays)
+                    ? scheduleRaw.weekdays.map(Number).filter((day: number) => day >= 1 && day <= 7)
+                    : [1],
+                }
+                : { kind: 'daily' as const, time: String(scheduleRaw.time ?? '09:00') }
+            const previous = previousById.get(id)
+            normalized.push({
+              id,
+              botId,
+              botName: typeof item.botName === 'string' && item.botName !== '' ? item.botName : 'Bot',
+              botRole: typeof item.botRole === 'string' ? item.botRole : '',
+              ...(item.botModel !== null && typeof item.botModel === 'object' ? { botModel: item.botModel } : {}),
+              name: typeof item.name === 'string' && item.name !== '' ? item.name : '例行任务',
+              instruction: typeof item.instruction === 'string' ? item.instruction : '',
+              schedule,
+              enabled: item.enabled !== false,
+              /*
+               * 信任设计字段（路线图 3.5）：没传就用缺省值，坏值一律夹取——
+               * 一个 NaN 的 retry.max 会让重试循环直接死循环。
+               */
+              noDataPolicy: normalizeNoDataPolicy(item.noDataPolicy),
+              retry: normalizeRetryPolicy(item.retry),
+              // 前端带来的 nextAt 只有在「还没到点」时才采信；否则按规则现算，
+              // 免得一个过期时间让任务在下一 tick 立刻连跑。
+              nextAt: typeof item.nextAt === 'number' && item.nextAt > now
+                ? item.nextAt
+                : nextRoutineAt({ schedule }, now),
+              ...(typeof item.lastRunAt === 'number' ? { lastRunAt: item.lastRunAt } : {}),
+              ...(previous?.lastResult !== undefined ? { lastResult: previous.lastResult } : {}),
+            })
+          }
+          writeRoutines(normalized)
+          return sendJson(res, 200, { ok: true, count: normalized.length, routines: normalized })
+        }
+
+        /* 服务端产生的消息（例行任务结果）：前端离线时错过的那部分在这里补。 */        if (tail === '/messages' && method === 'GET') {
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          const botId = url.searchParams.get('botId')
+          return sendJson(res, 200, {
+            ok: true,
+            messages: readServerMessages(botId === null || botId === '' ? undefined : botId),
+          })
+        }
+
+        /* 主动询问：前端定义活跃窗口，宿主在窗口内找机会说一句。 */
+        if (tail === '/proactive' && method === 'GET') {
+          return sendJson(res, 200, { ok: true, configs: readProactive() })
+        }
+        if (tail === '/proactive' && method === 'POST') {
+          const body = await readJsonBody(req) as Record<string, unknown>
+          const incoming = Array.isArray(body.configs) ? body.configs : []
+          const now = Date.now()
+          const normalized: HostProactive[] = []
+          for (const raw of incoming) {
+            if (raw === null || typeof raw !== 'object') continue
+            const item = raw as Record<string, any>
+            const botId = typeof item.botId === 'string' ? item.botId.trim() : ''
+            if (botId === '') continue
+            const config: HostProactive = {
+              botId,
+              botName: typeof item.botName === 'string' && item.botName !== '' ? item.botName : 'Bot',
+              botRole: typeof item.botRole === 'string' ? item.botRole : '',
+              ...(item.botModel !== null && typeof item.botModel === 'object' ? { botModel: item.botModel } : {}),
+              enabled: item.enabled !== false,
+              freq: typeof item.freq === 'string' ? item.freq : 'daily',
+              from: typeof item.from === 'string' ? item.from : '09:00',
+              to: typeof item.to === 'string' ? item.to : '22:00',
+              ...(typeof item.lastAt === 'number' ? { lastAt: item.lastAt } : {}),
+            }
+            // 只采信「还没到点」的 nextAt；过期的按规则现算，否则下一 tick 会连跑
+            config.nextAt = typeof item.nextAt === 'number' && item.nextAt > now
+              ? item.nextAt
+              : nextProactiveAt(config, now)
+            normalized.push(config)
+          }
+          writeProactive(normalized)
+          return sendJson(res, 200, { ok: true, count: normalized.length, configs: normalized })
+        }
+        /*
+         * 「现在问一次」：按钮走宿主，与定时那条共用同一份提示词和执行路径——
+         * 否则会出现「点按钮的语气和自动发的语气不一样」。
+         */
+        if (tail === '/proactive/run' && method === 'POST') {
+          const body = await readJsonBody(req) as Record<string, unknown>
+          const botId = typeof body.botId === 'string' ? body.botId.trim() : ''
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          const existing = readProactive().find((item) => item.botId === botId)
+          const config: HostProactive = existing ?? {
+            botId,
+            botName: typeof body.botName === 'string' && body.botName !== '' ? body.botName : 'Bot',
+            botRole: typeof body.botRole === 'string' ? body.botRole : '',
+            ...(body.botModel !== null && typeof body.botModel === 'object' ? { botModel: body.botModel } : {}),
+            enabled: false,
+            freq: 'manual',
+            from: '09:00',
+            to: '22:00',
+          }
+          const result = await runProactiveNow(webCtx, config)
+          return sendJson(res, result.ok ? 200 : 502, result)
+        }
+
+        /*
+         * 审批决定：前端点「允许这次 / 以后都允许 / 拒绝」后回传。
+         *
+         * 409 是刻意区分的：它表示「这个审批已经超时 / 被中止 / 已被处理」，
+         * 前端据此提示「这条已经失效」，而不是假装成功让用户以为生效了。
+         *
+         * `allow-always` 是新值（路线图 3.2）：先落一条 always-allow 规则，本次
+         * 仍按 allowed-once 结算——本次操作本来就要执行，规则只影响以后。
+         * 老前端只会发 allow / deny，这条分支对它是死代码，不改变任何行为。
+         */
+        if (tail === '/approval/decide' && method === 'POST') {
+          const body = await readJsonBody(req) as Record<string, unknown>
+          const approvalId = typeof body.approvalId === 'string' ? body.approvalId.trim() : ''
+          if (approvalId === '') return sendJson(res, 400, { ok: false, error: 'approvalId required' })
+          const rawDecision = typeof body.decision === 'string' ? body.decision.trim() : ''
+          const decision: ApprovalChoice = rawDecision === 'allow' || rawDecision === 'allowed-once'
+            ? 'allowed-once'
+            : rawDecision === 'allow-always' || rawDecision === 'always'
+              ? 'allowed-always'
+              : 'rejected'
+          const matched = decideApproval(approvalId, decision)
+          return sendJson(res, matched ? 200 : 409, {
+            ok: matched,
+            decision,
+            pending: pendingApprovalCount(),
+          })
+        }
+
+        /*
+         * 审批规则（Always allow / Ask first 的存储，路线图 3.2）。
+         *
+         * 规则由「以后都允许」按钮自动写入，也允许前端设置页直接管理：
+         * GET 看全部规则，POST add / remove。规则文件在插件状态目录下
+         * （`~/.dsh/storages/dsh-seeker-bot/personal-agent/approval-rules.json`）。
+         */
+        if (tail === '/approval/rules' && method === 'GET') {
+          return sendJson(res, 200, { ok: true, rules: readApprovalRules(), file: approvalRulesFile() })
+        }
+        if (tail === '/approval/rules' && method === 'POST') {
+          const body = await readJsonBody(req) as Record<string, unknown>
+          const action = typeof body.action === 'string' && body.action.trim() !== '' ? body.action.trim() : 'add'
+          if (action === 'add') {
+            const risk: ApprovalRisk | undefined = body.risk === 'irreversible' || body.risk === 'security' || body.risk === 'external'
+              ? body.risk
+              : undefined
+            const rule = addApprovalRule({
+              match: typeof body.match === 'string' ? body.match : '',
+              decision: body.decision === 'ask' ? 'ask' : 'allow',
+              ...(risk !== undefined ? { risk } : {}),
+            })
+            if (rule === null) return sendJson(res, 400, { ok: false, error: 'match required' })
+            return sendJson(res, 200, { ok: true, rule, rules: readApprovalRules() })
+          }
+          if (action === 'remove') {
+            const id = typeof body.id === 'string' ? body.id.trim() : ''
+            if (id === '') return sendJson(res, 400, { ok: false, error: 'id required' })
+            const removed = removeApprovalRule(id)
+            return sendJson(res, removed ? 200 : 404, { ok: removed, rules: readApprovalRules() })
+          }
+          return sendJson(res, 400, { ok: false, error: 'action must be add or remove' })
+        }
+
+        /*
+         * 问答回答：前端点了选项后回传。
+         *
+         * 409 与审批同义——问题已超时 / 被取消 / 已被回答。前端据此提示「这条已经
+         * 失效」，而不是假装成功让用户以为答案生效了。
+         */
+        if (tail === '/question/answer' && method === 'POST') {
+          const body = await readJsonBody(req) as Record<string, unknown>
+          const questionId = typeof body.questionId === 'string' ? body.questionId.trim() : ''
+          if (questionId === '') return sendJson(res, 400, { ok: false, error: 'questionId required' })
+          const selected = Array.isArray(body.selected)
+            ? body.selected
+              .filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+              .map((item) => item.trim())
+            : []
+          const custom = typeof body.custom === 'string' ? body.custom.trim() : ''
+          const matched = answerQuestion(questionId, selected, custom === '' ? undefined : custom)
+          return sendJson(res, matched ? 200 : 409, {
+            ok: matched,
+            pending: pendingQuestionCount(),
+          })
+        }
+
+        /*
+         * 面板「添加记忆」：写进该 Bot 自己的记忆库（schema v6 的 owner 维度）。
+         *
+         * 为什么不让前端直接调 `/api/dsh-memory/remember`：那条路由要求显式
+         * `projectHash`，而前端不该知道也不该硬编码 bot 工作区的 hash——它随盘符
+         * 和安装位置变化，写死一份会在换机器后把记忆写到另一个项目下。
+         * 这里用 `botWorkspaceDir()` 现算，owner 由 botId 推导，前端只传内容。
+         */
+        if (tail === '/memory/remember' && method === 'POST') {
+          const body = await readJsonBody(req) as Record<string, unknown>
+          const botId = typeof body.botId === 'string' ? body.botId.trim() : ''
+          const content = typeof body.content === 'string' ? body.content.trim() : ''
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          if (content === '') return sendJson(res, 400, { ok: false, error: 'content required' })
+          const tags = Array.isArray(body.tags)
+            ? body.tags
+              .filter((tag): tag is string => typeof tag === 'string' && tag.trim() !== '')
+              .map((tag) => tag.trim())
+              .slice(0, 8)
+            : []
+          const result = await rememberBotMemory(getWebuiMemoryStore(), botId, content, {
+            tags,
+            importance: typeof body.importance === 'number' && Number.isFinite(body.importance)
+              ? Math.max(1, Math.min(10, Math.round(body.importance)))
+              : 8,
+            source: 'manual',
+          })
+          /*
+           * 引擎没启动时必须 503，不能假装成功——假装成功会让用户以为记住了，
+           * 实际什么也没落库（记忆引擎是独立插件，用户可能把它关掉了）。
+           */
+          if (!result.ok && result.error === 'memory engine unavailable') {
+            return sendJson(res, 503, { ok: false, error: result.error })
+          }
+          if (!result.ok) return sendJson(res, 500, { ok: false, error: result.error ?? 'remember failed' })
+          return sendJson(res, 200, { ok: true, created: result.created, id: result.id })
+        }
+
+        /*
+         * 工作记忆（路线图 0.2）：Bot 当前的「任务状态」，每轮回复前注入上下文。
+         *
+         * 与长期记忆的分工：任务态（52 个账号、36 条草稿、做到第几步）只进这里；
+         * 偏好 / 事实只进长期记忆。任务 done 后自动沉淀一条带日期的工作日志进
+         * 长期记忆——那才是可回看、可检索的部分。
+         *
+         * GET  ?botId=          → 当前任务列表 + 即将注入的文本（便于面板预览）
+         * POST { botId, action: 'upsert', task } → 插入 / 更新一个任务
+         * POST { botId, action: 'prune' }        → 清理过期任务
+         */
+        if ((tail === '/working-memory' || tail === '/working-memory/') && method === 'GET') {
+          const botId = (url.searchParams.get('botId') ?? '').trim()
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          try {
+            const tasks = await readWorkingTasks(botId)
+            return sendJson(res, 200, {
+              ok: true,
+              botId,
+              tasks,
+              // 前端可以直接展示「Bot 这轮会看到什么」，不用自己复刻注入格式
+              block: buildWorkingMemoryBlock(tasks),
+              file: workingMemoryFile(botId),
+            })
+          } catch (error: any) {
+            return sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
+          }
+        }
+        if ((tail === '/working-memory' || tail === '/working-memory/') && method === 'POST') {
+          const body = await readJsonBody(req) as Record<string, unknown>
+          const botId = typeof body.botId === 'string' ? body.botId.trim() : ''
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          const actionRaw = typeof body.action === 'string' ? body.action.trim() : ''
+          // 没显式给 action 时按有没有 task 推断：带任务就是写，否则是清理
+          const action = actionRaw !== '' ? actionRaw : (body.task !== undefined ? 'upsert' : 'prune')
+          if (action !== 'upsert' && action !== 'prune') {
+            return sendJson(res, 400, { ok: false, error: 'action must be upsert or prune' })
+          }
+          try {
+            if (action === 'prune') {
+              const tasks = await pruneWorkingTasks(botId)
+              return sendJson(res, 200, { ok: true, botId, action, tasks })
+            }
+            const task = normalizeWorkingTask(body.task, Date.now())
+            if (task === null) return sendJson(res, 400, { ok: false, error: 'task.title required' })
+            const tasks = await upsertWorkingTask(botId, task)
+            /*
+             * 任务完成后沉淀「工作日志」进长期记忆（路线图 0.2 的「沉淀」）。
+             *
+             * 只写标题 + 产出 + 日期：任务的全部步骤与 facts 留在工作记忆里，
+             * 长期记忆只负责「这个 Bot 哪天做过什么事」这一层可回看的索引。
+             * 记忆引擎不可用时**不影响任务写入**（logged=false 即可），
+             * 否则关掉记忆插件的用户连工作记忆都用不了。
+             */
+            let memoryLogged = false
+            if (task.status === 'done') {
+              const logged = await rememberBotMemory(
+                getWebuiMemoryStore(),
+                botId,
+                workingLogContent(task),
+                { tags: ['工作日志', 'Bot工作记忆'], importance: 6, source: 'bot-working-memory' },
+              )
+              memoryLogged = logged.ok
+            }
+            return sendJson(res, 200, { ok: true, botId, action, task, tasks, memoryLogged })
+          } catch (error: any) {
+            return sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
+          }
+        }
+
+        /*
+         * Pages（路线图 3.1）：可回访的持久页面。
+         *
+         * 与消息内卡片的区别：卡片是即时的，Pages 是权威副本——Bot 产出报告 /
+         * 看板 / 追踪器时除了发卡片，还应写一份到这里，用户以后随时能打开。
+         * 存储落在产出物目录（`产出物/<botFolder>/网页/`，见 ./pages.ts），
+         * 与工作台共用同一套扫描链路。
+         *
+         * 为什么 item 返回 html 正文而不是给一个 `/file?path=...html` 的 URL：
+         * 同源 `text/html` 会在宿主 origin 下执行任意脚本，等于给 Bot 生成的页面
+         * 开一条通往宿主 API 的路。返回内容、由前端用 sandbox iframe 渲染，
+         * 沙箱边界交给渲染方，host 不假装安全。
+         */
+        if ((tail === '/pages' || tail === '/pages/') && method === 'GET') {
+          const botId = (url.searchParams.get('botId') ?? '').trim()
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          try {
+            // 列表只给 meta（不含 html）：面板要能一次列几百页而不搬几 MB 正文
+            return sendJson(res, 200, { ok: true, botId, pages: listPages(botId) })
+          } catch (error: any) {
+            return sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
+          }
+        }
+        if ((tail === '/pages/item' || tail === '/pages/item/') && method === 'GET') {
+          const botId = (url.searchParams.get('botId') ?? '').trim()
+          const slug = (url.searchParams.get('slug') ?? '').trim().toLowerCase()
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          if (slug === '') return sendJson(res, 400, { ok: false, error: 'slug required' })
+          try {
+            const page = readPage(botId, slug)
+            if (page === null) return sendJson(res, 404, { ok: false, error: 'page not found' })
+            return sendJson(res, 200, { ok: true, page })
+          } catch (error: any) {
+            return sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
+          }
+        }
+        if ((tail === '/pages' || tail === '/pages/') && method === 'POST') {
+          const body = await readJsonBody(req) as Record<string, unknown>
+          const botId = typeof body.botId === 'string' ? body.botId.trim() : ''
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          const result = writePage(botId, {
+            title: typeof body.title === 'string' ? body.title : '',
+            html: typeof body.html === 'string' ? body.html : '',
+            ...(typeof body.slug === 'string' ? { slug: body.slug } : {}),
+            ...(typeof body.sourceMessageId === 'string' ? { sourceMessageId: body.sourceMessageId } : {}),
+            ...(body.share === 'shared' || body.share === 'private' ? { share: body.share } : {}),
+          })
+          if (!result.ok) {
+            // 输入问题回 400，落盘失败才是 500——前端据此决定「提示改输入」还是「重试」
+            return sendJson(res, result.error === 'write-failed' ? 500 : 400, {
+              ok: false,
+              error: result.error,
+              message: result.message,
+            })
+          }
+          return sendJson(res, 200, { ok: true, page: result.meta })
         }
 
         /*
@@ -827,6 +1628,12 @@ export function applyPersonalAgentHost(ctx: any): void {
           const body = await readJsonBody(req)
           const botId = String(body.botId ?? '').trim()
           if (botId === '') return sendJson(res, 400, { ok: false, error: 'empty botId' })
+          /*
+           * 清掉工作记忆的注入指纹：会话已经重建，不重置的话内容相同的记忆会被
+           * 判定成「已经注入过」而永远不再注入——表现是「清空对话后 Bot 又不知道
+           * 自己手上有活了」。
+           */
+          resetWorkingMemoryInjection(botId)
           const result = await resetBotConversation(webCtx, botId)
           return sendJson(res, result.ok ? 200 : 502, result)
         }
@@ -844,6 +1651,7 @@ export function applyPersonalAgentHost(ctx: any): void {
           if (botId === '') return sendJson(res, 400, { ok: false, error: 'empty botId' })
           const text = String(body.text ?? '')
           const at = typeof body.at === 'number' && Number.isFinite(body.at) ? body.at : Date.now()
+          const messageId = typeof body.messageId === 'string' && body.messageId !== '' ? body.messageId : undefined
           /*
            * 前端只带 botId（撤回是「针对某条消息」，不需要完整 bot 档案）。
            * 这里补一个最小 bot 对象：botId 决定会话身份，name/role 只影响提示词，
@@ -853,8 +1661,23 @@ export function applyPersonalAgentHost(ctx: any): void {
             bot: { ...(body.bot ?? {}), id: botId },
             permission: body.permission === 'approval' ? 'approval' : 'full',
           })
-          const result = await recallBotTurn(webCtx, spec, text, at)
+          const result = await recallBotTurn(webCtx, spec, text, at, messageId)
           return sendJson(res, result.ok ? 200 : 502, result)
+        }
+
+        /*
+         * 停止当前轮次：前端「停止」按钮 / 卡住自救共用。
+         *
+         * 为什么必须存在：`runBotTurn` 的 10 分钟超时只结束前端等待，宿主里的
+         * agent 轮次不会停。它继续跑工具、占着会话，用户再发消息只能排队——
+         * 表现就是「Bot 一直卡着」。这里直接对 running 的 agent 调 cancel。
+         */
+        if (tail === '/stop' && method === 'POST') {
+          const body = await readJsonBody(req)
+          const botId = String(body.botId ?? '').trim()
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'empty botId' })
+          const result = cancelBotTurn(webCtx, botId)
+          return sendJson(res, result.ok ? 200 : 409, result)
         }
 
         /*
@@ -955,6 +1778,14 @@ export function applyPersonalAgentHost(ctx: any): void {
           const body = await readJsonBody(req) as ReplyBody
           const text = withImageHints(String(body.text ?? '').trim(), body.images)
           if (text === '') return sendJson(res, 400, { ok: false, error: 'empty message' })
+          const spec = toBotSpec(body)
+          /*
+           * 工作记忆注入（路线图 0.2）：每轮回复前把「当前任务状态」作为 developer
+           * 消息投给 agent。放在 runBotTurn 之前，是因为 `inject()` 不唤醒驱动器——
+           * 先注入、再 followup 用户消息，模型第一步就能看到任务进度，不依赖
+           * 历史有没有被压缩过。
+           */
+          await injectWorkingMemoryForReply(webCtx, spec)
 
           /*
            * 首选：把这个 bot 接到宿主的真 agent 会话上（能读文件 / 跑命令 / 搜索…）。
@@ -965,15 +1796,20 @@ export function applyPersonalAgentHost(ctx: any): void {
            */
           let agentError = ''
           try {
-            const turn = await runBotTurn(webCtx, toBotSpec(body), text, () => {})
+            const turn = await runBotTurn(webCtx, spec, text, () => {})
             if (turn.ok) {
-              // 把这一轮用的会话挂进 Seeker-Bot 工作区，避免新会话掉到「未分组」
-              await attachOneSession(webCtx, turn.sessionId)
+              // Bot 会话不再挂进 Work 的工作区：两套 agent 的会话列表互相隔离
               return sendJson(res, 200, {
                 ok: true,
                 blocks: turn.blocks,
+                /*
+                 * 多消息切分视图：非流式调用方（通话、例行任务、主动询问）也能拿到
+                 * 「模型说了几段」而不是一坨 blocks。流式入口由 message 事件承载。
+                 */
+                messages: turn.messages,
                 mode: 'agent',
                 sessionId: turn.sessionId,
+                ...(turn.userMessageId !== undefined ? { userMessageId: turn.userMessageId } : {}),
               })
             }
             agentError = turn.error ?? 'agent turn 未成功但未给出原因'
@@ -981,15 +1817,36 @@ export function applyPersonalAgentHost(ctx: any): void {
             agentError = String(error?.message ?? error)
           }
 
-          // 降级：一次 LLM 补全（旧行为，保证界面上还有东西可看）
-          const result = await generateReply(webCtx, body)
-          return sendJson(res, result.ok ? 200 : 502, { ...result, mode: 'chat', agentError })
+          /*
+           * 到此为止，**不再降级成一次纯 LLM 补全**。
+           *
+           * 旧行为是失败后退回 `ctx.llm.stream` 拼一段文本，界面上照样有东西可看。
+           * 代价是「agent 挂了」被伪装成「Bot 正常回复」——实测踩过：一个空壳会话
+           * 让每轮都走这条路，Bot 满口答应「我这就建」，却一个文件都产不出来，
+           * 而且界面上没有任何报错。失败必须可见，宁可让用户看到红字。
+           */
+          return sendJson(res, 502, {
+            ok: false,
+            mode: 'agent',
+            error: agentError,
+            agentError,
+          })
         }
 
         if (tail === '/reply/stream' && method === 'POST') {
           const body = await readJsonBody(req) as ReplyBody
           const text = withImageHints(String(body.text ?? '').trim(), body.images)
           if (text === '') return sendJson(res, 400, { ok: false, error: 'empty message' })
+          const spec = toBotSpec(body)
+          /*
+           * 记下这个 Bot 的配置：派活时宿主需要知道「子 Bot 是谁」。
+           * 前端每轮都会把完整配置带上来，所以这里缓存天然是新鲜的。
+           */
+          rememberBotSpec(spec)
+          // 全量花名册（可选）：让派活能覆盖「从没聊过的 Bot」
+          rememberRoster(body.roster)
+          // 工作记忆注入：与 /reply 同一处理，放在开 SSE 之前（避免拖慢首字节）
+          await injectWorkingMemoryForReply(webCtx, spec)
 
           res.statusCode = 200
           res.setHeader('content-type', 'text/event-stream; charset=utf-8')
@@ -1003,10 +1860,44 @@ export function applyPersonalAgentHost(ctx: any): void {
             } catch {
               /* 客户端已断开：忽略后续写入 */
             }
+            /*
+             * 同步广播到事件总线：多窗口 / 多设备打开同一个 bot 时，任一处发起的
+             * 对话其他地方也能看到。只广播 message 系事件——text / tool 是同一批
+             * 内容的扁平视图，转发出去前端也不会用。
+             */
+            const eventBotId = String(body.bot?.id ?? '').trim()
+            if (eventBotId === '') return
+            if (event.type === 'message') {
+              publish(eventBotId, { type: 'message', message: event.message, source: 'chat' })
+            } else if (event.type === 'message-update') {
+              publish(eventBotId, { type: 'message-update', message: event.message, source: 'chat' })
+            }
           }
 
+          /*
+           * 把这一轮挂到作业运行时上。
+           *
+           * 为什么需要：主 Bot 要能派活，`coordinate_bots` 就得有一个父节点可挂；
+           * 没有它，派出去的活会变成没人收结果的孤儿。这里只做「记录」——真正的
+           * 执行仍然是下面那次 `runBotTurn`，行为不变。
+           *
+           * 运行时没起来时 `rootAssignment` 是 undefined，对话照常，只是不能派活。
+           */
+          const runtimeHandle = personalRuntime()
+          const rootAssignment = runtimeHandle?.runtime.begin({
+            origin: { kind: 'person', source: 'chat', quote: text.slice(0, 400) },
+            requester: { kind: 'person' },
+            assignee: { botId: spec.botId },
+            brief: text,
+            level: spec.permission === 'approval' ? 'ask' : 'full',
+          })
+
+          let turnOk = false
+          let turnText = ''
           try {
-            const turn = await runBotTurn(webCtx, toBotSpec(body), text, write)
+            const turn = await runBotTurn(webCtx, spec, text, write)
+            turnOk = turn.ok
+            turnText = turn.error ?? ''
             /*
              * done 只由 runBotTurn 内部 emit（收口信号），这里**不要**再补一条：
              * 重复的 done 会让前端收口两次。失败路径（agent 建不起来 / 本轮无
@@ -1015,7 +1906,24 @@ export function applyPersonalAgentHost(ctx: any): void {
              */
             if (!turn.ok && turn.error !== undefined) write({ type: 'error', message: turn.error })
           } catch (error: any) {
-            write({ type: 'error', message: String(error?.message ?? error) })
+            turnText = String(error?.message ?? error)
+            write({ type: 'error', message: turnText })
+          } finally {
+            /*
+             * 收尾必须在 finally 里：用户中途断开、模型报错、`runBotTurn` 抛错，
+             * 这一轮的作业记录都得有个结局，否则它会永远停在 running 上——下次
+             * 启动时会被当成「被切掉的轮次」重跑一遍。
+             *
+             * 如果这一轮派了活还没回来，`end()` 会把记录转成 waiting，等子活
+             * 结算后由运行时唤醒它续跑一轮（那一轮会带着子活的结果）。
+             */
+            if (runtimeHandle !== undefined && rootAssignment !== undefined) {
+              try {
+                runtimeHandle.runtime.end(rootAssignment.id, { ok: turnOk, text: turnText })
+              } catch (error: any) {
+                console.warn('[personal-agent] 收尾作业记录失败:', String(error?.message ?? error))
+              }
+            }
           }
           try {
             res.end()
@@ -1023,6 +1931,105 @@ export function applyPersonalAgentHost(ctx: any): void {
             /* 已结束 */
           }
           return
+        }
+
+        /* ───────────────────── 期刊日记（宿主生成 / 持久化 / 调度）───────────────────── */
+
+        /*
+         * 期刊是「宿主异步产出」的东西：生成一次要调模型（+ 可选生图），可能几十秒。
+         * 所以接口拆成「命令」与「查询」两组：POST generate/check 触发动作，
+         * GET list/status 读落盘结果。宿主是唯一事实来源，前端只做展示与本地回退。
+         *
+         * 全部实现见 ./journal.ts（与生成、存储、调度同一模块），这里只做 HTTP 装配。
+         */
+        if (tail === '/journal/list' && method === 'GET') {
+          return sendJson(res, 200, { ok: true, journals: readJournals() })
+        }
+
+        if (tail === '/journal/status' && method === 'GET') {
+          const state = readJournalRuleState()
+          const journals = readJournals()
+          const lastGeneratedAt = journals.reduce<number | undefined>(
+            (latest, record) => (latest === undefined || record.generatedAt > latest ? record.generatedAt : latest),
+            undefined,
+          )
+          const status: JournalStatus = {
+            rule: state.rule,
+            logs: readJournalLogs(),
+            generating: isJournalGenerating(),
+            ...(lastGeneratedAt !== undefined ? { lastGeneratedAt } : {}),
+          }
+          return sendJson(res, 200, { ok: true, ...status })
+        }
+
+        /*
+         * 手动生成一期期刊（前端「生成今日期刊」按钮）。
+         *
+         * 失败必须回 502 + 可读原因，**不能**在这里降级成本地模板——前端拿到失败
+         * 后自己会走 buildJournal 回退并 toast 说明，两处各降级一次只会让人分不清
+         * 到底是模型失败还是前端没接上。
+         */
+        if (tail === '/journal/generate' && method === 'POST') {
+          const body = await readJsonBody(req)
+          const request = body as GenerateJournalRequest
+          const result = await generateJournalWithModel(webCtx, request)
+          if (result.ok && result.journal !== undefined) {
+            // 生成成功要广播：多窗口 / 页面切走再回来都能立刻看到新一期
+            publish(result.journal.botId, {
+              type: 'journal',
+              journal: result.journal,
+              source: request.auto === true ? 'auto' : 'manual',
+            })
+            return sendJson(res, 200, { ok: true, journal: result.journal })
+          }
+          return sendJson(res, 502, { ok: false, error: result.error ?? '生成失败' })
+        }
+
+        /*
+         * 规则检查：与调度器 tick 走同一个 `checkJournalTrigger`，两处判定逻辑
+         * 必须一致（否则会出现「按钮说该生成、定时器说不该」）。
+         * `now` 允许调用方指定（调试 / 测试用），缺省取宿主当前时间。
+         */
+        if (tail === '/journal/check' && method === 'POST') {
+          const body = await readJsonBody(req)
+          const now = typeof body.now === 'number' && Number.isFinite(body.now) ? Math.round(body.now) : Date.now()
+          const botId = typeof body.botId === 'string' && body.botId.trim() !== '' ? body.botId.trim() : 'main'
+          const result = await checkJournalTrigger(webCtx, now, botId)
+          return sendJson(res, 200, result)
+        }
+
+        if (tail === '/journal/rule' && method === 'POST') {
+          const body = await readJsonBody(req)
+          // 兼容两种形状：{ rule: {...}, lastUserMessageAt } 或直接 {...rule}
+          const ruleRaw = body.rule !== null && typeof body.rule === 'object' ? body.rule : body
+          const saved = writeJournalRuleState({
+            rule: ruleRaw,
+            ...(typeof body.lastUserMessageAt === 'number' && Number.isFinite(body.lastUserMessageAt)
+              ? { lastUserMessageAt: body.lastUserMessageAt }
+              : {}),
+          })
+          return sendJson(res, 200, { ok: true, rule: saved.rule })
+        }
+
+        if (tail === '/journal/feed' && method === 'POST') {
+          const body = await readJsonBody(req)
+          writeJournalFeed({
+            messages: Array.isArray(body.messages) ? body.messages : [],
+            ...(body.stats !== null && typeof body.stats === 'object' ? { stats: body.stats } : {}),
+            ...(typeof body.lastUserMessageAt === 'number' && Number.isFinite(body.lastUserMessageAt)
+              ? { lastUserMessageAt: body.lastUserMessageAt }
+              : {}),
+          })
+          return sendJson(res, 200, { ok: true })
+        }
+
+        if (tail === '/journal' && method === 'DELETE') {
+          const id = (url.searchParams.get('id') ?? '').trim()
+          if (id === '') return sendJson(res, 400, { ok: false, error: 'id required' })
+          const deleted = deleteJournalRecord(id)
+          return deleted
+            ? sendJson(res, 200, { ok: true })
+            : sendJson(res, 404, { ok: false, error: 'not found' })
         }
 
         if ((tail === '/journal/image' || tail === '/journal/image/') && method === 'POST') {
@@ -1048,6 +2055,29 @@ export function applyPersonalAgentHost(ctx: any): void {
         }
 
         /*
+         * 某个 Bot 的产出物清单：右栏「产出物」卡的数据源。
+         *
+         * 目录约定见 src/host/personal/outputs.ts：每个 bot 一个固定文件夹
+         * （`<workspace>/产出物/<botFolder>/`），下面 9 个分类子目录；扫描结果
+         * 按 mtime 倒序、最多 200 条。`name` 只在首次分配文件夹名时参与，
+         * 缺省时用 botId 兜底，所以前端不传也能拿到（可能已存在的）文件夹。
+         *
+         * 错误面刻意分两层：缺 botId → 400；分配 / 读取失败 → 500 + `{ok:false}`，
+         * 前端据此显示空态而不是一直转圈。
+         */
+        if ((tail === '/outputs' || tail === '/outputs/') && method === 'GET') {
+          const botId = (url.searchParams.get('botId') ?? '').trim()
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          const name = (url.searchParams.get('name') ?? '').trim()
+          try {
+            const result = scanBotOutputs(botId, name)
+            return sendJson(res, result.ok ? 200 : 500, result)
+          } catch (error: any) {
+            return sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
+          }
+        }
+
+        /*
          * 媒体文件：bot 工作区里图片 / 视频 / 音频 / PDF / Office 文档的同源访问入口。
          *
          * 图片来自生图落盘（见 host/personal/agent.ts 的 materializeGeneratedImages），
@@ -1057,7 +2087,8 @@ export function applyPersonalAgentHost(ctx: any): void {
          *
          * 安全面三道闸（缺一道就等于开了个任意文件读）：
          *  1. 路径必须落在允许根内（见 admitWorkspaceFile）；
-         *  2. 扩展名必须在白名单（图片 24MB / 其它媒体 256MB，见 MEDIA_CONTENT_TYPES）；
+         *  2. 扩展名必须在白名单（图片 24MB / 其它媒体 256MB，见 MEDIA_CONTENT_TYPES；
+         *     工具结果全文根额外放行 `.txt`，见 TOOL_RESULT_CONTENT_TYPES）；
          *  3. 必须是存在的普通文件，且不超过对应族的大小上限。
          *
          * **Range 支持是视频的硬需求**：Chromium 的 `<video>` 靠 206 才能 seek 与
@@ -1070,7 +2101,15 @@ export function applyPersonalAgentHost(ctx: any): void {
 
           const ext = extname(target).toLowerCase()
           const imageType = IMAGE_CONTENT_TYPES[ext]
-          const type = imageType ?? MEDIA_CONTENT_TYPES[ext]
+          /*
+           * `.txt` 只在**工具结果全文根**下放行（见 TOOL_RESULT_CONTENT_TYPES）：
+           * 前端「查看完整结果」要读回来；而 bot 工作区里的 .txt 仍然 403——
+           * 不能因为一个展示需求把用户的交付物目录整体放开。
+           */
+          const toolResultType = normalizeForCompare(admitted.root) === normalizeForCompare(toolResultsRoot())
+            ? TOOL_RESULT_CONTENT_TYPES[ext]
+            : undefined
+          const type = imageType ?? MEDIA_CONTENT_TYPES[ext] ?? toolResultType
           if (type === undefined) return sendJson(res, 403, { ok: false, error: 'forbidden' })
 
           const info = statFile(target)
@@ -1222,15 +2261,6 @@ export function applyPersonalAgentHost(ctx: any): void {
             name: typeof body.name === 'string' && body.name.trim() !== '' ? body.name.trim().slice(0, 120) : fileName,
             bytes: bytes.byteLength,
           })
-        }
-
-        if (tail === '/tts' && method === 'POST') {
-          const body = await readJsonBody(req)
-          const text = String(body.text ?? '').trim().slice(0, 600)
-          if (text === '') return sendJson(res, 400, { ok: false, error: 'empty text' })
-          const voice = typeof body.voice === 'string' && body.voice !== '' ? body.voice : 'zh-CN-XiaoxiaoNeural'
-          const result = await runEdgeTts(text, voice)
-          return sendJson(res, result.ok ? 200 : 502, result)
         }
 
         if (tail === '/asr' && method === 'POST') {

@@ -3,6 +3,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { rmSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -10,6 +11,24 @@ import { build } from 'esbuild'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..')
+
+/**
+ * schema v6 的条目 id（与 `src/triad/memory/engine/store.ts` 的 `entryIdOf()` 同算法）。
+ *
+ * 测试里独立算一份而不是 import，是为了让「id 算法漂移」当场变红：如果实现那边
+ * 改了 key 的拼法，这里算出来的就对不上，而不是两边一起改一起绿。
+ */
+function expectedEntryId(content, scope, projectHash, owner) {
+  const key = `${owner}\u0000${scope}\u0000${projectHash ?? ''}\u0000${String(content).trim()}`
+  return `mem_${createHash('sha1').update(key).digest('hex').slice(0, 16)}`
+}
+
+/** schema v5 及更早的条目 id（不含 owner），用来造「旧版云端包」。 */
+function legacyEntryId(content, scope, projectHash) {
+  const key = `${scope}\u0000${projectHash ?? ''}\u0000${String(content).trim()}`
+  return `mem_${createHash('sha1').update(key).digest('hex').slice(0, 16)}`
+}
+
 
 const SMOKE_HOME = resolve(ROOT, '_tmp', 'test-workbench-sync-dsh-home')
 try { rmSync(SMOKE_HOME, { recursive: true, force: true }) } catch {}
@@ -340,6 +359,167 @@ assert.equal(summaryAfterRestore.webSearchProvider, 'anysearch-auto', 'providerP
 
 console.log('✓ 供应商与模型配置收集 / 还原（条目合并 + 凭据更新 + 保留本机独有 key/条目）通过')
 
+console.log('--- 3.8 记忆 schema v6（owner 归属）随同步收集与还原 ---')
+/* 2026-11-02 记忆结构升级：条目多了 owner（work / bot:<id>），id 也把 owner 算进去了。
+ * 同步这边不跟着变会有两个后果：
+ *   ① 包里看不出「谁的记忆」，换机后 Bot 记忆像凭空消失；
+ *   ② 云端包可能是旧版（无 owner），恢复端若原样写盘，宿主 reload 时还得再迁移一次。
+ * 这里直接走真实 gather / restore，钉住「v5 包恢复成 v6」「归属统计正确」「bot 归属原样保留」。 */
+const memRoot = join(SMOKE_HOME, 'memories', 'dsh-memory')
+mkdirSync(join(memRoot, 'store'), { recursive: true })
+const legacyContentWork = 'Work 记下的长期事实'
+const legacyContentBot = '主 Bot 记下的偏好'
+const legacyContentDeprecated = '已经废弃的旧记忆'
+const legacyEntriesDoc = {
+  version: 1,
+  entries: [
+    {
+      id: legacyEntryId(legacyContentWork, 'global', null),
+      content: legacyContentWork,
+      scope: 'global',
+      projectHash: null,
+      tags: ['work'],
+      pinned: false,
+      createdAt: '2026-10-01T00:00:00.000Z',
+      updatedAt: '2026-10-01T00:00:00.000Z',
+      source: 'manual',
+      version: 1,
+      confidence: 1,
+      verified: true,
+      kind: 'fact',
+    },
+    {
+      // 归属只能从 provenance.sessionId 推出来（v5 包没有 owner 字段）。
+      id: legacyEntryId(legacyContentBot, 'global', null),
+      content: legacyContentBot,
+      scope: 'global',
+      projectHash: null,
+      tags: [],
+      pinned: false,
+      createdAt: '2026-10-02T00:00:00.000Z',
+      updatedAt: '2026-10-02T00:00:00.000Z',
+      provenance: { sessionId: 'pa-bot-v2-bot-main-xiaomo' },
+      source: 'extract',
+      version: 1,
+      confidence: 0.8,
+      verified: false,
+      kind: 'fact',
+    },
+    {
+      // 软废弃条目：不参与活跃统计。
+      id: legacyEntryId(legacyContentDeprecated, 'global', null),
+      content: legacyContentDeprecated,
+      scope: 'global',
+      projectHash: null,
+      tags: [],
+      pinned: false,
+      createdAt: '2026-09-01T00:00:00.000Z',
+      updatedAt: '2026-09-01T00:00:00.000Z',
+      deprecated: true,
+      source: 'manual',
+      version: 2,
+      confidence: 1,
+      verified: false,
+      kind: 'fact',
+    },
+  ],
+}
+writeFileSync(join(memRoot, 'store', 'entries.json'), JSON.stringify(legacyEntriesDoc, null, 2), 'utf8')
+
+const gatheredMemory = await mod.gatherWorkbenchAssets({
+  includeVault: false, includeMemory: true, includeSkills: false, vaultStore: syncStore,
+})
+assert.equal(gatheredMemory.version, 2, '包格式版本必须升到 2（记忆归属 + Live 供应商）')
+assert.ok(gatheredMemory.memory.ownerStats !== undefined, '记忆段必须带归属分布')
+assert.equal(gatheredMemory.memory.ownerStats.work, 1, 'Work 条目计数')
+assert.deepEqual(Object.keys(gatheredMemory.memory.ownerStats.bots), ['bot-main-xiaomo'],
+  'Bot 归属 key 用裸 botId（不带 bot: 前缀）')
+assert.equal(gatheredMemory.memory.ownerStats.bots['bot-main-xiaomo'], 1, 'Bot 条目计数')
+
+const restoredMemoryRes = await mod.restoreMemory(gatheredMemory.memory)
+assert.equal(restoredMemoryRes.entries, 3, '三条都要落盘（含软废弃）')
+assert.equal(restoredMemoryRes.work, 1, '还原结果要报 Work 条目数')
+assert.equal(restoredMemoryRes.bots, 1, '还原结果要报 Bot 条目数')
+const memAfter = JSON.parse(readFileSync(join(memRoot, 'store', 'entries.json'), 'utf8'))
+for (const entry of memAfter.entries) {
+  assert.ok(typeof entry.owner === 'string' && entry.owner !== '', `恢复后每条都要有 owner（${entry.id}）`)
+  assert.equal(entry.id, expectedEntryId(entry.content, entry.scope, entry.projectHash, entry.owner),
+    '恢复后 id 必须按 v6 算法（含 owner）重算')
+}
+const botEntry = memAfter.entries.find((entry) => entry.content === legacyContentBot)
+assert.equal(botEntry.owner, 'bot:bot-main-xiaomo', 'Bot 归属必须原样保留（本机没有名册也不改回 work）')
+
+const sizesAfterMemory = await mod.getWorkbenchSizes()
+assert.equal(sizesAfterMemory.memoryEntries, 2, '软废弃条目不进活跃统计')
+assert.equal(sizesAfterMemory.memoryWorkEntries, 1)
+assert.equal(sizesAfterMemory.memoryBotEntries, 1)
+assert.equal(sizesAfterMemory.memoryBots, 1)
+console.log('✓ 记忆 v6 归属（统计 + v5 包归一 + id 重算 + bot 归属保留）通过')
+
+console.log('--- 3.9 Live（实时语音）供应商随供应商同步收集与还原 ---')
+/* 供应商结构新增了「实时语音」这一套：vendors 列表 + 通话默认（音色/语速/联网），
+ * 落在本插件自己的 realtime-config.json（不在 cordis.patch.yml 里）。
+ * 它不跟着同步的话，换机后实时语音页会退回内置预设——而 API Key 还在
+ * .credentials.yaml 的 refs 里，表现为「有 key 但没有供应商能用」。 */
+const livePath = join(SMOKE_HOME, 'storages', 'dsh-seeker-bot', 'personal-agent', 'realtime-config.json')
+mkdirSync(dirname(livePath), { recursive: true })
+
+// ① 旧结构（routes.*）在采集端就归一成 vendors，且用预设 id 覆盖 route 名（避免同一端点两条）。
+writeFileSync(livePath, JSON.stringify({
+  routes: { stepplan: { vendor: 'stepfun', model: 'stepaudio-3-realtime-preview' } },
+}, null, 2), 'utf8')
+const gatheredLiveLegacy = mod.gatherLiveVendors()
+assert.ok(gatheredLiveLegacy !== undefined, '旧结构文件也要能采集出来')
+const stepfunVendor = gatheredLiveLegacy.vendors.find((vendor) => vendor.upstream === 'wss://api.stepfun.com/v1/realtime')
+assert.ok(stepfunVendor !== undefined, '旧 routes 迁移必须认出 StepFun 端点')
+assert.equal(stepfunVendor.id, 'stepfun', '迁移后的 id 用内置预设 id，不是聊天供应商 route 名')
+assert.equal(new Set(gatheredLiveLegacy.vendors.map((vendor) => vendor.upstream)).size, gatheredLiveLegacy.vendors.length,
+  '同一端点不得在列表里出现两次')
+
+// ② 空 vendors 是有效状态（用户把供应商全删了），不能偷偷塞回预设。
+writeFileSync(livePath, JSON.stringify({ vendors: [] }), 'utf8')
+assert.deepEqual(mod.gatherLiveVendors().vendors, [], '空 vendors 必须被尊重')
+
+// ③ 还原：同名覆盖 + 缺失新增 + 本机独有保留 + 旧字段清理。
+writeFileSync(livePath, JSON.stringify({
+  vendors: [{ id: 'local-only', label: '本机独有', upstream: 'wss://local.example/v1/realtime', keyRef: 'LOCAL_KEY' }],
+  voice: 'linjiajiejie',
+}, null, 2), 'utf8')
+const liveRestoreRes = mod.restoreLiveVendors({
+  vendors: [
+    { id: 'stepfun', label: 'StepFun 阶跃星辰', upstream: 'wss://api.stepfun.com/v1/realtime', keyRef: 'STEPPLAN_API_KEY', model: 'stepaudio-3-realtime-preview' },
+    { id: 'qwen', label: '千问 Qwen', upstream: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime', keyRef: 'QWEN_API_KEY' },
+  ],
+  defaultVendor: 'qwen',
+  speed: 'fast',
+  webSearch: false,
+})
+assert.equal(liveRestoreRes.added, 2, '云端两条在本机都不存在，应新增')
+assert.equal(liveRestoreRes.kept, 1, '本机独有的 Live 供应商必须保留')
+const liveAfter = JSON.parse(readFileSync(livePath, 'utf8'))
+assert.equal(liveAfter.vendors.length, 3, '合并后应有三条')
+assert.equal(liveAfter.vendors.find((vendor) => vendor.id === 'local-only').label, '本机独有', '本机独有条目原样保留')
+assert.equal(liveAfter.defaultVendor, 'qwen', '云端默认供应商覆盖本机')
+assert.equal(liveAfter.voice, 'linjiajiejie', '云端没带的字段保留本机值')
+assert.equal(liveAfter.speed, 'fast')
+assert.equal(liveAfter.webSearch, false)
+assert.ok(!('routes' in liveAfter) && !('vendor' in liveAfter), '写回必须落新结构并清掉旧字段')
+
+// ④ 状态视图：数量 / 默认项 / 体积。
+const liveSummary = mod.liveVendorSummary()
+assert.equal(liveSummary.vendors, 3, 'summary 数量要按归一后的列表算')
+assert.equal(liveSummary.defaultVendor, 'qwen')
+assert.ok(liveSummary.bytes > 0, 'summary 要统计文件字节')
+
+// ⑤ 挂进供应商段，且 restoreProviderAssets 回报 liveResult。
+const gatheredProvWithLive = mod.gatherProviderAssets()
+assert.ok(gatheredProvWithLive.liveVendors !== undefined, 'includeProviders 的包里必须带 liveVendors')
+const providerRestoreRes = await mod.restoreProviders(gatheredProvWithLive)
+assert.ok(providerRestoreRes.liveResult !== undefined, 'restoreProviders 必须回报 Live 供应商合并结果')
+assert.equal(typeof providerRestoreRes.liveResult.kept, 'number')
+console.log('✓ Live 供应商（旧结构归一 + 空列表尊重 + 合并还原 + 统计）通过')
+
+
 console.log('--- 4. 同步引擎：同步范围的保存与公开状态 ---')
 const vaultStore = new mod.VaultStore(null)
 const engine = new mod.WorkbenchSyncEngine(vaultStore, null, {})
@@ -355,10 +535,34 @@ assert.equal(view.includeVault, false, 'publicView 必须回传 includeVault')
 assert.equal(view.includeMcp, true, 'publicView 必须回传 includeMcp')
 assert.equal(view.includeProviders, true, 'publicView 必须回传 includeProviders')
 assert.ok(view.localProvidersBytes > 0, '公开状态必须带上本机供应商配置体积')
+/* 记忆归属与 Live 供应商也要进公开状态：同步设置页那两行数字全靠它，
+ * 缺字段时页面会显示 undefined（旧宿主 / 旧包都踩过）。 */
+assert.equal(view.localMemoryEntries, 2, '公开状态要带记忆活跃条数')
+assert.equal(view.localMemoryWorkEntries, 1, '公开状态要带 Work 条目数')
+assert.equal(view.localMemoryBotEntries, 1, '公开状态要带 Bot 条目数')
+assert.equal(view.localMemoryBots, 1, '公开状态要带不同 Bot 归属数')
+assert.equal(view.localLiveVendors, 3, '公开状态要带 Live 供应商数量')
+assert.equal(view.localLiveDefaultVendor, 'qwen', '公开状态要带默认 Live 供应商')
 await engine.save({ includeProviders: false })
 const viewAfterProv = await engine.publicView()
 assert.equal(viewAfterProv.includeProviders, false, 'includeProviders 开关必须能单独保存')
 console.log('✓ 同步引擎的同步范围保存与状态视图通过')
+
+console.log('--- 4.1 数据指纹同构（上传与拉取必须用同一套字段） ---')
+/* 踩过的坑：doPull 结尾写回 lastDataHash 时漏了 providers，而 doUpload 的指纹含
+ * providers。于是「拉取完立刻上传」必然被判成「数据已更新」，每次自动同步都白跑
+ * 一趟加密上传（几 MB 的包），而用户看到的是「明明没改东西却一直在传」。
+ * 这里静态钉住两处 hashData({...}) 的参数集合一致。 */
+const engineSource = readFileSync(resolve(ROOT, 'src/triad/workbench-sync/engine.ts'), 'utf8')
+const hashCalls = [...engineSource.matchAll(/hashData\(\{([\s\S]*?)\}\)/g)].map((match) => match[1])
+assert.ok(hashCalls.length >= 2, '上传与拉取各应有一处 hashData 指纹计算')
+for (const body of hashCalls) {
+  for (const field of ['vault', 'memory', 'skills', 'mcp', 'providers']) {
+    assert.ok(body.includes(field), `指纹字段必须同构：缺 ${field}（片段：${body.replace(/\s+/g, ' ').trim()}）`)
+  }
+}
+console.log('✓ 上传 / 拉取指纹字段同构通过')
+
 
 console.log('--- 5. 检查安全规范（零私密硬编码） ---')
 const rawEngineCode = await (await import('node:fs/promises')).readFile(resolve(ROOT, 'src/triad/workbench-sync/engine.ts'), 'utf8')

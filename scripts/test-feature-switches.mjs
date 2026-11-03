@@ -2,7 +2,7 @@
  * dsh-seeker-bot — 「包含的组件」原生行开关回归测试（纯 Node ESM）。
  *
  * 分四层：
- *   1. 组件目录 src/shared/components.ts：15 个组件、id / rowId 唯一、默认值齐全；
+ *   1. 组件目录 src/shared/components.ts：14 个组件、id / rowId 唯一、默认值齐全；
  *   2. 功能映射：src/shared/features.ts 的每一项都能映射到某个组件，且映射目标存在；
  *   3. 打包契约：cordis.patch.yml 的 insert 行与 COMPONENTS 逐一对齐、
  *      packages/<id>/ 有可解析的 host-only 入口与 locale/zh.json、package.json
@@ -54,8 +54,9 @@ async function catalogProbe(componentsUrl, featuresUrl) {
   const components = await import(componentsUrl)
   const features = await import(featuresUrl)
   const list = components.COMPONENTS
-  // 2026-11：新增「连接器」组件（MCP 市场）；2026-11-01 邮箱组件随整条功能移除，回到 15 项。
-  check(Array.isArray(list) && list.length === 15, 'COMPONENTS 恰好 15 项（实际 ' + list.length + '）')
+  // 2026-11：新增「连接器」组件（MCP 市场）；2026-11-01 邮箱组件随整条功能移除，
+  // 2026-11 用量工作台下线后回到 14 项。
+  check(Array.isArray(list) && list.length === 14, 'COMPONENTS 恰好 14 项（实际 ' + list.length + '）')
   const ids = new Set()
   const rows = new Set()
   for (const component of list) {
@@ -142,7 +143,7 @@ const patch = readText('cordis.patch.yml')
 const pkg = JSON.parse(readText('package.json'))
 const componentSrc = readText('src/shared/components.ts')
 const rowIds = [...componentSrc.matchAll(/rowId: '([^']+)'/g)].map((match) => match[1])
-check(rowIds.length === 15, 'components.ts 声明 15 个 rowId（实际 ' + rowIds.length + '）')
+check(rowIds.length === 14, 'components.ts 声明 14 个 rowId（实际 ' + rowIds.length + '）')
 for (const rowId of rowIds) {
   check(patch.includes('id: ' + rowId), 'cordis.patch.yml 含行 ' + rowId)
 }
@@ -150,7 +151,7 @@ check(patch.includes('name: dsh-seeker-bot/packages/cards'), 'patch 行 name 指
 check(pkg.exports['./packages/*'] === './packages/*/index.js', 'package.json 暴露 ./packages/* 子路径')
 check(pkg.exports['./packages/*/locale/zh.json'] === './packages/*/locale/zh.json', 'package.json 暴露组件 zh 本地化')
 check(pkg.files.includes('packages'), 'package.json files 包含 packages（发布时随包）')
-const componentDirs = ['cards','seeker','done-pill','memory','skills','usage','gallery','vault','prompt','sync','provider','input','host']
+const componentDirs = ['cards','seeker','done-pill','memory','skills','gallery','vault','prompt','sync','provider','input','host']
 for (const id of componentDirs) {
   const entry = join(ROOT, 'packages', id, 'index.js')
   const zh = join(ROOT, 'packages', id, 'locale', 'zh.json')

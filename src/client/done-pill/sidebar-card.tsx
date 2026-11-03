@@ -642,7 +642,14 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
     }
   }, [active])
 
+  /**
+   * Personal Agent 的宿主会话（`pa-bot-v2-<botId>`）属于 Bot 模式，不该进入
+   * Work 的完成胶囊：否则 Bot 一跑任务，Work 侧栏就挂出一条「1 进行中」，
+   * 点进去还是 Bot 的会话——和会话列表串台是同一类问题。
+   */
+  const isBotSession = (sessionId: string): boolean => sessionId.startsWith('pa-bot-v2-')
   const runningSessions = Object.entries(runInfo)
+    .filter(([sessionId]) => !isBotSession(sessionId))
     .map(([sessionId, info]) => ({
       id: sessionId,
       displayTitle: info.title,
@@ -651,8 +658,10 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
     }))
     .sort((a, b) => b.since - a.since)
 
-  const unreadCount = entries.filter(item => !readIds.has(item.id)).length
-  const latest = entries[0]
+  /** 最近完成也只展示 Work 会话，Bot 的回合在 Bot 自己的侧栏里看。 */
+  const visibleEntries = entries.filter(item => !isBotSession(item.sessionId))
+  const unreadCount = visibleEntries.filter(item => !readIds.has(item.id)).length
+  const latest = visibleEntries[0]
   const latestLabel = latest !== undefined
     ? (latest.question !== '' ? latest.question : latest.title)
     : ''
@@ -956,11 +965,11 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
               })}
             </>
           )}
-          <div style={sectionLabelStyle}><span style={sectionDotStyle} aria-hidden />{`最近完成${entries.length > 0 ? ` ${entries.length}` : ''}`}</div>
-          {entries.length === 0 ? (
+          <div style={sectionLabelStyle}><span style={sectionDotStyle} aria-hidden />{`最近完成${visibleEntries.length > 0 ? ` ${visibleEntries.length}` : ''}`}</div>
+          {visibleEntries.length === 0 ? (
             <div style={emptyStyle}>暂无记录 — 任一会话的对话完成后会出现在这里</div>
           ) : (
-            groupByMinute(entries.slice(0, POP_RECENT_N)).map((group) => (
+            groupByMinute(visibleEntries.slice(0, POP_RECENT_N)).map((group) => (
               <div key={`${group.time}|${group.items[0].id}`}>
                 <div style={groupHeadStyle}>
                   <span>{group.time === '' ? '未知时间' : group.time}</span>

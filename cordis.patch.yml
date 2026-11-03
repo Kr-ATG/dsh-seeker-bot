@@ -26,8 +26,6 @@
       name: dsh-seeker-bot/packages/skills
     - id: dsh-seeker-bot-connectors
       name: dsh-seeker-bot/packages/connectors
-    - id: dsh-seeker-bot-usage
-      name: dsh-seeker-bot/packages/usage
     - id: dsh-seeker-bot-gallery
       name: dsh-seeker-bot/packages/gallery
     - id: dsh-seeker-bot-vault

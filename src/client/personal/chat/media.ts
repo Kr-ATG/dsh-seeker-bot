@@ -26,8 +26,11 @@ import type { ArtifactKind } from '../types.ts'
  * 扩展名白名单（小写、不含点）。
  *
  * 只收「对话里真会出现、且浏览器能直接看」的那一族：音视频、PDF、Office 三件套、
- * 图片、压缩包。像 `.exe` / `.dll` / `.log` 这类既不预览也不该给下载按钮的，
+ * 图片、网页、压缩包。像 `.exe` / `.dll` / `.log` 这类既不预览也不该给下载按钮的，
  * 一律不认 —— 否则模型随手写的 `C:\Windows\notepad.exe` 会变成一张卡片。
+ *
+ * `html` / `htm` 归到 `page`（3.1 Pages）：它们在宿主里按网页预览（iframe），
+ * 卡片上另给「打开页面」入口，与 Bot 产出物工作台的「网页」分类同一口径。
  */
 const KIND_BY_EXT: Readonly<Record<string, ArtifactKind>> = {
   mp4: 'video',
@@ -53,6 +56,8 @@ const KIND_BY_EXT: Readonly<Record<string, ArtifactKind>> = {
   jpeg: 'image',
   webp: 'image',
   gif: 'image',
+  html: 'page',
+  htm: 'page',
   zip: 'file',
 }
 

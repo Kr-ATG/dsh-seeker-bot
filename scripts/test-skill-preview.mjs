@@ -39,7 +39,7 @@ async function compile(from) {
 
 const dir = mkdtempSync(join(tmpdir(), 'dsh-skillprev-'))
 await compile('src/shared/sanitize-html.ts')
-const entry = await compile('src/client/triad/usage/dashboard/skill-preview.ts')
+const entry = await compile('src/client/triad/skills/skill-preview.ts')
 const mod = await import(pathToFileURL(entry).href)
 
 let failed = 0

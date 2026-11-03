@@ -329,22 +329,24 @@ else pass('deferred webServer callback executed')
 // system-prompt 是 2026-10-27 新增：操作间「系统提示词」页的只读数据源
 // （assemble 出口抓到的最终快照）。它注册在自己的延迟注入里，漏注册的表现是
 // 「页面永远说取不到快照」，界面上不会报错 —— 计数 + 路径断言一起钉住。
-// 26 = 19（上一轮既有）+ 7（2026-10-28 自 dsh-companion 移植的对话胶囊）：
-//   4 条 done-pill（增量 / 壳热区 / 通知 / 通知点击）+ 2 条录屏（窗口枚举 / 抓帧）
-//   + 1 条提示音 prefix + 2 条工作区实时回显（echo-viewport/frame 窗口抓帧 +
-//     echo-viewport/space-frame 会话工作空间抓帧）。
-// 27 = 26 + 1（2026-10-30 的 git-commit-message 只读路由），再减掉 2026-10-31
-// 随「任务动画」一起删掉的 /api/chat-flow/motion —— 净额仍是 27。
-// 28 = 27 + 1（2026-11-01 Personal Agent：prefix /api/personal-agent ——
-//   模型回复 / 期刊生图 / Edge TTS / ASR 四条子路由共用一个 prefix）。
+// 2026-11-02 按用户要求「把回显这个功能彻底删掉」，以下 5 条路由整块移除：
+//   echo-viewport/frame、echo-viewport/space-frame（旧的窗口 / 会话回显）、
+//   echo-viewport/ext-frame（扩展帧流）、echo-viewport/bot-frame、
+//   echo-viewport/bot-echo-show（Bot 右栏回显）。
+// 26 = 31（上一轮）− 5 条回显路由。
+// 2026-11：会话管理（真正删除会话）新增 prefix /api/session-admin（list + delete），
+// 26 → 27。这条漏注册的表现是「右键菜单点删除毫无反应」（前端探测不到就静默
+// 失败），只能靠计数与路径断言钉住。
 // 这些路由漏注册的表现全是静默的：胶囊不出现、通知不弹、录屏面板只剩整屏 ——
 // 只有计数与路径断言能钉住它们。
-if (registered.length !== 28) {
-  fail(`expected exactly 28 route registrations, got ${registered.length}: ${JSON.stringify(registered)}`)
+if (registered.length !== 27) {
+  fail(`expected exactly 27 route registrations, got ${registered.length}: ${JSON.stringify(registered)}`)
 } else {
   const exacts = registered.filter(spec => spec?.kind === 'exact')
   const prefix = registered.filter(spec => spec?.kind === 'prefix')
-  if (!exacts.some(spec => spec?.path === '/api/chat-flow/components')) {
+  if (!prefix.some(spec => spec?.path === '/api/session-admin')) {
+    fail(`missing session-admin route (prefix /api/session-admin): ${JSON.stringify(prefix)}`)
+  } else if (!exacts.some(spec => spec?.path === '/api/chat-flow/components')) {
     fail(`missing feature switches route (exact /api/chat-flow/features): ${JSON.stringify(exacts)}`)
   } else if (!exacts.some(spec => spec?.path === '/api/chat-flow/generated-images')) {
     fail(`unexpected exact route specs: ${JSON.stringify(exacts)}`)
@@ -373,12 +375,6 @@ if (registered.length !== 28) {
   } else if (!exacts.some(spec => spec?.path === '/api/chat-flow/activate-window')) {
     fail('missing activate-window route (exact /api/chat-flow/activate-window) —— '
       + '点浏览器标志切到 ego 窗口就靠它，漏注册等于点了没反应')
-  } else if (!exacts.some(spec => spec?.path === '/api/chat-flow/echo-viewport/frame')) {
-    fail('missing echo-viewport frame route (exact /api/chat-flow/echo-viewport/frame) —— '
-      + '操作面板实时回显抓帧就靠它')
-  } else if (!exacts.some(spec => spec?.path === '/api/chat-flow/echo-viewport/space-frame')) {
-    fail('missing echo-viewport space-frame route (exact /api/chat-flow/echo-viewport/space-frame) —— '
-      + '会话关联工作空间的回显就靠它')
   } else if (!/return nowPid != 0 && nowPid == targetPid/.test(
     readFileSync(resolve(ROOT, 'src/running-apps/collect.ts'), 'utf8'))) {
     /*
@@ -787,35 +783,32 @@ if (providerNamespaces.length >= 3) {
   pass(`provider hub settings namespaces preserved: ${providerNamespaces.join(', ')}`)
 }
 
-// ── 工具闸门：默认全关 + `/指令` 按会话打开 ──────────────────────────────
+// ── 工具闸门：默认全关 + 连接器安装后注入 ────────────────────────────────
 // 主回归：computer-use（56 个）+ browser-use（24 个）实测占全部工具定义
-// 74.7%（约 3.1 万 tok/请求），默认必须不进入请求；`/` 命令打开后才注入。
-if (registeredCommands.length !== 2) {
-  fail(`expected 2 gate commands (computer-use / browser-use), got ${JSON.stringify(registeredCommands.map(c => c?.name))}`)
+// 74.7%（约 3.1 万 tok/请求），默认必须不进入请求。
+//
+// 2026-11 变更：这两个能力的入口从 `/` 命令挪到「操作间 → 连接器」——
+// 它们本质是 DSH 官方插件（各自注册服务与工具），不是指令。闸门本身保留，
+// 开关改由连接器的安装/卸载驱动（mcp-catalog 调 setGateDefaultEnabled）。
+const gateCommandsLeft = registeredCommands
+  .map((c) => c?.name)
+  .filter((name) => name === 'computer-use' || name === 'browser-use')
+if (gateCommandsLeft.length > 0) {
+  fail(`/ 菜单里不该再有闸门命令（入口已挪到连接器），实得 ${JSON.stringify(gateCommandsLeft)}`)
 } else {
-  const names = registeredCommands.map(c => c?.name).sort()
-  if (names[0] !== 'browser-use' || names[1] !== 'computer-use') {
-    fail(`gate command names must be browser-use / computer-use, got ${JSON.stringify(names)}`)
-  } else if (registeredCommands.some(c => typeof c?.handler !== 'function')) {
-    fail('gate command without a handler')
-  } else if (registeredCommands.some(c => c?.input?.hint === undefined)) {
-    // 回归钉子：**必须**声明 input。官方 ui-commands 的 matchEnter 对不带 input
-    // 的宿主命令只认裸 token，`/computer-use off` 会被静默降级成普通提示词发给
-    // 模型 —— 用户以为关了，其实只是说了句话。这条断言防的正是那种静默失败。
-    fail('gate commands must declare input.hint（否则 /xxx off 会静默降级为普通提示词）')
-  } else {
-    pass(`gate commands registered: /${names.join(', /')} (input hint ${JSON.stringify(registeredCommands[0]?.input?.hint)})`)
-  }
+  pass('/ 菜单已无 computer-use / browser-use（入口收到连接器面板）')
 }
-// 两条监听是**两个不同职责**，都要在：
+// 三条监听是**三个不同职责**，都要在：
 //   1. 工具闸门 —— 出口过滤掉关着的工具组与它们的提示词段；
-//   2. 系统提示词观测（2026-10-27）—— 出口抓最终快照给「操作间 → 系统提示词」页。
+//   2. 系统提示词观测（2026-10-27）—— 出口抓最终快照给「操作间 → 系统提示词」页；
+//   3. MCP 按需注入（Tool RAG）—— 出口按当前意图只留用得上的 MCP 工具（Work + Bot 共用）。
 // 计数写死而不是「至少一条」：漏挂一条都是静默失效（闸门失效 = 每轮多烧 3 万 token；
-// 观测失效 = 页面永远取不到快照），只能靠计数钉住。
-if (assembleListeners.length !== 2) {
-  fail(`expected exactly 2 system-prompt/assemble listeners (tools-gate + system-prompt inspector), got ${assembleListeners.length}`)
+// 观测失效 = 页面永远取不到快照；检索失效 = MCP 工具全量注入、白占上下文），
+// 只能靠计数钉住。
+if (assembleListeners.length !== 3) {
+  fail(`expected exactly 3 system-prompt/assemble listeners (tools-gate + system-prompt inspector + tool-retrieval), got ${assembleListeners.length}`)
 } else {
-  pass('gate + system-prompt inspector both hook system-prompt/assemble (registration-layer agnostic)')
+  pass('gate + system-prompt inspector + tool-retrieval all hook system-prompt/assemble (registration-layer agnostic)')
 }
 
 const gateTest = mod.toolsGateTest
@@ -866,14 +859,17 @@ if (gateTest === undefined) {
     pass('默认全关：电脑/浏览器工具与 provider 提示词段移除 + 追加「工具关着」说明段')
   }
 
-  // 说明段必须点名每个关着的组与开启方式，且不含已开启的组。
+  // 说明段必须点名每个关着的组与**连接器**这个入口 —— 命令已经移除，
+  // 再教模型去敲 /xxx on 就是把它引到一条不存在的路上。
   const offlineText = off.sections.find(s => s.name === 'tools-gate:offline')?.text ?? ''
-  if (!offlineText.includes('/computer-use on') || !offlineText.includes('/browser-use on')) {
-    fail(`说明段应点名两个关着的组的开启命令，实得 ${JSON.stringify(offlineText)}`)
+  if (!offlineText.includes('连接器') || !offlineText.includes('电脑操作') || !offlineText.includes('浏览器操作')) {
+    fail(`说明段应把开启入口指向连接器并点名两组，实得 ${JSON.stringify(offlineText)}`)
+  } else if (/\/computer-use|\/browser-use/.test(offlineText)) {
+    fail(`说明段不该再提已移除的斜杠命令，实得 ${JSON.stringify(offlineText)}`)
   } else if (!/不要假装/.test(offlineText)) {
     fail('说明段应明确禁止假装调用（否则模型会编造已操作）')
   } else {
-    pass('说明段点名关着的组 + 开启命令 + 禁止假装调用')
+    pass('说明段把入口指向连接器 + 不再提斜杠命令 + 禁止假装调用')
   }
 
   // 非 agent 组装（标题生成等服务级请求）原样放行：不误伤。
@@ -884,87 +880,63 @@ if (gateTest === undefined) {
     pass('无 agent 的组装原样放行（服务级请求不受闸门影响）')
   }
 
-  const invoke = async (name, rawInput, agent) => {
-    const def = registeredCommands.find(c => c?.name === name)
-    return def.handler({ agent, rawInput, attachments: [], signal: undefined, commandId: 'x' })
-  }
+  // ── 连接器安装/卸载驱动闸门（替代原来的 /指令 开关）────────────────────
+  // 连接器侧（src/triad/mcp-catalog.ts）在安装/卸载官方插件条目时调
+  // setGateDefaultEnabled；这里直接调同一个函数，钉住「装了就注入、卸了就收回」
+  // 这条主链路。它是部署级开关 —— 连接器本来就没有「按会话」的语义。
+  if (typeof mod.setGateDefaultEnabled !== 'function') {
+    fail('host 未导出 setGateDefaultEnabled（连接器驱动闸门的主链路不可测）')
+  } else {
+    mod.setGateDefaultEnabled('computer-use', true)
+    const afterInstall = await project(agentA)
+    if (namesOf(afterInstall) !== 'cua_driver_native__click,cua_driver_native__drag,pwsh') {
+      fail(`装 computer-use 后应注入 cua 工具，实得 ${namesOf(afterInstall)}`)
+    } else if (!sectionsOf(afterInstall).includes('computer-use:cua-driver-native')) {
+      fail(`装 computer-use 后应恢复 guidance 段，实得 ${sectionsOf(afterInstall)}`)
+    } else if (sectionsOf(afterInstall).includes('mcp:playwright-mcp')) {
+      fail('装 computer-use 不该连带打开浏览器组')
+    } else {
+      pass('连接器装「电脑操作」后：cua 工具与 guidance 段立刻注入（浏览器组不受影响）')
+    }
 
-  const onResult = await invoke('computer-use', ' on', agentA)
-  const afterOn = await project(agentA)
-  if (namesOf(afterOn) !== 'cua_driver_native__click,cua_driver_native__drag,pwsh') {
-    fail(`/computer-use on 后应注入 cua 工具，实得 ${namesOf(afterOn)}`)
-  } else if (!sectionsOf(afterOn).includes('computer-use:cua-driver-native')) {
-    fail(`/computer-use on 后应恢复 guidance 段，实得 ${sectionsOf(afterOn)}`)
-  } else if (sectionsOf(afterOn).includes('mcp:playwright-mcp')) {
-    fail('/computer-use on 不该连带打开浏览器组')
-  } else {
-    pass(`/computer-use on 只打开本组（工具 ${namesOf(afterOn)}；段 ${sectionsOf(afterOn)}）`)
-  }
-  if (onResult?.kind !== 'success' || !/已启用/.test(onResult?.text ?? '')) {
-    fail(`/computer-use on 应回 success 且文案含「已启用」，实得 ${JSON.stringify(onResult)}`)
-  } else if (!/2 个电脑操作工具/.test(onResult.text)) {
-    fail(`回执应带上该组工具数量（来自 ctx.get('tools').schemas），实得 ${JSON.stringify(onResult.text)}`)
-  } else {
-    pass('切换回执带上该组工具个数与 token 量级（用户能看见省了多少）')
-  }
-  // 部分开启时说明段必须只提还关着的组（开着的不该被劝去开）。
-  const partialNotice = afterOn.sections.find(s => s.name === 'tools-gate:offline')?.text ?? ''
-  if (partialNotice.includes('/computer-use on')) {
-    fail(`已开启的组不该出现在「关着」说明里，实得 ${JSON.stringify(partialNotice)}`)
-  } else if (!partialNotice.includes('/browser-use on')) {
-    fail(`还关着的组应出现在说明里，实得 ${JSON.stringify(partialNotice)}`)
-  } else {
-    pass('部分开启时说明段只点名还关着的组')
-  }
+    // 全局生效：另一个会话也看得到（连接器没有按会话开关的语义）。
+    const agentB = { id: 'agent-b' }
+    const bAfterInstall = await project(agentB)
+    if (namesOf(bAfterInstall) !== 'cua_driver_native__click,cua_driver_native__drag,pwsh') {
+      fail(`连接器安装是部署级的，新会话也应注入，实得 ${namesOf(bAfterInstall)}`)
+    } else {
+      pass('连接器安装对所有会话生效（部署级，不再是 per-session 开关）')
+    }
 
-  await invoke('browser-use', 'on', agentA)
-  const bothOn = await project(agentA)
-  if (namesOf(bothOn) !== 'cua_driver_native__click,cua_driver_native__drag,mcp__playwright-mcp__browser_click,pwsh') {
-    fail(`两组都打开时应全部注入，实得 ${namesOf(bothOn)}`)
-  } else {
-    pass('/browser-use on 与电脑组互不干扰（两组可同时开）')
-  }
+    mod.setGateDefaultEnabled('browser-use', true)
+    const bothOn = await project(agentA)
+    if (namesOf(bothOn) !== 'cua_driver_native__click,cua_driver_native__drag,mcp__playwright-mcp__browser_click,pwsh') {
+      fail(`两组都装时应全部注入，实得 ${namesOf(bothOn)}`)
+    } else {
+      pass('两组都装时全部注入（两组互不干扰）')
+    }
 
-  // 会话隔离：另一个 agent 不该继承 agentA 的开关。
-  const agentB = { id: 'agent-b' }
-  const bDefault = await project(agentB)
-  if (namesOf(bDefault) !== 'pwsh') {
-    fail(`开关必须按会话隔离，agentB 实得 ${namesOf(bDefault)}`)
-  } else {
-    pass('开关按 agent 隔离（新会话默认仍是全关）')
-  }
+    // 部分安装时说明段只提还关着的组（装好的不该被劝去再装一次）。
+    mod.setGateDefaultEnabled('computer-use', false)
+    const partial = await project(agentA)
+    const partialNotice = partial.sections.find(s => s.name === 'tools-gate:offline')?.text ?? ''
+    if (namesOf(partial) !== 'mcp__playwright-mcp__browser_click,pwsh') {
+      fail(`卸 computer-use 后应只收回 cua 工具，实得 ${namesOf(partial)}`)
+    } else if (partialNotice.includes('浏览器操作')) {
+      fail(`已装好的组不该出现在「未启用」说明里，实得 ${JSON.stringify(partialNotice)}`)
+    } else if (!partialNotice.includes('电脑操作')) {
+      fail(`还关着的组应出现在说明里，实得 ${JSON.stringify(partialNotice)}`)
+    } else {
+      pass('卸载立刻收回本组，说明段只点名还关着的组')
+    }
 
-  const offResult = await invoke('computer-use', 'off', agentA)
-  const afterOff = await project(agentA)
-  if (namesOf(afterOff) !== 'mcp__playwright-mcp__browser_click,pwsh') {
-    fail(`/computer-use off 后应移除 cua 工具，实得 ${namesOf(afterOff)}`)
-  } else {
-    pass('/computer-use off 立刻收回本组（浏览器组不受影响）')
-  }
-  if (offResult?.kind !== 'success' || !/已关闭/.test(offResult?.text ?? '')) {
-    fail(`/computer-use off 应回 success 且文案含「已关闭」，实得 ${JSON.stringify(offResult)}`)
-  }
-
-  // 不带参数 = 切换；非法取值 = error（不静默降级）。
-  // 此刻状态是 off（上一步刚 off 过），故第一次裸调用 → 启用，第二次 → 关闭。
-  const toggle1 = await invoke('computer-use', '', agentA)
-  const toggle2 = await invoke('computer-use', '  ', agentA)
-  if (toggle1?.kind !== 'success' || toggle2?.kind !== 'success' || !/已启用/.test(toggle1.text) || !/已关闭/.test(toggle2.text)) {
-    fail(`裸 /computer-use 应逐次切换，实得 ${JSON.stringify([toggle1, toggle2])}`)
-  } else {
-    pass('裸 /computer-use 逐次切换（toggle 语义）')
-  }
-  const bad = await invoke('computer-use', 'maybe', agentA)
-  if (bad?.kind !== 'error' || !/用法/.test(bad?.text ?? '')) {
-    fail(`非法取值应回 error 且带用法，实得 ${JSON.stringify(bad)}`)
-  } else {
-    pass('非法取值回 error 并给出用法（命令行不会被静默吞掉）')
-  }
-  const status = await invoke('computer-use', 'status', agentA)
-  if (status?.kind !== 'success' || !/电脑操作/.test(status?.text ?? '')) {
-    fail(`/computer-use status 应回当前状态，实得 ${JSON.stringify(status)}`)
-  } else {
-    pass('/computer-use status 回当前状态')
+    mod.setGateDefaultEnabled('browser-use', false)
+    const afterUninstall = await project(agentA)
+    if (namesOf(afterUninstall) !== 'pwsh') {
+      fail(`两组都卸后应回到全关，实得 ${namesOf(afterUninstall)}`)
+    } else {
+      pass('连接器卸载后回到默认全关（每轮省下那 3.1 万 token）')
+    }
   }
 
   // 纯函数：分组判定与体积统计（改前缀或加新组时的钉子）。
@@ -1013,7 +985,7 @@ if (gateTest === undefined) {
     }
   }
 
-  // 状态路由：客户端胶囊读/写与 /指令 同一张状态表（GET 读、POST 写）。
+  // 状态路由：连接器/面板读写的会话状态（GET 读、POST 写）。
   const route = registered.find(spec => spec?.path === '/api/chat-flow/tools-gate')
   const callRoute = async (method, url, body) => {
     const chunks = []
@@ -1072,20 +1044,16 @@ if (gateTest === undefined) {
     } else {
       pass('未知会话/组回 200 {ok:false}（闸门是可选能力，不报红）')
     }
-    // 单一真相：胶囊（路由）写的状态，/指令 必须读得到，反之亦然。
-    const statusAfterRouteWrite = await invoke('computer-use', 'status', liveRouteAgent)
-    if (!/已启用/.test(statusAfterRouteWrite?.text ?? '')) {
-      fail(`胶囊与 /指令 状态不一致：路由写了 enabled，/computer-use status 却回 ${JSON.stringify(statusAfterRouteWrite)}`)
-    } else {
-      pass('胶囊与 /指令 共用同一张状态表（无第二套真相）')
-    }
-    const routeAfterCommandWrite = await invoke('browser-use', 'on', liveRouteAgent)
+    // 单一真相：路由写的会话状态必须真的影响下一轮组装，不是「写了个没人读的字段」。
     const readBack = await callRoute('GET', '/api/chat-flow/tools-gate?session=route-session')
-    const browserGroup = readBack.payload?.groups?.find(g => g.key === 'browser-use')
-    if (routeAfterCommandWrite?.kind !== 'success' || browserGroup?.enabled !== true) {
-      fail(`/指令 写的状态，路由读不到：${JSON.stringify({ routeAfterCommandWrite, browserGroup })}`)
+    const computerGroup = readBack.payload?.groups?.find(g => g.key === 'computer-use')
+    const afterRouteWrite = await project(liveRouteAgent)
+    if (computerGroup?.enabled !== true) {
+      fail(`路由写后 GET 应回 enabled=true，实得 ${JSON.stringify(computerGroup)}`)
+    } else if (!namesOf(afterRouteWrite).includes('cua_driver_native__click')) {
+      fail(`路由写的状态没进组装：cua 工具仍被挡着，实得 ${namesOf(afterRouteWrite)}`)
     } else {
-      pass('/指令 写的状态，胶囊（路由）读得到')
+      pass('路由写的会话状态真的影响组装（无第二套真相）')
     }
   }
 }

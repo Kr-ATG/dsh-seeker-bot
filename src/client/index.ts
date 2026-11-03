@@ -58,11 +58,12 @@ import { applyUiFont } from './ui-font/index.ts'
 import { applyDonePill } from './done-pill/pill.tsx'
 import { startShellHotReporter } from './done-pill/shell-hot.ts'
 import { applySidebarMedia } from './sidebar-media/index.tsx'
-import { buildActivityGrid, activityColor, ACTIVITY_COLUMNS } from './triad/usage/dashboard/ActivityGrid.js'
 import { setClientCtx } from './client-ctx.ts'
 import { applyFeatureSwitches } from './features/index.tsx'
 import { applyModeSwitch } from './mode-switch/index.ts'
+import { applySidebarWidthPersist } from './sidebar-width-persist.ts'
 import { applyPersonalAgent } from './personal/index.tsx'
+import { applySessionDelete } from './session-delete/index.tsx'
 import { featureEnabledNow, featureMount } from './features/gate.tsx'
 
 /** 顶层服务依赖（client boot graph 用）。 */
@@ -182,6 +183,13 @@ export function apply(ctx: ClientContext): void {
   // 官方侧栏其余内容让位、只剩分段控件。见 mode-switch/index.ts 头注释。
   guarded(ctx, 'mode switch', () => { applyModeSwitch(ctx) })
 
+  // ── 左侧栏拖拽宽度持久化 ───────────────────────────────────────────────
+  // 官方 layout store 是 transient：刷新 / 重开客户端就回 280px 默认值。这里自己
+  // 记 localStorage，并把值写回官方那两处 inline style（frame 的 grid 第一列 +
+  // 侧栏根 width），同时在 resize / 折叠展开把宽度改回默认时守护住。见
+  // sidebar-width-persist.ts 头注释。
+  guarded(ctx, 'sidebar width persist', () => { applySidebarWidthPersist(ctx) })
+
   // ── Personal Agent（Bot 模式的全屏应用）────────────────────────────────
   // 挂载一个覆盖整个视口的 React 应用；Work 模式自动隐藏。数据与交互在本机
   // localStorage，真实模型回复 / 期刊生图 / TTS / ASR 走 host /api/personal-agent。
@@ -199,6 +207,15 @@ export function apply(ctx: ClientContext): void {
   // input.ui-font 不在外层做 apply 期门：ui-font 内部自带 onFeatureChange，
   // 外层门会让「上次关闭 → 本次打开」时监听装不上、必须刷新。
   guarded(ctx, 'ui font', () => { applyUiFont(ctx) })
+
+  // ── 会话右键菜单「删除会话」────────────────────────────────────────────
+  // 官方把会话行的「...」菜单拆成了 `sidebar.workspaces.session.menu.item` 席位，
+  // 内置项 order 为 置顶(100)/重命名(200)/分叉(300)/归档(400)/复制 ID(450)。
+  // 本项取 425：紧接「归档会话」之后、「复制 Session ID」之前。
+  //
+  // 真正删除由 host 半身 /api/session-admin 提供（官方只有归档没有删除，归档
+  // 只把 id 塞进集合、日志与记账都留着）。见 src/session-admin/index.ts。
+  guarded(ctx, 'session delete menu', () => { applySessionDelete(ctx) })
 
   // ── 对话完成胶囊（2026-10-28 自 dsh-companion 移植）────────────────────
   // 顶部悬浮胶囊 + 左下角小横条两种形态（设置里切换）、任务完成三通道提醒
@@ -371,12 +388,12 @@ export function apply(ctx: ClientContext): void {
     ))
   })
 
-  // ── 融合的原 dsh-triad 工作台（记忆 / 用量 / 技能与 MCP）──────────────
+  // ── 融合的原 dsh-triad 工作台（记忆 / 技能 / 连接器与 MCP）──────────────
   // 侧边栏导航行、面板、composer 记忆注入开关的座位 id / order / locale
   // namespace 全部原样保留（dsh-triad 退役，用户侧零迁移）。内部每个工作台
   // 各自 try/catch，一个挂载失败不影响其他两个，也不影响上面的对话增强。
   // 定时自动化不在此列：2026-09-28 起由官方 schedule bundle 提供。
-  guarded(ctx, 'triad (memory/usage/skills)', () => {
+  guarded(ctx, 'triad (memory/skills)', () => {
     applyTriadClient(ctx)
   })
 
@@ -434,15 +451,7 @@ export function apply(ctx: ClientContext): void {
   })
 }
 
-/** 纯逻辑再导出：供 smoke 断言「Token 活动」贡献热力模型 + 人话行动流翻译。 */
-export { buildActivityGrid, activityColor, ACTIVITY_COLUMNS }
-/**
- * 纯逻辑再导出：用量筛选的下拉选项 ↔ filterDaysByScope 口径。
- *
- * 这条口径踩过真坑（选模型后四格全 0、热力图全空），冒烟要能直接断言它，
- * 所以从 triad 半身一路转发到 client 入口。
- */
-export { collectModels, collectProviders, filterDaysByScope, providerOfModel } from './triad/usage/dashboard/aggregate.ts'
+/** 纯逻辑再导出：供 smoke 断言人话行动流翻译。 */
 export { toPlainStep, plainToolName, siteOf, isMetaTool, spawnsSubagents, humanIssue } from './kr-chat/plain-language.ts'
 export { buildPlainTimeline, condenseSteps } from './kr-chat/plain-timeline.ts'
 /**

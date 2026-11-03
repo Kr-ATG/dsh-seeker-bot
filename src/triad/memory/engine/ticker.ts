@@ -12,7 +12,9 @@ import { compileAll, promoteEntries, writeDailyLog } from './compile.js'
 import { consolidateAll } from './consolidate.js'
 import { decayImportance, daysSince, shouldEvict } from './scoring.js'
 import {
+  isExpired,
   localDate,
+  nowIso,
   summarize,
   type MemoryStore,
 } from './store.js'
@@ -107,6 +109,27 @@ export function createTicker(
       let pruned: Array<import('../types.ts').MemoryEntry> = []
       /** 回收站满保留期被硬删的条目（变更流单独记一条，面板可追溯）。 */
       let purged: Array<import('../types.ts').MemoryEntry> = []
+      /**
+       * 本次因 TTL 过期被**软废弃**的条目（变更流单独记 retire）。
+       *
+       * ## 为什么软废弃而不是物理删
+       *
+       * ttlDays 是**提取模型自己给的有效期判断**，本质是启发式的：模型可能把一件
+       * 其实长期有效的事误标成「7 天」（比如把「先按 A 方案跑通」当成临时决策），
+       * 也可能把「今天要发 36 条」标成 3 天。记忆是用户资产，误判必须可逆——
+       * 软废弃后条目仍在面板与回收站里，用户看见就能改 ttlDays（或恢复时顺手清掉
+       * ttlDays）把它救回来；物理删除没有任何补救窗口。
+       *
+       * 它也不是永久豁免：进回收站后按 deprecatedRetentionDays（默认 30 天）出清，
+       * 到期才硬删——那时用户已经有一整个月没来纠正这个判定了。
+       *
+       * ## 为什么放在每日编译里
+       *
+       * 过期是**按天**变化的事实，不需要每次写操作都扫全库；每日编译本来就持有
+       * 「全量条目 → 全量回写」这一趟，顺路判定零额外 IO，且天然幂等（已废弃的
+       * 条目下次走 frozen 分支，不会重复处理）。
+       */
+      let expired: Array<import('../types.ts').MemoryEntry> = []
       await store.replaceEntries(entries => {
         const live: Array<import('../types.ts').MemoryEntry> = []
         // frozen（回收站）必须可变：满保留期的条目要从中移出并硬删。
@@ -119,7 +142,23 @@ export function createTicker(
         for (const entry of entries) {
           if (entry.deprecated === true) frozen.push(entry)
           else if (entry.pending === true) pendingBucket.push(entry)
-          else live.push(entry)
+          // TTL 过期 → 软废弃（理由见 expired 的注释）。必须排在 live 判定之前：
+          // 过期条目已经退出活跃集，不该再参与衰减 / 晋升 / 滚出 / 闲置清理——
+          // 那些规则会改它的分数与层，而它马上要进回收站，改了只是白写。
+          else if (isExpired(entry)) {
+            const now = nowIso()
+            const retired: import('../types.ts').MemoryEntry = {
+              ...entry,
+              deprecated: true,
+              deprecatedAt: now,
+              deprecatedReason: `临时信息有效期已过（ttlDays=${String(entry.ttlDays ?? 0)}）`,
+              supersededBy: undefined,
+              updatedAt: now,
+              version: entry.version + 1,
+            }
+            expired.push(retired)
+            frozen.push(retired)
+          } else live.push(entry)
         }
         const decayed = live.map(entry => ({
           ...entry,
@@ -264,6 +303,18 @@ export function createTicker(
           summary: summarize(entry.content),
         })
       }
+      // 过期软废弃单独记 retire（而不是 delete）：语义上它「退出活跃集但数据还在」，
+      // 用户可能回头改 ttlDays 复活它。面板按 retire 归进回收站，一眼能看出
+      // 「这是自动过期，不是我手动删的」。
+      for (const entry of expired) {
+        await store.appendChange({
+          action: 'retire',
+          entryId: entry.id,
+          scope: entry.scope,
+          projectHash: entry.projectHash,
+          summary: `临时信息有效期已过（ttlDays=${String(entry.ttlDays ?? 0)}）自动软废弃：${summarize(entry.content)}`,
+        })
+      }
       for (const entry of evicted) {
         await store.appendChange({
           action: 'delete',
@@ -288,7 +339,7 @@ export function createTicker(
       // 5) 产物重编译 + daily 日志。
       await compileAll(store, config)
       await writeDailyLog(store)
-      ctx.logger?.debug?.(`[dsh-memory] daily compile done (promoted=${promoted.length}, evicted=${evicted.length}, pruned=${pruned.length})`)
+      ctx.logger?.debug?.(`[dsh-memory] daily compile done (promoted=${promoted.length}, evicted=${evicted.length}, pruned=${pruned.length}, expired=${expired.length})`)
 
       // 6) LLM 语义整理（Memory Dream）：合并去重 / 精炼重写 / 删除 / 提升长期。
       //    与规则整理正交：规则处理「分数」，本步处理「语义」。失败不阻塞（内部吞错）。

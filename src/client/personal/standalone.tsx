@@ -9,12 +9,18 @@ import { PersonalProvider } from './store.tsx'
 import { PersonalApp } from './index.tsx'
 import { injectPersonalBaseStyles } from './base.css.ts'
 import { injectShellStyles } from './shell/shell.css.ts'
+import { injectOutputsStyles } from './shell/outputs.css.ts'
+import { injectSettingsStyles } from './shell/settings.css.ts'
+import { injectTaskStyles } from './shell/tasks.css.ts'
 import { injectChatStyles } from './chat/chat.css.ts'
 import { injectCallStyles } from './call/call.css.ts'
 import { injectJournalStyles } from './journal/journal.css.ts'
 
 injectPersonalBaseStyles()
 injectShellStyles()
+injectOutputsStyles()
+injectSettingsStyles()
+injectTaskStyles()
 injectChatStyles()
 injectCallStyles()
 injectJournalStyles()
