@@ -11,7 +11,7 @@
  *
  * 视觉复用产出物卡的 `pa-out-*` 类：同一右栏里两张卡必须长得像一套，不另造外框。
  */
-import { memo, useCallback, useEffect, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { usePersonal } from '../store.tsx'
 import type { PageItem } from '../types.ts'
@@ -33,16 +33,49 @@ function formatPageTime(time: number): string {
  * 结构沿用产出物卡的 `pa-out-preview-*`（fixed 覆盖视口、点遮罩 / Escape 关闭）。
  */
 function PagePreview({ page, onClose }: { readonly page: PageItem; readonly onClose: () => void }): ReactElement {
+  /*
+   * 退场状态：关闭时先播 240ms 退场（遮罩淡出 + 面板下沉缩小），播完再真正卸载。
+   *
+   * 原来三条入口都直接 onClose()，父层的 preview 一置 null 这层就被摘掉——入场是
+   * 160ms 淡入 + 190ms 弹入，出场却是硬消失。时长与曲线对齐 modal-animation.ts
+   * 的 MODAL_ANIM_MS（240ms、出场加速曲线），与插件其它弹层同一套手感。
+   */
+  const [closing, setClosing] = useState(false)
+  const closeTimerRef = useRef<number | null>(null)
+
+  /** 关闭：先播 240ms 退场，再真正卸载（直接 onClose 会硬消失）。 */
+  const requestClose = useCallback((): void => {
+    if (closeTimerRef.current !== null) return
+    setClosing(true)
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null
+      setClosing(false)
+      onClose()
+    }, 240)
+  }, [onClose])
+
+  /*
+   * 卸载收尾：清定时器；如果退场还没播完就被强行摘掉（切 Bot 后清单清空、
+   * 整卡早退都会这样），仍要把父层的 preview 一并收干净——否则它会留在
+   * 父层 state 里，下次清单回来时这张旧预览会自己弹开。
+   */
+  useEffect(() => () => {
+    if (closeTimerRef.current === null) return
+    window.clearTimeout(closeTimerRef.current)
+    closeTimerRef.current = null
+    onClose()
+  }, [onClose])
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
         event.stopPropagation()
-        onClose()
+        requestClose()
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => { window.removeEventListener('keydown', onKeyDown) }
-  }, [onClose])
+  }, [requestClose])
 
   const time = formatPageTime(page.updatedAt)
 
@@ -52,8 +85,9 @@ function PagePreview({ page, onClose }: { readonly page: PageItem; readonly onCl
       role="dialog"
       aria-modal="true"
       aria-label={page.title}
+      data-closing={closing ? '1' : undefined}
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose()
+        if (event.target === event.currentTarget) requestClose()
       }}
     >
       <div className="pa-out-preview__panel" onMouseDown={(event) => event.stopPropagation()}>
@@ -68,7 +102,7 @@ function PagePreview({ page, onClose }: { readonly page: PageItem; readonly onCl
             type="button"
             title="关闭预览"
             aria-label="关闭预览"
-            onClick={onClose}
+            onClick={requestClose}
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
               <path d="m4 4 8 8M12 4l-8 8" />

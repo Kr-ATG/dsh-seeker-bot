@@ -2,7 +2,7 @@
  * dsh-seeker-bot — 界面字体：选项表与全局应用。
  *
  * 目标：让 DSH 全站（界面 + 对话正文 + 代码块）按用户选中的字体渲染，
- * 默认「微软雅黑」，可切「霞鹜新致宋」。
+ * 默认「微软雅黑」，可切「霞鹜文楷」（落霞孤鹜的代表作）/「霞鹜新致宋」/「HarmonyOS Sans」。
  *
  * ## 为什么覆盖这几个 CSS 变量就够（DSH 0.2.1 的变量分两层）
  *
@@ -56,8 +56,6 @@
  * 那需要 host 侧注册 schema 命名空间，而字体选择纯属浏览器侧渲染偏好，
  * 与「设置文档」的语义（跨设备、模型可见）不同族。
  */
-import type { CSSProperties } from 'react'
-
 /** localStorage 键：选中的字体档 id。 */
 export const FONT_STORE_KEY = 'dsh.chat_plus.ui_font'
 
@@ -89,9 +87,13 @@ export interface FontOption {
     family: string
     /** host 路由下的文件名。 */
     file: string
+    /** @font-face 的 format 值；省略按 woff2 处理。 */
+    format?: 'woff2' | 'truetype'
     /** 供 UI 显示的大致体积。 */
     sizeLabel: string
   }
+  /** 必须随字体显示的授权署名（可选；HarmonyOS 许可要求软件内显著提示）。 */
+  notice?: string
 }
 
 /** 官方 `:root` 的通用回退链（逐字抄自 ui-theme base.css，缺字时不会掉成衬线）。 */
@@ -104,7 +106,7 @@ const OFFICIAL_CODE = '"SF Mono", "JetBrains Mono", "Fira Code", Consolas, "Libe
  * 字体档表。顺序即下拉框顺序，第一项是默认档。
  *
  * 微软雅黑写成显式字体栈而非 `var(--dsw-font-family)`：后者在用户已经切到
- * 霞鹜新致宋之后会指向新字体，切回默认就失效了（自己引用自己）。
+ * 任一中文 webfont 之后都会指向新字体，切回默认就失效了（自己引用自己）。
  */
 export const FONT_OPTIONS: readonly FontOption[] = [
   {
@@ -112,6 +114,36 @@ export const FONT_OPTIONS: readonly FontOption[] = [
     label: '微软雅黑',
     body: `"Microsoft YaHei", "Microsoft YaHei UI", ${OFFICIAL_FALLBACK}`,
     code: OFFICIAL_CODE,
+  },
+  {
+    id: 'lxgw-wenkai',
+    label: '霞鹜文楷',
+    body: `"LXGW WenKai Screen", ${OFFICIAL_FALLBACK}`,
+    // 中文放在等宽拉丁之后：代码里的英文与符号仍走真等宽，中文注释用所选字体。
+    code: `"SF Mono", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono", Menlo, Courier, "LXGW WenKai Screen", "PingFang SC", "Microsoft YaHei"`,
+    webfont: {
+      family: 'LXGW WenKai Screen',
+      // 屏幕阅读版：作者针对屏幕 12–16px 阅读调过笔画与字重，UI 下比原版更实；
+      // 随包附 OFL-1.1 许可原文（见 assets/fonts/OFL-1.1.md）。
+      file: 'lxgw-wenkai-screen.woff2',
+      sizeLabel: '10.3 MB',
+    },
+  },
+  {
+    id: 'harmonyos-sans',
+    label: 'HarmonyOS Sans',
+    body: `"HarmonyOS Sans SC", ${OFFICIAL_FALLBACK}`,
+    // 中文放在等宽拉丁之后：代码里的英文与符号仍走真等宽，中文注释用所选字体。
+    code: `"SF Mono", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono", Menlo, Courier, "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei"`,
+    // HarmonyOS Sans 许可不允许修改字体文件，因此直接分发官方 TTF（不做 woff2 转换）；
+    // 许可同时要求在软件内显著提示正在使用 HarmonyOS Sans，见 notice。
+    notice: 'HarmonyOS Sans Fonts © Huawei Device Co., Ltd.',
+    webfont: {
+      family: 'HarmonyOS Sans SC',
+      file: 'harmonyos-sans-sc-regular.ttf',
+      format: 'truetype',
+      sizeLabel: '8.3 MB',
+    },
   },
   {
     id: 'lxgw-neozhisong',
@@ -197,11 +229,11 @@ export function fontOverrideCss(option: FontOption): string {
       + '}',
   ]
   if (option.webfont !== undefined) {
-    const { family, file } = option.webfont
+    const { family, file, format = 'woff2' } = option.webfont
     // font-display: swap —— 首帧先用回退字体渲染，字体到位后替换。
-    // 用 block 会让整页文字在字体下载期间不可见（5MB 首拉有明显空窗）。
+    // 用 block 会让整页文字在字体下载期间不可见（5MB+ 首拉有明显空窗）。
     rules.unshift(
-      `@font-face{font-family:"${family}";src:url("${fontFileUrl(file)}") format("woff2");font-display:swap;font-weight:400;font-style:normal}`,
+      `@font-face{font-family:"${family}";src:url("${fontFileUrl(file)}") format("${format}");font-display:swap;font-weight:400;font-style:normal}`,
     )
   }
   return rules.join('\n')
@@ -240,28 +272,4 @@ export function applyFont(option: FontOption): () => void {
  */
 export function applyStoredFont(): () => void {
   return applyFont(fontOptionOf(readStoredFontId()))
-}
-
-/**
- * 下拉框样式：逐字对齐官方 `ModelsSection.module.css` 的 `.input` + `.selectInput`
- * （见 src/client/provider/webui/blocks/shared.tsx 的 SELECT_STYLE，同一套规格）。
- */
-export const FONT_SELECT_STYLE: CSSProperties = {
-  boxSizing: 'border-box',
-  height: 32,
-  padding: '0 32px 0 10px',
-  borderRadius: 'var(--dsw-radius-md, 12px)',
-  border: '0.5px solid var(--dsw-alias-border-l4, rgba(255,255,255,.2))',
-  background: 'var(--dsw-alias-bg-layer-1, transparent)',
-  backgroundImage: 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'12\' height=\'12\' viewBox=\'0 0 12 12\' fill=\'none\'%3E%3Cpath d=\'M3 4.5L6 7.5L9 4.5\' stroke=\'%2381858C\' stroke-width=\'1.5\' stroke-linecap=\'round\' stroke-linejoin=\'round\'/%3E%3C/svg%3E")',
-  backgroundRepeat: 'no-repeat',
-  backgroundPosition: 'right 12px center',
-  backgroundSize: '12px 12px',
-  appearance: 'none',
-  color: 'var(--dsw-alias-label-primary)',
-  font: 'inherit',
-  fontSize: 14,
-  lineHeight: '22px',
-  cursor: 'pointer',
-  minWidth: 0,
 }

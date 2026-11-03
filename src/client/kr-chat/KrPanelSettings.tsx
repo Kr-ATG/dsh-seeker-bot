@@ -12,7 +12,7 @@
  * 2026-10-25 用户反馈「优化大盘设置布局，目前看起来拥挤，排版不合理」，
  * 再提「工作区记忆应该放在下方独立的空间」，于是内部结构变成：
  *
- *   ┌ 提示词通道 3 行 ────────┬ 展示 3 行 ────┐   ← 上方两栏
+ *   ┌ 提示词通道 3 行 ────────┬ 展示 2 行 ────┐   ← 上方两栏
  *   │                          │ 任务清单 2 行  │
  *   ├─────────────────────────┴───────────────┤   ← 发丝线
  *   │ 工作区记忆（通栏，逐工作区列表，限高可滚）  │   ← 下方独立区块
@@ -60,7 +60,7 @@
  * 开关在两处显示成两个值 —— 用户会以为其中一个坏了，而两边读的是同一份 host 状态。
  *
  * 为什么分三组：「提示词通道」那几条真的会改注入文本（回合结束自动收口除外，见下），
- * 「展示」那三条一个字都不进 prompt、只改本机观感。混在一列里，读者会以为「总结卡外框」
+ * 「展示」那两条一个字都不进 prompt、只改本机观感。混在一列里，读者会以为「总结卡外框」
  * 也是往提示词里塞东西 —— 这正是本仓反复踩过的「两种不同的东西挤一张卡」的坑。
  * 自动收口（回合结束把残留的 in_progress 改回 pending）同属「插件内置、全局单值、无
  * 卸载入口」这一类能力，才并排放在注入组里；它一个字都不进 prompt 这件事由 hint 讲清。
@@ -90,7 +90,6 @@ import { createMemoryApi, type InjectStateView, type ProjectView } from '../tria
 import { FALLBACK_INJECT_STATE, normalizeInjectState } from '../triad/memory/Toggle.js'
 import { replyCardChromeEnabled, setReplyCardChromeEnabled, subscribeReplyCardChrome } from '../reply-card-chrome.js'
 import { setToolCallsVisible, subscribeToolCallsVisible, toolCallsVisible } from '../tool-calls-visible.js'
-import { setPlainTimelineVisible, subscribePlainTimelineVisible, plainTimelineVisible } from '../plain-timeline-visible.js'
 import { workspaceCwdOf } from '../client-ctx.js'
 import { getPanelSettingsStore } from './panel-settings-store.js'
 
@@ -248,7 +247,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
    * 路由时会静默丢弃写入，回滚会让 UI 显示一个它并不具备的能力，回读拿到的是真实状态。
    */
   const pushChannel = useCallback((
-    key: 'zhEnabled' | 'htmlEnabled' | 'teamEnabled' | 'todoClosureEnabled' | 'todoRuleEnabled',
+    key: 'zhEnabled' | 'htmlEnabled' | 'teamEnabled' | 'todoClosureEnabled' | 'todoRuleEnabled' | 'motionEnabled',
     next: boolean,
   ): void => {
     setBusy(true)
@@ -261,13 +260,15 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
           ? api.setTeamInjectState(next)
           : key === 'todoRuleEnabled'
             ? api.setTodoRuleInjectState(next)
-            : api.setTodoClosureState(next)
+            : key === 'motionEnabled'
+              ? api.setMotionInjectState(next)
+              : api.setTodoClosureState(next)
     void write
       .then(res => {
         // 中文 / 自动收口缺字段按开兜底（默认开的内置能力）；html / team 缺字段按
         // 关兜底（旧 host 根本没有这个能力，显示「开」是假阳性）—— 与 normalizeInjectState
         // 的口径逐条一致，改这里必须同步改那里。
-        const enabled = key === 'htmlEnabled' || key === 'teamEnabled' ? res.enabled === true : res.enabled !== false
+        const enabled = key === 'htmlEnabled' || key === 'teamEnabled' || key === 'motionEnabled' ? res.enabled === true : res.enabled !== false
         setState(prev => ({ ...prev, [key]: enabled }))
       })
       .catch(reload)
@@ -354,6 +355,8 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
   const todoClosureOn = state.todoClosureEnabled !== false
   // 任务清单纪律与 zh / 自动收口同口径（默认开）：缺字段按开。
   const todoRuleOn = state.todoRuleEnabled !== false
+  // 动效技能通道与 html / team 同口径（默认关）：缺字段按关。
+  const motionOn = state.motionEnabled === true
 
   /*
    * 展示组两条：纯呈现偏好，状态在 localStorage（见 reply-card-chrome / tool-calls-visible）。
@@ -363,8 +366,6 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
    */
   const chromeOn = useSyncExternalStore(subscribeReplyCardChrome, replyCardChromeEnabled, replyCardChromeEnabled)
   const toolCallsOn = useSyncExternalStore(subscribeToolCallsVisible, toolCallsVisible, toolCallsVisible)
-  // 操作面板与上面两条同族：它也是「这张卡要不要出现在右栏」，同样只写 localStorage。
-  const plainTimelineOn = useSyncExternalStore(subscribePlainTimelineVisible, plainTimelineVisible, plainTimelineVisible)
 
   /*
    * 当前工作区 cwd（只用来给列表里那一行打「当前」标；拿不到就是 null）。
@@ -444,6 +445,18 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               busy={busy}
               onToggle={() => { pushChannel('teamEnabled', !teamOn) }}
             />
+            {/* 动效技能通道：与其他三条不同，这条**默认关** —— 它不声明能力，只是把
+                「涉及动效时先加载 harmonyos-motion」从概率行为变成确定性动作。
+                默认开等于替所有人改了行为，所以升级后开关是灰的，要自己拨。 */}
+            <SettingsRow
+              index={3}
+              label="动效技能强制加载"
+              hint="涉及动效时先加载 harmonyos-motion"
+              title="开启后每会话首步注入一条规则：遇到「做个动画 / 加个过渡 / 交互太生硬 / 松手像急刹车 / 卡片展开 / 页面转场」这类诉求，先调用 skill 加载 harmonyos-motion 再动手。默认关 —— 不打开就仍按模型自己的语义判断决定要不要加载。"
+              on={motionOn}
+              busy={busy}
+              onToggle={() => { pushChannel('motionEnabled', !motionOn) }}
+            />
           </div>
           </div>
 
@@ -452,7 +465,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               2026-10-25 结构变化：「工作区记忆」整块**搬出右栏**，改成正文下方的
               通栏区块（见后面 .kr-settings__ws-zone）。理由三条，都不是审美：
                 · 它是**列表**，长度跟工作区数量走（本机 2 个、重度用户几十个），
-                  而右栏那一列是「固定 3 行」的展示组——两种生长性塞进同一列，
+                  而右栏那一列是「固定 2 行」的展示组——两种生长性塞进同一列，
                   列表一长就把上面那组顶得没影；
                 · 它是**唯一按工作区存**的一组，行结构完全不同（名称 + 路径 +
                   两枚迷你开关，横着排）。挤在 390px 里时路径必然被截成
@@ -465,10 +478,10 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
           <div className="kr-settings__col kr-settings__col--aside">
 
           {/* 展示组：与上面那几条**不是一类东西**，所以另起一枚组标题隔开。
-              组说明承接标题、写该组**共性**（三条都是纯 localStorage 外观偏好：
+              组说明承接标题、写该组**共性**（两条都是纯 localStorage 外观偏好：
               只改本机观感、不入 prompt、全局所有会话生效、随浏览器持久保存），
               各行 hint 于是只讲「关掉后具体会怎样」——2026-10-15 之前这三句共性
-              在三条 hint 里各抄了一遍，是设置面板里最占地方的重复。
+              在两条 hint 里各抄了一遍，是设置面板里最占地方的重复。
               `--compact` 让这一组走紧凑排版（单行省略、悬停/聚焦展开全文），
               与注入组「每行一大段说明」的读法区分开。 */}
           <div className="kr-settings__group kr-settings__group--compact">
@@ -477,7 +490,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               <span className="kr-settings__group-scope">本机浏览器 · 不进提示词</span>
             </div>
             <SettingsRow
-              index={3}
+              index={4}
               lead
               label="总结卡外框"
               hint="关掉后不留边框与阴影，退回纯正文"
@@ -490,7 +503,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               onToggle={() => { setReplyCardChromeEnabled(!chromeOn) }}
             />
             <SettingsRow
-              index={4}
+              index={5}
               label="工具调用卡"
               hint="关掉后右栏不显示技术台账"
               title="关掉后 Seeker 右栏不再显示技术向的「工具调用」台账（默认 5 行滚动窗口那张）；人话行动流不受影响。"
@@ -498,20 +511,6 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               // 与总结卡外框同族：写 localStorage，同步落盘无网络往返，busy 恒 false。
               busy={false}
               onToggle={() => { setToolCallsVisible(!toolCallsOn) }}
-            />
-            {/* 操作面板：右栏滚动区那三张里的中间那张（人话行动流）。它与上面
-                两条同族（纯外观、localStorage），但读者不同 —— 它是唯一一张讲
-                人话的卡，关掉后右栏只剩技术台账，所以默认开、且 hint 要把这件事
-                说明白，免得用户关完发现"什么都不知道了"。 */}
-            <SettingsRow
-              index={5}
-              label="操作面板"
-              hint="关掉后右栏不显示人话行动流"
-              title="关掉后 Seeker 右栏不再显示那张中文人话行动流（把工具调用翻译成「打开携程 · 机票」的卡）；工具调用台账与其余卡片不受影响。"
-              on={plainTimelineOn}
-              // 同族第三条：localStorage 同步落盘，busy 恒 false。
-              busy={false}
-              onToggle={() => { setPlainTimelineVisible(!plainTimelineOn) }}
             />
           </div>
 

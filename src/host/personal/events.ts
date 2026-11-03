@@ -23,8 +23,16 @@ import type { BotMessage } from './agent.ts'
 
 /** 服务端推给前端的事件。 */
 export type BotEvent =
-  | { type: 'message'; botId: string; message: BotMessage; source: string; seq: number; at: number }
-  | { type: 'message-update'; botId: string; message: BotMessage; source: string; seq: number; at: number }
+  /**
+   * 一条新消息。
+   *
+   * `roomId` 是**群聊回合**的群 id：消息本身由按 botId 隔离的总线送出，前端按
+   * `message.roomId` 归组，不带这个字段的卡片就会落进该 Bot 的私聊。私聊回合
+   * 缺省不带（而不是带一个空串），前端据此走原来的私聊路径。
+   */
+  | { type: 'message'; botId: string; message: BotMessage; source: string; roomId?: string; seq: number; at: number }
+  /** 同一条消息的更新（审批 / 问答被点选后改写卡片）；`roomId` 必须与原消息一致，否则前端更新不到同一张卡。 */
+  | { type: 'message-update'; botId: string; message: BotMessage; source: string; roomId?: string; seq: number; at: number }
   | { type: 'status'; botId: string; status: 'idle' | 'thinking'; seq: number; at: number }
   | { type: 'error'; botId: string; message: string; seq: number; at: number }
   /**

@@ -75,6 +75,15 @@ export function PaSelect(props: PaSelectProps): JSX.Element {
   const [open, setOpen] = useState(false)
   const [activeIndex, setActiveIndex] = useState(-1)
   const [box, setBox] = useState<PopupBox | null>(null)
+  /*
+   * 弹层退场状态：关闭时先播 240ms（淡出 + 向右 10px + 轻微缩小），再真正卸载。
+   *
+   * 退场期间 open 仍为 true —— 渲染条件因此写成 (open || closing)，坐标 box
+   * 不会因为「已经逻辑关闭」而被 measure 清空，弹层才能在原位滑出而不是跳位。
+   * 时长 / 曲线与 src/client/modal-animation.ts 的 MODAL_ANIM_MS 一致。
+   */
+  const [closing, setClosing] = useState(false)
+  const closeTimerRef = useRef<number | null>(null)
   /** 弹层挂载点：最近的 .pa-root（继承主题变量），拿不到再退 body。 */
   const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(null)
 
@@ -137,6 +146,32 @@ export function PaSelect(props: PaSelectProps): JSX.Element {
     }
   }, [open, measure])
 
+  /** 关闭弹层：先播退场，240ms 后再真正卸载。 */
+  const requestClose = useCallback((): void => {
+    // 本来就没开：不能起退场，否则会凭空多渲染 240ms。
+    if (!open) return
+    if (closeTimerRef.current !== null) return
+    setClosing(true)
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null
+      setClosing(false)
+      setOpen(false)
+    }, 240)
+  }, [open])
+
+  /** 撤销退场：退场途中重新打开时，弹层原地恢复（坐标仍在）。 */
+  const cancelClose = useCallback((): void => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current)
+      closeTimerRef.current = null
+    }
+    setClosing(false)
+  }, [])
+
+  useEffect(() => () => {
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
+  }, [])
+
   /* 点外部关闭：pointerdown 比 click 早，不会和触发器自己的 onClick 抢时序。 */
   useEffect(() => {
     if (!open) return undefined
@@ -145,17 +180,19 @@ export function PaSelect(props: PaSelectProps): JSX.Element {
       if (!(target instanceof Node)) return
       if (triggerRef.current?.contains(target) === true) return
       if (popupRef.current?.contains(target) === true) return
-      setOpen(false)
+      requestClose()
     }
     document.addEventListener('pointerdown', onPointerDown, true)
     return () => document.removeEventListener('pointerdown', onPointerDown, true)
-  }, [open])
+  }, [open, requestClose])
 
   const openMenu = useCallback((): void => {
     if (disabled) return
+    // 退场途中重新打开：先撤掉退场，再照常展开。
+    cancelClose()
     setActiveIndex(selectedIndex >= 0 ? selectedIndex : 0)
     setOpen(true)
-  }, [disabled, selectedIndex])
+  }, [disabled, selectedIndex, cancelClose])
 
   const moveActive = useCallback((delta: number): void => {
     if (options.length === 0) return
@@ -166,12 +203,13 @@ export function PaSelect(props: PaSelectProps): JSX.Element {
   }, [options.length, selectedIndex])
 
   const choose = useCallback((index: number): void => {
-    setOpen(false)
+    // 选中值立即回调，弹层自己播退场滑出。
+    requestClose()
     const option = options[index]
     if (option === undefined) return
     // 选同一项不回调：避免调用方把「没变化」当成一次保存（音色会 toast 提示）
     if (option.value !== value) onChange(option.value)
-  }, [onChange, options, value])
+  }, [onChange, options, value, requestClose])
 
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>): void => {
     if (disabled) return
@@ -205,11 +243,11 @@ export function PaSelect(props: PaSelectProps): JSX.Element {
         return
       case 'Escape':
         event.preventDefault()
-        setOpen(false)
+        requestClose()
         return
       case 'Tab':
         // Tab 离开时收起，不拦默认行为（焦点该照常走）
-        setOpen(false)
+        requestClose()
         return
       default:
         return
@@ -219,13 +257,14 @@ export function PaSelect(props: PaSelectProps): JSX.Element {
   const optionId = (index: number): string => `${baseId}-opt-${index}`
   const activeOptionId = open && activeIndex >= 0 && activeIndex < options.length ? optionId(activeIndex) : undefined
 
-  const popup = open && box !== null && portalTarget !== null
+  const popup = (open || closing) && box !== null && portalTarget !== null
     ? createPortal(
       <div
         ref={popupRef}
         className="pa-select__popup"
         role="listbox"
         aria-label={ariaLabel}
+        data-closing={closing ? '1' : undefined}
         style={{
           left: box.left,
           width: box.width,
@@ -277,7 +316,15 @@ export function PaSelect(props: PaSelectProps): JSX.Element {
         aria-activedescendant={activeOptionId}
         disabled={disabled}
         data-open={open ? 'true' : 'false'}
-        onClick={() => (open ? setOpen(false) : openMenu())}
+        onClick={() => {
+          // 退场途中再点触发器：撤销退场原地恢复，而不是等它消失后再开。
+          if (closing) {
+            cancelClose()
+            return
+          }
+          if (open) requestClose()
+          else openMenu()
+        }}
         onKeyDown={onKeyDown}
       >
         <span className="pa-select__value" data-empty={selected === undefined ? 'true' : 'false'}>{display}</span>

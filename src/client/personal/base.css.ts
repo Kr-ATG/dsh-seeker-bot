@@ -52,7 +52,18 @@ html body[data-skb-mode='bot'] #root { overflow: hidden !important; }
   z-index: 2147483000;
   display: flex;
   overflow: hidden;
-  background: var(--pa-bg);
+  /*
+   * 兜底底色用 --pa-main（对话区色）而不是 --pa-bg（更深的 #141517）：
+   *
+   * 切模式时 .pa-root 从 display:none 重新显示，主列 / 侧栏的页面转场会从
+   * opacity:0 播 240ms。这 240ms 里透出来的就是这层底色 —— 旧值比正常界面
+   * 深一档，于是「Work 切 Bot」会先暗一下再亮起来，用户看到的就是「闪一下」。
+   * 改成与主区同色后，透出的是同色底，淡入过程不可见；位移期间顶部露出的
+   * 10px 带子也是同色，不会出现色带。
+   *
+   * --pa-bg 变量本身保留（独立演示页等地方还在用），只换这里的兜底色。
+   */
+  background: var(--pa-main);
   color: var(--pa-text);
   /*
    * 字体与字号跟随 Work 模式的「设置」：
@@ -83,6 +94,13 @@ html body[data-skb-mode='bot'] #root { overflow: hidden !important; }
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
+/*
+ * Work 模式：Personal App 常驻 DOM 但不参与渲染 —— 直接用 body 的 data-skb-mode
+ * 属性控制显隐。切换模式时属性和 CSS 同步生效，不经过 React 的重新挂载，
+ * 因此不会出现「官方侧栏已让位、Bot 侧栏还没挂出来」的空白帧。
+ * data-force-mode 是独立演示页（forceMode）的豁免：它不跟随 body 模式。
+ */
+body[data-skb-mode='work'] .pa-root:not([data-force-mode='true']) { display: none !important; }
 .pa-root * { box-sizing: border-box; }
 .pa-root button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
 /*
@@ -137,10 +155,56 @@ html body[data-skb-mode='bot'] #root { overflow: hidden !important; }
   flex-direction: column;
   min-height: 0;
   background: var(--pa-sidebar);
-  border-right: 1px solid var(--pa-line);
+  /*
+   * 分隔线用内阴影画，不用 border-right：border 会占掉 1px 内容宽度，导致
+   * Bot 侧栏的品牌行、收起按钮、模式分段比 Work 模式整体左移 1px（Work 的
+   * 官方侧栏没有 border，分隔线画在 frame 的 grid 上）。换成 inset 阴影后
+   * 两边内容宽度完全一致，切换模式时这些元素不会「跳一下」。
+   */
+  box-shadow: inset -1px 0 0 var(--pa-line);
   position: relative;
   /* 收起 / 展开与官方侧栏同一节奏（官方收口 150ms）。 */
   transition: width 160ms cubic-bezier(0.22, 0.8, 0.24, 1), flex-basis 160ms cubic-bezier(0.22, 0.8, 0.24, 1);
+}
+/*
+ * 右边缘拖拽手柄（2026-11-03 用户反馈「左侧侧边栏无法拖拽」）。
+ *
+ * 8px 热区压在分隔线上，悬停 / 拖拽时亮一条发丝线提示可拖；拖动期间关掉
+ * .pa-sidebar 的宽度过渡，让边缘跟手（逻辑见 shell/Sidebar.tsx 的 startResize）。
+ * 折叠态（64px 图标轨道）不显示：那个宽度不是用户拖出来的值。
+ */
+.pa-sidebar__resizer {
+  position: absolute;
+  right: -4px;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  z-index: 4;
+  cursor: col-resize;
+  background: transparent;
+}
+.pa-sidebar__resizer::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+.pa-sidebar__resizer:hover::after,
+body[data-pa-sidebar-resizing='true'] .pa-sidebar__resizer::after {
+  background: var(--pa-line-2);
+}
+.pa-sidebar[data-collapsed='true'] .pa-sidebar__resizer { display: none; }
+/* 拖拽中：侧栏宽度不做补间（否则边缘慢半拍），并禁止选中文字。 */
+body[data-pa-sidebar-resizing='true'] .pa-sidebar {
+  transition: none;
+}
+body[data-pa-sidebar-resizing='true'] {
+  cursor: col-resize;
+  user-select: none;
 }
 /*
  * 顶部品牌行：与 Work 模式官方侧栏完全一致的一行。
@@ -167,7 +231,9 @@ html body[data-skb-mode='bot'] #root { overflow: hidden !important; }
   gap: 5px;
   min-width: 0;
   height: 24px;
-  color: var(--pa-text);
+  /* 与 Work 模式官方品牌行同色：官方用 --dsw-alias-label-primary，宿主里
+     两边取到同一个值；独立演示页没有宿主变量时才回退 Bot 主题的 --pa-text。 */
+  color: var(--dsw-alias-label-primary, var(--pa-text));
   /*
    * HARNESS 徽标是「底色 = 品牌色、字母 = 反色」：官方 wordmark 里字母的
    * fill 走 --dsw-alias-label-primary-inverted。DSH 里这个变量由宿主提供，
@@ -182,7 +248,10 @@ html body[data-skb-mode='bot'] #root { overflow: hidden !important; }
 .pa-brand__wordmark { display: inline-flex; flex: none; }
 .pa-brand__wordmark > svg { display: block; width: 100%; height: 100%; }
 /* 收起按钮：官方是 28×28 圆角矩形（不是圆形），hover 只给底色。 */
-.pa-sidebar-toggle {
+/* 选择器带 .pa-root 前缀：文件顶部的 .pa-root button 重置（0,1,1）会把
+   单纯的 .pa-sidebar-toggle（0,1,0）的 color 压成 inherit，图标颜色就跟着
+   父级走、和 Work 模式官方按钮的 label-secondary 不一致了。 */
+.pa-root .pa-sidebar-toggle {
   width: 28px;
   height: 28px;
   flex: none;
@@ -190,17 +259,23 @@ html body[data-skb-mode='bot'] #root { overflow: hidden !important; }
   align-items: center;
   justify-content: center;
   border-radius: 7px;
-  color: var(--pa-text-2);
+  /* 与 Work 模式官方 .hHd-Xa_iconButton 同色（label-secondary）；
+     独立演示页没有宿主变量时回退 Bot 主题。 */
+  color: var(--dsw-alias-label-secondary, var(--pa-text-2));
   transition: background 120ms ease, color 120ms ease;
 }
-.pa-sidebar-toggle:hover { background: rgba(128, 132, 140, 0.16); color: var(--pa-text); }
-.pa-sidebar-toggle:active { transform: scale(0.96); }
+.pa-root .pa-sidebar-toggle:hover {
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128, 132, 140, 0.16));
+  color: var(--dsw-alias-label-primary, var(--pa-text));
+}
+.pa-root .pa-sidebar-toggle:active { transform: scale(0.96); }
 /* 折叠态顶部：鲸鱼 mark 即展开入口（与官方 rail 的 railMark 一致），hover 换面板图标。 */
-.pa-sidebar-toggle--rail {
+.pa-root .pa-sidebar-toggle--rail {
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  color: var(--pa-text);
+  /* 官方折叠态 .hHd-Xa_collapsed .hHd-Xa_iconButton 用 label-primary。 */
+  color: var(--dsw-alias-label-primary, var(--pa-text));
 }
 .pa-sidebar-toggle--rail .pa-sidebar-toggle__mark { display: inline-flex; }
 .pa-sidebar-toggle--rail .pa-sidebar-toggle__icon { display: none; }
@@ -234,7 +309,10 @@ html body[data-skb-mode='bot'] #root { overflow: hidden !important; }
   flex: none;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.035);
 }
-.pa-root[data-pa-theme='light'] .pa-mode-seg { background: #dfe2e7; }
+.pa-root[data-pa-theme='light'] .pa-mode-seg { background: #dfe2e7; box-shadow: none; }
+/* 与 Work 模式官方 .skb-seg__btn 的浅色 hover 同值（#14161a）；不加的话
+   继承深色主题的 #d8dade，在浅色槽上几乎看不见，两个模式手感不一致。 */
+.pa-root[data-pa-theme='light'] .pa-mode-seg button:hover { color: #14161a; }
 .pa-mode-seg button {
   flex: 1;
   height: 34px;
@@ -248,7 +326,14 @@ html body[data-skb-mode='bot'] #root { overflow: hidden !important; }
   align-items: center;
   justify-content: center;
   line-height: 1;
-  font-size: calc(14px + var(--pa-font-delta));
+  /*
+   * 与 Work 模式的 .skb-seg__btn 用同一个字号源：两边都直接读
+   * --dsh-content-font-size（落在 Bot 里就是 --pa-font-size）。此前 Bot 用
+   * calc(14px + delta)、Work 写死 14px，通用字号 15px 时 Bot 是 16px、Work 是
+   * 14px，切换模式这一排文字会跳（用户 2026-11-03「切换不要一闪」包含这类
+   * 跳动）。分段是模式切换器本身，两个模式的同一控件必须同字号。
+   */
+  font-size: var(--pa-font-size);
   font-weight: 500;
   letter-spacing: 0.01em;
   color: #a1a4aa;
@@ -324,6 +409,78 @@ html body[data-skb-mode='bot'] #root { overflow: hidden !important; }
 /* ---------- 头像 ---------- */
 .pa-avatar { position: relative; display: inline-flex; flex: none; }
 .pa-avatar svg { display: block; width: 100%; height: 100%; overflow: visible; }
+/* 本地导入的图片头像：圆形裁切，盖满整块（SVG 造型只在没有图片时用）。 */
+.pa-avatar__image {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+}
+
+/* ---------- 头像选择器（新建 Bot / 群聊、设置卡共用） ---------- */
+.pa-avatar-picker {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  min-width: 0;
+}
+.pa-avatar-picker__preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.pa-avatar-picker__actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.pa-avatar-picker__file { display: none; }
+.pa-avatar-picker__choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.pa-avatar-picker__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pa-avatar-picker__shape {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.pa-avatar-picker__shape:hover { background: rgba(128, 132, 140, 0.14); }
+.pa-avatar-picker__shape[data-on='true'] {
+  border-color: var(--pa-accent);
+  background: rgba(255, 159, 10, 0.12);
+}
+.pa-avatar-picker__color {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+  transition: transform 120ms ease, border-color 120ms ease;
+}
+.pa-avatar-picker__color:hover { transform: scale(1.12); }
+.pa-avatar-picker__color[data-on='true'] { border-color: var(--pa-text); }
+.pa-avatar-picker__error {
+  margin: 0;
+  font-size: calc(10px + var(--pa-font-delta));
+  color: var(--pa-red);
+}
+.pa-avatar-picker__reset { margin-top: 6px; align-self: flex-start; }
 .pa-avatar__online {
   position: absolute;
   right: -1px;
@@ -336,10 +493,14 @@ html body[data-skb-mode='bot'] #root { overflow: hidden !important; }
 }
 
 /* ---------- 列表行 ---------- */
-.pa-sec-title {
+/* 分区标题（可折叠手风琴头）：整行都是点击热区，右侧箭头指示展开 / 收起。
+ * 选择器带 .pa-root 是为了压过文件顶部的 .pa-root button 重置（0,1,1）——
+ * 不带的话 padding 被清成 0、颜色退回 inherit，标题会贴边并失去层级感。 */
+.pa-root .pa-sec-title {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
+  width: 100%;
   padding: 12px 8px 5px;
   font-size: calc(10.5px + var(--pa-font-delta));
   font-weight: 500;
@@ -347,8 +508,18 @@ html body[data-skb-mode='bot'] #root { overflow: hidden !important; }
   text-transform: uppercase;
   color: var(--pa-text-4);
   user-select: none;
+  transition: color 120ms ease;
 }
-.pa-sec-title__count { margin-left: auto; font-size: calc(10px + var(--pa-font-delta)); color: var(--pa-text-4); letter-spacing: 0; }
+.pa-root .pa-sec-title:hover { color: var(--pa-text-2); }
+.pa-sec-title__chevron {
+  flex: none;
+  color: inherit;
+  transition: transform 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+/* 展开时箭头朝下，收起时朝右——和文件树 / 手风琴的通用约定一致。 */
+.pa-sec-title[data-collapsed='false'] .pa-sec-title__chevron { transform: rotate(90deg); }
+.pa-sec-title[data-collapsed='true'] .pa-sec-title__chevron { transform: rotate(0deg); }
+
 
 .pa-bot-row {
   display: flex;
@@ -364,12 +535,53 @@ html body[data-skb-mode='bot'] #root { overflow: hidden !important; }
 }
 .pa-bot-row:hover { background: rgba(255, 255, 255, 0.045); }
 .pa-bot-row[data-selected='true'] { background: var(--pa-card-2); }
+/*
+ * 新回复提示（明显但克制）：左侧一条强调色竖条 + 行底色极淡的橙 + 摘要升一档颜色。
+ * 三处单看都很轻，叠起来在侧栏里一眼就能扫到「这个会话刚回了话」；不抢名字的
+ * 注意力，也不像红点那样像报警。读掉即消失（切进会话就写 ui.readAt）。
+ */
+.pa-bot-row[data-unread='true']::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 9px;
+  bottom: 9px;
+  width: 2.5px;
+  border-radius: 0 2px 2px 0;
+  background: var(--pa-accent);
+}
+.pa-bot-row[data-unread='true'] { background: rgba(255, 159, 10, 0.055); }
+.pa-root[data-pa-theme='light'] .pa-bot-row[data-unread='true'] { background: rgba(255, 159, 10, 0.09); }
+.pa-bot-row[data-unread='true'] .pa-bot-row__summary { color: var(--pa-text-2); }
 .pa-bot-row__body { flex: 1; min-width: 0; }
 .pa-bot-row__line1 { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .pa-bot-row__name { font-size: calc(12.5px + var(--pa-font-delta)); font-weight: 600; color: var(--pa-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 70%; flex: 0 1 auto; }
 .pa-bot-row__role { font-size: calc(9.5px + var(--pa-font-delta)); color: var(--pa-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; }
 .pa-bot-row__summary { font-size: calc(10.5px + var(--pa-font-delta)); color: var(--pa-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
 .pa-bot-row[data-selected='true'] .pa-bot-row__summary { color: var(--pa-text-2); }
+/* 行右上角的最新时间：会话列表里「谁最近说过话」的扫读锚点。
+ * 放在名字行最右端（IM 惯例）；hover 时淡出，把位置让给行尾的「更多」按钮
+ * （那个按钮是绝对定位盖在行右端的，不淡出会和时间叠在一起）。 */
+.pa-bot-row__time {
+  margin-left: auto;
+  flex: none;
+  font-size: calc(9.5px + var(--pa-font-delta));
+  color: var(--pa-text-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  transition: opacity 120ms ease;
+}
+.pa-bot-row:hover .pa-bot-row__time { opacity: 0; }
+/* 置顶标记：名字后面一个小图钉。颜色比名字淡一档——它只回答「这行为什么排在
+ * 前面」，不该和名字抢注意力；align-self 覆盖 line1 的 baseline 对齐，否则
+ * 图标会贴着文字基线往下沉。 */
+.pa-bot-row__pin {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  color: var(--pa-text-4);
+}
 .pa-bot-row__badge {
   min-width: 16px; height: 16px; padding: 0 5px; border-radius: 8px; background: var(--pa-accent);
   color: #1a1206; font-size: calc(9.5px + var(--pa-font-delta)); font-weight: 700; display: inline-flex; align-items: center; justify-content: center;
@@ -479,7 +691,7 @@ button.pa-select__trigger[data-open='true'] .pa-select__chevron { transform: rot
   box-shadow: var(--pa-shadow-pop);
   overflow-y: auto;
   overscroll-behavior: contain;
-  animation: pa-fade 120ms ease both;
+  animation: pa-fade 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-select__popup::-webkit-scrollbar { width: 6px; }
 .pa-select__popup::-webkit-scrollbar-thumb { background: var(--pa-line-2); border-radius: 3px; }
@@ -533,7 +745,7 @@ button.pa-select__trigger[data-open='true'] .pa-select__chevron { transform: rot
   justify-content: center;
   background: rgba(0, 0, 0, 0.58);
   backdrop-filter: blur(6px);
-  animation: pa-fade 160ms ease both;
+  animation: pa-fade 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
   padding: 24px;
 }
 .pa-modal {
@@ -544,7 +756,7 @@ button.pa-select__trigger[data-open='true'] .pa-select__chevron { transform: rot
   background: #1d1e21;
   border-radius: 16px;
   box-shadow: var(--pa-shadow-pop);
-  animation: pa-pop 200ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  animation: pa-pop 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
   color: var(--pa-text);
 }
 .pa-root[data-pa-theme='light'] .pa-modal { background: #ffffff; }
@@ -579,7 +791,7 @@ button.pa-select__trigger[data-open='true'] .pa-select__chevron { transform: rot
   padding: 9px 16px;
   border-radius: 12px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
-  animation: pa-rise-center 220ms ease both;
+  animation: pa-rise-center 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
   pointer-events: none;
   white-space: normal;
   overflow-wrap: anywhere;
@@ -626,8 +838,49 @@ button.pa-select__trigger[data-open='true'] .pa-select__chevron { transform: rot
   100% { background-position: 400px 0; }
 }
 
-.pa-fade-in { animation: pa-fade 180ms ease both; }
-.pa-rise-in { animation: pa-rise 260ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.pa-fade-in { animation: pa-fade 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.pa-rise-in { animation: pa-rise 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+
+/* ───────────────────────── 浮层退场（closing 态） ───────────────────────── */
+/*
+ * 关闭时先播 240ms 退场再真正卸载，避免条件渲染一置 null 就硬消失。
+ * 只挂在最外层（遮罩 / 弹层根）上，卡片用后代选择器跟随——组件侧只改一处
+ * data-closing，不会出现「遮罩淡出了、卡片还在」的错位。
+ *
+ * 时长与曲线跟 src/client/modal-animation.ts 的 MODAL_ANIM_MS 对齐（240ms、
+ * 出场用加速曲线 cubic-bezier(0.4, 0, 0.2, 1)，遮罩用 ease），整套插件同一套手感。
+ * 这里的选择器优先级高于入场规则，退场时只有退场动画在跑，两套动画不会打架。
+ */
+@keyframes pa-overlay-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes pa-modal-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(14px) scale(0.97); }
+}
+/* 下拉弹层（popover）：向右 10px 滑出。 */
+@keyframes pa-select-pop-out {
+  from { opacity: 1; transform: translateX(0) scale(1); }
+  to { opacity: 0; transform: translateX(10px) scale(0.97); }
+}
+/* toast：向下退场，translateX(-50%) 必须保留，否则会从屏幕中线跳开。 */
+@keyframes pa-toast-out {
+  from { opacity: 1; transform: translate(-50%, 0) scale(1); }
+  to { opacity: 0; transform: translate(-50%, 10px) scale(0.97); }
+}
+.pa-overlay[data-closing='1'] { animation: pa-overlay-out 240ms ease both; }
+.pa-overlay[data-closing='1'] .pa-modal { animation: pa-modal-out 240ms cubic-bezier(0.4, 0, 0.2, 1) both; }
+.pa-select__popup[data-closing='1'] { animation: pa-select-pop-out 240ms cubic-bezier(0.4, 0, 0.2, 1) both; }
+.pa-toast[data-closing='1'] { animation: pa-toast-out 240ms cubic-bezier(0.4, 0, 0.2, 1) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  /* 退场规则比入场规则更具体，必须连 [data-closing] 一起列进来才压得住。 */
+  .pa-overlay[data-closing='1'],
+  .pa-overlay[data-closing='1'] .pa-modal,
+  .pa-select__popup[data-closing='1'],
+  .pa-toast[data-closing='1'] { animation: none; }
+}
 
 @media (max-width: 1000px) {
   .pa-sidebar { width: 220px; flex-basis: 220px; }
@@ -648,7 +901,14 @@ let injected = false
 /** 幂等注入基础样式；返回是否本次真正插入。 */
 export function injectPersonalBaseStyles(): boolean {
   if (typeof document === 'undefined') return false
-  if (document.getElementById('pa-base-styles') !== null) {
+  const existing = document.getElementById('pa-base-styles')
+  if (existing !== null) {
+    /*
+     * live reload：节点已在，但样式内容可能来自旧 bundle。只认 id 直接返回
+     * 会让开发时改的 CSS 永远不生效（实测改完颜色必须手动刷整个页面），
+     * 这里顺手把 textContent 对齐到当前 bundle。内容相同则不动，保持幂等。
+     */
+    if (existing.textContent !== PERSONAL_BASE_CSS) existing.textContent = PERSONAL_BASE_CSS
     injected = true
     return false
   }

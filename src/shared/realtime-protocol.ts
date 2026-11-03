@@ -540,6 +540,125 @@ export function speedToSpeechRate(speed: RealtimeSpeed | undefined): number {
   return 1
 }
 
+/* -------------------------------------------------------------------------- */
+/* 文字朗读（TTS）：把回复气泡里的正文念出来                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 朗读端点：把一段文字合成成 WAV 音频（同源 POST）。
+ *
+ * **为什么复用「通话已设置的模型」而不是另配一套 TTS**：用户的心智是「我在通话里
+ * 配好的音色 / 供应商，聊天里也该是同一个声音」。再让他去填第二套 TTS 模型与
+ * 音色，等于同一个 Bot 有两个嗓子。所以这条端点读的就是实时语音那份配置
+ * （Live 供应商列表 + 音色 + 语速），Bot 上的 `voice` / `liveVendor` 覆盖优先级
+ * 与通话完全一致。
+ *
+ * 协议形状：**成功回二进制 WAV**（`content-type: audio/wav`），失败回 JSON
+ * `{ ok:false, error }` 且状态码非 200。为什么不回 base64 JSON：一段 30 秒的
+ * 24k PCM 有 1.4MB，base64 再涨 33%，浏览器还要多一次大字符串解析——二进制直接
+ * 喂给 `decodeAudioData` 更省也更快。
+ */
+export const REALTIME_TTS_PATH = '/api/personal-agent/tts'
+
+/**
+ * 单次朗读的文本上限（字符）。
+ *
+ * 超过这个长度上游会念几十秒，响应体也涨到几 MB；而且用户真正想听的是「这条回复
+ * 说了什么」，不是整篇长文。前端会先截断，宿主再用这个值兜底（两边都做，因为
+ * 前端可能来自旧版本页面）。
+ */
+export const REALTIME_TTS_MAX_CHARS = 400
+
+/**
+ * 流式朗读的响应体类型。
+ *
+ * 不带容器格式、直接是裸 PCM16 分片：WAV 头里的 data 长度必须等整段合成完才知道，
+ * 而流式的全部意义就是「首包立刻出声」——写一个假长度只会让浏览器解码到一半截断。
+ * 采样率、位深、声道数走响应头，前端据此建播放器。
+ */
+export const REALTIME_TTS_STREAM_MIME = 'application/octet-stream'
+
+/** 流式朗读响应头：PCM16 采样率（Hz）。前端用它决定重采样目标。 */
+export const REALTIME_TTS_SAMPLE_RATE_HEADER = 'x-tts-sample-rate'
+
+/**
+ * 朗读请求体（`POST REALTIME_TTS_PATH`）。
+ *
+ * 字段全部可选：不给 `vendor` / `voice` 时宿主按「Bot 设置 → 全局默认 → 列表第一条」
+ * 解析，与通话的 `start` 帧同一套优先级。
+ */
+export interface RealtimeTtsRequest {
+  /** 要朗读的文字（必填，空串会被拒）。 */
+  text: string
+  /** 发起朗读的 Bot（只用于日志与诊断，不参与合成）。 */
+  botId?: string
+  /** Live 供应商 id（`RealtimeVendorRecord.id`）。 */
+  vendor?: string
+  /** 音色 id；留空用全局默认。 */
+  voice?: string
+  /** 指定模型（只试这一个，不做回退）；留空走供应商配置 → 宿主候选链。 */
+  model?: string
+  /** 语速档位；留空用全局默认。 */
+  speed?: RealtimeSpeed
+  /**
+   * 流式返回（默认 false = 旧的「整段 WAV」）。
+   *
+   * 为什么要有它：非流式要等整段音频合成完才回响应，用户点喇叭后要干等几秒到
+   * 几十秒才听见第一个字。流式模式下宿主**收到首片音频就开始回包**（200 +
+   * `REALTIME_TTS_STREAM_MIME` + `REALTIME_TTS_SAMPLE_RATE_HEADER`），前端边收边播，
+   * 首字延迟从「整段合成时间」降到「建连 + 首包时间」。
+   *
+   * 旧前端不传这个字段，行为完全不变（回 WAV）；新前端遇到旧宿主（忽略该字段、
+   * 回 `audio/wav`）也能按 content-type 自动回落。
+   */
+  stream?: boolean
+}
+
+/** 朗读失败时的响应体。 */
+export interface RealtimeTtsErrorBody {
+  ok: false
+  error: string
+}
+
+/**
+ * 把上游地址和模型拼成最终 URL（地址里已有 model= 时不重复加）。
+ *
+ * 放在 shared 而不是宿主模块里：朗读模块与通话代理都要用，而且这是个纯函数，
+ * 两端都能离线测。
+ * @param base 上游地址（`wss://…/v1/realtime`）。
+ * @param model 模型名。
+ * @returns 带 `model` 查询参数的地址。
+ */
+export function buildRealtimeUpstreamUrl(base: string, model: string): string {
+  if (/[?&]model=/.test(base)) return base
+  const separator = base.includes('?') ? '&' : '?'
+  return `${base}${separator}model=${encodeURIComponent(model)}`
+}
+
+/**
+ * 朗读用的系统指令。
+ *
+ * 与通话指令（`wrapVoiceInstructions`）是两回事：通话里模型要对话、要判断该不该
+ * 调工具；朗读时它只有一个任务——把给它的那段文字**原样念出来**。不写这层约束，
+ * 模型会把「今天天气不错」当成用户的话去回答（「是的，今天确实不错」），用户听到
+ * 的就不是回复内容了。
+ *
+ * 语速仍然只能靠指令表达（Realtime API 没有独立语速参数，见 `speedInstruction`）。
+ * @param speed 语速档位。
+ * @returns 一段中文系统指令。
+ */
+export function speakInstructions(speed?: RealtimeSpeed): string {
+  const lines = [
+    '你是一台朗读器。用户会给你一段文字，你唯一要做的是把这段文字原样、完整地念出来。',
+    '不要回答文字里的问题，不要总结、解释、补充或省略，也不要在开头结尾加任何话。',
+    '文字里的换行当作自然停顿；不要念出 Markdown 标记、列表符号、代码块标记、链接地址或表情符号。',
+    '如果文字里出现「第一、第二」这类口语连接词，照常念出来。',
+  ]
+  const pace = speedInstruction(speed)
+  if (pace !== '') lines.splice(1, 0, pace)
+  return lines.join('\n')
+}
+
 /** 解析一行文本帧；不是本协议的 JSON 就返回 null（调用方丢弃即可）。 */
 export function parseServerMessage(raw: string): RealtimeServerMessage | null {
   try {

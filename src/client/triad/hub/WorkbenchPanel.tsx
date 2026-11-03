@@ -4,13 +4,15 @@
  * 聚合模块（顺序 = WORKBENCH_TABS 顺序 = 侧栏操作间顺序）：
  *  0. 记忆 (Memory)       — DSH 暗色系大盘与卡片流
  *  1. 能力 (Skills)       — 技能与 MCP 工具包管理
- *  2. 连接器 (Connectors) — MCP 市场：精选目录 + 搜索 + 一键安装
- *  3. 画廊 (Gallery)      — 多媒体画廊：所有对话生成的图片 / 网页 / 演示 / 文档一站查看
- *  4. 档案 (Vault)        — 结构化个人档案：账号密码 / 支付方式 / 联系方式 / 证件
+ *  2. 画廊 (Gallery)      — 多媒体画廊：所有对话生成的图片 / 网页 / 演示 / 文档一站查看
+ *  3. 档案 (Vault)        — 结构化个人档案：账号密码 / 支付方式 / 联系方式 / 证件
  *                          （与记忆库**互不隶属**：不受工作区开关管辖，敏感值加密
  *                          落盘且绝不进模型上下文；侧栏二级菜单 = 场景分组）
- *  5. 系统提示词 (Prompt) — 只读视图：这次发送会带上什么
- *  6. 同步设置 (Sync)     — 工作台资产（档案、记忆、技能、MCP 配置）云端双向漫游
+ *  4. 系统提示词 (Prompt) — 只读视图：这次发送会带上什么
+ *  5. 同步设置 (Sync)     — 工作台资产（档案、记忆、技能、MCP 配置）云端双向漫游
+ *
+ * 连接器（MCP 市场）**不在工作台里**：2026-11-03 用户要求「MCP页面变成弹窗卡片」，
+ * 它由侧栏底部「MCP服务器」胶囊直接弹出（../connectors/ConnectorModal.tsx）。
  *
  * 供应商与网络代理**不在这里**（2026-10-05 用户点名「还是把供应商配置和代理
  * 放在设置里面吧」）：两者都在官方「设置」弹窗的「供应商」页
@@ -22,13 +24,13 @@ import { ensureWorkbenchStyles } from './styles.js'
 import { ensureWorkbenchTheme } from './theme.js'
 import { MemoryPanel } from '../memory/Panel.js'
 import { SkillsPanel } from '../skills/SkillsPanel.js'
-import { ConnectorsPanel } from '../connectors/Panel.js'
 import { GalleryPanel } from '../gallery/GalleryPanel.js'
 import { VaultPanel } from '../vault/Panel.js'
 import { SystemPromptPanel } from '../system-prompt/Panel.js'
 import { SyncSettingsPanel } from '../workbench-sync/SyncSettingsPanel.js'
 import { createMemoryApi } from '../memory/api.js'
 import { PopoverShell } from '../popover-shell.js'
+import { PAGE_MOTION_IN } from '../../motion/overlay-motion.js'
 import {
   readWorkbenchTab,
   useVisibleWorkbenchTabs,
@@ -189,12 +191,15 @@ export function WorkbenchPanel({ onClose, initialTab = DEFAULT_TAB }: WorkbenchP
       <div className="wb-root">
         {/* 分类切换在侧栏横滑条上（./strip.tsx），页内不再放切换器 */}
 
-        {/* 主体内容视图（按分类切换；key 随分类变化，重播 .wb-body > * 的入场动效） */}
+        {/* 主体内容视图（按分类切换；key 随分类变化 → 各页自己的根容器重挂，
+            重播它挂的 {...PAGE_MOTION_IN}，见 motion/overlay-motion.ts）。
+            这里不再给 .wb-body > * 挂动画：分类页的根在各自面板里，动效挂在那层
+            才能同时覆盖「进入页面」与「页内视图切换」两件事。 */}
         <div className="wb-body">
           {/* 全部工作台都被关掉时的空态：保留操作间入口（切换行），只说明怎么办。
               不给「请打开某个开关」的按钮 —— 开关在插件页，跳过去反而多一步。 */}
           {visibleTabs.length === 0 && (
-            <div key="empty" className="wb2-page-wrap">
+            <div key="empty" className="wb2-page-wrap" {...PAGE_MOTION_IN}>
               <div style={{
                 margin: 'auto',
                 padding: '32px 24px',
@@ -227,12 +232,6 @@ export function WorkbenchPanel({ onClose, initialTab = DEFAULT_TAB }: WorkbenchP
               <PageHead tab="skills" />
               <SkillsPanel onClose={onClose} embedded />
             </div>
-          )}
-
-          {/* 连接器（2026-11）：MCP 市场，精选目录 + 搜索 + 一键安装。
-              自带页头（标题 + 搜索 + 分类条），所以不叠 PageHead。 */}
-          {effectiveTab === 'connectors' && (
-            <ConnectorsPanel key="connectors" onClose={onClose} embedded />
           )}
 
           {effectiveTab === 'gallery' && (

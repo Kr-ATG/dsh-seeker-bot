@@ -21,7 +21,7 @@
  * 迁移来源：`RightPanel.tsx` 旧「详情 / 资料库」tab 里的模型、音色、供应商、权限、
  * 主动询问、例行任务、子 Bot 管理、记忆；视觉从居中弹窗改成右侧滑出卡片。
  */
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
 import {
   IconClock,
@@ -41,7 +41,10 @@ import {
   IconUsers,
   IconX,
 } from '../icons.tsx'
+import { AvatarPicker } from '../shared/AvatarPicker.tsx'
+import { ModelPicker } from '../shared/ModelPicker.tsx'
 import { PaSelect, type PaSelectOption } from '../shared/PaSelect.tsx'
+import { useModelGroups } from '../shared/useModelGroups.ts'
 import { useLiveVendors, usePersonal } from '../store.tsx'
 import {
   formatClock,
@@ -54,13 +57,6 @@ import {
 } from '../types.ts'
 import { REALTIME_DEFAULT_VOICE, REALTIME_VOICES } from '../../../shared/realtime-protocol.ts'
 import { createMemoryApi, type MemoryEntryView } from '../../triad/memory/api.ts'
-
-/** 宿主 `/api/personal-agent/models` 返回的一组模型（按供应商分组）。 */
-interface ModelGroup {
-  provider: string
-  name: string
-  models: Array<{ id: string; name: string }>
-}
 
 /** 产出物接口的本地视图（只关心根路径与错误）。 */
 interface OutputsState {
@@ -166,9 +162,36 @@ export function BotSettingsCard(): JSX.Element | null {
   const botId = ui.botSettingsOpen
   const bot = botId !== null ? state.bots.find((item) => item.id === botId) ?? null : null
 
+  /*
+   * 退场状态：关闭时先播 240ms 退场（遮罩淡出 + 卡片下沉 14px 并缩到 0.97），
+   * 播完才真正 actions.openBotSettings(null) 卸载。直接置 null 的话卡片会硬
+   * 消失，和入场那 180ms 的弹入完全不对称。
+   *
+   * 时长与曲线跟 src/client/modal-animation.ts 的 MODAL_ANIM_MS 对齐
+   * （240ms / cubic-bezier(0.4, 0, 0.2, 1)），整套插件才是同一套手感；
+   * 具体关键帧在 settings.css.ts 的 .pa-sheet-overlay[data-closing='1'] 里。
+   */
+  const [closing, setClosing] = useState(false)
+  const closeTimerRef = useRef<number | null>(null)
+
+  /** 关闭：先播 240ms 退场，再真正卸载（直接置 null 会硬消失）。 */
+  const requestClose = useCallback((): void => {
+    if (closeTimerRef.current !== null) return
+    setClosing(true)
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null
+      setClosing(false)
+      actions.openBotSettings(null)
+    }, 240)
+  }, [actions])
+
+  /* 卸载时清计时器：退场播到一半被外部卸载（切 Work / 关插件）时别留悬空回调。 */
+  useEffect(() => () => {
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
+  }, [])
+
   /* ── 表单草稿（只有基本资料需要显式保存） ── */
   const [draft, setDraft] = useState({ name: '', role: '', description: '', instructions: '' })
-  const [modelGroups, setModelGroups] = useState<ModelGroup[]>([])
   /* ── 例行任务新建表单（内联展开） ── */
   const [routineOpen, setRoutineOpen] = useState(false)
   const [routineName, setRoutineName] = useState('')
@@ -207,6 +230,9 @@ export function BotSettingsCard(): JSX.Element | null {
   const memoryApi = useMemo(() => createMemoryApi(), [])
   /* Live 供应商列表：宿主配置，打开设置卡时拉一次；读不到就降级为置灰下拉。 */
   const liveVendors = useLiveVendors(bot !== null)
+  /* 宿主可用模型（供应商 → 模型）：打开设置卡时拉一次，读不到就显示空态。 */
+  const modelGroupsState = useModelGroups(bot !== null)
+  const modelGroups = modelGroupsState.groups
   const liveVendorChoices = useMemo(
     () => liveVendorOptions(liveVendors.vendors, bot?.liveVendor, liveVendors.defaultVendor),
     [liveVendors.vendors, liveVendors.defaultVendor, bot?.liveVendor],
@@ -247,23 +273,6 @@ export function BotSettingsCard(): JSX.Element | null {
     setMemoryQuery('')
     setMemoryFilter(null)
     setNewMemory('')
-  }, [botId])
-
-  /* 拉一次宿主可用模型（供应商 + 模型）。失败就保持空，选择器显示空态。 */
-  useEffect(() => {
-    if (botId === null) return undefined
-    let alive = true
-    void (async () => {
-      try {
-        const res = await fetch('/api/personal-agent/models')
-        if (!res.ok) return
-        const data = (await res.json()) as { ok?: boolean; groups?: ModelGroup[] }
-        if (alive && data.ok === true && Array.isArray(data.groups)) setModelGroups(data.groups)
-      } catch {
-        /* 宿主不可用 / 独立演示页：不显示模型列表 */
-      }
-    })()
-    return () => { alive = false }
   }, [botId])
 
   /* 拉产出物根目录（只取 root；文件列表由右栏 BotOutputsCard 负责）。 */
@@ -389,16 +398,20 @@ export function BotSettingsCard(): JSX.Element | null {
     if (botId === null) return undefined
     const onKey = (event: KeyboardEvent): void => {
       if (event.defaultPrevented) return
-      if (event.key === 'Escape') actions.openBotSettings(null)
+      // 走 requestClose 而不是直接置 null：Esc 也要播完退场再卸载。
+      if (event.key === 'Escape') requestClose()
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [botId, actions])
+  }, [botId, requestClose])
 
   /*
    * Bot 被删除后 `ui.botSettingsOpen` 会残留一个不存在的 id。
    * 组件这时 return null 不渲染，但 store 里仍是非 null——用户再点别的 Bot
    * 才会覆盖它；这里主动清掉，避免状态里留一个指向已删除对象的悬空值。
+   *
+   * 这一条不走 requestClose：它清理的是「指向已删除对象的悬空状态」，此刻
+   * bot 已经是 null、组件本来就渲染不出任何东西，没有可播的退场动画。
    */
   useEffect(() => {
     if (botId === null) return
@@ -420,8 +433,6 @@ export function BotSettingsCard(): JSX.Element | null {
   /* ── 以下都是「打开状态下」才用得到的派生值 / 事件处理 ── */
   if (bot === null) return null
 
-  const close = (): void => actions.openBotSettings(null)
-
   const updateDraft = (patch: Partial<typeof draft>): void => {
     setDraft((prev) => ({ ...prev, ...patch }))
   }
@@ -436,18 +447,59 @@ export function BotSettingsCard(): JSX.Element | null {
     actions.toast('Bot 资料已保存')
   }
 
-  /** 当前模型（provider/model）的人类可读名。 */
+  /** 当前模型（provider/model）的选择键。 */
   const modelValue = `${bot.model.provider}/${bot.model.model}`
-  const modelLabel = modelGroups
-    .flatMap((group) => group.models.map((item) => ({ value: `${group.provider}/${item.id}`, name: item.name })))
-    .find((item) => item.value === modelValue)?.name ?? bot.model.model
+  /** 当前选中的模型条目（带推理档位元数据；宿主没给列表时为 undefined）。 */
+  const currentModel = modelGroups
+    .flatMap((group) => group.models.map((item) => ({ ...item, provider: group.provider })))
+    .find((item) => `${item.provider}/${item.id}` === modelValue)
+  /** 当前模型（provider/model）的人类可读名。 */
+  const modelLabel = currentModel?.name ?? bot.model.model
 
-  const handleModelChange = (value: string): void => {
-    // provider 不含 `/`，model 可能含（例如 auto/deepseek-v4.1-flash），按第一个 `/` 切
-    const slash = value.indexOf('/')
-    if (slash <= 0 || slash >= value.length - 1) return
+  /*
+   * 推理档位：只列模型自己公布的档位，另加一项「跟随默认」（不下发 effort，
+   * 由宿主用模型默认档）。模型没公布档位（或宿主未提供模型列表）时不渲染这一行，
+   * 不拿一套固定档位冒充能力。
+   */
+  const effortChoices: PaSelectOption[] = currentModel === undefined || (currentModel.reasoningEfforts ?? []).length === 0
+    ? []
+    : [
+        { value: '', label: '跟随默认' },
+        ...(currentModel.reasoningEfforts ?? []).map((effort) => ({ value: effort.id, label: effort.name })),
+      ]
+  /** 当前值不在公布档位里（旧数据 / 换过模型）时按「跟随默认」展示，不编一个假选项。 */
+  const effortValue = effortChoices.some((option) => option.value === (bot.model.effort ?? ''))
+    ? (bot.model.effort ?? '')
+    : ''
+
+  const handleModelChange = (provider: string, model: string): void => {
+    /*
+     * 换模型时保留推理强度有个前提：新模型必须公布同一个档位。
+     * `updateBot` 对 `model` 是整体替换，不带上就会被清掉——那样用户刚选的
+     * 档位会悄悄丢回宿主默认，表现是「改了设置但下一轮没变化」。
+     */
+    const next = modelGroups
+      .flatMap((group) => group.models.map((item) => ({ ...item, provider: group.provider })))
+      .find((item) => item.provider === provider && item.id === model)
+    const nextEfforts = (next?.reasoningEfforts ?? []).map((effort) => effort.id)
+    const keepEffort = bot.model.effort !== undefined && bot.model.effort !== '' && nextEfforts.includes(bot.model.effort)
+      ? bot.model.effort
+      : undefined
     actions.updateBot(bot.id, {
-      model: { provider: value.slice(0, slash), model: value.slice(slash + 1) },
+      model: {
+        provider,
+        model,
+        ...(keepEffort !== undefined ? { effort: keepEffort } : {}),
+      },
+    })
+  }
+
+  /** 推理强度即改即存；空值 = 跟随模型默认（不下发 reasoningEffort）。 */
+  const handleEffortChange = (next: string): void => {
+    actions.updateBot(bot.id, {
+      model: next === ''
+        ? { provider: bot.model.provider, model: bot.model.model }
+        : { provider: bot.model.provider, model: bot.model.model, effort: next },
     })
   }
 
@@ -530,15 +582,21 @@ export function BotSettingsCard(): JSX.Element | null {
       })
   }
 
+  /*
+   * 退场只加一个 data-closing，动画由 settings.css.ts 里
+   * .pa-sheet-overlay[data-closing='1'] 的后代选择器接管（特异性高于入场规则），
+   * 所以入场 class 不用拆，两者不会同时抢同一个 animation 属性。
+   */
   return (
     <div
-      className="pa-sheet-overlay"
+      className="pa-sheet-overlay pa-sheet-overlay--dialog"
+      data-closing={closing ? '1' : undefined}
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) close()
+        if (event.target === event.currentTarget) requestClose()
       }}
     >
       <aside
-        className="pa-sheet"
+        className="pa-sheet pa-sheet--dialog"
         role="dialog"
         aria-modal="true"
         aria-label={`${bot.name} 设置`}
@@ -550,7 +608,7 @@ export function BotSettingsCard(): JSX.Element | null {
             <div className="pa-sheet__title">{bot.name}</div>
             <div className="pa-sheet__sub">Bot 设置 · {bot.role}</div>
           </div>
-          <button className="pa-sheet__close" type="button" onClick={close} title="关闭" aria-label="关闭设置">
+          <button className="pa-sheet__close" type="button" onClick={requestClose} title="关闭" aria-label="关闭设置">
             <IconX size={16} />
           </button>
         </div>
@@ -558,6 +616,20 @@ export function BotSettingsCard(): JSX.Element | null {
         <div className="pa-sheet__body">
           {/* 1. 基本资料 */}
           <SheetSection icon={<IconSparkles size={13} />} title="基本资料">
+            <div className="pa-sheet-field-row">
+              <label className="pa-sheet-label">头像</label>
+              {/*
+               * 头像改完立刻生效，不等「保存资料」：它是纯视觉字段，用户在预览里
+               * 看到什么样、侧栏就该是什么样；混进表单草稿反而要再点一次保存。
+               */}
+              <AvatarPicker
+                value={bot.avatar}
+                onChange={(avatar) => {
+                  actions.updateBot(bot.id, { avatar })
+                  actions.toast('头像已更新')
+                }}
+              />
+            </div>
             <div className="pa-sheet-field-row">
               <label className="pa-sheet-label" htmlFor="pa-bset-name">名称</label>
               <input
@@ -610,25 +682,30 @@ export function BotSettingsCard(): JSX.Element | null {
           {/* 2. 模型 */}
           <SheetSection icon={<IconCpu size={13} />} title="模型" extra={modelLabel}>
             {modelGroups.length === 0 ? (
-              <div className="pa-sheet-empty">宿主未提供模型列表（跟随默认模型）</div>
+              <div className="pa-sheet-empty">
+                {modelGroupsState.loading ? '正在读取模型列表…' : '宿主未提供模型列表（跟随默认模型）'}
+              </div>
             ) : (
-              <select
-                className="pa-bset-model"
-                value={modelValue}
-                onChange={(event) => handleModelChange(event.target.value)}
-                aria-label="模型"
-              >
-                {modelGroups.map((group) => (
-                  <optgroup key={group.provider} label={group.name}>
-                    {group.models.map((item) => (
-                      <option key={`${group.provider}/${item.id}`} value={`${group.provider}/${item.id}`}>
-                        {item.name}
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
-              </select>
+              <ModelPicker
+                groups={modelGroups}
+                value={{ provider: bot.model.provider, model: bot.model.model }}
+                onChange={(next) => handleModelChange(next.provider, next.model)}
+              />
             )}
+            {effortChoices.length > 0 ? (
+              <div className="pa-sheet-field-row" style={{ marginTop: 11 }}>
+                <label className="pa-sheet-label">推理强度</label>
+                <PaSelect
+                  value={effortValue}
+                  options={effortChoices}
+                  ariaLabel="推理强度"
+                  onChange={handleEffortChange}
+                />
+                <p className="pa-sheet-hint">
+                  档位越高，模型思考越久、回答越稳；「跟随默认」使用模型自己的默认档。下一轮对话生效。
+                </p>
+              </div>
+            ) : null}
             <p className="pa-sheet-hint">选择后立即保存；下一轮对话开始生效，不影响已经开始的回合。</p>
           </SheetSection>
 
@@ -647,7 +724,7 @@ export function BotSettingsCard(): JSX.Element | null {
                 onChange={(next) => actions.updateBot(bot.id, { voice: next })}
               />
               <p className="pa-sheet-hint">
-                只影响语音通话的音色，下一通电话生效；聊天文字回复不受影响。
+                语音通话与「自动朗读」共用这套音色，下一通电话 / 下一次朗读生效。
               </p>
             </div>
             <div className="pa-sheet-field-row">
@@ -666,8 +743,27 @@ export function BotSettingsCard(): JSX.Element | null {
                     ? '正在读取供应商列表…'
                     : liveVendors.vendors.length === 0
                       ? '还没有配置任何 Live 供应商：到「设置 → 供应商 → 实时语音」里新增一个。'
-                      : '只影响语音通话连哪家 Live 供应商，下一通电话生效。'}
+                      : '语音通话与「自动朗读」共用这家供应商，下一通电话 / 下一次朗读生效。'}
               </p>
+            </div>
+            {/*
+             * 自动朗读：朗读走的就是上面这套「音色 + Live 供应商」，所以开关放在
+             * 同一个分区里 —— 用户不该为了「让它念出来」再去别处配第二套 TTS。
+             */}
+            <div className="pa-bset-row">
+              <div className="pa-bset-row__main">
+                <b>自动朗读回复</b>
+                <span>打开后新回复会自动用通话里设置的音色与供应商朗读；气泡右侧的喇叭按钮可以随时点播</span>
+              </div>
+              <button
+                className="pa-bset-switch"
+                type="button"
+                data-on={bot.autoSpeak === true ? 'true' : 'false'}
+                aria-label={bot.autoSpeak === true ? '关闭自动朗读回复' : '开启自动朗读回复'}
+                onClick={() => actions.updateBot(bot.id, { autoSpeak: bot.autoSpeak !== true })}
+              >
+                <i />
+              </button>
             </div>
           </SheetSection>
 
@@ -1096,7 +1192,7 @@ export function BotSettingsCard(): JSX.Element | null {
         </div>
 
         <div className="pa-sheet__foot">
-          <button className="pa-btn pa-btn--primary" type="button" onClick={close}>完成</button>
+          <button className="pa-btn pa-btn--primary" type="button" onClick={requestClose}>完成</button>
         </div>
       </aside>
     </div>

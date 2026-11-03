@@ -793,6 +793,13 @@ function runGit(args) {
     execFile("git", args, {
       timeout: GIT_CLONE_TIMEOUT_MS,
       windowsHide: true,
+      /*
+       * maxBuffer：默认 1MB 会把 `ls-tree -r --name-only` 的输出截断成
+       * "stdout maxBuffer length exceeded"（上游技能仓库 12742 个文件，清单接近
+       * 1MB）。截断后目录发现拿不到结果，只能退回全量 checkout —— 等于又白等
+       * 一次整仓下载。给到 64MB，远超任何正常仓库的文件清单。
+       */
+      maxBuffer: 64 * 1024 * 1024,
       // GIT_TERMINAL_PROMPT=0：私有仓库/需要凭据时立刻失败，而不是挂在终端提示上
       // 等到 180s 超时（宿主进程没有 TTY，等提示等于等死）。
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }
@@ -862,6 +869,41 @@ async function discoverSkillDirs(base, baseRel) {
   return skillChildDirs(base, baseRel);
 }
 /**
+ * 从 `git ls-tree -r --name-only` 的文件清单里算「要检出哪些目录」。
+ *
+ * 与 {@link discoverSkillDirs} 一一对应（a 根 SKILL.md / b skills 下一层 /
+ * c 仓库下一层，第一个命中就停），只是输入从「磁盘目录」换成「路径清单」：
+ * partial clone（--no-checkout）时工作区还是空的，只能靠清单判断，否则就得
+ * 先把整仓文件写下来 —— 那正是要避免的几十秒。
+ *
+ * 返回仓库相对路径（/ 分隔）；根技能返回 ["."]，表示整个 base 都要检出。
+ */
+function skillDirsFromListing(text, baseRel) {
+  const rel = String(baseRel ?? "").replace(/^\/+|\/+$/g, "");
+  const prefix = rel === "" ? "" : `${rel}/`;
+  const files = String(text ?? "").split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== "");
+  const known = /* @__PURE__ */ new Set(files);
+  // a. base/SKILL.md → 单技能，技能目录就是 base 本身
+  if (known.has(`${prefix}${SKILL_FILE}`)) return [rel === "" ? "." : rel];
+  // b. base/skills/<x>/SKILL.md → 多技能（技能包仓库的主场景）
+  const nestedPrefix = `${prefix}skills/`;
+  const nested = /* @__PURE__ */ new Set();
+  for (const file of files) {
+    if (!file.startsWith(nestedPrefix)) continue;
+    const parts = file.slice(nestedPrefix.length).split("/");
+    if (parts.length === 2 && parts[1] === SKILL_FILE) nested.add(`${nestedPrefix}${parts[0]}`);
+  }
+  if (nested.size > 0) return [...nested].sort();
+  // c. base/<x>/SKILL.md → 多技能
+  const direct = /* @__PURE__ */ new Set();
+  for (const file of files) {
+    if (!file.startsWith(prefix)) continue;
+    const parts = file.slice(prefix.length).split("/");
+    if (parts.length === 2 && parts[1] === SKILL_FILE) direct.add(`${prefix}${parts[0]}`);
+  }
+  return [...direct].sort();
+}
+/**
  * 递归收集技能目录下的普通文件（相对路径用 / 分隔，便于走 resolveSkillFile 校验）。
  *
  * 只收 isFile() 的普通文件：clone 出来的仓库里可能有符号链接（指向 /etc/passwd
@@ -924,9 +966,26 @@ async function importGitSkills(body) {
      */
     const cloneArgs = ["-c", "core.longpaths=true", "clone", "--depth", "1", "--single-branch"];
     if (ref !== "") cloneArgs.push("--branch", ref);
-    // -- 之后再放地址：即使地址长得像选项（--upload-pack=...），也只能当仓库参数。
-    cloneArgs.push("--", url, cloneDir);
-    await runGit(cloneArgs);
+    /*
+     * 先试 partial clone（dsh-seeker-bot patch 2026-11-03）。
+     *
+     * 技能仓库常把 benchmark 夹具 / 大资源一起提交：实测上游
+     * dsh-plugin-upgrade-skill 整仓 117MB / 12742 个文件，而技能本体只有
+     * 2.4MB / 186 个文件。整仓 clone 要 86 秒，用户点一次「更新」得等两分钟，
+     * 界面只有一个「更新中…」，看起来就像卡死。--filter=blob:none 只下 tree
+     * （十几秒），拿到文件清单后再 sparse-checkout 技能目录，把等待压到 20 秒内。
+     * 老 git / 服务器不支持 filter 时 clone 会失败，退回原来的完整 clone。
+     */
+    const fullCloneArgs = [...cloneArgs, "--", url, cloneDir];
+    const partialCloneArgs = [...cloneArgs, "--filter=blob:none", "--no-checkout", "--", url, cloneDir];
+    let partial = false;
+    try {
+      await runGit(partialCloneArgs);
+      partial = true;
+    } catch {
+      await rm(cloneDir, { recursive: true, force: true });
+      await runGit(fullCloneArgs);
+    }
     const commit = (await runGit(["-C", cloneDir, "rev-parse", "HEAD"])).stdout.trim();
     let base = cloneDir;
     let baseRel = "";
@@ -934,6 +993,38 @@ async function importGitSkills(body) {
       const segments = subdirSegments(subdir);
       base = resolveRepoSubdir(cloneDir, segments, subdir);
       baseRel = segments.join("/");
+    }
+    if (partial) {
+      /*
+       * 只检出技能目录。清单来自 ls-tree（partial clone 已有 tree 对象，不出网）；
+       * 目录发现规则与 discoverSkillDirs 一致（见 skillDirsFromListing）。
+       * 清单里没有 SKILL.md 就直接报错，不必再把上万个文件全写到磁盘。
+       */
+      let skillDirs = null;
+      try {
+        const listing = (await runGit(["-C", cloneDir, "ls-tree", "-r", "--name-only", "HEAD"])).stdout;
+        skillDirs = skillDirsFromListing(listing, baseRel);
+      } catch {
+        skillDirs = null;
+      }
+      if (skillDirs !== null && skillDirs.length === 0) {
+        throw new Error(`no ${SKILL_FILE} found in ${subdir === "" ? "repository" : `subdir ${JSON.stringify(subdir)}`}`);
+      }
+      if (skillDirs !== null && !skillDirs.includes(".")) {
+        try {
+          await runGit(["-c", "core.longpaths=true", "-C", cloneDir, "sparse-checkout", "init", "--cone"]);
+          await runGit(["-c", "core.longpaths=true", "-C", cloneDir, "sparse-checkout", "set", "--", ...skillDirs]);
+          await runGit(["-c", "core.longpaths=true", "-C", cloneDir, "checkout", "HEAD"]);
+        } catch {
+          // sparse-checkout 不可用（git < 2.25 / 路径特殊）→ 全量检出兜底，正确性优先。
+          await runGit(["-c", "core.longpaths=true", "-C", cloneDir, "checkout", "HEAD"]);
+        }
+      } else {
+        // 根技能（"."）本来就要整个 base，直接全量检出。
+        await runGit(["-c", "core.longpaths=true", "-C", cloneDir, "checkout", "HEAD"]);
+      }
+    }
+    if (subdir !== "") {
       try {
         if (!(await stat(base)).isDirectory()) throw new Error("not a directory");
       } catch {
@@ -1244,12 +1335,45 @@ async function checkSources(body) {
  *
  * 复用 importGitSkills 而不是自己 clone 一遍：落盘、整体覆盖、归组、来源记录刷新
  * 全在那一处，两条路各写一套迟早分叉（比如一边记得排除 node_modules，另一边忘了）。
+ *
+ * 更新前先 ls-remote 比对（dsh-seeker-bot patch 2026-11-03）：账本里的 commit 就是
+ * 上次落盘的版本，远端没动时再 clone 一遍纯属白等 —— 用户点「更新」的预期是
+ * 「要么变新，要么立刻告诉我已经最新」。比对失败（网络抖动 / ref 临时不可解析）
+ * 不阻塞真正的 clone，退回原流程，让错误在 clone 阶段以更完整的信息报出。
  */
-async function updateSource(id) {
+async function updateSource(id, options) {
   const wantedId = typeof id === "string" ? id.trim() : "";
+  const opts = typeof options === "object" && options !== null ? options : {};
   const before = await readSourceLedger();
   const existing = before.sources.find((item) => item.id === wantedId);
   if (existing === void 0) throw new Error(`source ${JSON.stringify(wantedId)} not found`);
+  if (opts.skipRemoteCheck !== true && existing.commit !== "") {
+    try {
+      const remoteCommit = await remoteCommitOf(existing.url, existing.ref ?? "");
+      const checked = await readSourceLedger();
+      const checkedRecord = checked.sources.find((item) => item.id === wantedId);
+      if (checkedRecord !== void 0) {
+        checkedRecord.lastCheck = nowMs();
+        checkedRecord.lastError = null;
+        await writeSourceLedger(checked);
+      }
+      if (remoteCommit !== "" && remoteCommit === existing.commit) {
+        return {
+          ok: true,
+          upToDate: true,
+          source: checkedRecord ?? existing,
+          id: existing.id,
+          url: existing.url,
+          commit: remoteCommit,
+          skills: existing.skills,
+          installed: [],
+          skipped: []
+        };
+      }
+    } catch {
+      // 比对失败就退回 clone：clone 会给出更完整的错误（网络 / 权限 / 仓库不存在）。
+    }
+  }
   let result;
   try {
     result = await importGitSkills({
@@ -1315,7 +1439,8 @@ async function updateAllSources() {
       continue;
     }
     try {
-      const result = await updateSource(record.id);
+      // checkSources 刚比对过远端，这里不必再 ls-remote 一次。
+      const result = await updateSource(record.id, { skipRemoteCheck: true });
       updated.push({ id: result.id, url: result.url, commit: result.commit, skills: result.skills });
     } catch (error) {
       failed.push({ id: record.id, url: record.url, error: error instanceof Error ? error.message : String(error) });

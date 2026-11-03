@@ -57,7 +57,7 @@ export function injectStyles(): () => void {
 /* ── 页面骨架：窄屏纵向堆叠 / 宽屏三栏（列表 · 详情 · 模型设置） ──
    宽窄由组件用 ResizeObserver 量自身宽度后打 data-wide（媒体查询量视口，
    与容器实宽不是一回事）。 */
-.phub-host{display:flex;flex-direction:column;gap:18px;animation:phub-page-in 360ms cubic-bezier(.22,1,.36,1) backwards}
+.phub-host{display:flex;flex-direction:column;gap:18px;animation:phub-page-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards}
 /* 弹窗放大过程中内容一直在重排，淡入 + 轻微上浮让这一拍读起来是「铺开」而不是「被拉伸」。 */
 @keyframes phub-page-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 /* ── 模式切换行（模型 / 实时语音）：内容区顶部右对齐 ──
@@ -75,7 +75,7 @@ export function injectStyles(): () => void {
    布局一次到位更扎眼；重排本身由这层淡入遮住即可。
    容器自身只播 col-in（带 120ms 延后，等弹窗先铺开），卡片错峰由下面的
    nth-child 承担——容器再播一份 block-in 会和子卡叠成双重淡入，时序全乱。 */
-.phub-host[data-wide] > .phub-hub > .phub-blocks{flex:0 0 clamp(560px,44%,900px);width:clamp(560px,44%,900px);max-height:var(--phub-max-h, calc(100vh - 150px));overflow-y:auto;overflow-x:hidden;padding-right:2px;animation:phub-col-in 360ms cubic-bezier(.22,1,.36,1) 120ms backwards}
+.phub-host[data-wide] > .phub-hub > .phub-blocks{flex:0 0 clamp(560px,44%,900px);width:clamp(560px,44%,900px);max-height:var(--phub-max-h, calc(100vh - 150px));overflow-y:auto;overflow-x:hidden;padding-right:2px;animation:phub-col-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) 120ms backwards}
 @keyframes phub-col-in{from{opacity:0;transform:translateX(10px)}}
 /* 窄屏（未打 data-wide）：模型设置卡换行落到第二行，占满整行。
    flex-basis:100% 是换行的关键——只给 flex:1 的话它会被压在同一行里，
@@ -106,7 +106,7 @@ export function injectStyles(): () => void {
 .phub-host[data-editing] .phub-navwrap{display:none}
 
 /* 右侧详情：打开/切换/关闭回占位时滑入（key 变化重播） */
-.phub-detail-in{display:flex;flex-direction:column;min-width:0;animation:phub-slide-in 220ms cubic-bezier(.2,.8,.2,1)}
+.phub-detail-in{display:flex;flex-direction:column;min-width:0;animation:phub-slide-in 240ms cubic-bezier(.2,.8,.2,1)}
 @keyframes phub-slide-in{from{opacity:0;transform:translateX(14px)}to{opacity:1;transform:none}}
 
 /* ── 行 hover / 按下：列表行与底部模型卡的行卡片共用同一套反馈 ── */
@@ -133,19 +133,19 @@ export function injectStyles(): () => void {
    与官方设置页的卡片并排一眼能看出两套。 */
 .phub-block{border:.5px solid var(--dsw-alias-settings-card-stroke, rgba(255,255,255,.2));border-radius:var(--dsw-radius-xl,20px);padding:12px 14px;display:flex;flex-direction:column;gap:12px;min-width:0;box-sizing:border-box;background:var(--dsw-alias-settings-card-fill, transparent);transition:border-color 120ms ease}
 .phub-block:hover{border-color:var(--dsw-alias-border-l3,rgba(255,255,255,.24))}
-.phub-block-in{animation:phub-block-in 320ms cubic-bezier(.22,1,.36,1) backwards}
+.phub-block-in{animation:phub-block-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards}
 /* 底部模型卡错峰入场：弹窗放大的 420ms 里先让骨架铺开，内容晚一拍跟进，
    整页像一次性铺开而不是同时闪出来。代理块跟在最后一块后面。
    注意：nth-child 直接写 animation 简写（而非 animation-delay），
    会覆盖子卡自带的 .phub-block-in——这正是要的：时序以这里为准。 */
 .phub-blocks{display:flex;flex-direction:column;gap:14px;min-width:0}
-.phub-blocks > *:nth-child(1){animation:phub-block-in 320ms cubic-bezier(.22,1,.36,1) 140ms backwards}
-.phub-blocks > *:nth-child(2){animation:phub-block-in 320ms cubic-bezier(.22,1,.36,1) 220ms backwards}
-.phub-blocks > *:nth-child(3){animation:phub-block-in 320ms cubic-bezier(.22,1,.36,1) 300ms backwards}
-.phub-proxy.phub-block-in{animation:phub-block-in 320ms cubic-bezier(.22,1,.36,1) 360ms backwards}
+.phub-blocks > *:nth-child(1){animation:phub-block-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) 140ms backwards}
+.phub-blocks > *:nth-child(2){animation:phub-block-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) 220ms backwards}
+.phub-blocks > *:nth-child(3){animation:phub-block-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) 300ms backwards}
+.phub-proxy.phub-block-in{animation:phub-block-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) 360ms backwards}
 @keyframes phub-block-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 /* 展开的「说明」段落：高度不变，只淡入，避免整块跳动。 */
-.phub-desc-in{animation:phub-desc-in 200ms ease backwards}
+.phub-desc-in{animation:phub-desc-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards}
 @keyframes phub-desc-in{from{opacity:0}to{opacity:1}}
 
 /* ── 网络代理：整页底部区块（不占右列，用户 2026-10-05 点名） ──
@@ -155,7 +155,7 @@ export function injectStyles(): () => void {
 @media (max-width: 1200px){.phub-proxy > .pp-panel{grid-template-columns:1fr}}
 
 /* 空态占位：细虚线 + 居中说明，随页面淡入（无内容时不撑一条边框出来）。 */
-.phub-placeholder{border-style:dashed;border-color:var(--dsw-alias-border-l3,#c9cdd4);color:var(--dsw-alias-label-tertiary,#8f959e);text-align:center;align-items:center;justify-content:center;min-height:220px;padding:24px;animation:phub-block-in 260ms cubic-bezier(.2,.8,.2,1) backwards}
+.phub-placeholder{border-style:dashed;border-color:var(--dsw-alias-border-l3,#c9cdd4);color:var(--dsw-alias-label-tertiary,#8f959e);text-align:center;align-items:center;justify-content:center;min-height:220px;padding:24px;animation:phub-block-in 240ms cubic-bezier(.2,.8,.2,1) backwards}
 
 /* ── 弹窗尺寸：保持官方 800×800，不做任何放大 / 缩放 ──
    这一页曾按 :has(.phub-host) 把设置弹窗撑到 min(1680px, 100vw-48px) 并吃满

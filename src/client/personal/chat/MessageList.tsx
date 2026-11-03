@@ -14,12 +14,17 @@
  * 进入对话流（同一个气泡样式），只是带上 `callSegment` 标记归属。段首有一条
  * `call-segment` 折叠条，收起时这里整段跳过（只留折叠条），展开时什么都不用做——
  * 段内消息本来就是普通气泡，不额外包卡片。
+ *
+ * 朗读（见 speech.ts）：bot 消息的气泡侧边、引用按钮之后有一枚喇叭按钮，点一下
+ * 就用「通话里设置的音色与供应商」把这条念出来；Bot 设置里打开「自动朗读回复」后
+ * 新回复也会自动念（只在单聊、且没有通话进行时，理由见自动播放那段注释）。
  */
-import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
-import { IconChevronDown, IconQuote, IconSparkles, IconUndo, IconX } from '../icons.tsx'
+import { IconChevronDown, IconQuote, IconSparkles, IconStop, IconUndo, IconVolume, IconX } from '../icons.tsx'
 import { formatClock, type Bot, type Message, type MessageBlock } from '../types.ts'
 import { usePersonal } from '../store.tsx'
+import { getSpeechState, speakText, speechTextOf, stopSpeech, useSpeechState } from '../speech.ts'
 import { MessageBlockView } from './MessageBlockView.tsx'
 import { pendingTasksOf } from './pending.ts'
 
@@ -139,6 +144,69 @@ function messagePreview(message: Message): string {
     return '（无文字内容）'
   }
   return text.length > 80 ? `${text.slice(0, 80)}…` : text
+}
+
+/* ───────────────────────── 朗读（自动朗读 / 气泡喇叭） ───────────────────────── */
+
+/**
+ * 自动朗读的 debounce（毫秒）。
+ *
+ * 流式回复会连续改 messages（每来一段正文就变一次引用），不加防抖就会把半句话
+ * 念出去、然后被下一段打断。250ms 是「这一阵安静下来了」的量级：比一次事件循环
+ * 长，又短到用户感觉不出延迟。
+ */
+const AUTO_SPEAK_DELAY_MS = 250
+
+/**
+ * 气泡上的「朗读」按钮（引用按钮之后）。
+ *
+ * 单独抽成组件而不是内联：它要订阅朗读状态（useSpeechState），内联的话每次播放
+ * 开始 / 结束都会让**整条消息流**重渲染；抽出来之后只有这一枚按钮跟着变。
+ * 文本清洗也放这里 useMemo —— 长会话里每条 bot 消息渲染时都洗一遍 Markdown 是纯浪费。
+ */
+function SpeakToolButton({ message, bot, onError }: {
+  message: Message
+  bot: Bot
+  /**
+   * 手动点播失败时的回调。
+   *
+   * 自动朗读失败要静默（那是背景行为，弹错只会打扰用户），但**用户自己点的**
+   * 按钮失败了必须说一声——否则点了没反应，看起来像功能坏了。
+   */
+  onError?: (message: string) => void
+}): JSX.Element | null {
+  const speech = useSpeechState()
+  const text = useMemo(() => speechTextOf(message), [message])
+  // 没有可朗读的正文（纯工具卡 / 生图卡）就不给入口：按钮点了也没声音
+  if (text === '') return null
+  const active = speech.messageId === message.id && (speech.speaking || speech.loading)
+  return (
+    <button
+      className="pa-msg__tool"
+      type="button"
+      data-speaking={active ? 'true' : 'false'}
+      title={active ? '停止朗读' : '朗读这条消息'}
+      aria-label={active ? '停止朗读' : '朗读这条消息'}
+      onClick={() => {
+        if (active) {
+          stopSpeech()
+          return
+        }
+        void speakText(text, {
+          messageId: message.id,
+          botId: message.senderId ?? message.botId,
+          // 音色 / 供应商跟这条消息的发送者走：群聊里不同 Bot 有各自的嗓子
+          ...(bot.voice !== undefined && bot.voice !== '' ? { voice: bot.voice } : {}),
+          ...(bot.liveVendor !== undefined && bot.liveVendor !== '' ? { vendor: bot.liveVendor } : {}),
+        }).then(() => {
+          const error = getSpeechState().error
+          if (error !== null) onError?.(error)
+        })
+      }}
+    >
+      {active ? <IconStop size={16} /> : <IconVolume size={18} strokeWidth={2} />}
+    </button>
+  )
 }
 
 /* ───────────────────────── 压缩标记（1.1） ───────────────────────── */
@@ -274,6 +342,40 @@ export function MessageList({ messages, bot, room }: MessageListProps): JSX.Elem
   const [atBottom, setAtBottom] = useState(true)
   /** 待撤回的消息（非 null 时显示确认卡）。 */
   const [recallTarget, setRecallTarget] = useState<Message | null>(null)
+  /*
+   * 撤回确认卡的退场状态：关闭时先播 240ms（遮罩淡出 + 卡片下滑缩小），
+   * 再真正卸载。直接 setRecallTarget(null) 会让卡片硬消失，和入场那 200ms
+   * 的弹出不对称。时长 / 曲线与 modal-animation.ts 的 MODAL_ANIM_MS 一致。
+   */
+  const [recallClosing, setRecallClosing] = useState(false)
+  const recallTimerRef = useRef<number | null>(null)
+
+  /** 关闭确认卡：先播退场，再执行原来的关闭 / 撤回动作。 */
+  const closeRecall = useCallback((after?: () => void): void => {
+    if (recallTimerRef.current !== null) return
+    setRecallClosing(true)
+    recallTimerRef.current = window.setTimeout(() => {
+      recallTimerRef.current = null
+      setRecallClosing(false)
+      setRecallTarget(null)
+      after?.()
+    }, 240)
+  }, [])
+
+  useEffect(() => () => {
+    if (recallTimerRef.current !== null) window.clearTimeout(recallTimerRef.current)
+  }, [])
+
+  /* Esc 关闭确认卡：与关闭按钮、点遮罩走同一个退场，不再有第三条硬关路径。 */
+  useEffect(() => {
+    if (recallTarget === null) return undefined
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      closeRecall()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [recallTarget, closeRecall])
   /**
    * 已收起的轮次（turnId）。
    *
@@ -302,7 +404,24 @@ export function MessageList({ messages, bot, room }: MessageListProps): JSX.Elem
 
   useEffect(() => {
     stickRef.current = true
+    // 切会话时停掉正在念的那一条：用户已经在看别的对话，旧消息继续响很怪
+    stopSpeech()
   }, [room?.id, bot.id])
+
+  /*
+   * 通话一开就停掉朗读：扬声器要留给通话，两边同时出声会互相盖住。
+   * 只拦「通话开始」这一刻，通话中用户仍然可以手动点喇叭（那是显式操作）。
+   */
+  useEffect(() => {
+    if (ui.call.status !== 'idle') stopSpeech()
+  }, [ui.call.status])
+
+  // 消息流卸载（切去期刊页等）时收声：已经离开对话了还继续念属于失控
+  useEffect(() => {
+    return () => {
+      stopSpeech()
+    }
+  }, [])
 
   useEffect(() => {
     const element = scrollRef.current
@@ -312,6 +431,54 @@ export function MessageList({ messages, bot, room }: MessageListProps): JSX.Elem
     })
     return () => window.cancelAnimationFrame(frame)
   }, [messages])
+
+  /*
+   * 自动朗读（Bot 设置里的「自动朗读回复」）。
+   *
+   * 只在单聊里生效：群聊是多个 Bot 轮流说话，自动念会变成抢话；通话进行中也不念
+   * ——那条链路本来就在播语音，再叠一层会撞在一起。
+   *
+   * 三条防呆：
+   *  · 首次挂载 / 切换会话时把已有消息全部标记成「已播」，否则一刷新就把最后一条
+   *    历史回复念一遍（这是最容易吓到用户的一种）；
+   *  · debounce：流式回复会连续改 messages，等这一阵安静下来再播；
+   *  · 每轮只播最后一条，且 pending 的消息不播（它还没定稿，念了就是半句话）。
+   */
+  const autoSpeak = bot.autoSpeak === true
+  const autoSpeakRef = useRef(autoSpeak)
+  const spokenRef = useRef<{ key: string; ids: Set<string> } | null>(null)
+  useEffect(() => {
+    const key = room === null ? `bot:${bot.id}` : `room:${room.id}`
+    const spoken = spokenRef.current
+    if (spoken === null || spoken.key !== key) {
+      // 换了会话：把这一屏现有的消息全部记为已播，不补念历史
+      spokenRef.current = { key, ids: new Set(messages.map((message) => message.id)) }
+      autoSpeakRef.current = autoSpeak
+      return
+    }
+    if (autoSpeakRef.current !== autoSpeak) {
+      // 开关刚拨动：把当前消息记为已播，拨开关这个动作本身不触发朗读
+      autoSpeakRef.current = autoSpeak
+      for (const message of messages) spoken.ids.add(message.id)
+      return
+    }
+    if (!autoSpeak || room !== null || ui.call.status !== 'idle') return
+    const timer = window.setTimeout(() => {
+      const last = [...messages].reverse().find((message) => message.role === 'bot')
+      if (last === undefined || spoken.ids.has(last.id)) return
+      if (last.pending === true) return
+      const text = speechTextOf(last)
+      if (text === '') return
+      spoken.ids.add(last.id)
+      void speakText(text, {
+        messageId: last.id,
+        botId: last.botId,
+        ...(bot.voice !== undefined && bot.voice !== '' ? { voice: bot.voice } : {}),
+        ...(bot.liveVendor !== undefined && bot.liveVendor !== '' ? { vendor: bot.liveVendor } : {}),
+      })
+    }, AUTO_SPEAK_DELAY_MS)
+    return () => window.clearTimeout(timer)
+  }, [messages, room?.id, autoSpeak, bot.id, bot.voice, bot.liveVendor, ui.call.status])
 
   const onScroll = (event: UIEvent<HTMLDivElement>): void => {
     const element = event.currentTarget
@@ -639,7 +806,8 @@ export function MessageList({ messages, bot, room }: MessageListProps): JSX.Elem
                     {/*
                      * 气泡侧边的操作图标：hover / 键盘聚焦才浮现，纯图标不带文字。
                      * bot 消息挂在气泡右侧（气泡左对齐，右边是空白），用户消息挂在左侧。
-                     * 引用两边都有（把自己刚说的话带进上下文同样成立）；撤回只对自己的消息。
+                     * 引用两边都有（把自己刚说的话带进上下文同样成立）；朗读只对 bot 消息；
+                     * 撤回只对自己的消息。
                      * 绝对定位不占布局：常驻占位会把气泡和消息间距一起撑开。
                      */}
                     <div className="pa-msg__tools">
@@ -652,6 +820,12 @@ export function MessageList({ messages, bot, room }: MessageListProps): JSX.Elem
                       >
                         <IconQuote size={18} strokeWidth={2} />
                       </button>
+                      {/*
+                       * 朗读按钮紧跟在引用之后（用户要求「引用后面加扬声器标识」）。
+                       * 只有 bot 消息有：自己的话不需要听一遍，念自己的消息还会让人
+                       * 以为是在放语音输入。文本为空的消息由组件自己返回 null。
+                       */}
+                      {message.role === 'bot' ? <SpeakToolButton message={message} bot={sender} onError={actions.toast} /> : null}
                       {message.role === 'user' ? (
                         <button
                           className="pa-msg__tool"
@@ -702,14 +876,15 @@ export function MessageList({ messages, bot, room }: MessageListProps): JSX.Elem
       {recallTarget !== null ? (
         <div
           className="pa-overlay"
+          data-closing={recallClosing ? '1' : undefined}
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setRecallTarget(null)
+            if (event.target === event.currentTarget) closeRecall()
           }}
         >
           <div className="pa-modal pa-confirm" onMouseDown={(event) => event.stopPropagation()}>
             <div className="pa-modal__head">
               <div className="pa-modal__title">撤回消息</div>
-              <button className="pa-modal__close" type="button" onClick={() => setRecallTarget(null)} aria-label="关闭">
+              <button className="pa-modal__close" type="button" onClick={() => closeRecall()} aria-label="关闭">
                 <IconX size={16} />
               </button>
             </div>
@@ -720,7 +895,7 @@ export function MessageList({ messages, bot, room }: MessageListProps): JSX.Elem
               </p>
             </div>
             <div className="pa-modal__foot">
-              <button className="pa-btn pa-btn--ghost" type="button" onClick={() => setRecallTarget(null)}>
+              <button className="pa-btn pa-btn--ghost" type="button" onClick={() => closeRecall()}>
                 取消
               </button>
               <button
@@ -728,8 +903,10 @@ export function MessageList({ messages, bot, room }: MessageListProps): JSX.Elem
                 type="button"
                 onClick={() => {
                   const target = recallTarget
-                  setRecallTarget(null)
-                  actions.recallMessage(target.id)
+                  // 撤回动作等退场播完再执行，卡片滑出时消息流才刷新。
+                  closeRecall(() => {
+                    actions.recallMessage(target.id)
+                  })
                 }}
               >
                 撤回

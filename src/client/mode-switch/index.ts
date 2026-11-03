@@ -47,6 +47,16 @@ const BOT_DISABLED_TITLE = 'Bot 模式暂不可用，当前固定在 Work'
 
 const ANCHOR = '[data-slot="sidebar.workspaces"]'
 const HIDE_ATTR = 'data-skb-native-hide'
+/**
+ * 「软隐藏」属性：只用于 Bot 模式让官方侧栏内容不可见。
+ *
+ * 为什么不用 display:none：官方侧栏里的品牌 / 新会话 / 面板标题都带
+ * .wide 的入场动画（wide-in，0.2s opacity 0→1）。display:none 会把动画
+ * 一并取消；切回 Work 重新显示时这些动画从头重播，看起来就是左侧标识和
+ * 文字淡入一下（用户 2026-11-03 反馈「切回 Work 会闪」）。visibility:hidden
+ * 只影响绘制、不打断动画时间轴，切回来时元素保持最终状态，无重播。
+ */
+const SOFT_HIDE_ATTR = 'data-skb-mode-hide'
 const CONTROLLER_KEY = '__dshSeekerModeSwitchV1__'
 const LOGO_ROW_CLASS = 'hHd-Xa_logoRow'
 const NAV_SECTIONS_ID = 'dsh-sidebar-nav-sections'
@@ -226,15 +236,27 @@ function applyModeDom(): void {
   const doc = currentDocument()
   if (doc === undefined) return
   const body = doc.body
+  /*
+   * 这一行同时是「切到 Bot = 进入一页」的入场触发器。
+   *
+   * Bot 应用的整页转场挂在 personal/index.tsx 的 .pa-main-col 与 shell/Sidebar 的
+   * .pa-sidebar 上（全局 PAGE_MOTION_IN，240ms 减速上浮）。它们常驻不卸载，重播
+   * 靠的就是下面这个属性切换：base.css.ts 里 body[data-skb-mode='work'] .pa-root
+   * 是 display:none，切回 bot 时 .pa-root 重新显示，子树上的 CSS 动画从头播。
+   *
+   * 所以**不要**把 .pa-root 的隐藏方式改成 visibility / opacity：visibility 不打断
+   * 动画时间轴（正是 SOFT_HIDE_ATTR 那条注释在讲的事），改完页面入场就不会重播了，
+   * 而且是静默失效（动画仍在样式里，只是永远停在结束态）。
+   */
   if (body !== null && body !== undefined && body.getAttribute(MODE_ATTR) !== mode) {
     body.setAttribute(MODE_ATTR, mode)
   }
-  const hide = (el: Element | null, on: boolean): void => {
+  const hide = (el: Element | null, on: boolean, attr: string = HIDE_ATTR): void => {
     if (el === null) return
     if (on) {
-      if (!el.hasAttribute(HIDE_ATTR)) el.setAttribute(HIDE_ATTR, 'true')
-    } else if (el.hasAttribute(HIDE_ATTR)) {
-      el.removeAttribute(HIDE_ATTR)
+      if (!el.hasAttribute(attr)) el.setAttribute(attr, 'true')
+    } else if (el.hasAttribute(attr)) {
+      el.removeAttribute(attr)
     }
   }
   const rootEl = sidebarRoot()
@@ -242,15 +264,23 @@ function applyModeDom(): void {
     for (const child of Array.from(rootEl.children)) {
       // 宿主自己永远保留（Bot 模式下侧栏就只剩它）
       if (child === hostEl) {
-        hide(child, false)
+        hide(child, false, HIDE_ATTR)
+        hide(child, false, SOFT_HIDE_ATTR)
         continue
       }
-      hide(child, mode === 'bot')
+      hide(child, mode === 'bot', SOFT_HIDE_ATTR)
+      // 防御：旧版本（或上一段代码）可能给同一节点留过硬隐藏标记，一律清掉；
+      // 官方侧栏根的直接子节点不该再走 display:none，否则切回 Work 会空白。
+      hide(child, false, HIDE_ATTR)
     }
   }
-  hide(doc.getElementById(NAV_SECTIONS_ID), mode === 'bot')
+  hide(doc.getElementById(NAV_SECTIONS_ID), mode === 'bot', SOFT_HIDE_ATTR)
+  hide(doc.getElementById(NAV_SECTIONS_ID), false, HIDE_ATTR)
   // 官方工作区行（锚点）在 Bot 模式整体让位。
-  for (const node of Array.from(doc.querySelectorAll(ANCHOR))) hide(node, mode === 'bot')
+  for (const node of Array.from(doc.querySelectorAll(ANCHOR))) {
+    hide(node, mode === 'bot', SOFT_HIDE_ATTR)
+    hide(node, false, HIDE_ATTR)
+  }
   /*
    * Work 侧栏里混入的 Bot 宿主会话：Personal Agent 的每个 Bot 在宿主侧都是一个
    * `pa-bot-v2-<botId>` 会话，而官方会话列表不区分来源，会把它当成普通会话

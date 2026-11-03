@@ -112,7 +112,7 @@ export const PERSONAL_SHELL_CSS = `
   border-radius: 9px;
   background: var(--pa-card);
   color: var(--pa-text-3);
-  animation: pa-fade 140ms ease both;
+  animation: pa-fade 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-side-search input {
   flex: 1;
@@ -204,25 +204,61 @@ export const PERSONAL_SHELL_CSS = `
 
 /* 底部入口 */
 .pa-sidebar__bottom--rail { padding: 8px 0 10px; display: flex; flex-direction: column; align-items: center; gap: 4px; }
-.pa-side-bottom-item {
+/*
+ * 选择器带 .pa-root 前缀：base.css 的 ".pa-root button { font: inherit; padding: 0 }"
+ * 是 (0,1,1)，比裸类名 (0,1,0) 高一级，会把字号 / 字重 / 内边距全部重置掉。
+ * 之前这两项文字偏细偏小、内边距不生效，就是被那条规则吃掉的。
+ */
+.pa-root .pa-side-bottom-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
   width: 100%;
-  height: 34px;
-  padding: 0 10px;
-  border-radius: 9px;
+  height: 36px;
+  padding: 0 11px;
+  border-radius: 11px;
   color: var(--pa-text-2);
-  font-size: calc(12.5px + var(--pa-font-delta));
+  /*
+   * 字号 / 字重与 Work 模式侧栏底部（官方设置行 / 面板行）逐像素对齐：
+   * 那两处是固定 14px / 400 / 22px 行高，不跟随「通用 → 字号」。
+   * 这里原先写 calc(13px + var(--pa-font-delta))（通用 15px 时解析成 15px、500 字重），
+   * 所以 Bot 的「期刊日记 / 设置」看起来比 Work 的「设置」大一号、粗一档
+   * （2026-11-03 用户反馈「文字字号不对等」）。固定成同一套规格后两边一致。
+   */
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 22px;
+  letter-spacing: 0.02em;
   text-align: left;
-  transition: background 120ms ease, color 120ms ease;
+  transition: background 120ms ease, color 120ms ease, transform 120ms ease;
 }
-.pa-side-bottom-item:hover { background: rgba(128, 132, 140, 0.14); color: var(--pa-text); }
+.pa-root .pa-side-bottom-item:hover { background: rgba(128, 132, 140, 0.14); color: var(--pa-text); }
+.pa-root .pa-side-bottom-item:active { transform: scale(0.985); }
 .pa-sidebar__bottom--rail .pa-side-bottom-item {
   width: 42px;
   height: 38px;
   padding: 0;
   justify-content: center;
+}
+/*
+ * 底部「设置」行 + 右侧 MCP 服务器胶囊（2026-11-03 用户要求「bot模式下也要这个」）。
+ * 设置按钮让出右侧空间（flex:1 可收缩），胶囊自己 margin-left:auto 贴右缘；
+ * 与 Work 模式账号行的布局语义一致：左边是原有入口，右边是连接器胶囊。
+ */
+.pa-sidebar__bottom-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  /* 垂直位置与 Work 模式账号行对齐：Bot 底部块 padding-bottom 12px、行高 36px，
+     Work 是 padding-bottom 10px、行高 44px；补 2px 后胶囊中心线一致（用户要求
+     「位置与大小样式一致」）。 */
+  margin-bottom: 2px;
+}
+.pa-sidebar__bottom-row .pa-side-bottom-item {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
 }
 
 /* ───────────────────────── 弹出菜单 ───────────────────────── */
@@ -234,7 +270,7 @@ export const PERSONAL_SHELL_CSS = `
   border-radius: 12px;
   background: #232427;
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.07);
-  animation: pa-pop 140ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  animation: pa-pop 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
   color: var(--pa-text);
 }
 .pa-root[data-pa-theme='light'] .pa-popover {
@@ -599,6 +635,17 @@ body[data-pa-resizing='true'] {
   overflow-y: auto;
   padding: 2px 16px 26px;
 }
+/*
+ * 右栏卡片的错峰序号（配合全局 [data-page-motion='stagger'] > * 的
+ * animation-delay: calc(var(--i) * 22ms)）。
+ *
+ * 为什么不在 RightPanel.tsx 里给每张卡写内联 --i：PagesCard 在「这个 Bot
+ * 还没有页面」时整张不渲染，写死序号会让后面的卡延迟整体前移（缺第一张时
+ * 第二张仍在等 22ms，看起来像卡了一下）。按实际渲染顺序给，缺谁都不错位。
+ */
+.pa-right__body[data-page-motion='stagger'] > :nth-child(1) { --i: 0; }
+.pa-right__body[data-page-motion='stagger'] > :nth-child(2) { --i: 1; }
+.pa-right__body[data-page-motion='stagger'] > :nth-child(3) { --i: 2; }
 .pa-right-sec {
   display: flex;
   align-items: center;
@@ -1027,6 +1074,25 @@ body[data-pa-resizing='true'] {
   flex-direction: column;
   overflow: hidden;
 }
+
+/*
+ * 新建 Bot / 新建群聊弹窗的退场：遮罩由 base.css 的 .pa-overlay 统一淡出，
+ * 卡片在这里单独给一份（向下 14px + 缩小到 .97），与入场的 pa-pop 对称。
+ * 240ms + cubic-bezier(0.4, 0, 0.2, 1) 与 modal-animation.ts 的 MODAL_ANIM_MS
+ * 一致；[data-closing] 选择器压过入场规则，两套动画不会同时跑。
+ */
+@keyframes pa-create-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(14px) scale(0.97); }
+}
+.pa-overlay[data-closing='1'] .pa-create-modal {
+  animation: pa-create-out 240ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pa-overlay[data-closing='1'] .pa-create-modal { animation: none; }
+}
+
 .pa-create-head {
   display: flex;
   align-items: flex-start;

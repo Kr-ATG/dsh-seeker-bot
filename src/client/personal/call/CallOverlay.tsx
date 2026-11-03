@@ -7,7 +7,12 @@
  * 这是**全双工**通话：麦克风一直上行，服务端 VAD 自动断句、自动 ASR，用户一开口
  * 就打断 Bot（`speech_started` 已在 realtime-client 里清空播放队列）。所以界面上
  * 没有「点击说话」按钮——那是半双工链路（点按录音 → ASR → 模型 → Edge TTS）的
- * 交互，已经整条移除。麦克风不可用时仍可打字（走 text 帧），会话不会因此中断。
+ * 交互，已经整条移除。
+ *
+ * 也**没有文字输入框**：原来底部那条「不方便说话时，也可以打字…」+ 发送按钮已按
+ * 用户反馈整块移除。它横跨整宽、和这一列居中的胶囊控件不是一个语言，而全双工通话
+ * 里打字本来就是罕见路径。麦克风不可用时只提示重试 / 挂断，不再兜底打字；store 的
+ * `callUserTurn` 与宿主侧 text 帧能力保留，只是不再有界面入口。
  *
  * 两处刻意「没有」的控件：
  *  · **没有扬声器开关**：通话本来就该出声，关掉它只会让人以为坏了；播放路径在
@@ -18,7 +23,7 @@
  * 一旦本轮生成过音频就不能改，语速靠 instructions 描述），所以只能对下一通生效，
  * 界面上必须写清楚，否则用户点完发现声音没变会当成 bug。
  */
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
 import {
   IconChevronDown,
@@ -29,7 +34,6 @@ import {
   IconPause,
   IconPhoneOff,
   IconRefresh,
-  IconSend,
   IconSettings,
   IconSparkles,
   IconVideo,
@@ -47,8 +51,8 @@ import {
   type RealtimeSpeed,
 } from '../../../shared/realtime-protocol.ts'
 
-/** 波形条数量（奇数，左右对称）。 */
-const WAVE_BARS = 25
+/** 波形点的数量（奇数，左右对称）。7 个：再少表达不出声波，再多就显密。 */
+const WAVE_DOTS = 7
 
 /**
  * 音色选项（自绘下拉用）。
@@ -70,42 +74,67 @@ const VOICE_OPTIONS: PaSelectOption[] = [
 const SPEED_OPTIONS: readonly RealtimeSpeed[] = ['slow', 'normal', 'fast']
 
 /**
- * 麦克风音量波形。
+ * 麦克风电平的可视化：一排随声音起伏的小圆点。
  *
- * 每帧直接改 DOM 的 transform，**不走 React state**：60fps 的 setState 会把整棵
- * Bot 应用（含 200 条消息的列表）拖到掉帧，而波形只是装饰，不值得这个代价。
- * 平滑用指数滤波：直接跟随原始 level 会一跳一跳，滤波后像真实电平表。
+ * 为什么不是传统竖条频谱：25 根带随机抖动的亮绿条是「录音软件」的语言，放在这块
+ * 圆角胶囊面板里又吵又廉价（用户反馈「丑陋，要简约又优雅」）。换成少量圆点后——
+ *  · 用**正弦相位**代替随机数，相邻的点有先后，动作像水波而不是噪音；
+ *  · 中间的点最活跃、两端最安静，整排只占 28px 高；
+ *  · 静止时就是一排安静的小点（40% 透明度的绿），不抢视线。
+ *
+ * 每帧直接改 DOM 的 transform / opacity，**不走 React state**：60fps 的 setState
+ * 会把整棵 Bot 应用（含 200 条消息的列表）拖到掉帧，而它们只是装饰。
+ * 平滑用指数滤波：直接跟随原始 level 会一跳一跳；滤波后像真实的呼吸。
  */
 function CallWave({ active }: { active: boolean }): JSX.Element {
   const { actions } = usePersonal()
-  const barsRef = useRef<Array<HTMLSpanElement | null>>([])
+  const dotsRef = useRef<Array<HTMLSpanElement | null>>([])
   /*
    * actions 放进 ref：它会在每次 ui 变化时重建（useMemo 依赖一堆 callback），
-   * 直接进 effect 依赖会让 rAF 每 120ms 被掐断重启一次，波形看起来一顿一顿的。
+   * 直接进 effect 依赖会让 rAF 每 120ms 被掐断重启一次，点阵看起来一顿一顿的。
    */
   const actionsRef = useRef(actions)
   actionsRef.current = actions
 
   useEffect(() => {
     if (!active) {
-      // 停掉动画后压平，避免停在某个奇怪的形状上
-      for (const bar of barsRef.current) bar?.style.setProperty('transform', 'scaleY(0.08)')
+      /*
+       * 停掉动画后回到静止态，而不是停在某个奇怪的形状上。
+       * 清掉 inline style 让 CSS 的基线（opacity 0.4 / 无缩放）接管。
+       */
+      for (const dot of dotsRef.current) {
+        if (dot === null) continue
+        dot.style.transform = ''
+        dot.style.opacity = ''
+      }
       return undefined
     }
     let frame = 0
     let smooth = 0
+    const started = performance.now()
     const tick = (): void => {
-      const level = actionsRef.current.callLevel()
-      smooth = smooth * 0.65 + level * 0.35
-      const shaped = Math.min(1, Math.pow(Math.max(0, smooth), 0.6) * 1.15)
-      const bars = barsRef.current
-      for (let index = 0; index < bars.length; index += 1) {
-        const bar = bars[index]
-        if (bar === null || bar === undefined) continue
-        // 中间高、两边低，再叠一点随机，看起来才像被声音推动的波形
-        const center = 1 - Math.abs(index - (bars.length - 1) / 2) / ((bars.length - 1) / 2)
-        const value = Math.max(0.08, Math.min(1, shaped * (0.3 + center * 0.95) * (0.72 + Math.random() * 0.56)))
-        bar.style.transform = `scaleY(${value.toFixed(3)})`
+      const raw = actionsRef.current.callLevel()
+      // 上行滤波比旧版更慢（0.86）：点阵要「优雅地跟随」，而不是抖成电平表
+      smooth = smooth * 0.86 + Math.max(0, Math.min(1, raw)) * 0.14
+      const time = (performance.now() - started) / 1000
+      const dots = dotsRef.current
+      for (let index = 0; index < dots.length; index += 1) {
+        const dot = dots[index]
+        if (dot === null || dot === undefined) continue
+        /*
+         * 包络：中间的点能量最大、两端最小（center: 0..1）。
+         * `pow(smooth, 0.62)` 把「正常说话」那点电平抬起来——原始 level 大多只有
+         * 0.1~0.4，线性映射的话点几乎不动，看着像坏了。
+         */
+        const center = 1 - Math.abs(index - (dots.length - 1) / 2) / ((dots.length - 1) / 2)
+        const energy = Math.min(1, Math.pow(smooth, 0.62) * (0.45 + center * 0.85))
+        // 相位错开：相邻点一前一后，整排像水波推过去，而不是一起跳
+        const sway = Math.sin(time * 6.2 + index * 0.85)
+        // 幅度克制：大小只放大到 2 倍出头，主要靠上下浮动表达「声音在流动」
+        const scale = 1 + energy * (0.45 + (sway * 0.5 + 0.5) * 0.75)
+        const lift = energy * (2.4 + center * 5.6) * sway
+        dot.style.transform = `translateY(${(-lift).toFixed(2)}px) scale(${scale.toFixed(3)})`
+        dot.style.opacity = (0.4 + energy * 0.55).toFixed(3)
       }
       frame = window.requestAnimationFrame(tick)
     }
@@ -115,11 +144,11 @@ function CallWave({ active }: { active: boolean }): JSX.Element {
 
   return (
     <div className="pa-call__wave" data-on={active ? 'true' : 'false'} aria-hidden="true">
-      {Array.from({ length: WAVE_BARS }, (_, index) => (
+      {Array.from({ length: WAVE_DOTS }, (_, index) => (
         <span
           key={index}
           ref={(node) => {
-            barsRef.current[index] = node
+            dotsRef.current[index] = node
           }}
         />
       ))}
@@ -130,13 +159,49 @@ function CallWave({ active }: { active: boolean }): JSX.Element {
 export function CallOverlay(): JSX.Element | null {
   const { state, ui, actions } = usePersonal()
   const [now, setNow] = useState(() => Date.now())
-  const [typed, setTyped] = useState('')
   const [thinkingOpen, setThinkingOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   /** 全局语速档位；null = 还没从宿主读到（此时控件禁用，避免误显示成「正常」）。 */
   const [speed, setSpeed] = useState<RealtimeSpeed | null>(null)
   const [speedBusy, setSpeedBusy] = useState(false)
   const turnsRef = useRef<HTMLDivElement | null>(null)
+
+  /*
+   * 退场状态：最小化 / 挂断都先播 240ms 退场，播完再真正收层。
+   *
+   * 这两条入口原来都是直接切 store 状态（minimizeCall / endCall），组件在下一帧就
+   * 被顶部的 `idle || minimized` 早退摘掉——入场是 180ms 淡入 + 220ms 弹入，出场
+   * 却是硬消失，关一下就「啪」地断掉。时长与曲线对齐 modal-animation.ts 的
+   * MODAL_ANIM_MS（240ms、出场加速曲线），整套插件才是同一套手感。
+   */
+  const [closing, setClosing] = useState(false)
+  const closeTimerRef = useRef<number | null>(null)
+  /** 退场播完后要执行的真正关闭动作（最小化与挂断两种入口共用一条定时器）。 */
+  const pendingCloseRef = useRef<(() => void) | null>(null)
+
+  /**
+   * 关闭：先播 240ms 退场，再真正卸载 / 最小化（直接切状态会硬消失）。
+   *
+   * 传进来的 action 才是原关闭动作：点遮罩与右上角按钮是最小化，挂断是 endCall。
+   * 定时器已挂上时直接返回，连点两下不会排两条。
+   */
+  const requestClose = useCallback((action: () => void): void => {
+    if (closeTimerRef.current !== null) return
+    pendingCloseRef.current = action
+    setClosing(true)
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null
+      setClosing(false)
+      const run = pendingCloseRef.current
+      pendingCloseRef.current = null
+      if (run !== null) run()
+    }, 240)
+  }, [])
+
+  /* 卸载时清定时器：通话可能被宿主 onClosed 自己收掉，别让回调打在已卸载的组件上。 */
+  useEffect(() => () => {
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
+  }, [])
 
   const call = ui.call
   const bot = call.botId !== null ? state.bots.find((item) => item.id === call.botId) ?? null : null
@@ -192,6 +257,13 @@ export function CallOverlay(): JSX.Element | null {
 
   if (call.status === 'idle' || call.minimized) return null
 
+  /*
+   * 三个关闭入口都走 requestClose：先播退场，播完再最小化 / 挂断。
+   * 通话本身在退场这 240ms 里照常进行（音频不断），只是这一层在渐隐。
+   */
+  const minimizeCall = (): void => { requestClose(() => actions.minimizeCall(true)) }
+  const hangUp = (): void => { requestClose(() => actions.endCall()) }
+
   const elapsed = active ? Math.max(0, now - call.startedAt) : 0
   const clock = formatDuration(elapsed)
   const modelLabel = call.realtime.model !== '' ? call.realtime.model : '实时语音'
@@ -206,8 +278,6 @@ export function CallOverlay(): JSX.Element | null {
    */
   const volume = Number.isFinite(call.volume) ? Math.max(0, Math.min(1, call.volume)) : 1
   const volumePercent = Math.round(volume * 100)
-  /** 轨道已填充比例：CSS 变量给 ::-webkit-slider-runnable-track 的渐变用。 */
-  const volumeFillStyle = { '--pa-call-vol-fill': `${volumePercent}%` } as unknown as CSSProperties
 
   const statusText = ((): string => {
     if (reconnecting) return '连接中断，正在重连…'
@@ -226,13 +296,6 @@ export function CallOverlay(): JSX.Element | null {
         return ''
     }
   })()
-
-  const submitTyped = (): void => {
-    const value = typed.trim()
-    if (value === '') return
-    setTyped('')
-    actions.callUserTurn(value)
-  }
 
   /**
    * 改全局语速：`POST /realtime/config`（宿主只收白名单字段，speed 三选一）。
@@ -302,6 +365,7 @@ export function CallOverlay(): JSX.Element | null {
       role="dialog"
       aria-modal="true"
       aria-label="实时语音通话"
+      data-closing={closing ? '1' : undefined}
       onClick={(event) => {
         /*
          * 点卡片外的遮罩 = 最小化通话，而不是挂断。
@@ -310,11 +374,11 @@ export function CallOverlay(): JSX.Element | null {
          * 最小化后右栏顶部有恢复入口，随时能回来。只认 `target === currentTarget`，
          * 卡片内部的点击照常冒泡给按钮，不会误触发。
          */
-        if (event.target === event.currentTarget) actions.minimizeCall(true)
+        if (event.target === event.currentTarget) minimizeCall()
       }}
     >
       <div className="pa-call" data-state={reconnecting ? 'reconnecting' : call.status}>
-        <button className="pa-call__minimize" type="button" title="最小化" aria-label="最小化" onClick={() => actions.minimizeCall(true)}>
+        <button className="pa-call__minimize" type="button" title="最小化" aria-label="最小化" onClick={minimizeCall}>
           <IconMinimize size={16} />
         </button>
         <span className="pa-call__encrypted" title={`模型 ${modelLabel} · 音色 ${voiceLabel}`}>
@@ -359,9 +423,9 @@ export function CallOverlay(): JSX.Element | null {
           * 语音里「让 Bot 干活」的状态条（宿主 task_started / task_progress / task_done）。
           *
           * 位置在提示条与转写区之间：它是「此刻正在发生的事」，比转写更该被一眼看到，
-          * 又不能挤到下面的输入框和静音/挂断（矮屏下整块 .pa-call 可滚动）。
+          * 又不能挤到下面的音量与静音/挂断（矮屏下整块 .pa-call 可滚动）。
           *
-          * 刻意**不带任何按钮、也不禁用麦克风与输入框**：任务与对话是并行的，用户
+          * 刻意**不带任何按钮、也不禁用麦克风与音量**：任务与对话是并行的，用户
           * 随时可以继续说下一句或打断。结束态由 store 停留几秒后自动收起。
           */}
         {task !== undefined ? (
@@ -394,7 +458,7 @@ export function CallOverlay(): JSX.Element | null {
                     : call.muted
                       ? '已静音，说话不会被听见'
                       : micBroken
-                        ? '麦克风不可用，可以直接打字提问'
+                        ? '麦克风不可用，重试或直接挂断'
                         : call.realtime.micReady !== true
                           ? '正在打开麦克风（浏览器可能会询问权限）…'
                           : call.status === 'speaking'
@@ -411,8 +475,15 @@ export function CallOverlay(): JSX.Element | null {
 
             {/*
               * 通话音量：控制 Bot 声音（下行）的播放增益，常驻而不是塞进「通话设置」——
-              * 调音量是通话中的高频动作，折叠起来要多点两下；这一行只有 30px 高。
-              * 拖到 0 显示「静音」而不是 0%：要让用户明确知道是「听不见」，不是数字坏了。
+              * 调音量是通话中的高频动作，折叠起来要多点两下。
+              *
+              * 形态是**居中胶囊**（图标 + 细轨道 + 数值），不是一条横跨整宽的裸滑块：
+              * 这一列的元素全是居中成组的胶囊，通栏滑块看着像从别的界面借来的控件
+              * （用户实机截图反馈「很丑、不协调」）。
+              * 拖到 0 显示「静音」而不是 0%，图标换成静音喇叭：要让用户明确知道是
+              * 「听不见」，不是数字坏了。
+              * 轨道是**单色**的，不带填充色（用户要求「音量条里面的颜色去掉」）：音量
+              * 由滑块位置与右侧数值表达，胶囊里不再出现第二种颜色。
               * 上行麦克风不在这里调：浏览器 autoGainControl 已经管了，叠增益会干扰 VAD。
               */}
             <div className="pa-call__volume">
@@ -426,38 +497,13 @@ export function CallOverlay(): JSX.Element | null {
                 max={100}
                 step={1}
                 value={volumePercent}
-                style={volumeFillStyle}
                 onChange={(event) => actions.setCallVolume(Number(event.target.value) / 100)}
                 aria-label="通话音量"
                 aria-valuetext={volumePercent === 0 ? '静音' : `${volumePercent}%`}
               />
-              <span className="pa-call__volume-value" data-muted={volumePercent === 0 ? 'true' : 'false'}>
+              <span className="pa-call__volume-value">
                 {volumePercent === 0 ? '静音' : `${volumePercent}%`}
               </span>
-            </div>
-
-            <div className="pa-call__type">
-              <input
-                value={typed}
-                onChange={(event) => setTyped(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && !event.shiftKey) {
-                    event.preventDefault()
-                    submitTyped()
-                  }
-                }}
-                placeholder={micBroken ? '麦克风不可用，在这里打字提问…' : '不方便说话时，也可以打字…'}
-                aria-label="通话文字输入"
-              />
-              <button
-                type="button"
-                onClick={submitTyped}
-                disabled={typed.trim() === '' || call.status === 'ringing'}
-                title="发送"
-                aria-label="发送"
-              >
-                <IconSend size={15} />
-              </button>
             </div>
 
             {/*
@@ -522,7 +568,7 @@ export function CallOverlay(): JSX.Element | null {
                 <span className="pa-call__ctrl-icon"><IconVideo size={20} /></span>
                 视频
               </button>
-              <button className="pa-call__ctrl pa-call__ctrl--danger" type="button" onClick={() => actions.endCall()}>
+              <button className="pa-call__ctrl pa-call__ctrl--danger" type="button" onClick={hangUp}>
                 <span className="pa-call__ctrl-icon"><IconPhoneOff size={20} /></span>
                 挂断
               </button>

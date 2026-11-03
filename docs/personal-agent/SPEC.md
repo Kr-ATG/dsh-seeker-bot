@@ -239,9 +239,10 @@ actions.toggleJournal() / openJournal(id)
   - call-segment：语音通话折叠条（**不是卡**：两条发丝线夹一行小字，点击收起/展开整段）
   - call：旧版通话记录卡（仅历史数据，新通话不再产生）
   - journal：期刊卡（封面缩略图 + 标题 + 打开）
-- 输入框：附件按钮 + textarea（自动增高）+ 麦克风（MediaRecorder → 16k 单声道 WAV →
+- 输入框：附件按钮 + textarea（多行输入、自动增高；上限与 Work 模式的对话框同源，336px）+ 麦克风（MediaRecorder → 16k 单声道 WAV →
   `ctx.remote.speech.transcribe`，与 Work 模式同一条 SenseVoice ASR；转写填入输入框，确认后发送）
-- 输入框上方支持 `@` 提及（群聊时选择成员）与快捷 chip
+- 输入框上方支持 `@` 提及与快捷 chip；群聊里 `@名字` 是**结构化点名**（只叫被点名的），
+  判定规则见 6.7.1。注意：目前只有「手动插入 `@名字`」这一条路径，输入 `@` 弹出的成员选择层尚未实现
 - 空会话展示 bot 主动打招呼与 3 个建议 chip
 
 ### 6.4.1 回复形态（Bot ≠ Work）
@@ -293,6 +294,12 @@ Bot 复用宿主的 agent loop，但输出形态必须按**对话**设计，不�
 
 - 打开：全屏遮罩 + 居中 360px 通话面板（主题跟随 DSH，深浅两套；头像 88px、名字、状态/计时、波纹环）
 - 控件：静音、视频（禁用）、挂断（红）；最小化只在右上角，控制栏不重复
+- 通话音量：**居中胶囊**（喇叭图标 + 细轨道 + 百分比），只调下行播放增益；拖到 0 显示「静音」。
+  轨道**单色无填充**（用户要求「音量条里面的颜色去掉」）：音量只由滑块位置与数值表达
+- 麦克风电平：**7 个圆点的点阵**（正弦相位、中间最活跃），静止时是一排 40% 透明度的安静小点；
+  不再用 25 根竖条频谱（用户反馈「丑陋，要简约又优雅」后整块重做）
+- **没有文字输入框**：底部「不方便说话时，也可以打字…」+ 发送按钮已移除（横跨整宽、与
+  居中胶囊不协调）。麦克风不可用时只提示重试 / 挂断；`callUserTurn` 与宿主 text 帧保留
 - 「最小化」按钮：收起后 `ui.call.minimized = true`，右栏顶部出现通话条，点击恢复
 - **转写实时进对话流**（不是挂断后才生成一张卡）：
   - 通话开始时先写一条**段标记消息**（`blocks: [{ type: 'call-segment', segment, live: true }]`，
@@ -317,11 +324,47 @@ Bot 复用宿主的 agent loop，但输出形态必须按**对话**设计，不�
   下行 `response.audio.delta`（base64 PCM16 24 kHz）→ 浏览器 `PcmPlayer` 串接播放。
 - 打断：收到 `speech_started` 立刻 `player.interrupt()` 清空播放队列（本地立即静音），
   宿主侧在确有响应在跑时补一发 `response.cancel`。
-- 失败时给出可读提示并保留打字输入兜底（打字走 `conversation.item.create` + `response.create`），
-  绝不再静默返回固定假回复；缺凭据 / 上游 401 这类不可重试错误必须原样告诉用户。
+- 失败时给出可读提示，绝不再静默返回固定假回复；缺凭据 / 上游 401 这类不可重试错误必须
+  原样告诉用户。（打字通道 `conversation.item.create` + `response.create` 仍在宿主侧保留，
+  但通话界面已不提供输入框，见上方「没有文字输入框」。）
 - 协议契约：`src/shared/realtime-protocol.ts`（两端共享，只放常量与类型）。
 - 宿主实现：`src/host/personal/realtime/`（`ws-frame` 帧编解码 / `upstream` 上游客户端 /
   `session` 事件翻译 / `index` 会话编排 / `mount` cordis 适配，前四个不依赖框架、可离线测试）。
+
+### 6.5.1 文字朗读（TTS：把回复气泡念出来）
+
+- **入口 1（手动）**：Bot 消息气泡侧边、引用按钮**之后**一枚喇叭按钮（`IconVolume`），
+  播放中换成停止图标 + `data-speaking='true'`（`--pa-accent` 常亮 + 1.6s 脉冲，
+  `prefers-reduced-motion` 下关动画）。只对**有可朗读正文的 bot 消息**渲染；
+  用户消息不给入口（自己的话不需要听，也容易让人以为在放语音输入）。
+- **入口 2（自动）**：Bot 设置卡「语音通话」分区的 **「自动朗读回复」** 开关
+  （`Bot.autoSpeak`，默认关；`normalizeState` 只认显式 `true`）。
+  生效条件：单聊（`room === null`）+ 开关打开 + `ui.call.status === 'idle'`。
+  触发：messages 变化后 debounce 250ms，取**最后一条** bot 消息，`pending` 不播；
+  `spokenRef` 记录已播消息，首次挂载 / 切会话 / 拨开关时把现有消息全部标记为已播
+  （刷新不重播历史）。切会话、通话开始、消息流卸载都会 `stopSpeech()`。
+- **语音来源 = 通话已设置的模型**：请求带该消息发送者 Bot 的 `voice` / `liveVendor`，
+  宿主缺省回落到全局默认。**没有第二套 TTS 配置**。
+- 链路（**流式**）：`POST REALTIME_TTS_PATH`（`/api/personal-agent/tts`，见 shared 契约）
+  → 宿主 `synthesizeSpeechStream`：读 Live 供应商 → 凭据 → 模型候选（请求 > 供应商配置 > 宿主链）
+  → 一次性 Realtime 会话（`session.update` 带朗读指令 + 音色，**无 tools、无 turn_detection**；
+  **收到 `session.created` 就发** `conversation.item.create` + `response.create`，不等
+  `session.updated`——WS 帧有序，等它只是多一次往返）
+  → 收 `response.audio.delta` 逐片回调 → 路由层**首片到达才写 200**
+  （`REALTIME_TTS_STREAM_MIME` + `REALTIME_TTS_SAMPLE_RATE_HEADER`，chunked）→ 边收边 `res.write`。
+  `stream` 缺省/false 时保留整段 WAV（`synthesizeSpeech` + `encodeWav`）。
+  失败口径：**首包前**非 200 + `{ ok:false, error }`（中文可读）；**首包后**只能断流
+  （已发 200 与部分 PCM，再补 JSON 会被当 PCM 播放）；客户端中途断开 → abort 上游并关连接。
+- **播放器（`src/client/personal/speech.ts`）**：模块级单例 + `useSyncExternalStore`
+  订阅；`AudioContext` 懒创建并复用（发送消息时 `primeSpeech()` 在手势里预热，
+  否则自动朗读会被浏览器策略拦）；同一时刻只播一条，新播放停旧的；「播放代次」
+  丢弃迟到响应；`AbortController` 取消在途合成。被拦时**静默**回空闲；
+  手动点播失败才 `toast` 原因（`SpeakToolButton` 的 `onError`）。
+- **文本清洗**：`cleanSpeechText` 去代码块 / 行内反引号 / 图片 / 链接地址（留文字）/
+  标题列表引用符号 / 表格分隔行 / 加粗星号 / HTML 标签，压缩空白，截到 240 字
+  （宿主 `REALTIME_TTS_MAX_CHARS` = 400 兜底）。
+- 回归：`scripts/test-realtime-tts.mjs`（宿主端到端，假上游）、
+  `scripts/test-speech-client.mjs`（esbuild 打包真实 speech.ts + mock fetch/AudioContext）。
 
 ### 6.6 Journal（v4：宿主生成 + 编辑杂志风 + 双主题）
 
@@ -369,10 +412,41 @@ JournalStatus / sanitizeJournalRecord / journalDateKey / formatJournalFeedForPro
 
 ### 6.7 GroupSettings（v3：右侧滑出卡）
 
-- 同一套 `pa-sheet` 右侧滑出卡：群名、模型策略（跟随各自 Bot / 全组统一）、成员 chips、保存、
+- 同一套 `pa-sheet` 居中弹窗卡：群名、模型策略（跟随各自 Bot / 全组统一）、成员 chips、保存、
   删除群聊（自绘二次确认）。
 - 群聊成员管理与模型统一设置在 store 更新。
-- 新增 `BotSettingsCard`（Bot 设置滑出卡）与侧栏底部全局设置滑出卡。
+- **模型选择**：群聊「全组统一」与 `BotSettingsCard` 的模型区共用 `shared/ModelPicker.tsx`，
+  都是**先选供应商、再选模型**的两级 PaSelect 下拉（不再用原生 `<select>` 或手填 provider）；
+  两边都带**推理强度**下拉（只列当前模型公布过的档位，空 = 跟随默认），换模型时旧档位不再
+  被新模型支持会自动回落；宿主模型列表读不到时群聊保留手填输入作为降级。
+- 新增 `BotSettingsCard`（Bot 设置居中弹窗卡）与侧栏底部全局设置滑出卡。
+
+### 6.7.1 群聊「谁接话」的判定
+
+判定抽在 `src/client/personal/room-trigger.ts`（纯函数，不依赖 React 与宿主），
+由 `store.tsx` 的 `sendMessage` 群聊分支调用；回归测试 `scripts/test-room-trigger.mjs`。
+完整设计见 [GROUP-CHAT.md](./GROUP-CHAT.md)。
+
+- 五档，命中即停：`@所有人` 一类广播 → 全员；`@名字` → 只叫被点名的（按点名顺序）；
+  引用了某条 Bot 消息 → 只叫被引用的那个；委托词（让/请/叫/找/交给/派给/由）紧邻成员名 →
+  只叫被委托的那个；都没有 → 群主兜底。`@` 压过引用（@ 是更晚的一次选择），引用压过委托
+  （UI 动作比文本推断确定）；被引用的人已退群时按没引用处理。
+- 正文里随口提到成员名**不**触发（原实现是 `value.includes(bot.name)`）；
+  `user@example.com`、`@2x` 这类写法不算点名；成员名互为子串时最长优先。
+- 一次最多编排 3 位成员，超出的进 `overflow` 并 toast 说清谁没接（原来是静默截断）。
+- 群里没有成员时 toast 提示并中止，不再让消息「发出去没反应」。
+- 成员之间**严格串行**：每个成员等上一位在本群的轮次收口再启动，判据是`room-queue.ts`
+  的 `shouldStartNext()`（纯函数、有真值表测试；关键是「上一位启动过没有」，不是「在不在跑」），
+  运行时读 `runningReplyTurnsRef`（与停止键共用），180 秒超时兜底。不是固定错峰——一轮回复
+  要几十秒，固定错峰会让第二个成员在第一个还在流式生成时就开口，等于各自回答同一段背景。
+- 「全组统一模型」在回合开始时解析成 `unifiedModel` 并覆盖进请求体的 `bot.model`——
+  宿主只认这一个字段，设置里的 `modelMode` 原本不会影响任何一轮回复。
+- 群里的审批卡 / 问答卡由宿主侧补 `roomId` 后发布（`src/host/personal/room-context.ts`），
+  否则它们只会落进该 Bot 的私聊，群里那条回复永远等不到应答。
+- **群成员能看见彼此**：群聊回合把本群最近 20 条消息（含其他成员发言、排除本轮这条、
+  带 `name`）随请求体 `history` 带上；宿主 `buildRoomContextBlock()` 拼成一段
+  developer 消息，在用户消息之前注入。单条 ≤600 字符、整体 ≤6000 字符，超限保留最近发言。
+  只带本群是刻意的（别的群是另一种场地）；私聊回合维持原样。
 
 ## 7. 验收自检（必须逐条可演示）
 

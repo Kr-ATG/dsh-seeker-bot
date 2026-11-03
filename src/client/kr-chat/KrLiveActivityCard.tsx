@@ -24,6 +24,8 @@ const AVATAR_MENU_WIDTH = 188
 const AVATAR_MENU_ESTIMATED_HEIGHT = 198
 const AVATAR_MENU_GAP = 7
 const AVATAR_MENU_VIEWPORT_GAP = 8
+/** 头像气泡退场时长（ms），必须与样式表 kr-agent-avatar-menu-out 的 160ms 一致。 */
+const AVATAR_MENU_EXIT_MS = 160
 
 /**
  * 卡片文字大小档位：只改壳子上的 --kr-text-scale，卡内所有 font-size / line-height
@@ -178,6 +180,34 @@ export const KrLiveActivityCard = memo(function KrLiveActivityCard({
   const [avatarMenuPosition, setAvatarMenuPosition] = useState<AvatarMenuPosition | null>(null)
   const [avatarError, setAvatarError] = useState(false)
 
+  /*
+   * 头像设置气泡的退场状态机（只作用于这一个 popover，卡片自身的
+   * kr-agent-mini-exit 退场链路原样保留，不在这里掺和）。
+   *
+   * 原先所有关闭入口都是 setAvatarMenu(false) 直接卸载，气泡「啪」地消失。这里
+   * 统一改成先置 closing 播 160ms 缩回淡出（transform-origin 就在左上角，读起来
+   * 是「收回指针按下时的那个点」），到点再真正卸载。
+   */
+  const [avatarMenuClosing, setAvatarMenuClosing] = useState(false)
+  const avatarMenuTimerRef = useRef<number | null>(null)
+  const requestAvatarMenuClose = useCallback((): void => {
+    // 已在退场中：忽略重复请求（Esc 连按、外部点击与滚动同时到达）。
+    if (avatarMenuTimerRef.current !== null) return
+    setAvatarMenuClosing(true)
+    avatarMenuTimerRef.current = window.setTimeout(() => {
+      avatarMenuTimerRef.current = null
+      setAvatarMenuClosing(false)
+      setAvatarMenu(false)
+      // 位置与开合必须一起清：渲染条件是「开 && 有位置」，只清一个会留下半个状态。
+      setAvatarMenuPosition(null)
+    }, AVATAR_MENU_EXIT_MS)
+  }, [])
+
+  // 卸载时掐掉未完成的定时器，否则回调会打到已卸载的组件上。
+  useEffect(() => () => {
+    if (avatarMenuTimerRef.current !== null) window.clearTimeout(avatarMenuTimerRef.current)
+  }, [])
+
   const runningTool = useMemo(() => {
     for (let index = tools.length - 1; index >= 0; index -= 1) {
       const node = tools[index]
@@ -214,15 +244,16 @@ export const KrLiveActivityCard = memo(function KrLiveActivityCard({
       if (target === null) return
       if (rootRef.current?.contains(target) === true) return
       if (avatarMenuRef.current?.contains(target) === true) return
-      setAvatarMenu(false)
+      requestAvatarMenuClose()
     }
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setAvatarMenu(false)
+      if (event.key === 'Escape') requestAvatarMenuClose()
     }
     const syncPosition = (): void => {
       const button = avatarButtonRef.current
       if (button === null || button.isConnected === false) {
-        setAvatarMenu(false)
+        // 锚点按钮已经不在了：气泡没有可依附的位置，跟着收起。
+        requestAvatarMenuClose()
         return
       }
       setAvatarMenuPosition(positionAvatarMenu(button.getBoundingClientRect()))
@@ -238,7 +269,7 @@ export const KrLiveActivityCard = memo(function KrLiveActivityCard({
       window.removeEventListener('resize', syncPosition)
       window.removeEventListener('scroll', syncPosition, true)
     }
-  }, [avatarMenu])
+  }, [avatarMenu, requestAvatarMenuClose])
 
   useEffect(() => {
     if (closing) {
@@ -274,18 +305,19 @@ export const KrLiveActivityCard = memo(function KrLiveActivityCard({
       localStorage.setItem(AVATAR_STORAGE_KEY, value)
       setAvatar(value)
       setAvatarError(false)
-      setAvatarMenu(false)
+      // 上传成功后收起气泡，同样走退场动画，不硬切。
+      requestAvatarMenuClose()
     } catch {
       setAvatarError(true)
     }
-  }, [])
+  }, [requestAvatarMenuClose])
 
   const resetAvatar = useCallback((): void => {
     try { localStorage.removeItem(AVATAR_STORAGE_KEY) } catch { /* storage 不可用时仅改内存 */ }
     setAvatar(null)
     setAvatarError(false)
-    setAvatarMenu(false)
-  }, [])
+    requestAvatarMenuClose()
+  }, [requestAvatarMenuClose])
 
   /** 字号档位只落一个枚举 id，读时回放成 --kr-text-scale 供卡内所有 calc 使用。 */
   const chooseFontScale = useCallback((id: FontScaleId): void => {
@@ -317,8 +349,8 @@ export const KrLiveActivityCard = memo(function KrLiveActivityCard({
           onClick={(event) => {
             event.stopPropagation()
             if (avatarMenu) {
-              setAvatarMenu(false)
-              setAvatarMenuPosition(null)
+              // 再次点击头像＝收起：同样先播退场，避免「点一下气泡瞬间没」。
+              requestAvatarMenuClose()
               return
             }
             setAvatarMenuPosition(positionAvatarMenu(event.currentTarget.getBoundingClientRect()))
@@ -377,6 +409,7 @@ export const KrLiveActivityCard = memo(function KrLiveActivityCard({
         <div
           ref={avatarMenuRef}
           className="kr-agent-avatar-menu"
+          data-closing={avatarMenuClosing ? '1' : undefined}
           style={avatarMenuPosition as CSSProperties}
           role="dialog"
           aria-label={`${AGENT_DISPLAY_NAME} 头像设置`}

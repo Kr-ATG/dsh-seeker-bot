@@ -5,16 +5,18 @@
  * 组件按区域拆分：Sidebar（shell/）、ChatPanel（chat/）、RightPanel（shell/）、
  * CallOverlay（call/）、JournalOverlay（journal/）。
  */
-import { useEffect, useState, type CSSProperties } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import { flushSync } from 'react-dom'
 import { createRoot, type Root } from 'react-dom/client'
 import { setUiMode } from '../mode-switch/index.ts'
+import { ensureOverlayMotionStyles } from '../motion/overlay-motion.ts'
 import { PersonalProvider, usePersonal } from './store.tsx'
 import { injectPersonalBaseStyles } from './base.css.ts'
 import { injectIuStyles } from '../iu/styles.ts'
 import { injectHtmlEmbedStyles } from '../html-embed/styles.ts'
 import { Sidebar } from './shell/Sidebar.tsx'
 import { RightPanel } from './shell/RightPanel.tsx'
-import { installWorkSidebarWidthSync } from './shell/work-sidebar-width.ts'
+import { installWorkSidebarWidthSync, readWorkSidebarWidth } from './shell/work-sidebar-width.ts'
 import { NewBotModal } from './shell/NewBotModal.tsx'
 import { GroupSettings } from './shell/GroupSettings.tsx'
 import { BotSettingsCard } from './shell/BotSettingsCard.tsx'
@@ -36,29 +38,14 @@ export interface PersonalAppProps {
   onExitWork?: () => void
 }
 
-function useBodyMode(): 'work' | 'bot' {
-  const [mode, setMode] = useState<'work' | 'bot'>(() => {
-    if (typeof document === 'undefined') return 'work'
-    return document.body.getAttribute('data-skb-mode') === 'bot' ? 'bot' : 'work'
-  })
-  useEffect(() => {
-    if (typeof document === 'undefined') return
-    const sync = (): void => {
-      const next = document.body.getAttribute('data-skb-mode') === 'bot' ? 'bot' : 'work'
-      setMode((prev) => (prev === next ? prev : next))
-    }
-    const observer = new MutationObserver(sync)
-    observer.observe(document.body, { attributes: true, attributeFilter: ['data-skb-mode'] })
-    const handler = (): void => sync()
-    window.addEventListener('skb:mode', handler)
-    sync()
-    return () => {
-      observer.disconnect()
-      window.removeEventListener('skb:mode', handler)
-    }
-  }, [])
-  return mode
-}
+/**
+ * 注意：这里不再用 useBodyMode() 参与显隐判断。
+ *
+ * 2026-11-03 起 PersonalApp 常驻 DOM，Work / Bot 的显示切换完全由 CSS 的
+ * body[data-skb-mode] 属性选择器完成（见 base.css.ts 顶部）。React 状态只在
+ * 主题、侧栏宽度这类不影响首帧显隐的地方使用 —— 若把显隐挂在 React state 上，
+ * 切换又要等一次 MutationObserver → setState，空白帧会回来。
+ */
 
 /** 读 DSH / 系统当前主题：优先 DSH 的 body/html 属性，其次系统配色。 */
 function detectTheme(): 'dark' | 'light' {
@@ -148,8 +135,62 @@ function useDetectedTheme(): 'dark' | 'light' {  const [theme, setTheme] = useSt
   return theme
 }
 
-export function PersonalApp({ forceMode = false, onExitWork }: PersonalAppProps): JSX.Element | null {
-  const mode = useBodyMode()
+/**
+ * 提示卡（toast）：store 到点会把 ui.toast 直接置 null，这里在组件内部补一段
+ * 240ms 退场——文案先留着播完动画，再真正从 DOM 摘掉。store 的 linger 计时
+ * 逻辑不动（它只决定「什么时候该消失」，动画归这里）。
+ */
+function ToastCard({ text }: { text: string | null }): JSX.Element | null {
+  const [shown, setShown] = useState<string | null>(text)
+  const [closing, setClosing] = useState(false)
+  const closeTimerRef = useRef<number | null>(null)
+  const shownRef = useRef<string | null>(text)
+
+  useEffect(() => {
+    if (text !== null) {
+      // 新提示（含替换上一条）：撤掉退场，立刻换成新文案。
+      if (closeTimerRef.current !== null) {
+        window.clearTimeout(closeTimerRef.current)
+        closeTimerRef.current = null
+      }
+      setClosing(false)
+      shownRef.current = text
+      setShown(text)
+      return
+    }
+    if (shownRef.current === null) return
+    setClosing(true)
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null
+      shownRef.current = null
+      setClosing(false)
+      setShown(null)
+    }, 240)
+  }, [text])
+
+  useEffect(() => () => {
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
+  }, [])
+
+  /*
+   * 渲染时直接用最新的 text 兜底：新 toast 不必等 effect 跑完才出现（少一帧延迟）。
+   * 退场时 text 已经变 null，靠 shown 留住旧文案播完动画。
+   */
+  const content = text ?? shown
+  if (content === null) return null
+  return (
+    // key 跟着文案走：连续两条 toast 会重新挂载，入场动画重新播一次。
+    <div
+      className="pa-toast"
+      key={content}
+      data-closing={closing && text === null ? '1' : undefined}
+    >
+      {content}
+    </div>
+  )
+}
+
+export function PersonalApp({ forceMode = false, onExitWork }: PersonalAppProps): JSX.Element {
   const { state, ui, actions } = usePersonal()
   const detectedTheme = useDetectedTheme()
   const theme = state.settings.theme === 'auto' ? detectedTheme : state.settings.theme
@@ -161,21 +202,43 @@ export function PersonalApp({ forceMode = false, onExitWork }: PersonalAppProps)
    * 拖出来的 px（我们的 300px 锁定只改 computed 宽度，不改 inline），所以切过来
    * 时能拿到真实拖拽值。读不到就保持 null，CSS 回退官方默认的 280px。
    */
-  const [workSidebarWidth, setWorkSidebarWidth] = useState<number | null>(null)
   /*
-   * 依赖 mode：每次切进 Bot 都重新装一次。
+   * 宽度直接写 pa-root 的 CSS 变量，不再走 React state。
    *
-   * 官方侧栏的 inline width 只在用户拖拽那一刻变，切模式时读到的是当时的拖拽
-   * 值；重装还能顺带重绑 React 在切模式时可能重建过的侧栏节点（旧节点上的
-   * MutationObserver 会跟着失效）。
+   * 为什么不 setState：PersonalApp 现在常驻 DOM，Work 模式也活着；若每次官方
+   * 侧栏拖拽都 setState，会以每帧一次的频率重渲染整棵（隐藏中的）Bot 树，
+   * Work 模式拖侧栏会被拖慢。这里只在首帧读一次做初始值，之后用同步链直接
+   * 改 style 属性 —— 对 DOM 是一次属性写入，零 React 渲染。
    */
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const initialSidebarWidth = useState(() => readWorkSidebarWidth())[0]
+  useLayoutEffect(() => {
+    const el = rootRef.current
+    if (el === null || initialSidebarWidth === null) return
+    el.style.setProperty('--pa-sidebar-w', `${initialSidebarWidth}px`)
+  }, [initialSidebarWidth])
   useEffect(() => {
-    if (mode !== 'bot') return
-    return installWorkSidebarWidthSync(setWorkSidebarWidth)
-  }, [mode])
+    return installWorkSidebarWidthSync((px) => {
+      const el = rootRef.current
+      if (el === null) return
+      if (px === null) el.style.removeProperty('--pa-sidebar-w')
+      else el.style.setProperty('--pa-sidebar-w', `${px}px`)
+    })
+  }, [])
 
-  if (!forceMode && mode !== 'bot') return null
-
+  /*
+   * 常驻 DOM（2026-11-03 用户要求「Work 与 Bot 切换不要出现一闪」）。
+   *
+   * 旧实现在 Work 模式 return null，切换要走「MutationObserver → setState →
+   * React 重新挂载整棵 PersonalApp」——实测点击 Bot 后约有 3~4 帧（60~100ms）
+   * 侧栏只剩官方空壳（品牌行已被 mode-switch 隐藏、Bot 侧栏还没挂出来），
+   * 看起来就是左侧整块闪一下白。
+   *
+   * 现在 React 树始终挂载，Work / Bot 的显隐完全交给 CSS 的 body[data-skb-mode]
+   * 属性选择器（见 base.css.ts 顶部的 .pa-root 规则）：点下去 body 属性同步
+   * 变化，同一帧内对应界面就位，不经过 React 渲染，所以没有空白帧。
+   * forceMode（独立演示页）不受 body 模式影响，用 data-force-mode 豁免。
+   */
   const exitToWork = onExitWork ?? ((): void => {
     setUiMode('work')
     document.body.setAttribute('data-skb-mode', 'work')
@@ -184,16 +247,13 @@ export function PersonalApp({ forceMode = false, onExitWork }: PersonalAppProps)
 
   return (
     <div
+      ref={rootRef}
       className="pa-root"
       data-mode="bot"
+      data-force-mode={forceMode ? 'true' : 'false'}
       data-pa-theme={theme}
       data-shell-embed={isEmbeddedShell() ? 'true' : 'false'}
       data-call-minimized={ui.call.status !== 'idle' && ui.call.minimized ? 'true' : 'false'}
-      style={
-        workSidebarWidth === null
-          ? undefined
-          : ({ '--pa-sidebar-w': `${workSidebarWidth}px` } as CSSProperties)
-      }
     >
       <Sidebar onExitWork={exitToWork} />
       {/*
@@ -201,6 +261,20 @@ export function PersonalApp({ forceMode = false, onExitWork }: PersonalAppProps)
        * 重渲染），松手才写回 store；窄屏由 shell.css.ts 的媒体查询接管。
        */}
       <div className="pa-app-shell" style={{ '--pa-right-w': `${ui.rightPanelWidth}px` } as CSSProperties}>
+        {/*
+         * 主列**不加页面转场**（2026-11-04 按用户要求移除）。
+         *
+         * 曾经挂过 PAGE_MOTION_IN / PAGE_MOTION_SLIDE，但 .pa-root 在 Work 模式下是
+         * display:none，切回 Bot 时子树动画从头播 —— 主列铺满视口，任何入场（哪怕
+         * 只是位移）都会让「切模式」多出一段本不该有的过程，用户看到的就是「闪一下」。
+         *
+         * 整层替换（Work ⇄ Bot）本来就该是瞬时的：两套界面同色同布局，硬切没有
+         * 突兀感，反而加动效才突兀。页面转场留给真正的「页内视图切换」
+         * （工作台各页、右栏面板、记忆/画廊/系统提示词页内切换）。
+         *
+         * 同理也不能给主列加 key 重播：换 Bot / 换群聊只换内容，Composer 的草稿
+         * 存在组件本地 state，重挂载会把没发出去的字丢掉。
+         */}
         <main
           className="pa-main-col"
           style={{ '--pa-chat-w': ui.chatWidth > 0 ? `${ui.chatWidth}px` : '100%' } as CSSProperties}
@@ -215,7 +289,7 @@ export function PersonalApp({ forceMode = false, onExitWork }: PersonalAppProps)
       <TaskDetailModal />
       <JournalOverlay />
       <CallOverlay />
-      {ui.toast !== null ? <div className="pa-toast">{ui.toast}</div> : null}
+      <ToastCard text={ui.toast} />
       {!ui.rightPanelOpen ? (
         <button
           className="pa-right-reopen"
@@ -244,6 +318,13 @@ interface Mounted {
 /** 挂载 Personal Agent 应用（Bot 模式生效）。 */
 export function applyPersonalAgent(_ctx?: unknown): void {
   if (typeof document === 'undefined') return
+  /*
+   * 全局动效样式（浮层 + 页面转场）由 client/index.ts 在 apply 期注入；
+   * 这里再调一次是幂等的兜底：Bot 模式的页面转场属性就写在本文件与 shell/
+   * 里，若哪天挂载顺序变了、或有人单独 import 这套组件，动画不能静默消失
+   * （属性还在、样式没注入 = 页面完全不动，最难排查）。
+   */
+  ensureOverlayMotionStyles()
   injectPersonalBaseStyles()
   injectShellStyles()
   injectOutputsStyles()
@@ -277,11 +358,30 @@ export function applyPersonalAgent(_ctx?: unknown): void {
   document.body.appendChild(host)
 
   const root = createRoot(host)
-  root.render(
-    <PersonalProvider>
-      <PersonalApp />
-    </PersonalProvider>,
-  )
+  /*
+   * Bot 模式下首帧必须同步渲染完（2026-11-03，配合「切换不要一闪」）。
+   *
+   * 页面启动时如果上次停在 Bot 模式，applyModeSwitch 会先把官方侧栏内容
+   * 隐藏；而 createRoot().render() 默认是并发调度，React 树要等下一帧才
+   * commit，这中间会出现一段只有空侧栏的空白帧（左侧品牌也没了）。用
+   * flushSync 把首次 render 压进当前任务，第一帧就是完整 Bot 界面。
+   * Work 模式同样同步渲染：PersonalApp 常驻但被 CSS 隐藏，代价只是启动时
+   * 多渲染一次（比「用户首屏内点 Bot 时撞上未完成渲染」安全）。
+   */
+  const renderApp = (): void => {
+    root.render(
+      <PersonalProvider>
+        <PersonalApp />
+      </PersonalProvider>,
+    )
+  }
+  try {
+    flushSync(renderApp)
+  } catch {
+    // 极端环境（React 版本不支持 / 在渲染周期内调用）退回异步渲染：
+    // 退化为旧行为，但不能因为首帧优化把整个 Personal Agent 挂死。
+    renderApp()
+  }
 
   const dispose = (): void => {
     try { root.unmount() } catch { /* 已卸载 */ }

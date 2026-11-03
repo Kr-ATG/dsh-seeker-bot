@@ -113,11 +113,15 @@ export function IconCircleCheck({ size, className }: IconProps): JSX.Element {
 }
 
 export function IconSettings({ size, className }: IconProps): JSX.Element {
-  return <Svg size={size} className={className}><circle cx="12" cy="12" r="3.1" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.11a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.11a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.11a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.56 1H21a2 2 0 1 1 0 4h-.11a1.7 1.7 0 0 0-1.56 1Z" /></Svg>
+  /**
+   * 圆角齿轮：齿顶保留小平台、齿根用圆弧收口，配合 stroke-linejoin=round
+   * 让小尺寸下不再是一圈尖齿（原来的刚性来自 8 个尖锐齿角）。
+   */
+  return <Svg size={size} className={className}><path d="M18.5 10.85 L21.13 10.88 A9.2 9.2 0 0 1 21.13 13.12 L18.5 13.15 A6.6 6.6 0 0 1 17.41 15.79 L19.25 17.66 A9.2 9.2 0 0 1 17.66 19.25 L15.79 17.41 A6.6 6.6 0 0 1 13.15 18.5 L13.12 21.13 A9.2 9.2 0 0 1 10.88 21.13 L10.85 18.5 A6.6 6.6 0 0 1 8.21 17.41 L6.34 19.25 A9.2 9.2 0 0 1 4.75 17.66 L6.59 15.79 A6.6 6.6 0 0 1 5.5 13.15 L2.87 13.12 A9.2 9.2 0 0 1 2.87 10.88 L5.5 10.85 A6.6 6.6 0 0 1 6.59 8.21 L4.75 6.34 A9.2 9.2 0 0 1 6.34 4.75 L8.21 6.59 A6.6 6.6 0 0 1 10.85 5.5 L10.88 2.87 A9.2 9.2 0 0 1 13.12 2.87 L13.15 5.5 A6.6 6.6 0 0 1 15.79 6.59 L17.66 4.75 A9.2 9.2 0 0 1 19.25 6.34 L17.41 8.21 A6.6 6.6 0 0 1 18.5 10.85 Z" /><circle cx="12" cy="12" r="3" /></Svg>
 }
 
 export function IconBook({ size, className }: IconProps): JSX.Element {
-  return <Svg size={size} className={className}><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v18H6.5A2.5 2.5 0 0 0 4 23V5.5Z" /><path d="M4 18.5A2.5 2.5 0 0 1 6.5 16H20" /></Svg>
+  return <Svg size={size} className={className}><rect x="4" y="3.5" width="16" height="17" rx="3.4" /><path d="M8.4 3.5v17" /><path d="M11.6 8.2h5.2M11.6 11.6h3.4" /></Svg>
 }
 
 export function IconUsers({ size, className }: IconProps): JSX.Element {
@@ -178,6 +182,16 @@ export function IconTrash({ size, className }: IconProps): JSX.Element {
 
 export function IconEdit({ size, className }: IconProps): JSX.Element {
   return <Svg size={size} className={className}><path d="M4 20h4l11-11a2.5 2.5 0 0 0-3.5-3.5L4.5 16.5 4 20Z" /><path d="m13.5 7 3.5 3.5" /></Svg>
+}
+
+/** 图钉（置顶）：钉在侧栏会话列表最前。 */
+export function IconPin({ size, className }: IconProps): JSX.Element {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M12 17v5" />
+      <path d="M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.8l-1.8-.9A2 2 0 0 1 15 10.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+    </Svg>
+  )
 }
 
 export function IconPause({ size, className }: IconProps): JSX.Element {

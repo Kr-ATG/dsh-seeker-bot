@@ -210,7 +210,7 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  animation: pa-pop 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: pa-pop 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-root[data-pa-theme='light'] .pa-chat__menu { background: #ffffff; }
 .pa-chat__menu button {
@@ -332,7 +332,7 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
   display: flex;
   width: 100%;
   min-width: 0;
-  animation: pa-rise 260ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: pa-rise 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-callseg {
   flex: 1 1 auto;
@@ -529,7 +529,7 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
   align-items: flex-start;
   gap: 10px;
   max-width: 100%;
-  animation: pa-rise 260ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: pa-rise 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-msg--bot { justify-content: flex-start; padding-right: 12%; }
 .pa-msg--user { justify-content: flex-end; padding-left: 16%; }
@@ -640,7 +640,7 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
 .pa-msg--system {
   justify-content: center;
   padding: 0;
-  animation: pa-rise 260ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: pa-rise 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-msg__system-text {
   font-size: calc(10.5px + var(--pa-font-delta));
@@ -702,6 +702,29 @@ button.pa-msg__tool {
 }
 button.pa-msg__tool:hover { background: var(--pa-chat-hover-strong); color: var(--pa-text); }
 button.pa-msg__tool:active { transform: scale(0.92); }
+/*
+ * 朗读中的喇叭按钮：常亮品牌色 + 一圈很轻的脉冲。
+ *
+ * 只给这一枚按钮上色而不是整条消息：正在被念的是「这一条」，用户要一眼看出该停
+ * 哪一条；给气泡上色会让人以为整轮都在播。脉冲用 box-shadow 向外扩散，不占布局、
+ * 不推图标位置，1.6s 一轮，够弱不抢戏（reduced-motion 下直接关掉）。
+ */
+button.pa-msg__tool[data-speaking='true'] {
+  color: var(--pa-accent);
+  background: color-mix(in srgb, var(--pa-accent) 14%, transparent);
+  animation: pa-msg-speaking 1.6s ease-in-out infinite;
+}
+button.pa-msg__tool[data-speaking='true']:hover {
+  color: var(--pa-accent);
+  background: color-mix(in srgb, var(--pa-accent) 22%, transparent);
+}
+@keyframes pa-msg-speaking {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--pa-accent) 40%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--pa-accent) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  button.pa-msg__tool[data-speaking='true'] { animation: none; }
+}
 
 /* ---------- 引用条（2.3） ----------
  * 一条浅色细条：左侧一道竖线 + 「引用」+ 被引用消息摘要。
@@ -1672,7 +1695,7 @@ select.pa-int__input { appearance: none; background-image: linear-gradient(45deg
   border-radius: 24px;
   background: var(--pa-card-2);
   border: 1px solid var(--pa-line);
-  animation: pa-pop 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: pa-pop 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-voicebar__cancel,
 .pa-voicebar__stop,
@@ -1828,7 +1851,14 @@ select.pa-int__input { appearance: none; background-image: linear-gradient(45deg
   flex: 1;
   min-width: 0;
   min-height: 36px;
-  max-height: 140px;
+  /*
+   * 多行输入随内容拉长：上限跟 Work 模式对话框同源（DSH 在
+   * .wSkVaW_composerSeat 上定义 --dsh-composer-text-max-height: 336px）。
+   * 以前写死 140px，输入到五行就不再变高，长消息只能在小框里滚。
+   * 这里保留 fallback 336px：Bot 模式是独立全屏层，不保证挂在 Work 的
+   * composerSeat 里，变量缺失时也要和 Work 一样高。
+   */
+  max-height: var(--dsh-composer-text-max-height, 336px);
   resize: none;
   border: 0;
   outline: none;
@@ -1838,6 +1868,9 @@ select.pa-int__input { appearance: none; background-image: linear-gradient(45deg
   line-height: calc(21px + var(--pa-font-delta));
   padding: 7px 2px;
   overflow-y: auto;
+  /* 换行原样保留（textarea 默认 pre-wrap，显式写出来防止继承样式意外覆盖） */
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
 }
 .pa-composer__textarea::placeholder { color: var(--pa-text-3); }
 .pa-composer__tools { display: flex; align-items: center; gap: 2px; flex: none; padding-bottom: 1px; }
@@ -1852,7 +1885,7 @@ select.pa-int__input { appearance: none; background-image: linear-gradient(45deg
   justify-content: center;
   flex: none;
   transition: background 120ms ease, transform 120ms ease, opacity 120ms ease;
-  animation: pa-pop 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: pa-pop 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-composer__voice:hover { background: #ffffff; }
 .pa-composer__voice:active { transform: scale(0.94); }
@@ -1867,7 +1900,7 @@ select.pa-int__input { appearance: none; background-image: linear-gradient(45deg
   justify-content: center;
   flex: none;
   transition: background 120ms ease, transform 120ms ease, opacity 120ms ease;
-  animation: pa-pop 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: pa-pop 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-composer__send:hover { background: #ffffff; }
 .pa-composer__send:active { transform: scale(0.94); }
@@ -1891,7 +1924,7 @@ select.pa-int__input { appearance: none; background-image: linear-gradient(45deg
   justify-content: center;
   flex: none;
   transition: background 120ms ease, transform 120ms ease, opacity 120ms ease;
-  animation: pa-pop 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: pa-pop 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-composer__stop:hover { background: color-mix(in srgb, var(--pa-red) 26%, transparent); }
 .pa-composer__stop:active { transform: scale(0.94); }
@@ -1913,7 +1946,7 @@ select.pa-int__input { appearance: none; background-image: linear-gradient(45deg
   display: flex;
   flex-direction: column;
   gap: 2px;
-  animation: pa-pop 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: pa-pop 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-root[data-pa-theme='light'] .pa-composer__mention { background: #ffffff; }
 .pa-composer__mention button {
@@ -1929,6 +1962,30 @@ select.pa-int__input { appearance: none; background-image: linear-gradient(45deg
 .pa-composer__mention button:hover { background: var(--pa-chat-hover); }
 .pa-composer__mention-name { font-size: calc(12.5px + var(--pa-font-delta)); line-height: calc(17px + var(--pa-font-delta)); color: var(--pa-text); }
 .pa-composer__mention-role { font-size: calc(10px + var(--pa-font-delta)); line-height: calc(14px + var(--pa-font-delta)); color: var(--pa-text-3); }
+
+/* ───────────────────────── 小浮层退场（closing 态） ───────────────────────── */
+/*
+ * 「更多」菜单与 @ 提及气泡：关闭时先播 240ms 退场再卸载。
+ * 两者入场都是 pa-pop（translateY(8px) scale(.975)），退场按 popover 规格
+ * 向右 10px + 轻微缩小，形成「弹入 → 滑出」的方向差。
+ * 时长与曲线跟 src/client/modal-animation.ts 的 MODAL_ANIM_MS 对齐；
+ * [data-closing] 选择器比入场规则更具体，退场时不会两套动画同时跑。
+ */
+@keyframes pa-chat-menu-out {
+  from { opacity: 1; transform: translateX(0) scale(1); }
+  to { opacity: 0; transform: translateX(10px) scale(0.97); }
+}
+@keyframes pa-mention-out {
+  from { opacity: 1; transform: translateX(0) scale(1); }
+  to { opacity: 0; transform: translateX(10px) scale(0.97); }
+}
+.pa-chat__menu[data-closing='1'] { animation: pa-chat-menu-out 240ms cubic-bezier(0.4, 0, 0.2, 1) both; }
+.pa-composer__mention[data-closing='1'] { animation: pa-mention-out 240ms cubic-bezier(0.4, 0, 0.2, 1) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pa-chat__menu[data-closing='1'],
+  .pa-composer__mention[data-closing='1'] { animation: none; }
+}
 
 /* 文件输入隐藏 */
 .pa-composer__file { display: none; }
@@ -2288,7 +2345,7 @@ button.dgi__save-button:disabled { opacity: 0.6; cursor: default; }
   padding: 32px;
   background: rgba(0, 0, 0, 0.62);
   backdrop-filter: blur(3px);
-  animation: pa-pop 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: pa-pop 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-media__lightbox-inner {
   display: flex;
@@ -2332,6 +2389,44 @@ button.dgi__save-button:disabled { opacity: 0.6; cursor: default; }
 .pa-media__frame--full { height: min(70vh, 640px); }
 .pa-media__lightbox-body .pa-media__image { max-height: 70vh; width: auto; }
 .pa-media__lightbox-body .pa-media__video { max-width: 100%; }
+
+/*
+ * 灯箱退场：遮罩淡出 + 面板下沉 14px 并轻微缩小。
+ *
+ * 入场是 160ms 弹入，出场原来是硬消失（组件里 lightbox 一置 false 就被摘掉）。
+ * 时长与曲线对齐 modal-animation.ts 的 MODAL_ANIM_MS：240ms，出场用加速曲线
+ * （从静止启动、峰值速度结束），与插件其它浮层同一套手感。
+ *
+ * 只在根节点挂一个 data-closing，面板用后代选择器跟随——组件侧只改一处属性，
+ * 不会出现「遮罩淡出了、面板还在」的错位。
+ */
+@keyframes pa-media-lightbox-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes pa-media-lightbox-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(14px) scale(0.97); }
+}
+.pa-media__lightbox[data-closing='1'] {
+  animation: pa-media-lightbox-fade-out 240ms ease both;
+}
+.pa-media__lightbox[data-closing='1'] .pa-media__lightbox-inner {
+  animation: pa-media-lightbox-out 240ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+/*
+ * 减少动效：入场与退场一起关掉。
+ *
+ * 退场选择器必须原样再列一遍（带上 [data-closing='1']）——媒体查询不增加权重，
+ * 只写 .pa-media__lightbox 压不过上面那条带属性的规则，退场动画会照播。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .pa-media__lightbox,
+  .pa-media__lightbox[data-closing='1'],
+  .pa-media__lightbox[data-closing='1'] .pa-media__lightbox-inner {
+    animation: none;
+  }
+}
 
 /* 「正在生成文档」占位复用生图卡的 dgi-stage 样式（见 src/client/styles.ts），
    这里不再单独定义——两套样式迟早会走样，用户要求所有生成过程长得一样。 */

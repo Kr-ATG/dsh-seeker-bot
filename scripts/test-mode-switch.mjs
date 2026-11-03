@@ -245,7 +245,9 @@ console.log('[mode-switch] 挂载与分段结构')
     && buttons[1].textContent === 'Bot')
   check('默认选中 Work', seg?.getAttribute('data-mode') === 'work' && buttons[0].className.includes(' on'))
   check('body 模式属性 = work', doc.body.getAttribute('data-skb-mode') === 'work')
-  check('Work 模式下官方侧栏不被隐藏', !logo.hasAttribute('data-skb-native-hide') && !workspaces.hasAttribute('data-skb-native-hide'))
+  check('Work 模式下官方侧栏不被隐藏',
+    !logo.hasAttribute('data-skb-native-hide') && !workspaces.hasAttribute('data-skb-native-hide')
+    && !logo.hasAttribute('data-skb-mode-hide') && !workspaces.hasAttribute('data-skb-mode-hide'))
   const style = doc.getElementById('dsh-seeker-bot-mode-switch')
   check('样式表已注入', style !== null && style.textContent.includes('.skb-seg__thumb'))
 }
@@ -262,9 +264,11 @@ console.log('[mode-switch] Bot 可点')
   botBtn.click()
   check('点 Bot 后 body 变为 bot', doc.body.getAttribute('data-skb-mode') === 'bot',
     String(doc.body.getAttribute('data-skb-mode')))
-  check('点 Bot 后品牌行让位', logo.hasAttribute('data-skb-native-hide'))
-  check('点 Bot 后工作区行让位', workspaces.hasAttribute('data-skb-native-hide'))
-  check('点 Bot 后工作台导航让位', navSections.hasAttribute('data-skb-native-hide'))
+  check('点 Bot 后品牌行软隐藏（不重播 wide 入场动画）',
+    logo.hasAttribute('data-skb-mode-hide') && !logo.hasAttribute('data-skb-native-hide'))
+  check('点 Bot 后工作区行软隐藏',
+    workspaces.hasAttribute('data-skb-mode-hide') && !workspaces.hasAttribute('data-skb-native-hide'))
+  check('点 Bot 后工作台导航软隐藏', navSections.hasAttribute('data-skb-mode-hide'))
   check('点 Bot 后分段在 bot', host.querySelector('.skb-seg').getAttribute('data-mode') === 'bot')
   check('点 Bot 后模式落盘成 bot', storage.getItem('dsh-seeker-bot.ui-mode') === 'bot',
     String(storage.getItem('dsh-seeker-bot.ui-mode')))
@@ -289,7 +293,8 @@ console.log('[mode-switch] 外部篡改被纠回')
   mod.reconcileModeSwitch()
   check('对账后 body 纠回 work', doc.body.getAttribute('data-skb-mode') === 'work',
     String(doc.body.getAttribute('data-skb-mode')))
-  check('对账后侧栏没有被隐藏', !logo.hasAttribute('data-skb-native-hide'))
+  check('对账后侧栏没有被隐藏',
+    !logo.hasAttribute('data-skb-native-hide') && !logo.hasAttribute('data-skb-mode-hide'))
   check('分段仍在 work', doc.getElementById('skb-bot-console-host')
     .querySelector('.skb-seg').getAttribute('data-mode') === 'work')
 

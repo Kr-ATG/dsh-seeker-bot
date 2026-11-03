@@ -28,6 +28,7 @@ import {
 } from './icons.js'
 import { emitSyncNotice } from '../hub/sync-notice.js'
 import { ensureSyncStyles, syncCss } from './styles.js'
+import { PAGE_MOTION_IN } from '../../motion/overlay-motion.js'
 import { SyncProgressCard } from './SyncProgressCard.js'
 
 function formatBytes(bytes: number): string {
@@ -205,7 +206,11 @@ export function SyncSettingsPanel({ onClose }: SyncSettingsPanelProps): JSX.Elem
   const canOperate = Boolean(status?.repo && status?.passphraseSet && status?.tokenSet) && !running
 
   return (
-    <div className={syncCss.root}>
+    /* 这一页没有页内视图切换（单页表单），页面级容器就是这层根：切到本页时
+       随 WorkbenchPanel 的 key="sync" 重挂，重播 {...PAGE_MOTION_IN}。
+       上面那个 loading 分支的根刻意不挂 —— 它只是「正在读取…」占位，随后会被
+       这一层替换，两层都挂等于首屏连播两次。 */
+    <div className={syncCss.root} {...PAGE_MOTION_IN}>
       {/* 页头：eyebrow + 标题 + 定位说明 + 右侧核心操作 */}
       <header className={syncCss.head}>
         <div className={syncCss.headMain}>

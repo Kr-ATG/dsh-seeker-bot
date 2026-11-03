@@ -4,10 +4,11 @@
  * 只做一件事：把随包分发的 woff2 以正确的 MIME 与缓存头吐给浏览器。
  *
  * 为什么字体要走 host 路由而不是内联进 client 产物：
- *  1. 字体约 5MB，base64 内联进 client.js 会让**每个**用户（包括从不切字体的
- *     绝大多数）冷启动多下载 6.6MB 且解析一份巨大的 JS 字符串；
+ *  1. 字体约 5–10MB，base64 内联进 client.js 会让**每个**用户（包括从不切字体的
+ *     绝大多数）冷启动多下载一份巨大的 JS 字符串；
  *  2. 走独立路由后是浏览器原生字体加载：默认档（微软雅黑）一个字节都不下载，
- *     只有用户主动选中「霞鹜新致宋」才拉这一次，之后靠 immutable 缓存命中。
+ *     只有用户主动选中「霞鹜文楷」「霞鹜新致宋」或「HarmonyOS Sans」才拉这一次，
+ *     之后靠 immutable 缓存命中。
  *
  * 为什么不放官方静态目录：DSH 没有给插件放静态资产的公共目录，本插件的
  * `assets/` 只随包分发（与 mermaid 同一套形态），必须自己开路由。
@@ -25,11 +26,16 @@ export const FONT_ROUTE = '/api/chat-flow/fonts'
 /**
  * 随包分发的字体文件表：对外名 → 包内相对路径。
  *
- * 只列已知的两个文件，不接受任意文件名——请求路径必须精确命中这张表。
+ * 只列已知的五个文件，不接受任意文件名——请求路径必须精确命中这张表。
  */
 const FONT_FILES: Record<string, { rel: string; mime: string }> = {
+  'lxgw-wenkai-screen.woff2': { rel: 'assets/fonts/lxgw-wenkai-screen.woff2', mime: 'font/woff2' },
   'lxgw-neozhisong-screen.woff2': { rel: 'assets/fonts/lxgw-neozhisong-screen.woff2', mime: 'font/woff2' },
+  // HarmonyOS Sans 许可要求原样分发、不得修改字体文件，所以直接给官方 TTF（不做 woff2 转换）。
+  'harmonyos-sans-sc-regular.ttf': { rel: 'assets/fonts/harmonyos-sans-sc-regular.ttf', mime: 'font/ttf' },
+  'OFL-1.1.md': { rel: 'assets/fonts/OFL-1.1.md', mime: 'text/markdown; charset=utf-8' },
   'IPA-Font-License-1.0.md': { rel: 'assets/fonts/IPA-Font-License-1.0.md', mime: 'text/markdown; charset=utf-8' },
+  'HarmonyOS-Sans-Fonts-License.txt': { rel: 'assets/fonts/HarmonyOS-Sans-Fonts-License.txt', mime: 'text/plain; charset=utf-8' },
 }
 
 /**

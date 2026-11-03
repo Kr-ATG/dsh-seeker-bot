@@ -24,7 +24,11 @@ const ctx = {
   webServer: {
     register(route) { routes.push(route); return () => {} },
   },
-  get(name) { return name === 'credentials' ? ctx.credentials : undefined },
+  get(name) {
+    if (name === 'credentials') return ctx.credentials
+    if (name === 'llm') return ctx.llm
+    return undefined
+  },
   credentials: { resolve: async () => ({ value: 'test-key' }) },
   settings: {
     get(ns) {
@@ -36,6 +40,24 @@ const ctx = {
     listProviders: () => [{ id: 'alymagpie' }],
     listModels: async () => [{ id: 'auto/deepseek-v4.1-flash' }],
     listConfigurableProviders: () => [{ provider: 'sensenova', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'sensenova'] }],
+    // Bot 设置卡的「推理强度」下拉：宿主把模型公布的档位与默认档一并返回
+    resolveModelInfo: async (provider, model) => {
+      if (model !== 'auto/deepseek-v4.1-flash') throw new Error('unknown model')
+      return {
+        provider,
+        id: model,
+        name: 'DeepSeek V4.1 Flash',
+        reasoning: {
+          efforts: [
+            { id: 'off', name: '关闭' },
+            { id: 'low', name: '低' },
+            { id: 'high', name: '高' },
+            { id: 'max', name: '最高' },
+          ],
+          defaultEffort: 'high',
+        },
+      }
+    },
     stream: async function* (options) {
       lastLlmOptions = options
       yield { type: 'text-delta', index: 0, text: '这是来自模型层的回复。' }
@@ -1160,6 +1182,33 @@ console.log('✓ 工具卡归属：迟到的 tool/result 原地更新，不复�
     throw new Error('409 回包里的 ok 必须是 false')
   }
   console.log('✓ 问答通道：缺参 400、失效问题 409（不假装成功）')
+}
+
+/*
+ * ── 模型列表：推理档位 ──────────────────────────────────────────────
+ *
+ * Bot 设置卡的「推理强度」下拉依赖宿主把每个模型公布的档位一起返回。
+ * 少了它，用户就只能用写死的默认档（MODEL_FALLBACK.effort 一直是 'max'），
+ * 没有任何入口能改——这正是这次要修的产品缺口。锁三件事：
+ *   1. 档位随模型返回（id + 显示名）；
+ *   2. 模型自己的默认档透传；
+ *   3. 单个模型解析失败只丢档位，不拖垮整组。
+ */
+{
+  const models = JSON.parse((await request('/api/personal-agent/models', 'GET')).text)
+  if (models.ok !== true || !Array.isArray(models.groups) || models.groups.length === 0) {
+    throw new Error(`/models 应返回分组，实际 ${JSON.stringify(models).slice(0, 200)}`)
+  }
+  const entry = models.groups[0].models.find((item) => item.id === 'auto/deepseek-v4.1-flash')
+  if (entry === undefined) throw new Error('/models 缺 auto/deepseek-v4.1-flash')
+  const ids = (entry.reasoningEfforts ?? []).map((effort) => effort.id)
+  for (const wanted of ['off', 'low', 'high', 'max']) {
+    if (!ids.includes(wanted)) throw new Error(`缺推理档位 ${wanted}: ${JSON.stringify(entry.reasoningEfforts ?? [])}`)
+  }
+  if (entry.defaultEffort !== 'high') throw new Error(`默认档应为 high，实际 ${String(entry.defaultEffort)}`)
+  const named = entry.reasoningEfforts.find((effort) => effort.id === 'max')
+  if (named?.name !== '最高') throw new Error(`档位应带显示名，实际 ${JSON.stringify(named)}`)
+  console.log('✓ /models：模型公布推理档位（含显示名 + 默认档）')
 }
 
 console.log('[personal-agent host] PASS')

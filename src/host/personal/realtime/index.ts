@@ -23,10 +23,14 @@ import {
   REALTIME_KEY_PATH,
   REALTIME_MAX_SESSION_MS,
   REALTIME_PATH,
+  REALTIME_TTS_PATH,
+  REALTIME_TTS_SAMPLE_RATE_HEADER,
+  REALTIME_TTS_STREAM_MIME,
   REALTIME_WARN_BEFORE_MS,
   REALTIME_MODELS,
   REALTIME_VENDORS,
   REALTIME_VOICES,
+  buildRealtimeUpstreamUrl,
   parseClientMessage,
   speedToSpeechRate,
   type RealtimeAgentSpec,
@@ -38,11 +42,13 @@ import {
   DEFAULT_REALTIME_VENDORS,
   type RealtimeServerMessage,
   type RealtimeSpeed,
+  type RealtimeTtsRequest,
   type RealtimeVendor,
 } from '../../../shared/realtime-protocol.ts'
 import { acceptUpgrade, isWebSocketUpgrade, type WsPeer } from './ws-frame.ts'
 import { connectUpstream, UpstreamError } from './upstream.ts'
 import { buildSessionUpdate, IGNORED_UPSTREAM_EVENTS, mapUpstreamEvent, readyMessage, wrapVoiceInstructions } from './session.ts'
+import { synthesizeSpeech, synthesizeSpeechStream, TtsError, type TtsOptions, type TtsStreamMeta } from './tts.ts'
 
 /** 宿主侧注入的配置与能力。 */
 export interface RealtimeOptions {
@@ -172,12 +178,23 @@ export function readRealtimeDiagnostics(options: RealtimeOptions): RealtimeDiagn
   }
 }
 
-/** 把上游地址和模型名拼成最终 URL（地址里已有 model= 时不重复加）。 */
+/**
+ * 把上游地址和模型名拼成最终 URL（地址里已有 model= 时不重复加）。
+ *
+ * 实现已经挪到 shared（`buildRealtimeUpstreamUrl`）——朗读与通话都要用它，而它是个
+ * 纯函数、两端都能离线测。这里保留同名导出，既有调用点与产物行为完全不变。
+ */
 export function buildUpstreamUrl(base: string, model: string): string {
-  if (/[?&]model=/.test(base)) return base
-  const separator = base.includes('?') ? '&' : '?'
-  return `${base}${separator}model=${encodeURIComponent(model)}`
+  return buildRealtimeUpstreamUrl(base, model)
 }
+
+/**
+ * 同一份任务结果最多补发几次 `response.create`。
+ *
+ * 1 次就够：正常竞态下，上游那一轮 `response.done` 之后补发必然成功；还失败说明
+ * 上游又自己起了一轮响应，继续补只会变成死循环（见 `responseCreateResends`）。
+ */
+const MAX_RESPONSE_CREATE_RESENDS = 1
 
 /** 一次会话（一个浏览器连接 + 一个上游连接）。 */
 class RealtimeBridge {
@@ -188,6 +205,35 @@ class RealtimeBridge {
   private voice = ''
   private readySent = false
   private responseActive = false
+  /**
+   * 「该让模型开口」但此刻发不出去的标记（见 `finishAgentTask`）。
+   *
+   * 为什么需要：任务完成时要回灌 `function_call_output`，紧接着发 `response.create`
+   * 让模型汇报。但上游此刻可能正有一轮响应在跑（模型正在说话，或用户刚开口触发了
+   * VAD），上游对这条 `response.create` 只回一句 `ongoing response already exists`
+   * 就丢掉了——**不排队，也不替我们补发**。不自己记着这件事，结果就是：任务其实
+   * 成功了，用户却只听到沉默，外加一条红色错误条（实测截图）。
+   *
+   * 多个任务同时完成也只补一次：它们的结果都已经回灌进同一个上下文，一次
+   * `response.create` 就能让模型一起汇报。
+   */
+  private responseCreatePending = false
+  /**
+   * 已经发出 `response.create`、还在等上游回 `response.created`（或 error）。
+   *
+   * 防的是另一种重复：`response.done` 里既可能补发 pending，又可能因为兜底执行
+   * 工具调用而再触发一次 finishAgentTask。两条都发的话，后一条必然撞上前一条刚开
+   * 的响应，白拿一条 error，还会把补发额度用掉。
+   */
+  private responseCreateInFlight = false
+  /**
+   * 同一份 pending 已经补发过几次（上限见 MAX_RESPONSE_CREATE_RESENDS）。
+   *
+   * 补发出去的那条仍可能被拒（用户刚打断、上游又自己起了一轮）。没有上限就会形成
+   * 「done → 补发 → 被拒 → 等 done → 再补发」的活锁：模型永远开不了口，日志里还
+   * 刷满同一句。宁可这一轮不开口，也不能把会话拖死。
+   */
+  private responseCreateResends = 0
   private closed = false
   private warnTimer: NodeJS.Timeout | null = null
   private endTimer: NodeJS.Timeout | null = null
@@ -453,7 +499,11 @@ class RealtimeBridge {
       return
     }
 
-    if (type === 'response.created') this.responseActive = true
+    if (type === 'response.created') {
+      this.responseActive = true
+      // 上游接住了我们那条 response.create：不再有「已发未确认」的在途请求
+      this.responseCreateInFlight = false
+    }
 
     /*
      * 工具调用的参数收集与执行。
@@ -516,6 +566,7 @@ class RealtimeBridge {
     }
     if (type === 'response.done') {
       this.responseActive = false
+      this.responseCreateInFlight = false
       /*
        * 兜底一：有些上游只在 `response.done` 的 output 里给出完整的 function_call。
        */
@@ -544,6 +595,13 @@ class RealtimeBridge {
         if (pending.args.trim() === '') continue
         this.dispatchFunctionCall(pendingId, pending.name, pending.args, 'response.done+delta')
       }
+      /*
+       * 那一轮终于结束了：把之前发不出去的 response.create 补上（见
+       * flushPendingResponseCreate）。放在兜底执行之后——兜底若又跑起一个任务，
+       * 它走 requestResponseCreate 时 responseActive 已经是 false，会立刻发出，
+       * pending 那边由 in-flight 标记挡住，不会重复。
+       */
+      this.flushPendingResponseCreate()
       // 不 return：下面还要把 response_done 转发给前端
     }
 
@@ -552,6 +610,25 @@ class RealtimeBridge {
       const nested = event.error !== null && typeof event.error === 'object' ? event.error as Record<string, unknown> : null
       const message = String(nested?.message ?? event.message ?? '')
       if (message.includes('no ongoing response')) return
+      /*
+       * 「上游已经有一轮响应在跑」：任务完成、回灌结果之后紧接着发的 response.create
+       * 撞上了模型正在说话（或用户刚开口触发 VAD）。
+       *
+       * 这条**绝不能**转给前端——任务本身是成功的，弹红条只会让用户以为失败了
+       * （实测截图就是它）。但也不能像 no ongoing response 那样一丢了之：上游不替
+       * 我们排队，丢了这条 response.create，模型就永远收不到「该汇报了」的信号，
+       * 表现为任务成功却一声不吭。所以记 pending，等那一轮 response.done 再补发
+       * （见 flushPendingResponseCreate）。
+       *
+       * 这里**不重置** responseCreateResends：补发被拒时它会再次走到这里，额度用完
+       * 后 flush 会放弃，避免「补发 ↔ 被拒」的死循环。
+       */
+      if (message.includes('ongoing response already exists')) {
+        this.responseCreateInFlight = false
+        this.responseCreatePending = true
+        this.options.log?.('[realtime] response.create 撞上上游进行中的响应，等 response.done 后补发')
+        return
+      }
       /*
        * 我们发的 session.update 被上游拒了（通常是某个字段它不认识——最可能是
        * `tools` 里内置 web_search 的形状）。这时**降级重发**：去掉 tools 再来一次，
@@ -766,7 +843,12 @@ class RealtimeBridge {
           type: 'conversation.item.create',
           item: { type: 'function_call_output', call_id: callId, output },
         }))
-        upstream.sendText(JSON.stringify({ type: 'response.create' }))
+        /*
+         * 不直接发 response.create：上游此刻可能正有一轮响应在跑（模型在说话 /
+         * 用户刚开口），发过去必被拒且**不会补发**，模型于是不开口汇报。
+         * requestResponseCreate 会判断能不能发，不能发就记 pending 等 done 后补。
+         */
+        this.requestResponseCreate()
       } catch {
         /* 上游已断：onUpstreamClose 会接手 */
       }
@@ -780,6 +862,62 @@ class RealtimeBridge {
       // 产物一并下发：前端要把它们落成对话流里的图片/文件消息（只让模型念一句不够）
       ...(result.artifacts !== undefined && result.artifacts.length > 0 ? { artifacts: result.artifacts } : {}),
     })
+  }
+
+  /**
+   * 请求上游开一轮新响应（回灌任务结果之后必须做，否则模型不会开口）。
+   *
+   * 发不出去时**不在这里重试**：上游正有一轮响应在跑，此刻发必被拒。记 pending，
+   * 真正的补发时机是那一轮 `response.done`（见 flushPendingResponseCreate）。
+   */
+  private requestResponseCreate(): void {
+    if (this.upstream === null || this.closed) return
+    /*
+     * 新的一份任务结果 → 补发额度重置。只在「当前没有待补发的」时重置：连续两个
+     * 任务完成时它们共用同一次补发（pending 是个布尔），额度也该共用。
+     */
+    if (!this.responseCreatePending) this.responseCreateResends = 0
+    if (this.responseActive || this.responseCreateInFlight) {
+      this.responseCreatePending = true
+      this.options.log?.('[realtime] 上游响应进行中：response.create 记为待补发')
+      return
+    }
+    this.sendResponseCreate()
+  }
+
+  /** 真的把 `response.create` 写出去（调用方负责判断「现在能不能发」）。 */
+  private sendResponseCreate(): void {
+    const upstream = this.upstream
+    if (upstream === null || this.closed) return
+    try {
+      upstream.sendText(JSON.stringify({ type: 'response.create' }))
+      this.responseCreateInFlight = true
+    } catch {
+      /* 上游已断：onUpstreamClose 会接手 */
+    }
+  }
+
+  /**
+   * 上游那一轮响应结束（`response.done`）：补发一次之前发不出去的 `response.create`。
+   *
+   * 只补一次（MAX_RESPONSE_CREATE_RESENDS）：补发出去若又被拒，error 分支会重新置
+   * pending，但额度已经用完，这里放弃并留日志——模型这一轮不开口，比「补发 ↔ 被拒」
+   * 无限循环把会话拖死要好。
+   */
+  private flushPendingResponseCreate(): void {
+    if (!this.responseCreatePending) return
+    if (this.closed || this.upstream === null) return
+    // 调用点刚把 responseActive 置 false；in-flight 再挡一次，避免和「兜底执行工具
+    // 调用」即将发出的那条重复
+    if (this.responseActive || this.responseCreateInFlight) return
+    if (this.responseCreateResends >= MAX_RESPONSE_CREATE_RESENDS) {
+      this.responseCreatePending = false
+      this.options.log?.('[realtime] 放弃补发 response.create：已补发过一次仍被上游拒绝')
+      return
+    }
+    this.responseCreatePending = false
+    this.responseCreateResends += 1
+    this.sendResponseCreate()
   }
 
   /**
@@ -864,6 +1002,12 @@ class RealtimeBridge {
       this.upstream.sendText(JSON.stringify({ type: 'response.cancel' }))
     }
     this.responseActive = false
+    /*
+     * 不清 responseCreatePending：用户打断的是**上一轮**对话，任务结果仍然该汇报
+     * （语音里让它生图，用户插话打断的是闲聊，不是「别告诉我图好了」）。这里只把
+     * 状态置成「看起来可以发」，真正的补发仍然等上游那条 response.done（cancelled
+     * 也算一条），不会在打断的瞬间抢发。
+     */
     this.send({ type: 'interrupted' })
   }
 
@@ -912,6 +1056,9 @@ class RealtimeBridge {
     this.disarmTimers()
     // 未完成的工具调用参数一并丢掉：会话已关，再执行也没地方回灌
     this.pendingCalls.clear()
+    // 待补发的 response.create 同理：会话已关，补发也没地方去了
+    this.responseCreatePending = false
+    this.responseCreateInFlight = false
     // 挂断时中止还在跑的 agent 任务：留着它继续跑会白烧模型调用，而且结果没人接收
     if (this.taskAbort !== null) {
       try {
@@ -1275,6 +1422,250 @@ export function createRealtimeKeyHandler(options: RealtimeOptions): (req: Incomi
   }
 }
 
+/** 朗读请求体的字节上限：400 字正文的 JSON 撑死几 KB，32KB 足够，超了直接拒。 */
+const TTS_BODY_LIMIT_BYTES = 32 * 1024
+
+/**
+ * 把值清成可见 ASCII，专给响应头用。
+ *
+ * 供应商 id 是用户自己填的（可能是中文），而 `setHeader` 遇到非 ASCII 会直接抛
+ * `ERR_INVALID_CHAR`——那会让一条已经写到一半的响应卡死（头没发出去、body 也没
+ * 结束）。诊断头宁可变成 `__` 也不能把整次朗读带崩。
+ */
+function headerSafe(value: string): string {
+  return value.replace(/[^\x20-\x7e]/g, '_')
+}
+
+/**
+ * 造朗读路由的处理器（`POST /api/personal-agent/tts`）。
+ *
+ * 两种交付形态（由请求体的 `stream` 选）：
+ *
+ * - **默认（stream 缺省/false）**：等整段合成完，回二进制 WAV（`content-type: audio/wav`）。
+ *   为什么不回 base64 JSON——一段 30 秒的 24k PCM 有 1.4MB，base64 再涨 33%，浏览器
+ *   还要多一次大字符串解析；二进制直接喂给 `decodeAudioData` 更省也更快。
+ * - **stream: true**：收到首片音频就写 200，之后边收边写裸 PCM16（chunked）。用户点
+ *   喇叭后听到第一个字的时间从「整段合成完」降到「建连 + 首包」。
+ *
+ * 失败一律回 `{ ok:false, error }`；流式下只有**首包之前**失败才回 JSON（写出去
+ * 200 之后就只剩断流这一条路，见 respondTtsStream）。
+ *
+ * 与 config / key 两个路由一样不依赖 cordis：既能挂到 DSH 的 webServer（mount.ts），
+ * 也能挂到裸 `node:http` server 上做端到端测试（scripts/test-realtime-tts.mjs）。
+ *
+ * @param options 宿主能力。朗读读的就是**通话那一份**配置，所以这里直接透传，不另开一套。
+ * @param tts 朗读专属参数（目前只有超时）。
+ */
+export function createRealtimeTtsHandler(
+  options: RealtimeOptions,
+  tts: { timeoutMs?: number } = {},
+): (req: IncomingMessage, res: import('node:http').ServerResponse) => void {
+  const sendJson = (res: import('node:http').ServerResponse, status: number, payload: unknown): void => {
+    try {
+      res.statusCode = status
+      res.setHeader('content-type', 'application/json; charset=utf-8')
+      res.setHeader('cache-control', 'no-store')
+      res.end(JSON.stringify(payload))
+    } catch {
+      /* 已断开 */
+    }
+  }
+  const ttsOptions: TtsOptions = {
+    resolveApiKey: options.resolveApiKey,
+    resolveVendor: options.resolveVendor,
+    voice: options.voice,
+    speed: options.speed,
+    models: options.models,
+    log: options.log,
+    timeoutMs: tts.timeoutMs,
+  }
+
+  return (req, res) => {
+    void (async () => {
+      if (String(req.method ?? 'GET').toUpperCase() !== 'POST') {
+        sendJson(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      /*
+       * 凭据能力是朗读的硬前提。类型上它是必填，但裸 server 装配时可能漏给——
+       * 那种情况下回 501 比在 synthesizeSpeech 里抛 TypeError 好（后者对用户不可读）。
+       */
+      if (typeof options.resolveApiKey !== 'function') {
+        sendJson(res, 501, { ok: false, error: '当前宿主没有提供朗读所需的凭据能力' })
+        return
+      }
+      // 读请求体（上限 32KB）
+      const chunks: Buffer[] = []
+      let size = 0
+      let tooLarge = false
+      await new Promise<void>((resolve) => {
+        req.on('data', (chunk: Buffer) => {
+          size += chunk.length
+          if (size > TTS_BODY_LIMIT_BYTES) {
+            tooLarge = true
+            resolve()
+            return
+          }
+          chunks.push(chunk)
+        })
+        req.on('end', resolve)
+        req.on('error', resolve)
+      })
+      if (tooLarge) {
+        sendJson(res, 413, { ok: false, error: '朗读请求过大' })
+        return
+      }
+      let body: Record<string, unknown>
+      try {
+        const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+        if (parsed === null || typeof parsed !== 'object') throw new Error('not an object')
+        body = parsed as Record<string, unknown>
+      } catch {
+        sendJson(res, 400, { ok: false, error: '请求体不是合法 JSON' })
+        return
+      }
+      /*
+       * 只读白名单字段，并逐项过一遍类型：JSON 里的 vendor / speed 可能是数字或对象，
+       * 直接往下传会让 pickVendor 之类的字符串方法抛 TypeError（对用户不可读）。
+       */
+      const request: RealtimeTtsRequest = { text: typeof body.text === 'string' ? body.text : '' }
+      if (typeof body.botId === 'string' && body.botId.trim() !== '') request.botId = body.botId.trim()
+      if (typeof body.vendor === 'string' && body.vendor.trim() !== '') request.vendor = body.vendor.trim()
+      if (typeof body.voice === 'string' && body.voice.trim() !== '') request.voice = body.voice.trim()
+      if (typeof body.model === 'string' && body.model.trim() !== '') request.model = body.model.trim()
+      const speed = body.speed
+      if (speed === 'slow' || speed === 'normal' || speed === 'fast') request.speed = speed
+
+      /*
+       * 流式朗读：走单独的分支。非流式那条路径一个字都不改——旧前端不传 stream，
+       * 拿到的仍然是完整 WAV。
+       */
+      if (body.stream === true) {
+        request.stream = true
+        await respondTtsStream(res, ttsOptions, request)
+        return
+      }
+
+      try {
+        const result = await synthesizeSpeech(ttsOptions, request)
+        try {
+          res.statusCode = 200
+          res.setHeader('content-type', 'audio/wav')
+          res.setHeader('content-length', String(result.wav.length))
+          // 同一段文字每次合成的结果都可能不同，体积也不小，一律不缓存
+          res.setHeader('cache-control', 'no-store')
+          /*
+           * 两个数字头：前端要显示「这段多长」，排查时要确认「WAV 头里的采样率与
+           * 上游实际吐的一致」。只放数字——自定义音色 id 可能是非 ASCII，而
+           * setHeader 遇到非 ASCII 会抛错，那会把整条响应挂住。
+           */
+          res.setHeader('x-tts-sample-rate', String(result.sampleRate))
+          res.setHeader('x-tts-duration-ms', String(result.durationMs))
+          res.end(result.wav)
+        } catch {
+          /* 浏览器已断开 */
+        }
+      } catch (error) {
+        const status = error instanceof TtsError ? error.status : 500
+        const message = error instanceof Error ? error.message : String(error)
+        sendJson(res, status, { ok: false, error: message })
+      }
+    })()
+  }
+}
+
+/**
+ * 流式朗读的响应分支：首片音频到了才写 200 头，之后边收边写。
+ *
+ * 为什么「首片到达才写头」：一旦把 200 发出去，就再也没法回 JSON 错误了。而首包
+ * 前的失败（鉴权失败、模型不存在、上游 error）恰恰是用户最常遇到的——它必须变成
+ * 一条可读的中文错误，而不是一个空的 200。
+ *
+ * 为什么用 chunked 而不是给 content-length：总长度要等整段合成完才知道，而流式的
+ * 全部意义就是「不等整段」。裸 PCM16 的容器信息（采样率）走响应头。
+ *
+ * @param res 响应对象。
+ * @param options 宿主能力（与通话同一份配置）。
+ * @param request 已解析好的朗读请求（`stream` 为真）。
+ */
+async function respondTtsStream(
+  res: import('node:http').ServerResponse,
+  options: TtsOptions,
+  request: RealtimeTtsRequest,
+): Promise<void> {
+  const controller = new AbortController()
+  /** 200 头是否已经写出去了（写出去之后就只剩「断流」这一条收尾路径）。 */
+  let started = false
+  /*
+   * 客户端提前断开时中止上游。监听 res 的 'close' 而不是 req：Node 在响应**正常**
+   * 结束（res.end 之后）也会发 close，要靠 writableFinished 区分「正常收尾」与
+   * 「用户中途取消」——只有后者才需要去关上游连接，否则每次朗读成功都要白 abort 一次。
+   */
+  const onClose = (): void => {
+    if (!res.writableFinished) controller.abort()
+  }
+  res.on('close', onClose)
+  try {
+    await synthesizeSpeechStream(options, request, (chunk: Buffer, meta: TtsStreamMeta) => {
+      if (res.writableEnded || res.destroyed) {
+        // 已经写不出去了：别再让上游白念完，直接停
+        controller.abort()
+        return
+      }
+      if (!started) {
+        started = true
+        res.statusCode = 200
+        res.setHeader('content-type', REALTIME_TTS_STREAM_MIME)
+        res.setHeader('cache-control', 'no-store')
+        res.setHeader(REALTIME_TTS_SAMPLE_RATE_HEADER, String(meta.sampleRate))
+        // 诊断用：前端可以显示「当前用哪家 / 哪个模型」，排查时也不用去翻日志
+        res.setHeader('x-tts-vendor', headerSafe(meta.vendor))
+        res.setHeader('x-tts-model', headerSafe(meta.model))
+        // 先把头刷出去：前端拿到 200 就能建播放器，不必等第一片 body
+        res.flushHeaders?.()
+      }
+      /*
+       * 不处理背压（res.write 返回 false）：单次朗读最多几 MB，Node 的发送缓冲
+       * 足够吞下；要做真背压得把 onChunk 改成 async 并等 drain，代价不值得。
+       * 写失败（客户端已断开 / 已 end）一律 abort 上游，别让它白念完。
+       */
+      try {
+        res.write(chunk)
+      } catch {
+        controller.abort()
+      }
+    }, controller.signal)
+    if (!res.writableEnded) res.end()
+  } catch (error) {
+    if (started) {
+      /*
+       * 已经回了 200 和部分音频：只能断流。前端会看到「响应提前结束」（chunked 缺
+       * 结束块），按半段处理即可——**绝不能**再补一段 JSON，那会被当成 PCM 播出来
+       * （刺耳的噪声）。
+       */
+      try {
+        res.end()
+      } catch {
+        /* 已断开 */
+      }
+      return
+    }
+    // 首包前失败：一个字都还没发出去，回一条可读的 JSON 最有用
+    const status = error instanceof TtsError ? error.status : 500
+    const message = error instanceof Error ? error.message : String(error)
+    try {
+      res.statusCode = status
+      res.setHeader('content-type', 'application/json; charset=utf-8')
+      res.setHeader('cache-control', 'no-store')
+      res.end(JSON.stringify({ ok: false, error: message }))
+    } catch {
+      /* 已断开 */
+    }
+  } finally {
+    res.off('close', onClose)
+  }
+}
+
 /**
  * 把实时语音路由挂到一个裸 `node:http` server 上（测试与独立部署用）。
  *
@@ -1288,6 +1679,7 @@ export function attachRealtimeRoutes(server: Server, options: RealtimeOptions): 
   const diagnose = createRealtimeDiagnoseHandler(options)
   const config = createRealtimeConfigHandler(options)
   const key = createRealtimeKeyHandler(options)
+  const tts = createRealtimeTtsHandler(options)
 
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
     let pathname = ''
@@ -1311,7 +1703,12 @@ export function attachRealtimeRoutes(server: Server, options: RealtimeOptions): 
     } catch {
       return
     }
-    if (pathname !== REALTIME_DIAGNOSE_PATH && pathname !== REALTIME_CONFIG_PATH && pathname !== REALTIME_KEY_PATH) return
+    if (
+      pathname !== REALTIME_DIAGNOSE_PATH
+      && pathname !== REALTIME_CONFIG_PATH
+      && pathname !== REALTIME_KEY_PATH
+      && pathname !== REALTIME_TTS_PATH
+    ) return
     // 已经被别的 handler 应答过就不要再写（裸 server 上常见）
     if (res.headersSent || res.writableEnded) return
     if (pathname === REALTIME_CONFIG_PATH) {
@@ -1320,6 +1717,10 @@ export function attachRealtimeRoutes(server: Server, options: RealtimeOptions): 
     }
     if (pathname === REALTIME_KEY_PATH) {
       key(req, res)
+      return
+    }
+    if (pathname === REALTIME_TTS_PATH) {
+      tts(req, res)
       return
     }
     if (String(req.method ?? 'GET').toUpperCase() !== 'GET') {

@@ -51,8 +51,9 @@ function readMainLeft(): number {
 
 const SHEET = `
 /* ── page：官方 main 槽位里的整页视图（与自动化任务页同座位） ── */
-.psh-page{position:relative;flex:1 1 auto;width:100%;min-width:0;height:100%;min-height:0;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;background:var(--dsw-alias-bg-base,var(--dsw-alias-bg-layer-1,#fff));color:var(--dsw-alias-label-primary,#eee);animation:dsh-psh-page-in 140ms ease-out}
-@keyframes dsh-psh-page-in{from{opacity:0}to{opacity:1}}
+.psh-page{position:relative;flex:1 1 auto;width:100%;min-width:0;height:100%;min-height:0;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;background:var(--dsw-alias-bg-base,var(--dsw-alias-bg-layer-1,#fff));color:var(--dsw-alias-label-primary,#eee);animation:dsh-page-in 240ms cubic-bezier(.2,.8,.2,1) backwards}
+/* 整页视图入场用全局的 dsh-page-in（240ms 减速 + 上浮 10px，定义在
+   motion/overlay-motion.ts）：原来只有 140ms 纯 opacity 淡入，切页像瞬间换图。 */
 /* ── 遮罩：淡入淡出（compact 卡片用透明遮罩，只吃点击不遮视野） ── */
 .psh-mask{position:fixed;inset:0;z-index:999;background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.45))}
 .psh-mask[data-plain]{background:transparent}
@@ -72,7 +73,7 @@ const SHEET = `
 /* sheet（窄屏全屏）是固定 100dvh 的，内容再长也长不出屏幕，只能让主体滚——
    这是「卡片自适应」在窄屏唯一可行的兜底（桌面端 compact 永远不滚）。 */
 .psh-card[data-mode='sheet'] .psh-body{overflow-y:auto}
-.psh-card[data-mode='compact'][data-anim='in']{animation:dsh-psh-pop-in 200ms cubic-bezier(.2,.8,.2,1)}
+.psh-card[data-mode='compact'][data-anim='in']{animation:dsh-psh-pop-in 240ms cubic-bezier(.2,.8,.2,1)}
 .psh-card[data-mode='compact'][data-anim='out']{animation:dsh-psh-pop-out 180ms cubic-bezier(.4,0,.2,1) both}
 @keyframes dsh-psh-pop-in{from{opacity:0;transform:translateY(10px) scale(.975)}to{opacity:1;transform:translateY(0) scale(1)}}
 @keyframes dsh-psh-pop-out{from{opacity:1;transform:translateY(0) scale(1)}to{opacity:0;transform:translateY(6px) scale(.985)}}
@@ -89,9 +90,26 @@ const SHEET = `
   backdrop-filter:none;-webkit-backdrop-filter:none}
 body[data-ds-dark-theme] .psh-card[data-solid],
 html[data-dsh-glass] body[data-ds-dark-theme] .psh-card[data-solid]{
-  background:var(--dsw-static-neutral-bluish-850,#2c2c2e)}
+  /* 深色下用页面底色（近黑），不用 neutral-850 的灰面——用户 2026-11-03 反馈
+     「不喜欢深色模式下这个灰灰的背景色」。MCP 弹窗在深色下应该是深底卡片，
+     与官方对话区 / Bot 侧栏同一色温。 */
+  background:var(--dsw-alias-bg-base,#151517)}
 .psh-card[data-mode='sheet'][data-anim='in']{animation:dsh-modal-slide-in ${MODAL_ANIM_MS}ms cubic-bezier(.2,.8,.2,1)}
 .psh-card[data-mode='sheet'][data-anim='out']{animation:dsh-modal-slide-out ${MODAL_ANIM_MS}ms cubic-bezier(.4,0,.2,1) both}
+/* ── modal：居中弹窗卡片（连接器页） ─────────────────────────────────
+   尺寸：桌面 1040×860 上限，随视口夹紧；窄屏走上面的 sheet 全屏。
+   z-index 必须高过 Personal Agent 的 .pa-root（2147483000）——Bot 模式下
+   胶囊也能打开它，否则卡片会被全屏 Bot 应用盖在下面。
+   居中用 left/top 50% + translate(-50%,-50%)；开合动画把 translate 写进
+   keyframes 里，动画结束回落到这条 transform，避免「动画结束跳位」。 */
+.psh-card[data-mode='modal']{left:50%;top:50%;transform:translate(-50%,-50%);
+  width:min(1040px,calc(100vw - 48px));height:min(860px,calc(100vh - 72px));
+  z-index:2147483600;transition:none}
+.psh-mask[data-modal]{z-index:2147483500}
+.psh-card[data-mode='modal'][data-anim='in']{animation:dsh-psh-modal-in ${MODAL_ANIM_MS}ms cubic-bezier(.2,.8,.2,1)}
+.psh-card[data-mode='modal'][data-anim='out']{animation:dsh-psh-modal-out ${MODAL_ANIM_MS}ms cubic-bezier(.4,0,.2,1) both}
+@keyframes dsh-psh-modal-in{from{opacity:0;transform:translate(-50%,-48%) scale(.985)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+@keyframes dsh-psh-modal-out{from{opacity:1;transform:translate(-50%,-50%) scale(1)}to{opacity:0;transform:translate(-50%,-46%) scale(.99)}}
 /* ── 通用卡片头部：标题 + 关闭（对齐 auto-card-head 规格）── */
 .psh-head{flex:none;display:flex;align-items:center;gap:8px;padding:12px 16px 10px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.08))}
 .psh-title{flex:1;min-width:0;font-size:15px;font-weight:600;line-height:22px;color:var(--dsw-alias-label-primary,#eee)}
@@ -159,8 +177,13 @@ export interface PopoverSize {
   fill?: boolean
 }
 
-/** 面板形态：page = 铺满官方 main 槽位的整页视图；compact = 贴入口的小卡片。 */
-export type PopoverVariant = 'page' | 'compact'
+/**
+ * 面板形态：
+ *  - page = 铺满官方 main 槽位的整页视图；
+ *  - compact = 贴入口的定尺寸小卡片；
+ *  - modal = 居中弹窗卡片（MCP 连接器页用：用户 2026-11-03 要求「MCP页面变成弹窗卡片」）。
+ */
+export type PopoverVariant = 'page' | 'compact' | 'modal'
 
 /** PopoverShell 属性。 */
 export interface PopoverShellProps {
@@ -226,7 +249,8 @@ export function PopoverShell({
   // 窄屏回退全屏 sheet；桌面端 compact 走内容自适应的小卡片。
   const narrow = vw < NARROW_VP
   const compact = variant === 'compact' && !narrow
-  const mode = narrow ? 'sheet' : 'compact'
+  const modal = variant === 'modal' && !narrow
+  const mode = narrow ? 'sheet' : modal ? 'modal' : 'compact'
   /*
    * 卡片实高（内容撑开后的真实高度）。
    *
@@ -344,23 +368,23 @@ export function PopoverShell({
 
   return createPortal(
     <>
-      {(narrow || compact) && (
-        <div className="psh-mask" data-plain={compact || undefined} data-anim={anim} aria-hidden="true" onClick={onClose} />
+      {!page && (
+        <div className="psh-mask" data-plain={compact || undefined} data-modal={modal || undefined} data-anim={anim} aria-hidden="true" onClick={onClose} />
       )}
       <div
         ref={cardRef}
         tabIndex={-1}
-        className={`psh-card ${compact ? '' : modalDrawerAnimClass(closing)}`}
+        className={`psh-card ${compact || modal ? '' : modalDrawerAnimClass(closing)}`}
         data-anim={anim}
         data-mode={mode}
         data-solid={solid ? '' : undefined}
         style={style}
         role="dialog"
         /*
-         * aria-modal 只在**真的有遮罩**时才是对的（narrow || compact）。
-         * sheet 形态带遮罩，标了才准；没有遮罩时不标。
+         * aria-modal 只在**真的有遮罩**时才是对的（narrow || compact || modal）。
+         * 这几种形态都带遮罩，标了才准；page 形态没有遮罩，不标。
          */
-        aria-modal={narrow || compact ? true : undefined}
+        aria-modal={narrow || compact || modal ? true : undefined}
         aria-label={ariaLabel}
         onMouseEnter={onCardMouseEnter}
         onMouseLeave={onCardMouseLeave}

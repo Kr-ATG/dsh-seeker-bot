@@ -33,6 +33,7 @@ import {
 import { modalStaggerClass } from '../triad-modal-animation'
 import { ConfirmDialog } from '../memory/ConfirmDialog'
 import { PshBody, PopoverShell } from '../popover-shell'
+import { PAGE_MOTION_IN } from '../../motion/overlay-motion'
 
 /** ---------------------------------------------------------------- 数据模型 */
 
@@ -139,6 +140,12 @@ const SKILL_ZH: Record<string, string> = {
   srcUpdateAllOk: '已更新 {n} 个来源',
   srcUpdateAllPartial: '更新 {ok} 个来源，{failed} 个失败',
   srcUpdateAllEmpty: '没有可更新的来源',
+  // 更新进度：「全部更新」改成前端逐条跑，得让用户看见跑到第几条、单条跑了多久
+  srcUpToDate: '已是最新（{commit}）',
+  srcUpdatingSeconds: '更新中… {n}s',
+  srcUpdateAllProgress: '正在更新 {i}/{n}：{name}',
+  srcUpdateAllChecking: '检查中…',
+  srcUpdateAllNoTarget: '没有需要更新的来源',
   srcAuto: '自动', srcRemove: '移除',
   srcRemoveConfirmTitle: '移除 Git 来源',
   srcRemoveConfirmBody: '移除「{url}」？只删这条导入记录，已装的技能仍留在本地，但之后不再跟着仓库更新。',
@@ -364,8 +371,8 @@ const skillApi = {
   /** 检查远端有没有新 commit：只比对不落盘，updates[].hasUpdate 决定要不要提示。 */
   checkSources: (input?: { id?: string }): Promise<{ checked: number; updates: Array<{ id: string; url: string; currentCommit: string; remoteCommit: string; hasUpdate: boolean; error?: string }> }> =>
     skillRequest('/sources/check', { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(input ?? {}) }),
-  /** 更新单条来源（重新 clone 并覆盖落盘的技能）。 */
-  updateSource: (id: string): Promise<{ ok: true; installed: Array<{ name: string }>; skipped: Array<{ path: string; reason: string }>; commit: string }> =>
+  /** 更新单条来源（重新 clone 并覆盖落盘的技能）；远端没有新 commit 时 host 秒回 upToDate，不重装。 */
+  updateSource: (id: string): Promise<{ ok: true; upToDate?: boolean; installed: Array<{ name: string }>; skipped: Array<{ path: string; reason: string }>; commit: string }> =>
     skillRequest(`/sources/${encodeURIComponent(id)}/update`, { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify({}) }),
   /** 全部更新：host 逐条跑，失败的单条进 failed，不打断整批。 */
   updateAllSources: (): Promise<{ updated: Array<{ id: string; installed: number; commit: string }>; failed: Array<{ id: string; error: string }> }> =>
@@ -526,6 +533,8 @@ const css = {
   toastOk: 'skm-toast-ok',
   toastErr: 'skm-toast-err',
   toastDot: 'skm-toast-dot',
+  /** 退场态：定时器到点先加它播 160ms，播完才从数组里摘掉。 */
+  toastOut: 'skm-toast-out',
   bundleEmpty: 'skm-bundle-empty',
   bundleEmptyTitle: 'skm-bundle-empty-title',
   bundleEmptyHint: 'skm-bundle-empty-hint',
@@ -544,6 +553,7 @@ const css = {
   srcSwitch: 'skm-src-switch',
   srcInterval: 'skm-src-interval',
   srcList: 'skm-src-list',
+  srcProgress: 'skm-src-progress',
   srcRow: 'skm-src-row',
   srcMain: 'skm-src-main',
   srcUrl: 'skm-src-url',
@@ -565,7 +575,7 @@ const SHEET = `.skm-modal-body{overflow:hidden;display:flex;flex-direction:colum
 .skm-install-row{display:flex;flex-direction:column;gap:6px}
 .skm-inline-form{flex:none;display:flex;align-items:center;gap:6px}
 /* 块级变体：改名输入行独占一整行（整行内容保留，表单追加在其下方）。 */
-.skm-inline-form-block{width:100%;box-sizing:border-box;padding:0 8px 8px;animation:skm-form-in 160ms ease-out}
+.skm-inline-form-block{width:100%;box-sizing:border-box;padding:0 8px 8px;animation:skm-form-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1)}
 @keyframes skm-form-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 .skm-inline-input{flex:1;min-width:0;height:32px;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.08));border-radius:8px;padding:0 10px;font-size:13px;color:var(--dsw-alias-label-primary,#eee);background:var(--dsw-alias-bg-base,#0e1116)}
 .skm-inline-input::placeholder{color:var(--dsw-alias-label-tertiary,#888)}
@@ -684,7 +694,7 @@ const SHEET = `.skm-modal-body{overflow:hidden;display:flex;flex-direction:colum
 .skm-cat-editor{display:flex;flex-direction:column;gap:8px;box-sizing:border-box;width:100%}
 .skm-cat-empty{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#81858c)}
 .skm-cat-selected{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:5px}
-.skm-cat-selected-tag{display:inline-flex;align-items:center;gap:5px;height:24px;box-sizing:border-box;padding:0 4px 0 9px;border-radius:999px;font-size:12px;line-height:20px;color:var(--dsw-alias-state-business-primary,#3d6be5);background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#3d6be5) 12%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-state-business-primary,#3d6be5) 26%,transparent);animation:skm-cat-tag-in 200ms cubic-bezier(.2,.9,.3,1.1) both}
+.skm-cat-selected-tag{display:inline-flex;align-items:center;gap:5px;height:24px;box-sizing:border-box;padding:0 4px 0 9px;border-radius:999px;font-size:12px;line-height:20px;color:var(--dsw-alias-state-business-primary,#3d6be5);background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#3d6be5) 12%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-state-business-primary,#3d6be5) 26%,transparent);animation:skm-cat-tag-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both}
 .skm-cat-selected-name{white-space:nowrap}
 .skm-cat-remove{flex:none;display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;padding:0;border:none;border-radius:50%;background:transparent;color:inherit;cursor:pointer;opacity:.6;transition:opacity 140ms ease,background 140ms ease,transform 140ms ease}
 .skm-cat-remove:hover{opacity:1;background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#3d6be5) 22%,transparent)}
@@ -726,7 +736,7 @@ const SHEET = `.skm-modal-body{overflow:hidden;display:flex;flex-direction:colum
 .skm-skill-card{position:relative;min-width:0;display:grid;grid-template-columns:minmax(0,1fr) auto;
   grid-template-rows:auto auto;align-content:center;align-items:baseline;gap:0 12px;box-sizing:border-box;
   border:0;border-radius:0;background:none;box-shadow:none;padding:3px 10px 3px 0;min-height:38px;
-  opacity:0;animation:skm-card-in 260ms cubic-bezier(.2,.7,.3,1.06) forwards;
+  opacity:0;animation:skm-card-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
   animation-delay:calc(var(--skm-i,0)*40ms);transition:background .16s ease}
 /* 设计稿 .sk::before：竖线在行外 -10px，hover / 聚焦时从中间展开 */
 .skm-skill-card::before{content:"";position:absolute;left:-10px;top:5px;bottom:5px;width:1.5px;
@@ -923,6 +933,9 @@ const SHEET = `.skm-modal-body{overflow:hidden;display:flex;flex-direction:colum
 .skm-src-interval{height:24px;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.18));border-radius:6px;
   background:var(--dsw-alias-bg-base,#16181d);color:var(--dsw-alias-label-secondary,#b9b9b9);font-family:inherit;font-size:11.5px;padding:0 4px;cursor:pointer}
 .skm-src-list{list-style:none;margin:0;padding:0;border-top:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.14))}
+/* 更新进度行：夹在 header 与列表之间，一行说完「第几条 / 跑了多久」，仓库名长了单行省略 */
+.skm-src-progress{margin:0;padding:4px 12px;border-top:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.14));
+  font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#8b8b8b);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .skm-src-row{display:flex;align-items:flex-start;gap:12px;padding:8px 12px}
 .skm-src-row + .skm-src-row{border-top:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.1))}
 .skm-src-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
@@ -956,7 +969,7 @@ const SHEET = `.skm-modal-body{overflow:hidden;display:flex;flex-direction:colum
 .skm-assign-modal{width:min(560px,calc(100vw - 48px))}
 .skm-assign-modal-body{overflow:hidden;display:flex;flex-direction:column;max-height:min(560px,calc(100vh - 180px))}
 .skm-assign-list{list-style:none;margin:0;padding:4px 2px 2px;display:flex;flex-direction:column;gap:8px;overflow-y:auto}
-.skm-assign-card{display:flex;align-items:center;gap:10px;width:100%;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.08));border-radius:12px;background:var(--dsw-alias-bg-base,#fff);padding:10px 12px;cursor:pointer;font-family:inherit;text-align:left;opacity:0;animation:skm-card-in 240ms cubic-bezier(.2,.7,.3,1.06) forwards;animation-delay:calc(var(--skm-i,0)*45ms);transition:border-color 140ms ease,box-shadow 140ms ease,transform 140ms ease}
+.skm-assign-card{display:flex;align-items:center;gap:10px;width:100%;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.08));border-radius:12px;background:var(--dsw-alias-bg-base,#fff);padding:10px 12px;cursor:pointer;font-family:inherit;text-align:left;opacity:0;animation:skm-card-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;animation-delay:calc(var(--skm-i,0)*45ms);transition:border-color 140ms ease,box-shadow 140ms ease,transform 140ms ease}
 .skm-assign-card:hover{border-color:var(--dsw-alias-state-business-primary,#4176e6);box-shadow:0 2px 8px rgba(16,24,40,.07);transform:translateY(-1px)}
 .skm-assign-card:active{transform:translateY(0) scale(.99)}
 .skm-assign-card-icon{flex:none;width:34px;height:34px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.08));border-radius:10px;background:var(--dsw-alias-bg-module-platform,#f5f6f7);color:var(--dsw-alias-label-secondary,#61666b);transition:color 140ms ease,border-color 140ms ease}
@@ -971,7 +984,7 @@ const SHEET = `.skm-modal-body{overflow:hidden;display:flex;flex-direction:colum
 .skm-skill-file:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.06))}
 .skm-skill-file[data-main='true']{color:var(--dsw-alias-label-primary,#eee);font-weight:500}
 /* 查看器默认就是大画幅（1280×880 上限，随视口收缩），可一键全屏；宽/高带缓动过渡。 */
-.skm-viewer-modal{width:min(1280px,calc(100vw - 64px));animation:skm-viewer-in 260ms cubic-bezier(.2,.7,.3,1.06);transition:width 320ms cubic-bezier(.22,.72,.24,1)}
+.skm-viewer-modal{width:min(1280px,calc(100vw - 64px));animation:skm-viewer-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1);transition:width 320ms cubic-bezier(.22,.72,.24,1)}
 .skm-viewer-modal-full{width:calc(100vw - 48px)}
 @keyframes skm-viewer-in{from{opacity:0;transform:translateY(12px) scale(.985)}to{opacity:1;transform:none}}
 .skm-viewer-body{overflow:hidden;display:flex;flex-direction:column;height:min(880px,calc(100vh - 96px));transition:height 320ms cubic-bezier(.22,.72,.24,1);--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2)}
@@ -1023,7 +1036,7 @@ const SHEET = `.skm-modal-body{overflow:hidden;display:flex;flex-direction:colum
 .skm-viewer-media{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;min-height:100%;padding:8px 0}
 .skm-viewer-media img{max-width:100%;max-height:calc(88vh - 210px);height:auto;border-radius:10px;box-shadow:0 6px 28px rgba(0,0,0,.16);background:
   repeating-conic-gradient(var(--dsw-alias-bg-module-platform,rgba(0,0,0,.04)) 0% 25%,transparent 0% 50%) 50%/18px 18px;
-  animation:skm-media-in 220ms cubic-bezier(.2,.7,.3,1)}
+  animation:skm-media-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1)}
 @keyframes skm-media-in{from{opacity:0;transform:scale(.985)}to{opacity:1;transform:none}}
 .skm-viewer-media video,.skm-viewer-media audio{max-width:100%;border-radius:10px;outline:none}
 .skm-viewer-media video{max-height:calc(88vh - 210px);background:#000}
@@ -1066,11 +1079,16 @@ const SHEET = `.skm-modal-body{overflow:hidden;display:flex;flex-direction:colum
 
 /* ── 面板级提示条：删除/归组/改名/安装的成败都要让用户看见 ── */
 .skm-toast-stack{position:absolute;right:18px;bottom:18px;z-index:6;display:flex;flex-direction:column;align-items:flex-end;gap:8px;pointer-events:none}
-.skm-toast{display:inline-flex;align-items:center;gap:8px;max-width:min(460px,72vw);box-sizing:border-box;padding:8px 14px;border-radius:10px;font-size:12.5px;line-height:18px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));background:var(--dsw-static-neutral-bluish-00,#fff);color:var(--dsw-alias-label-primary,#222);box-shadow:var(--dsw-shadow-lv2,0 6px 22px rgba(0,0,0,.16));animation:skm-toast-in 260ms cubic-bezier(.2,.9,.25,1) both}
+.skm-toast{display:inline-flex;align-items:center;gap:8px;max-width:min(460px,72vw);box-sizing:border-box;padding:8px 14px;border-radius:10px;font-size:12.5px;line-height:18px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));background:var(--dsw-static-neutral-bluish-00,#fff);color:var(--dsw-alias-label-primary,#222);box-shadow:var(--dsw-shadow-lv2,0 6px 22px rgba(0,0,0,.16));animation:skm-toast-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards}
 .skm-toast-ok{border-color:rgba(35,160,90,.38);color:#1c7a45}
 .skm-toast-err{border-color:rgba(226,80,64,.42);color:#b3271c}
 .skm-toast-dot{flex:none;width:6px;height:6px;border-radius:50%;background:currentColor;animation:skm-toast-ping 1.7s ease-out infinite}
 @keyframes skm-toast-in{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:none}}
+/* 退场与入场对称：淡出 + 下沉 10px + 缩到 .97，160ms。
+   曲线取加速语义（cubic-bezier(.4,0,.2,1)）——提示条正在离开视线，
+   不需要入场那种减速收尾。forwards 保住末帧，等定时器到点才真正移除。 */
+@keyframes skm-toast-out{from{opacity:1;transform:none}to{opacity:0;transform:translateY(10px) scale(.97)}}
+.skm-toast.skm-toast-out{animation:skm-toast-out 160ms cubic-bezier(.4,0,.2,1) forwards}
 @keyframes skm-toast-ping{0%{box-shadow:0 0 0 0 currentColor;opacity:.9}70%{box-shadow:0 0 0 7px rgba(0,0,0,0);opacity:.35}100%{box-shadow:0 0 0 0 rgba(0,0,0,0);opacity:1}}
 body[data-ds-dark-theme] .skm-toast{background:var(--dsw-static-neutral-bluish-850,#2c2c2e)}
 body[data-ds-dark-theme] .skm-toast-ok{color:#6ee7a8}
@@ -1117,6 +1135,7 @@ body[data-ds-dark-theme] .skm-bundle-missing{color:#f0c48a}
   .skm-tag{transition:none}
   .skm-skill-foot-icon,.skm-assign-card{transition:none}
   .skm-toast{animation:none}
+  .skm-toast.skm-toast-out{animation:none}
   .skm-toast-dot{animation:none}
   .skm-bundle-empty,.skm-bundle-missing{animation:none}
   .skm-bundle-empty-btn,.skm-bundle-missing-btn{transition:none}
@@ -1657,6 +1676,9 @@ const SKILL_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
  */
 const COLLAPSED_ROWS = 8
 
+/** 提示条退场时长（ms），与样式表 .skm-toast-out 的 160ms 成对维护。 */
+const TOAST_OUT_MS = 160
+
 /** 从 SKILL.md 文本里取 frontmatter 的 name（安装弹窗预览真实技能名用）。 */
 function frontmatterName(text: string): string | null {
   const lines = text.split(/\r?\n/).slice(0, 80)
@@ -1760,23 +1782,41 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
   const [sourcesBusy, setSourcesBusy] = useState(false)
   /** 正在单条更新的来源 id（行内按钮据此显示「更新中…」并禁用）。 */
   const [updatingId, setUpdatingId] = useState<string | null>(null)
+  /** 单条更新已用秒数：整仓 clone 要一两分钟，按钮上只写「更新中…」看不出是活着还是卡死。 */
+  const [updateElapsed, setUpdateElapsed] = useState(0)
+  /** 「全部更新」的逐条进度：null = 没在跑（按钮回到「全部更新」文案）。 */
+  const [updateProgress, setUpdateProgress] = useState<{ current: number; total: number; name: string } | null>(null)
   const [savingSettings, setSavingSettings] = useState(false)
   /** 移除来源的二次确认目标（走现有 ConfirmDialog）。 */
   const [sourceConfirm, setSourceConfirm] = useState<GitSource | null>(null)
+  /** 单条更新计时：换来源重新计时，结束归零（秒数只对「当前这一条」有意义）。 */
+  useEffect(() => {
+    setUpdateElapsed(0)
+    if (updatingId === null) return undefined
+    const timer = window.setInterval(() => { setUpdateElapsed((value) => value + 1) }, 1000)
+    return () => { window.clearInterval(timer) }
+  }, [updatingId])
   /**
    * 面板级提示条。旧实现把所有失败都塞进 installError，而它只在「添加技能」弹窗里
    * 渲染 —— 于是删除技能、归组、改名、开关失败时面板上什么都不显示，用户只看到
    * 「点了没反应」。成败反馈统一走这里。
    */
-  const [toasts, setToasts] = useState<Array<{ id: number; tone: 'ok' | 'err'; text: string }>>([])
+  const [toasts, setToasts] = useState<Array<{ id: number; tone: 'ok' | 'err'; text: string; leaving?: boolean }>>([])
   const toastTimers = useRef<number[]>([])
   const pushToast = (tone: 'ok' | 'err', text: string): void => {
     const id = Date.now() + Math.random()
     setToasts((current) => [...current.slice(-2), { id, tone, text }])
-    const timer = window.setTimeout(() => {
-      setToasts((current) => current.filter((item) => item.id !== id))
+    // 到点不再直接 filter 掉：先标 leaving 播 160ms 的 skm-toast-out，
+    // 播完才从数组里移除。直接摘是「啪」地消失，和 260ms 的入场完全不对等。
+    // 两个定时器都要登记，卸载时统一清（见下面那个 cleanup effect）。
+    const leaveTimer = window.setTimeout(() => {
+      setToasts((current) => current.map((item) => (item.id === id ? { ...item, leaving: true } : item)))
+      const removeTimer = window.setTimeout(() => {
+        setToasts((current) => current.filter((item) => item.id !== id))
+      }, TOAST_OUT_MS)
+      toastTimers.current.push(removeTimer)
     }, tone === 'err' ? 6400 : 2800)
-    toastTimers.current.push(timer)
+    toastTimers.current.push(leaveTimer)
   }
   /** 统一失败提示：label 说清是哪一步，message 用 host 原文。 */
   const failToast = (label: string, error: unknown): void => {
@@ -2204,33 +2244,75 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
     }
   }
 
-  /** 全部更新：host 逐条跑，失败的单条不打断整批，回执按「成功 / 失败」两段报。 */
+  /**
+   * 全部更新：前端逐条调 /sources/:id/update，而不是打 update-all。
+   *
+   * 单条要 clone 整个仓库（十几秒到两分钟），批量接口只在结束时回一个总账，
+   * 中途前端只能显示「更新中…」——用户不知道跑到第几条，看起来像卡死。
+   * 逐条调能把「2/3 正在更新 xxx」显示出来，且单条失败不影响后面的来源。
+   */
   const updateAllSources = async (): Promise<void> => {
     if (sourcesBusy || updatingId !== null) return
     setSourcesBusy(true)
     try {
-      const result = await skillApi.updateAllSources()
-      if (result.failed.length > 0) {
-        pushToast('err', t('srcUpdateAllPartial', { ok: result.updated.length, failed: result.failed.length }))
-      } else if (result.updated.length > 0) {
-        pushToast('ok', t('srcUpdateAllOk', { n: result.updated.length }))
-      } else {
-        pushToast('ok', t('srcUpdateAllEmpty'))
+      // 先检查一次：只更新远端确实有新 commit 的来源（host 对已最新的来源虽然秒回，但白跑一趟没意义）。
+      const checked = await skillApi.checkSources()
+      const stale = new Set(checked.updates
+        .filter((item) => item.hasUpdate && !(typeof item.error === 'string' && item.error !== ''))
+        .map((item) => item.id))
+      // 检查失败要单独数出来：全都查不成时不能说「已是最新」，那等于把网络故障说成好消息。
+      const broken = checked.updates.filter((item) => typeof item.error === 'string' && item.error !== '')
+      // 顺序按来源列表：用户看到的顺序就是更新顺序，进度不会跳来跳去。
+      const targets = sourceList.filter((source) => source.auto && stale.has(source.id))
+      if (targets.length === 0) {
+        if (stale.size === 0 && broken.length > 0) {
+          pushToast('err', t('srcCheckFailed', { n: broken.length }))
+        } else {
+          // 有更新但都被「自动更新」开关过滤掉时，说「没有需要更新的来源」比「全部已是最新」准确。
+          pushToast('ok', t(stale.size === 0 ? 'srcCheckAllFresh' : 'srcUpdateAllNoTarget'))
+        }
+        void skillApi.listSources().then((snapshot) => { setSources(snapshot) }, () => { /* 保持当前显示 */ })
+        return
       }
+      let ok = 0
+      let failed = 0
+      for (let index = 0; index < targets.length; index += 1) {
+        const source = targets[index]
+        setUpdateProgress({ current: index + 1, total: targets.length, name: repoName(source.url) })
+        try {
+          await skillApi.updateSource(source.id)
+          ok += 1
+        } catch {
+          // 单条失败不打断整批：后面的来源还可能成功，最后统一报「成功几个 / 失败几个」。
+          failed += 1
+        }
+      }
+      if (failed > 0) pushToast('err', t('srcUpdateAllPartial', { ok, failed }))
+      else pushToast('ok', t('srcUpdateAllOk', { n: ok }))
       refresh()
     } catch (error) {
       failToast('全部更新', error)
     } finally {
       setSourcesBusy(false)
+      setUpdateProgress(null)
     }
   }
 
-  /** 单条更新：成功后 refresh()，让技能卡片上的描述 / 文件数跟着变。 */
+  /**
+   * 单条更新：远端没有新 commit 时 host 秒回 upToDate（不 clone、不重装），
+   * 这时只说「已是最新」，别报成「更新了 N 个技能」，也别重载技能列表（会白闪一下）。
+   */
   const updateOneSource = async (source: GitSource): Promise<void> => {
     if (updatingId !== null || sourcesBusy) return
     setUpdatingId(source.id)
     try {
       const result = await skillApi.updateSource(source.id)
+      if (result.upToDate === true) {
+        pushToast('ok', t('srcUpToDate', { commit: result.commit.slice(0, 7) }))
+        // 只刷新来源列表（commit / 上次检查时间），技能列表一个字节都没变。
+        void skillApi.listSources().then((snapshot) => { setSources(snapshot) }, () => { /* 保持当前显示 */ })
+        return
+      }
       pushToast('ok', t('srcUpdatedOne', {
         name: repoName(source.url),
         n: result.installed.length,
@@ -2413,6 +2495,8 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
   const loose = state.status === 'ready' ? state.snapshot.loose : []
   /** Git 来源列表：null（还没拉到 / 接口不存在）与空数组都不渲染区块。 */
   const sourceList = sources?.sources ?? []
+  /** 正在单条更新的来源：进度行要带仓库短名（列表刚刷新、找不到时就不显示名字）。 */
+  const updatingSource = updatingId === null ? undefined : sourceList.find((item) => item.id === updatingId)
   /**
    * 技能名 → 来源仓库地址。技能卡片据此打「Git」徽标：
    * 查不到的技能就是本地拖放 / 自建技能，不显示徽标，也不会被自动更新覆盖。
@@ -2518,7 +2602,11 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
 
   const shellOrWrap = (children: JSX.Element): JSX.Element => (
     embedded
-      ? <div style={{ flex: '1 1 auto', minHeight: 0, width: '100%', height: '100%', display: 'flex', flexDirection: 'column', position: 'relative' }}>{children}</div>
+      /* 工作台里的「SKILL」整页：这层 flex 容器就是页面级容器 —— 切到本页时
+         WorkbenchPanel 用 key="skills" 让它整体重挂，重播 {...PAGE_MOTION_IN}。
+         非 embedded 分支是 PopoverShell 浮层卡片（入场已由浮层动效统一给），
+         这里不叠加，否则卡片与内容会各浮一次。 */
+      ? <div {...PAGE_MOTION_IN} style={{ flex: '1 1 auto', minHeight: 0, width: '100%', height: '100%', display: 'flex', flexDirection: 'column', position: 'relative' }}>{children}</div>
       : (
         <PopoverShell
           onClose={() => {
@@ -2836,10 +2924,21 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
                     </select>
                   </label>
                   <button type="button" className={css.srcBtn} disabled={sourcesBusy || updatingId !== null}
+                    title={updateProgress === null ? undefined : t('srcUpdateAllProgress', { i: updateProgress.current, n: updateProgress.total, name: updateProgress.name })}
                     onClick={() => { void updateAllSources() }}>
-                    {sourcesBusy ? t('srcUpdating') : t('srcUpdateAll')}
+                    {updateProgress !== null
+                      ? `${updateProgress.current}/${updateProgress.total}`
+                      : sourcesBusy ? t('srcUpdateAllChecking') : t('srcUpdateAll')}
                   </button>
                 </header>
+                {/* 进度行：逐条跑「全部更新」时显示第几条，单条更新时显示已用秒数（整仓 clone 要一两分钟） */}
+                {sourcesOpen && (updateProgress !== null || updatingId !== null) && (
+                  <p className={css.srcProgress}>
+                    {updateProgress !== null
+                      ? t('srcUpdateAllProgress', { i: updateProgress.current, n: updateProgress.total, name: updateProgress.name })
+                      : `${t('srcUpdatingSeconds', { n: updateElapsed })}${updatingSource === undefined ? '' : ` · ${repoName(updatingSource.url)}`}`}
+                  </p>
+                )}
                 {sourcesOpen && (
                   <ul className={css.srcList}>
                     {sourceList.map((source) => {
@@ -2871,7 +2970,9 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
                             <button type="button" className={css.srcBtn}
                               disabled={sourcesBusy || updatingId !== null}
                               onClick={() => { void updateOneSource(source) }}>
-                              {updatingThis ? t('srcUpdating') : t('srcUpdate')}
+                              {updatingThis
+                                ? (updateElapsed > 0 ? t('srcUpdatingSeconds', { n: updateElapsed }) : t('srcUpdating'))
+                                : t('srcUpdate')}
                             </button>
                             <label className={css.srcSwitch} title={t('srcAuto')}>
                               <input type="checkbox" checked={source.auto}
@@ -3170,7 +3271,12 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
       {toasts.length > 0 && (
         <div className={css.toastStack} role="status" aria-live="polite">
           {toasts.map((item) => (
-            <span key={item.id} className={`${css.toast} ${item.tone === 'err' ? css.toastErr : css.toastOk}`} data-tone={item.tone}>
+            <span
+              key={item.id}
+              className={`${css.toast} ${item.tone === 'err' ? css.toastErr : css.toastOk}${item.leaving === true ? ` ${css.toastOut}` : ''}`}
+              data-tone={item.tone}
+              data-leaving={item.leaving === true ? 'true' : undefined}
+            >
               <i className={css.toastDot} aria-hidden="true" />
               {item.text}
             </span>

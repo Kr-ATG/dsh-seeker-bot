@@ -1304,6 +1304,27 @@ export class MemoryStore {
     return typeof state.todoClosureEnabled === 'boolean' ? state.todoClosureEnabled : fallback
   }
 
+  // ── 动效技能强制加载开关（全局单值） ──────────────────────────────
+
+  /**
+   * 动效技能强制加载是否开启（三态：state 显式值 ?? 调用方给的 fallback）。
+   *
+   * 与上面四条注入通道同构，但**默认关**：它不声明任何能力，只是把「涉及动效时
+   * 先加载 harmonyos-motion」从概率行为变成确定性行为，属于用户主动打开的偏好。
+   * 全局单值同理：模型该不该先加载技能是跨会话恒定的习惯，不该逐会话割裂。
+   */
+  async isMotionInjectEnabled(fallback: boolean): Promise<boolean> {
+    const state = await this.readState()
+    return typeof state.motionInjectEnabled === 'boolean' ? state.motionInjectEnabled : fallback
+  }
+
+  /** 写动效技能强制加载开关（全局单值；直接落盘，调用频率极低）。 */
+  async setMotionInjectEnabled(enabled: boolean): Promise<void> {
+    const state = await this.readState()
+    state.motionInjectEnabled = enabled
+    await this.writeState(state)
+  }
+
   /** 写回合结束自动收口开关（全局单值；直接落盘，调用频率极低）。 */
   async setTodoClosureEnabled(enabled: boolean): Promise<void> {
     const state = await this.readState()

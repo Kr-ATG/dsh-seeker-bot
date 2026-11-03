@@ -57,16 +57,16 @@ body[data-ds-dark-theme] .wb-root {
   overflow: hidden;
   position: relative;
 }
-/* ── 工作台页面切换动效（分类内容滑入）──
-   .wb-body 的每个直接子级在 key 变化时重播 wb-page-in：淡入 + 轻微右移；
-   150ms 足够快，不拖手感。 */
-.wb-body > * {
-  animation: wb-page-in 190ms cubic-bezier(.2,.8,.2,1);
-}
-@keyframes wb-page-in {
-  from { opacity: 0; transform: translateX(8px); }
-  to { opacity: 1; transform: none; }
-}
+/* ── 工作台页面切换动效已收敛到全局页面转场 ─────────────────────────
+   分类切换的入场不再由本表提供：各分类页的根容器自己挂
+   {...PAGE_MOTION_IN}（motion/overlay-motion.ts 的 dsh-page-in：240ms
+   减速 + 上浮 10px），切分类时随 WorkbenchPanel 里的 key 重挂而重播。
+
+   为什么删掉原先那条 .wb-body > * { animation: wb-page-in … }：
+   它与全局的 [data-page-motion='in'] **同特异性**，而本表在面板首次渲染时
+   注入、晚于 apply 期注入的全局表 —— 留着它就会把新挂的属性规则压掉，
+   表现为「属性挂了但动画不播」。同一件事只留一个来源。 */
+
 
 /* ── 统一工作台所有页面的工具条与次级导航（Toolbar & Subheader Archetype） ──────
    让画廊工具条、记忆视图行在视觉上高度一致，成为统一的「页面二级控制条」，
@@ -201,7 +201,6 @@ body[data-ds-dark-theme] .wb-root {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .wb-body > * { animation: none !important; }
   .wb-bar-btn, .wb-icon-btn { transition: none !important; }
   .wb-bar-btn[data-spin] svg { animation: none !important; }
 }

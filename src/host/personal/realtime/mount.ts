@@ -38,10 +38,11 @@ import {
   REALTIME_KEY_PATH,
   REALTIME_MODELS,
   REALTIME_PATH,
+  REALTIME_TTS_PATH,
   type RealtimeArtifact,
   type RealtimeConfig,
 } from '../../../shared/realtime-protocol.ts'
-import { createRealtimeConfigHandler, createRealtimeKeyHandler, createRealtimeDiagnoseHandler, createRealtimeUpgradeHandler, primeRealtimeKeyState, type RealtimeOptions } from './index.ts'
+import { createRealtimeConfigHandler, createRealtimeKeyHandler, createRealtimeDiagnoseHandler, createRealtimeTtsHandler, createRealtimeUpgradeHandler, primeRealtimeKeyState, type RealtimeOptions } from './index.ts'
 
 /** 插件 config 里本模块的配置形状（全部可选）。 */
 export interface PersonalRealtimeConfig {
@@ -323,6 +324,18 @@ export function applyPersonalAgentRealtime(ctx: any, config: PersonalRealtimeCon
       path: REALTIME_KEY_PATH,
       handler: createRealtimeKeyHandler(options),
     }), 'dsh-seeker-bot: realtime voice key route')
+
+    /*
+     * 朗读路由：对话流里每条回复气泡的「朗读」按钮走它。
+     *
+     * 它读的是**同一份**实时语音配置（Live 供应商列表 + 音色 + 语速），所以在通话里
+     * 挑好的声音，聊天里朗读出来也是同一个——用户不用再配第二套 TTS 模型。
+     */
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact',
+      path: REALTIME_TTS_PATH,
+      handler: createRealtimeTtsHandler(options),
+    }), 'dsh-seeker-bot: reply speech (TTS) route')
 
     /*
      * 挂载时先探一次凭据，让诊断路由第一次被打开就有结论（否则它是 null，

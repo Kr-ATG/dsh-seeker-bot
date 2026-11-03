@@ -493,7 +493,9 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
 
   return createPortal(
     <>
-      <div className={cls.mask} aria-hidden="true" onClick={onClose} />
+      {/* 遮罩跟着面板一起开合：data-anim 与卡片共用同一个 closing 状态，
+          否则卡片在 240ms 里淡出、遮罩却瞬间消失，退场会「先掉一层底」。 */}
+      <div className={cls.mask} data-anim={anim} aria-hidden="true" onClick={onClose} />
       <div className={cls.panel} data-anim={anim} data-editing={editing || undefined} role="dialog" aria-modal="true" aria-label="对话截图">
         <div className={cls.head}>
           <span className={cls.title}>对话截图</span>

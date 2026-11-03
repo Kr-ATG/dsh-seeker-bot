@@ -56,6 +56,7 @@ import {
 } from './api.js'
 import { collectCategories } from '../../../triad/vault/types.js'
 import { css, ensureVaultStyles } from './styles.js'
+import { PAGE_MOTION_IN } from '../../motion/overlay-motion.js'
 import {
   AlertIcon,
   ChevronRightIcon,
@@ -76,6 +77,7 @@ import { VaultReminderWindow, reminderCount, reminderTone } from './ReminderWind
 import { VaultBackupPanel } from './BackupPanel.js'
 import { VaultBrokerPanel } from './BrokerPanel.js'
 import { VaultModal } from './Shell.js'
+import { useModalClose } from '../triad-modal-animation.js'
 import { PopoverShell, PshBody } from '../popover-shell.js'
 
 /** 面板 props（与记忆 / 技能面板同形，便于接进统一工作台）。 */
@@ -197,6 +199,36 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
   const [backupOpen, setBackupOpen] = useState<boolean>(false)
   const [brokerOpen, setBrokerOpen] = useState<boolean>(false)
 
+  /**
+   * 退场状态机（5 份，互不干扰）：4 个弹窗 + 1 个原地展开的详情。
+   *
+   * 为什么不用「组件里自己计时」：这些浮层都由 open 状态条件渲染，一旦
+   * setXxx(false)，整棵子树当场卸载，动画根本没有机会播。共享的 useModalClose
+   * 把顺序倒过来——requestClose 先置 closing 播退场，240ms 后才真正调 onClose
+   * 把 open 置 false。退场期间 open 仍为 true，所以上面的条件渲染一行都不用改。
+   *
+   * 原地展开那条（openId）额外需要 cancelClose：openId 从 A 换成 B 时 open
+   * 一直是 true，useModalClose 不会自己复位，不撤销的话 240ms 后的定时器会把
+   * 刚展开的 B 一起关掉。
+   */
+  const {
+    closing: reminderClosing, requestClose: requestReminderClose,
+  } = useModalClose(reminderOpen, useCallback(() => { setReminderOpen(false) }, []))
+  const {
+    closing: backupClosing, requestClose: requestBackupClose,
+  } = useModalClose(backupOpen, useCallback(() => { setBackupOpen(false) }, []))
+  const {
+    closing: brokerClosing, requestClose: requestBrokerClose,
+  } = useModalClose(brokerOpen, useCallback(() => { setBrokerOpen(false) }, []))
+  const {
+    closing: creatingClosing, requestClose: requestCreatingClose,
+  } = useModalClose(creatingScene !== null, useCallback(() => { setCreatingScene(null) }, []))
+  const {
+    closing: detailClosing,
+    requestClose: requestDetailClose,
+    cancelClose: cancelDetailClose,
+  } = useModalClose(openId !== null, useCallback(() => { setOpenId(null) }, []))
+
   /** 拉全量（首屏与「刷新 / 重试」共用一条路径）。 */
   const refresh = useCallback(async (): Promise<void> => {
     setError('')
@@ -271,32 +303,35 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
       }
       if (brokerOpen) {
         consume()
-        setBrokerOpen(false)
+        requestBrokerClose()
         return
       }
       if (backupOpen) {
         consume()
-        setBackupOpen(false)
+        requestBackupClose()
         return
       }
       if (reminderOpen) {
         consume()
-        setReminderOpen(false)
+        requestReminderClose()
         return
       }
       if (creatingScene !== null) {
         consume()
-        setCreatingScene(null)
+        requestCreatingClose()
         return
       }
       if (openId !== null) {
         consume()
-        setOpenId(null)
+        requestDetailClose()
       }
     }
     window.addEventListener('keydown', onKey, true)
     return () => { window.removeEventListener('keydown', onKey, true) }
-  }, [openId, creatingScene, reminderOpen, backupOpen, brokerOpen])
+  }, [
+    openId, creatingScene, reminderOpen, backupOpen, brokerOpen,
+    requestDetailClose, requestCreatingClose, requestReminderClose, requestBackupClose, requestBrokerClose,
+  ])
 
   // flash 自动消失（定时器随文本变化重置）。
   useEffect(() => {
@@ -319,14 +354,22 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
   /** 保存 / 创建成功：从「新建中」切到「编辑这一条」，并给一句提示。 */
   const onSaved = useCallback((next: VaultRecord): void => {
     onRecord(next)
-    setCreatingScene(null)
+    // 只有「新建弹窗开着」时才走退场：保存成功时它立刻消失会让人以为
+    // 「点空了」，240ms 的收起正好把视线交还给背后那条刚展开的记录。
+    // 在原地展开里改一条已有记录时 creatingScene 本来就是 null，这里不能
+    // 顺手调 requestCreatingClose——那会排一个 240ms 后的 setCreatingScene(null)，
+    // 把这段时间里新开的弹窗误关。
+    if (creatingScene !== null) requestCreatingClose()
+    cancelDetailClose()
     setOpenId(next.id)
     setActionError('')
     setFlash('已保存')
-  }, [onRecord])
+  }, [onRecord, creatingScene, requestCreatingClose, cancelDetailClose])
 
   const onDeleted = useCallback((id: string): void => {
     setRecords((previous) => previous.filter((item) => item.id !== id))
+    // 这里刻意不走 requestDetailClose：记录已经从列表里消失，openRecord 当场
+    // 变 null，展开卡片没有内容可退场，等 240ms 只会让「已删除」晚半拍。
     setOpenId(null)
     setFlash('已删除')
   }, [])
@@ -339,6 +382,8 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
    * 留在屏幕上会让人以为还有一步没做）。
    */
   const onRestored = useCallback((result: VaultRestoreResult): void => {
+    // 整库替换是一次数据切换，不是「用户关窗」：立即收口，避免退场那 240ms
+    // 里弹窗还挂着上一座库的统计。
     setBackupOpen(false)
     setOpenId(null)
     setCreatingScene(null)
@@ -350,10 +395,13 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
 
   /** 提醒窗口里点某一条 → 跳到那条记录（关掉窗口，原地展开详情）。 */
   const onOpenReminder = useCallback((recordId: string): void => {
-    setReminderOpen(false)
+    // 提醒窗口播退场，同时背后把那条记录原地展开：视线从窗口落到列表上，
+    // 不会先看到一段空白。
+    requestReminderClose()
     setCreatingScene(null)
+    cancelDetailClose()
     setOpenId(recordId)
-  }, [])
+  }, [requestReminderClose, cancelDetailClose])
 
   /** 清理：清孤儿 blob + 按配额淘汰（一个按钮做完两件事）。 */
   const onMaintain = useCallback(async (): Promise<void> => {
@@ -490,7 +538,11 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
 
   const shell = (children: JSX.Element): JSX.Element => (
     embedded
-      ? <div className={css.root}>{children}</div>
+      /* 工作台里的「档案」整页：这一层就是页面级容器 —— 切到本页时
+         WorkbenchPanel 用 key="vault" 让它整体重挂，重播 {...PAGE_MOTION_IN}
+         的减速入场。非 embedded 分支是 compact 浮层卡片（PopoverShell），
+         那是浮层、走浮层动效，不在这里挂页面转场。 */
+      ? <div className={css.root} {...PAGE_MOTION_IN}>{children}</div>
       : (
         <PopoverShell onClose={onClose} ariaLabel="档案">
           <PshBody>
@@ -759,6 +811,8 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
                   data-primary="1"
                   title="在这个分组里加一条记录"
                   aria-label={'在' + scene.label + '里加一条记录'}
+                  // 打开新建弹窗时收起原地展开的详情：这是两个浮层互换，不是关闭。
+                  // 详情在这里直接收口，把整段退场留给弹窗自己的入场。
                   onClick={() => { setCreatingScene(scene); setOpenId(null) }}
                 >
                   <PlusIcon size={14} /> 新建
@@ -850,7 +904,19 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
                             aria-expanded={isOpen}
                             // 点已展开的那一行＝收起来。再点一次还得给个出口，
                             // 否则用户只能去找那个小小的关闭按钮。
-                            onClick={() => { setCreatingScene(null); setOpenId(isOpen ? null : record.id) }}
+                            onClick={() => {
+                              setCreatingScene(null)
+                              if (isOpen) {
+                                // 收起也播退场：这一块是撑开页面高度的，直接抽走会让
+                                // 下面的记录「跳」上来。
+                                requestDetailClose()
+                              } else {
+                                // 从「正在退场的 A」切到 B：撤销退场，否则 240ms 后的
+                                // 定时器会把刚展开的 B 一起关掉。
+                                cancelDetailClose()
+                                setOpenId(record.id)
+                              }
+                            }}
                           >
                             <span className={css.rowIcon}><Icon size={15} /></span>
                             <span className={css.rowMain}>
@@ -888,7 +954,13 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
                             会挂在新记录上（光看界面发现不了的串台）。
                           */}
                           {isOpen && (
-                            <div className={css.expand} key={'expand:' + record.id}>
+                            <div
+                              className={css.expand}
+                              key={'expand:' + record.id}
+                              // 退场标记只在「正在关的就是这一条」时挂上：切换记录时
+                              // openId 已经换成新那条，旧卡片不该再播一次收起。
+                              data-closing={detailClosing && openId === record.id ? 'true' : undefined}
+                            >
                               <VaultDetailDrawer
                                 record={record}
                                 siblings={records.filter((item) => item.scene === record.scene && item.id !== record.id)}
@@ -899,7 +971,7 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
                                 onRecord={onRecord}
                                 onSaved={onSaved}
                                 onDeleted={onDeleted}
-                                onClose={() => { setOpenId(null) }}
+                                onClose={requestDetailClose}
                               />
                             </div>
                           )}
@@ -973,16 +1045,16 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
 
            它们互斥（同一时刻只开一个），所以各自一段条件渲染、不共用状态。 */}
       {reminderOpen && (
-        <VaultModal label="到期提醒" onClose={() => { setReminderOpen(false) }}>
+        <VaultModal label="到期提醒" closing={reminderClosing} onClose={requestReminderClose}>
           <VaultReminderWindow
             onOpenRecord={onOpenReminder}
-            onClose={() => { setReminderOpen(false) }}
+            onClose={requestReminderClose}
           />
         </VaultModal>
       )}
 
       {brokerOpen && (
-        <VaultModal label="凭据代用" onClose={() => { setBrokerOpen(false) }}>
+        <VaultModal label="凭据代用" closing={brokerClosing} onClose={requestBrokerClose}>
           <div className={css.panelHead}>
             <span style={{ display: 'inline-flex', color: 'var(--v-text-2)' }}><ShieldIcon size={16} /></span>
             <div style={{ flex: 1, minWidth: 0, fontSize: 15, fontWeight: 600, lineHeight: '22px' }}>
@@ -993,7 +1065,7 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
               className={css.panelClose}
               aria-label="关闭凭据代用"
               title="关闭（Esc）"
-              onClick={() => { setBrokerOpen(false) }}
+              onClick={requestBrokerClose}
             >
               <CloseIcon size={15} />
             </button>
@@ -1011,7 +1083,7 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
       )}
 
       {backupOpen && (
-        <VaultModal label="备份与恢复" onClose={() => { setBackupOpen(false) }}>
+        <VaultModal label="备份与恢复" closing={backupClosing} onClose={requestBackupClose}>
           <div className={css.panelHead}>
             <span style={{ display: 'inline-flex', color: 'var(--v-text-2)' }}><KeyIcon size={16} /></span>
             <div style={{ flex: 1, minWidth: 0, fontSize: 15, fontWeight: 600, lineHeight: '22px' }}>
@@ -1022,7 +1094,7 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
               className={css.panelClose}
               aria-label="关闭备份与恢复"
               title="关闭（Esc）"
-              onClick={() => { setBackupOpen(false) }}
+              onClick={requestBackupClose}
             >
               <CloseIcon size={15} />
             </button>
@@ -1038,7 +1110,7 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
       )}
 
       {creatingScene !== null && (
-        <VaultModal label="新建档案记录" onClose={() => { setCreatingScene(null) }}>
+        <VaultModal label="新建档案记录" closing={creatingClosing} onClose={requestCreatingClose}>
           <VaultDetailDrawer
             /*
              * key 让「换一个场景新建」变成**重新挂载**而不是改 props。
@@ -1057,7 +1129,7 @@ export function VaultPanel({ onClose, embedded = false }: VaultPanelProps): JSX.
             onRecord={onRecord}
             onSaved={onSaved}
             onDeleted={onDeleted}
-            onClose={() => { setCreatingScene(null) }}
+            onClose={requestCreatingClose}
           />
         </VaultModal>
       )}

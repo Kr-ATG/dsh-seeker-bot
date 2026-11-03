@@ -37,10 +37,12 @@ import * as zlib from 'node:zlib'
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import {
   decodeDataUrl,
-  extensionFor,
+  extensionFromBytes,
   fetchImageBytes,
+  localPathOfImageRef,
   looksLikeImage,
   parseGeneratedResult,
+  readLocalImageBytes,
   reusable,
 } from '../../spill/materialize.ts'
 import { admitSpillPath, spillRoots } from '../../spill/index.ts'
@@ -1415,6 +1417,12 @@ function pinModel(agent: any, resolved: { provider: string; model: string; effor
   }
 }
 
+/** 模型选择的比较键：provider/model + 推理档位；用于判断缓存里的 agent 是否需要重新钉。 */
+function modelKeyOf(resolved: { provider: string; model: string; effort?: string } | null): string {
+  if (resolved === null) return ''
+  return `${resolved.provider}/${resolved.model}#${resolved.effort ?? ''}`
+}
+
 /**
  * 把权限档位钉到会话上。
  *
@@ -1461,7 +1469,7 @@ function applyPermission(ctx: any, agent: any, permission: BotPermission | undef
  * 存 handle 是为了「清空对话」能真正 dispose 掉 agent：只清缓存不清 agent，
  * 宿主内存里那个会话还带着旧历史，下一次 `agents.get()` 又会把它拿回来。
  */
-const agentCache = new Map<string, { agent: any; handle?: any }>()
+const agentCache = new Map<string, { agent: any; handle?: any; modelKey?: string }>()
 
 /**
  * 在 setup 阶段把 agent preset 挂到 bot 的 agent 上。
@@ -1582,6 +1590,16 @@ export async function ensureBotAgent(ctx: any, spec: BotAgentSpec): Promise<any>
      * 里，实际一小时最多跑一次。
      */
     scheduleToolResultsPrune()
+    /*
+     * 模型 / 推理强度可能刚在设置卡里改过：缓存命中也要重新钉一次。
+     * 只在真的变化时 `select`，避免每轮往会话里追加一条 model/selection。
+     */
+    const resolved = resolveModel(ctx, spec)
+    const modelKey = modelKeyOf(resolved)
+    if (cached.modelKey !== modelKey) {
+      pinModel(cached.agent, resolved)
+      cached.modelKey = modelKey
+    }
     return cached.agent
   }
 
@@ -1777,7 +1795,7 @@ export async function ensureBotAgent(ctx: any, spec: BotAgentSpec): Promise<any>
   await ensureAgentPreset(ctx, agent)
   await ensureSharedWorkspace(ctx, agent)
   applyPermission(ctx, agent, spec.permission)
-  agentCache.set(sessionId, { agent, handle })
+  agentCache.set(sessionId, { agent, handle, modelKey: modelKeyOf(resolved) })
   /*
    * 会话建好之后再清 tool-results：不与建会话抢 IO，也不阻塞本轮。
    * best-effort —— 删失败只记日志（pruneToolResults 内部已 catch）。
@@ -2213,9 +2231,18 @@ function readGeneratedResultText(ctx: any, text: string): string {
   }
 }
 
-/** 一张图片 URL → 原始字节（data: 解码 / http(s) 下载，其它跳过）。 */
+/**
+ * 一张图片 URL → 原始字节（data: 解码 / 本地文件读盘 / http(s) 下载，其它跳过）。
+ *
+ * 本地文件分支是 2026-11-03 新增：`generate_image` 现在自己把图落盘、结果里给
+ * `images[].path`（parseGeneratedResult 转成同源文件路由 URL）。不认这条分支的话，
+ * 新格式结果会「解析得出、落不进工作区」，生图卡就是 ok 但没有图。
+ * 大小上限与 magic 校验在 readLocalImageBytes / writeGeneratedImage 里做。
+ */
 async function generatedImageBytes(url: string): Promise<Buffer | null> {
   if (url.startsWith('data:')) return decodeDataUrl(url)
+  const local = localPathOfImageRef(url)
+  if (local !== null) return readLocalImageBytes(local)
   if (/^https?:\/\//i.test(url)) return fetchImageBytes(url)
   return null
 }
@@ -2231,7 +2258,9 @@ async function writeGeneratedImage(url: string, outDir: string): Promise<string 
   if (bytes === null || bytes.byteLength === 0 || bytes.byteLength > MAX_GENERATED_IMAGE_BYTES) return null
   // 被截断 / 污染的 base64 也能解码出字节，落成 png 后就是裂图 —— 先验 magic number。
   if (!looksLikeImage(bytes)) return null
-  const name = `${createHash('sha1').update(url).digest('hex').slice(0, 16)}.${extensionFor(url)}`
+  // 扩展名按**字节**定，不按 url 猜：新格式给的是本地 .jpg 路径、网关也可能给
+  // 无后缀的 http 地址，猜出来的 .png 会让 /file 路由声明错 content-type。
+  const name = `${createHash('sha1').update(url).digest('hex').slice(0, 16)}.${extensionFromBytes(bytes)}`
   try {
     mkdirSync(outDir, { recursive: true })
     const target = join(outDir, name)
@@ -2361,15 +2390,40 @@ async function fetchVideoBytes(url: string): Promise<Buffer | null> {
 }
 
 /**
+ * 本地视频文件 → 字节。
+ *
+ * 与图片同款：先 stat 再读，超限（{@link MAX_GENERATED_VIDEO_BYTES}）直接放弃，
+ * 免得把几百 MB 的视频整份读进内存。magic 校验交给调用方的 looksLikeVideo。
+ */
+function readLocalVideoBytes(path: string): Buffer | null {
+  try {
+    const info = statSync(path)
+    if (!info.isFile() || info.size <= 0 || info.size > MAX_GENERATED_VIDEO_BYTES) return null
+    return readFileSync(path)
+  } catch {
+    return null
+  }
+}
+
+/**
  * 把一条视频落到 bot 工作区，返回相对工作区的正斜杠路径（失败返回 null）。
  *
  * 文件名用 sha1(url) 前 16 位：同一段视频重复出现（重放历史 / 重试）落在同一个
  * 文件上，幂等，也不会把磁盘越写越满。
  */
 async function writeGeneratedVideo(url: string, outDir: string): Promise<string | null> {
+  /*
+   * 三条字节来源：data URL / 本地文件 / http(s)。
+   *
+   * 本地文件分支是 2026-11-03 新增：generate_video 现在自己把视频落盘、结果里给
+   * `videos[].path`。不认这条分支的话，新格式结果会「解析得出、落不进工作区」，
+   * 视频卡就只能退化成任务 id 提示。
+   */
+  const local = localPathOfImageRef(url)
   const bytes = url.startsWith('data:')
     ? decodeDataUrl(url)
-    : /^https?:\/\//i.test(url) ? await fetchVideoBytes(url) : null
+    : local !== null ? readLocalVideoBytes(local)
+      : /^https?:\/\//i.test(url) ? await fetchVideoBytes(url) : null
   if (bytes === null || bytes.byteLength === 0 || bytes.byteLength > MAX_GENERATED_VIDEO_BYTES) return null
   if (!looksLikeVideo(bytes)) return null
   const name = `${createHash('sha1').update(url).digest('hex').slice(0, 16)}.${videoExtensionFor(url)}`
@@ -2389,6 +2443,12 @@ interface VideoCandidates {
   urls: string[]
   /** 裸 base64（键名命中 {@link VIDEO_B64_KEYS}）。 */
   b64: string[]
+  /**
+   * 本地视频文件的绝对路径（新格式 `videos[].path`，2026-11-03 起）。
+   *
+   * 工具自己落盘后结果里给的是路径而不是地址：这是最权威的一份，优先于下载。
+   */
+  paths: string[]
 }
 
 function pushUniqueString(list: string[], value: string, max: number): void {
@@ -2414,6 +2474,15 @@ function collectVideoString(value: string, key: string | null, sink: VideoCandid
       return
     }
     if (text.length > 64) pushUniqueString(sink.b64, text, MAX_GENERATED_VIDEOS)
+    return
+  }
+  /*
+   * 新格式（2026-11-03 起）：generate_video 已把视频落盘，结果里给
+   * `videos: [{ path, mime, bytes }]`。键名 + 绝对路径双判据，避免把响应里
+   * 别处的相对路径当成视频文件。
+   */
+  if (key === 'path' && isAbsolute(text)) {
+    pushUniqueString(sink.paths, text, MAX_GENERATED_VIDEOS)
     return
   }
   if (isVideoAddress(text, key)) pushUniqueString(sink.urls, text, MAX_GENERATED_VIDEOS)
@@ -2507,7 +2576,7 @@ async function materializeGeneratedVideos(ctx: any, message: any): Promise<Gener
     parsed = null
   }
 
-  const sink: VideoCandidates = { urls: [], b64: [] }
+  const sink: VideoCandidates = { urls: [], b64: [], paths: [] }
   let model: string | null = null
   if (parsed !== null && typeof parsed === 'object') {
     collectVideoCandidates(parsed, sink)
@@ -2523,6 +2592,13 @@ async function materializeGeneratedVideos(ctx: any, message: any): Promise<Gener
 
   const outDir = join(botWorkspaceDir(), '_tmp', 'generated-media')
   const videos: string[] = []
+  // 新格式的本地路径最权威（工具刚落盘的那份），优先于重新下载。
+  for (const path of sink.paths) {
+    const rel = await writeGeneratedVideo(path, outDir)
+    if (rel === null) continue
+    const href = `${IMAGE_FILE_ROUTE}?path=${encodeURIComponent(rel)}`
+    if (!videos.includes(href)) videos.push(href)
+  }
   for (const url of sink.urls) {
     const rel = await writeGeneratedVideo(url, outDir)
     if (rel === null) continue

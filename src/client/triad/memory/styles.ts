@@ -107,6 +107,10 @@ export const css = {
   detailHead: 'dsh-memory-detail-head',
   detailTitle: 'dsh-memory-detail-title',
   detailAnim: 'dsh-memory-detail-anim',
+  /** 详情浮层的退场态（窄屏关闭时播 dsh-memory-detail-out）。 */
+  detailOut: 'dsh-memory-detail-out',
+  /** 详情浮层的显式关闭钮（宽屏由 CSS 隐藏，见文件末尾的媒体查询）。 */
+  detailClose: 'dsh-memory-detail-close',
   chips: 'dsh-memory-chips',
   chipMute: 'dsh-memory-chip-mute',
   chipAccent: 'dsh-memory-chip-accent',
@@ -480,7 +484,7 @@ const SHEET = `
   margin:14px 0 9px;font-size:var(--m-fs-caption);font-weight:600;
   line-height:16px;color:var(--m-text-3);
   letter-spacing:.05em;text-transform:uppercase;
-  animation:dsh-memory-section-in .26s cubic-bezier(.2,.8,.2,1) both;
+  animation:dsh-memory-section-in 240ms cubic-bezier(.2,.8,.2,1) both;
 }
 /* 标题后的那条延伸细线：把「分组」这件事用留白 + 线条表达，而不是靠字重。 */
 .dsh-memory-group-section::after{content:"";flex:1;height:1px;background:var(--m-border);margin-left:2px}
@@ -511,7 +515,7 @@ const SHEET = `
              box-shadow .18s cubic-bezier(.2,.8,.2,1),
              background .18s cubic-bezier(.2,.8,.2,1),
              transform .18s cubic-bezier(.2,.8,.2,1);
-  animation:dsh-memory-entry-in .34s cubic-bezier(.2,.8,.2,1) both;
+  animation:dsh-memory-entry-in 240ms cubic-bezier(.2,.8,.2,1) both;
 }
 /* 逐条错峰浮现：靠 nth-child 而非内联 delay（不污染 DOM 属性）。
    上限截到 8 条，再多就看不出错峰、只剩整体变慢。 */
@@ -660,11 +664,33 @@ const SHEET = `
 .dsh-memory-detail-col{padding:0;display:flex;flex-direction:column;gap:0;box-sizing:border-box}
 /* 详情主容器：padding 放在这里，粘性头部用负 margin 顶出去再贴回来。 */
 .dsh-memory-detail-anim{
-  animation:dsh-memory-detail-in .24s cubic-bezier(.2,.8,.2,1) both;
+  /* fill-mode 用 backwards 而不是 both：both 会在动画结束后继续保留 to 帧的
+     transform，使这个容器成为后代 position:fixed 元素（Markdown 里的浮层）
+     的包含块，整体偏移。backwards 只保证延迟期应用 from 帧，结束后回到元素自身。 */
+  animation:dsh-memory-detail-in 240ms cubic-bezier(.2,.8,.2,1) backwards;
   display:flex;flex-direction:column;gap:14px;min-width:0;
   padding:16px 18px 44px;box-sizing:border-box;
 }
 @keyframes dsh-memory-detail-in{from{opacity:0;transform:translateX(8px)}to{opacity:1;transform:none}}
+/* 退场：与入场反向对称（淡出 + 右收 8px），240ms —— 与面板弹窗同一条时长
+   （triad-modal-animation 的 MODAL_ANIM_MS），插件的开合节奏保持一致。
+   曲线取加速语义：出场元素正在离开视线，不需要入场那种减速收尾。
+   加在 .dsh-memory-detail-col 而不是内层 .dsh-memory-detail-anim 上：
+   窄屏下浮层的壳（背景 + 左侧描边 + 阴影）也在 col 上，只淡内容会让壳「啪」地消失。 */
+@keyframes dsh-memory-detail-out{from{opacity:1;transform:none}to{opacity:0;transform:translateX(8px)}}
+.dsh-memory-detail-col.dsh-memory-detail-out{animation:dsh-memory-detail-out .24s cubic-bezier(.4,0,.2,1) forwards}
+/* 详情浮层的显式关闭钮：默认不显示（宽屏下详情是常驻右栏，关掉只会留一块空白），
+   只在窄屏浮层形态出现 —— 见文件末尾 @media (max-width:900px)。 */
+.dsh-memory-detail-close{
+  display:none;flex:none;align-items:center;justify-content:center;
+  width:26px;height:26px;padding:0;margin:-2px -4px 0 0;border:none;
+  border-radius:var(--m-r-ctrl);background:transparent;color:var(--m-text-3);
+  font-family:inherit;cursor:pointer;
+  transition:background .16s ease,color .16s ease,transform .12s ease;
+}
+.dsh-memory-detail-close:hover{background:var(--m-hover);color:var(--m-text)}
+.dsh-memory-detail-close:active{transform:scale(.94)}
+.dsh-memory-detail-close:focus-visible{outline:2px solid var(--m-primary);outline-offset:1px}
 /* 头部：吸顶。滚动长正文时标题与操作始终可见——
    旧版滚下去就找不到「编辑」「删除」在哪了。 */
 .dsh-memory-detail-head{
@@ -910,6 +936,11 @@ const SHEET = `
     box-shadow:-8px 0 28px rgba(0,0,0,.12);
     border-left:1px solid var(--m-border);
   }
+  /* 浮层形态下必须有显式关闭入口：原先只能靠「点别的条目」换内容，浮层关不掉。 */
+  .dsh-memory-detail-close{display:inline-flex}
+  /* 没有详情也没有表单时，浮层壳（背景 + 描边 + 阴影）不该继续盖在列表右侧。
+     只在窄屏生效 —— 宽屏下详情列是常驻右栏，空态提示是它的一部分。 */
+  .dsh-memory-detail-col[data-empty="true"]{display:none}
   .dsh-memory-cols{position:relative}
   /* 列表占满整宽（详情是浮层，不占位）。 */
   .dsh-memory-list-col{width:100% !important;max-height:none;flex:1 1 auto;padding:2px 12px 20px}
@@ -945,6 +976,9 @@ const SHEET = `
   .dsh-memory-entry-card,.dsh-memory-entry-row,.dsh-memory-related-card,
   .dsh-memory-history-link,.dsh-memory-tool-btn,.dsh-memory-change-more{transition:none}
   .dsh-memory-entry-card,.dsh-memory-entry-row,.dsh-memory-group-section,.dsh-memory-detail-anim{animation:none}
+  /* 详情浮层的退场动画（240ms）：减弱动效下只关动画，**不动可见性** ——
+     浮层该退场还是退场（由 useModalClose 的定时器收掉），只是没有过渡帧。 */
+  .dsh-memory-detail-col.dsh-memory-detail-out{animation:none}
   .dsh-memory-skeleton-row{animation:none}
   .dsh-memory-importance-bar i{transition:none}
 }

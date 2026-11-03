@@ -22,10 +22,35 @@ export const PERSONAL_CALL_CSS = `
   padding: 24px;
   background: rgba(4, 5, 7, 0.64);
   backdrop-filter: blur(12px);
-  animation: pa-fade 180ms ease both;
+  animation: pa-fade 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 /* 浅色主题：遮罩只压一层淡灰。原来的 0.42 在浅色界面上仍然像拉了一层黑幕 */
 .pa-root[data-pa-theme='light'] .pa-call-overlay { background: rgba(15, 17, 21, 0.24); }
+
+/*
+ * 退场：整层淡出 + 弹层下沉 14px 并轻微缩小。
+ *
+ * 入场是 180ms 淡入 + 220ms 弹入，出场原来是硬消失（组件被 idle / minimized
+ * 早退直接摘掉）。时长与曲线对齐 modal-animation.ts 的 MODAL_ANIM_MS：240ms，
+ * 出场用加速曲线（从静止启动、峰值速度结束），与插件的其它弹层同一套手感。
+ *
+ * 只在根节点挂一个 data-closing，弹层用后代选择器跟随——组件侧只改一处属性，
+ * 不会出现「遮罩淡出了、弹层还在」的错位。
+ */
+@keyframes pa-call-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes pa-call-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(14px) scale(0.97); }
+}
+.pa-call-overlay[data-closing='1'] {
+  animation: pa-call-fade-out 240ms ease both;
+}
+.pa-call-overlay[data-closing='1'] .pa-call {
+  animation: pa-call-out 240ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
 
 /* ---------- 弹层主体 ---------- */
 .pa-call {
@@ -73,7 +98,7 @@ export const PERSONAL_CALL_CSS = `
    * 通话中要挂断还得先往回滚（实测最容易漏的一条）。
    */
   overflow: hidden;
-  animation: pa-pop 220ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  animation: pa-pop 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 /* 左右两栏：左信息/控制、右转写 */
 .pa-call__layout {
@@ -339,7 +364,7 @@ button.pa-call__notice-btn {
    * transition 就永远不生效（表现成「淡出没反应，到点直接消失」）。
    * backwards 只在动画开始前应用 from 帧，播完即交还给普通声明。
    */
-  animation: pa-call-task-in 200ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+  animation: pa-call-task-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
   transition: opacity 600ms ease, max-height 600ms ease, padding 600ms ease, transform 600ms ease;
 }
 .pa-call__task[data-phase='done'] {
@@ -418,7 +443,7 @@ button.pa-call__notice-btn {
   font-size: calc(12px + var(--pa-font-delta));
   line-height: 1.58;
   overflow-wrap: anywhere;
-  animation: pa-rise 200ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: pa-rise 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-call__turn[data-role='user'] { align-self: flex-end; background: var(--pa-call-surface-2); color: var(--pa-call-text); border-bottom-right-radius: 4px; }
 /* Bot 气泡比用户气泡淡一档（沿用原来的层级）；浅色下再补一圈发丝边，否则白底上看不出气泡边界 */
@@ -495,11 +520,11 @@ button.pa-call__think-toggle {
   line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  animation: pa-fade 160ms ease both;
+  animation: pa-fade 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-call__think-body::-webkit-scrollbar { display: none; }
 
-/* ---------- 麦克风波形 + 打断 ---------- */
+/* ---------- 麦克风电平（点阵） + 打断 ---------- */
 /* 全双工没有「点击说话」按钮：麦克风一直开着，这里显示的是实时电平与当前提示。 */
 .pa-call__audio {
   width: 100%;
@@ -509,30 +534,38 @@ button.pa-call__think-toggle {
   gap: 6px;
   z-index: 1;
 }
+/*
+ * 一排小圆点，随音量上下起伏、放大；中间的点最活跃、两端最安静。
+ *
+ * 旧版是 25 根带随机抖动的亮绿竖条（「录音软件」的语言），在这块圆角胶囊面板里
+ * 又吵又廉价——用户反馈「丑陋，要简约又优雅」后整块重做。现在是 7 个点、正弦相位、
+ * 28px 高，静止时就是一排 40% 透明度的安静小点。
+ *
+ * 点的大小 / 位移由 rAF 每帧直接写 transform（见 CallOverlay 的 CallWave），
+ * 所以这里**不要挂 transition**：逐帧写入叠加 CSS 过渡会互相拖拽，动作变糊。
+ */
 .pa-call__wave {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 3px;
+  gap: 13px;
   width: 100%;
-  height: 38px;
+  height: 28px;
   padding: 0 4px;
 }
 .pa-call__wave span {
-  flex: 1 1 auto;
-  min-width: 2px;
-  max-width: 5px;
-  height: 100%;
-  border-radius: 3px;
-  /* 波形是「声音在动」的唯一视觉线索，绿色与 listening 状态同色系 */
-  background: linear-gradient(180deg, rgba(48, 209, 88, 0.92), rgba(48, 209, 88, 0.3));
-  transform: scaleY(0.08);
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  /* 浅色主题压深、深色主题亮化：绿点在白底上不荧光，在暗底上也不发脏 */
+  background: var(--pa-call-green-fg);
+  opacity: 0.4;
   transform-origin: center;
-  transition: transform 60ms linear, background 200ms ease;
+  will-change: transform, opacity;
 }
-.pa-call__wave[data-on='false'] span {
-  background: var(--pa-call-line);
-}
+/* 未在采集（静音 / 麦克风没就绪 / 重连）：点退回发丝线色，暗示「麦克风没在工作」 */
+.pa-call__wave[data-on='false'] span { background: var(--pa-call-line); }
 .pa-call__audio-note {
   font-size: calc(10px + var(--pa-font-delta));
   line-height: calc(14px + var(--pa-font-delta));
@@ -555,14 +588,26 @@ button.pa-call__interrupt {
 }
 .pa-call__interrupt:hover { background: rgba(255, 159, 10, 0.28); }
 
-/* ---------- 通话音量拖动条 ---------- */
-/* 只调下行（听 Bot 说话）的播放增益；上行麦克风由浏览器 autoGainControl 管，
-   这里不碰——叠一层增益会干扰服务端 VAD 与 ASR。 */
+/* ---------- 通话音量 ---------- */
+/*
+ * 只调下行（听 Bot 说话）的播放增益；上行麦克风由浏览器 autoGainControl 管，
+ * 这里不碰——叠一层增益会干扰服务端 VAD 与 ASR。
+ *
+ * 形态是**居中的胶囊**（图标 + 细轨道 + 数值），与「通话设置」按钮同一套底色与
+ * 圆角，上下呼应。原来是一条横跨整宽的裸滑块，两侧顶到面板边缘、和这一列居中
+ * 成组的元素完全不是一个语言（用户实机截图反馈「很丑、不协调」）。
+ * 宽度 min(100%, 208px)：窄屏不溢出，宽屏也不会被拉成一根长条。
+ */
 .pa-call__volume {
-  width: 100%;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
+  width: min(100%, 208px);
+  padding: 5px 12px 5px 10px;
+  border-radius: 999px;
+  background: var(--pa-call-surface);
+  /* 用 inset 发丝边而不是 border：不改盒模型，胶囊高度在深浅主题下都稳定 */
+  box-shadow: inset 0 0 0 1px var(--pa-call-line);
   z-index: 1;
 }
 .pa-call__volume-icon {
@@ -573,7 +618,7 @@ button.pa-call__interrupt {
 .pa-call__volume-range {
   flex: 1;
   min-width: 0;
-  height: 16px;
+  height: 18px;
   margin: 0;
   background: transparent;
   -webkit-appearance: none;
@@ -582,98 +627,65 @@ button.pa-call__interrupt {
   outline: none;
 }
 /*
- * 轨道：已填充部分用强调色，剩余部分用发丝线。
- * 「--pa-call-vol-fill」由 JSX 按当前音量写进 style（0%..100%），滑块一动轨道跟着变。
- * 强调色用 --pa-call-accent-fg（浅色主题已压深），不用 --pa-accent：亮橙在浅色
- * 轨道上几乎看不出边界。
+ * 轨道是**单色**的：没有「已填充段」的强调色，也不再有 JS 写进来的填充比例。
+ * 用户明确要求「音量条里面的颜色去掉」——胶囊里只留中性灰轨道 + 前景色滑块，
+ * 音量由滑块位置和右侧数值表达。这样整颗胶囊在深浅主题下都只有一种颜色，
+ * 不会再冒出橙色的短条抢视线。
  */
 .pa-call__volume-range::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 999px;
-  background: linear-gradient(
-    to right,
-    var(--pa-call-accent-fg) 0 var(--pa-call-vol-fill, 100%),
-    var(--pa-call-line) var(--pa-call-vol-fill, 100%) 100%
-  );
-}
-.pa-call__volume-range::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 12px;
-  height: 12px;
-  margin-top: -4px;
-  border-radius: 50%;
-  background: var(--pa-call-text);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
-  transition: transform 120ms ease;
-}
-.pa-call__volume-range:hover::-webkit-slider-thumb { transform: scale(1.15); }
-.pa-call__volume-range:focus-visible::-webkit-slider-thumb {
-  box-shadow: 0 0 0 3px rgba(255, 159, 10, 0.35);
-}
-/* Firefox：轨道与已填充段是两个伪元素，没有渐变也能对齐观感 */
-.pa-call__volume-range::-moz-range-track {
-  height: 4px;
+  height: 5px;
   border-radius: 999px;
   background: var(--pa-call-line);
 }
-.pa-call__volume-range::-moz-range-progress {
-  height: 4px;
+/*
+ * 滑块：实心圆点 + 一圈「胶囊底色」的挖空环。没有这一环，圆点在浅色主题里就是
+ * 一颗浮在轨道上的脏黑点（原来的 1px 硬阴影加深了这个观感）；有了它才像嵌进
+ * 轨道，拖动时也不会盖住两端。
+ */
+.pa-call__volume-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: var(--pa-call-text);
+  box-shadow: 0 0 0 2px var(--pa-call-surface), 0 1px 3px rgba(0, 0, 0, 0.28);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+.pa-call__volume-range:hover::-webkit-slider-thumb { transform: scale(1.12); }
+.pa-call__volume-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 2px var(--pa-call-surface), 0 0 0 4px rgba(255, 159, 10, 0.32);
+}
+/* Firefox：轨道与已填充段是两个伪元素，没有渐变也能对齐观感 */
+.pa-call__volume-range::-moz-range-track {
+  height: 5px;
   border-radius: 999px;
-  background: var(--pa-call-accent-fg);
+  background: var(--pa-call-line);
+}
+/* Firefox 的 progress 默认会用系统高亮色画已填充段：显式改成轨道色，才真的是单色 */
+.pa-call__volume-range::-moz-range-progress {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--pa-call-line);
 }
 .pa-call__volume-range::-moz-range-thumb {
-  width: 12px;
-  height: 12px;
+  width: 13px;
+  height: 13px;
   border: 0;
   border-radius: 50%;
   background: var(--pa-call-text);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 0 0 2px var(--pa-call-surface), 0 1px 3px rgba(0, 0, 0, 0.28);
 }
 .pa-call__volume-value {
   flex: none;
-  min-width: 34px;
+  min-width: 30px;
   text-align: right;
   font-size: calc(10px + var(--pa-font-delta));
   line-height: calc(15px + var(--pa-font-delta));
   color: var(--pa-call-text-2);
   font-variant-numeric: tabular-nums;
 }
-.pa-call__volume-value[data-muted='true'] { color: var(--pa-call-accent-fg); }
-.pa-call__type {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  margin-top: 2px;
-  z-index: 1;
-}
-.pa-call__type input {
-  flex: 1;
-  min-width: 0;
-  height: 32px;
-  padding: 0 11px;
-  border-radius: 9px;
-  border: 1px solid var(--pa-call-line);
-  background: var(--pa-call-surface);
-  color: var(--pa-call-text);
-  font-size: calc(12px + var(--pa-font-delta));
-  outline: none;
-}
-.pa-call__type input::placeholder { color: var(--pa-call-text-3); }
-.pa-call__type input:focus { border-color: rgba(255, 159, 10, 0.45); }
-.pa-call__type button {
-  width: 32px;
-  height: 32px;
-  border-radius: 9px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--pa-call-on);
-  color: var(--pa-call-on-fg);
-  flex: none;
-}
-.pa-call__type button:disabled { opacity: 0.35; cursor: not-allowed; }
 .pa-call__thinking { display: inline-flex; gap: 4px; align-items: center; height: 20px; }
 .pa-call__thinking i {
   width: 5px;
@@ -717,7 +729,7 @@ button.pa-call__settings-toggle {
   padding: 10px 12px;
   border-radius: 12px;
   background: var(--pa-call-surface);
-  animation: pa-fade 160ms ease both;
+  animation: pa-fade 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-call__field { display: flex; align-items: center; gap: 10px; }
 .pa-call__field-label {
@@ -852,7 +864,7 @@ button.pa-call__settings-toggle {
   gap: 8px;
   padding: 12px 14px;
   border-top: 1px solid var(--pa-line);
-  animation: pa-fade 160ms ease both;
+  animation: pa-fade 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-callcard__turn {
   max-width: 88%;
@@ -953,7 +965,8 @@ button.pa-callcard__collapse {
   .pa-call__transcript { padding: 12px 14px 16px; }
   .pa-call__controls { gap: 8px; }
   .pa-call__ctrl-icon { width: 46px; height: 46px; }
-  .pa-call__wave { height: 32px; gap: 2px; }
+  .pa-call__wave { height: 26px; gap: 9px; }
+  .pa-call__volume { width: min(100%, 196px); }
   .pa-call__field-hint { padding-left: 0; }
 }
 /* 矮屏（笔记本 768p / 分屏）收紧一档；只作用于左右布局，窄屏由上面的媒体查询接管 */
@@ -961,10 +974,25 @@ button.pa-callcard__collapse {
   .pa-call__side { gap: 10px; padding: 24px 20px 16px; }
   .pa-call__transcript { padding: 20px 18px 14px; }
   .pa-call__avatar-wrap { width: 112px; height: 112px; margin-top: 2px; }
-  .pa-call__wave { height: 30px; }
+  .pa-call__wave { height: 24px; }
   .pa-call__ctrl-icon { width: 44px; height: 44px; }
   /* 任务条也收一档：矮屏下多一行提示就少一行转写 */
   .pa-call__task { padding: 7px 9px; }
+}
+
+/*
+ * 减少动效：入场与退场一起关掉。
+ *
+ * 退场选择器必须原样再列一遍（带上 [data-closing='1']）——媒体查询不增加权重，
+ * 只写 .pa-call-overlay 压不过上面那条带属性的规则，退场动画会照播。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .pa-call-overlay,
+  .pa-call,
+  .pa-call-overlay[data-closing='1'],
+  .pa-call-overlay[data-closing='1'] .pa-call {
+    animation: none;
+  }
 }
 `
 

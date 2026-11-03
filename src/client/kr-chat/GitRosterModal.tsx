@@ -10,9 +10,10 @@
  * @module
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactElement, MouseEvent } from 'react'
 import { getService } from '../client-ctx.ts'
+import { MODAL_ANIM_MS } from '../modal-animation.ts'
 import { getGitRosterStore, useGitRosterSnapshot } from './git-roster-store.ts'
 import type { GitRosterItem } from './git-roster-store.ts'
 
@@ -124,11 +125,48 @@ export function GitRosterModal(): ReactElement | null {
     if (open) void store.refresh(true)
   }, [open, store])
 
-  if (!open) return null
+  /*
+   * 退场动画状态机：先播 240ms 收回动画，再真正关闭 store。
+   *
+   * 原先点关闭是直接 store.close()，React 当场把整棵树卸载，浏览器一帧都没机会
+   * 画「正在消失」的中间态 —— 看起来是硬切。这里把关闭拆成「置 closing（CSS 播
+   * 退场）→ 定时器到点 → 执行原关闭动作」，卸载因此被推迟到动画播完。
+   * 时长复用 MODAL_ANIM_MS，与样式表里的 240ms 是同一个数，改一处两边同步。
+   */
+  const [closing, setClosing] = useState(false)
+  const closeTimerRef = useRef<number | null>(null)
+  const requestClose = useCallback((): void => {
+    // 已在退场中：忽略重复请求（连点关闭按钮 / 点完按钮又点遮罩）。
+    if (closeTimerRef.current !== null) return
+    setClosing(true)
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null
+      setClosing(false)
+      store.close()
+    }, MODAL_ANIM_MS)
+  }, [store])
 
-  const onClose = () => {
-    store.close()
-  }
+  // 卸载时掐掉未完成的定时器：否则回调会打到已卸载组件的 store 上。
+  useEffect(() => () => {
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
+  }, [])
+
+  /*
+   * Escape 关闭（本弹窗此前缺失）。
+   *
+   * 卡片头部的关闭按钮 title 写着「关闭 (Esc)」，但实际没挂键盘监听 —— 承诺了
+   * 一个不存在的快捷键。这里补上，并统一走 requestClose，保证 Esc 也有退场动画。
+   */
+  useEffect(() => {
+    if (!open) return undefined
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') requestClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => { window.removeEventListener('keydown', onKeyDown) }
+  }, [open, requestClose])
+
+  if (!open) return null
 
   const workspaces = data?.workspaces ?? []
   const plugins = data?.plugins ?? []
@@ -150,7 +188,8 @@ export function GitRosterModal(): ReactElement | null {
   return (
     <div
       className="kr-git-roster-overlay"
-      onClick={onClose}
+      data-closing={closing ? '1' : undefined}
+      onClick={requestClose}
       role="dialog"
       aria-modal="true"
       aria-labelledby="kr-git-roster-title"
@@ -215,7 +254,7 @@ export function GitRosterModal(): ReactElement | null {
             <button
               type="button"
               className="kr-git-roster-modal__tool-btn"
-              onClick={onClose}
+              onClick={requestClose}
               title="关闭 (Esc)"
               aria-label="关闭窗口"
             >
@@ -365,7 +404,7 @@ export function GitRosterModal(): ReactElement | null {
                         <button
                           type="button"
                           className="kr-git-action-btn"
-                          onClick={() => launchSessionForRepo(item, onClose)}
+                          onClick={() => launchSessionForRepo(item, requestClose)}
                           title={`以【${item.name}】自动新建会话并填充指令`}
                           aria-label={`开启 ${item.name} 会话`}
                         >

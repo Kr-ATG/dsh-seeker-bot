@@ -8,9 +8,9 @@
  * 「等用户动作」的消息，但它们会随对话流滚出视口，用户切回来时常常忘了还有一张卡
  * 在等自己。这条把最新的一条钉在输入框上方，点击跳回原消息。
  */
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
-import { IconBook, IconChevronRight, IconClock, IconMessage, IconMore, IconPhone, IconSettings, IconTrash, IconUsers, IconX } from '../icons.tsx'
+import { IconBook, IconChevronRight, IconMessage, IconMore, IconPhone, IconSettings, IconTrash, IconUsers, IconX } from '../icons.tsx'
 import { usePersonal } from '../store.tsx'
 import type { Bot, Message } from '../types.ts'
 import { Composer } from './Composer.tsx'
@@ -26,6 +26,69 @@ export function ChatPanel(): JSX.Element {
   const moreRef = useRef<HTMLDivElement>(null)
   /** 待清空对话的目标 bot（非 null 时显示确认卡片）。 */
   const [clearTarget, setClearTarget] = useState<Bot | null>(null)
+
+  /*
+   * 退场状态：菜单与确认卡关闭时先播 240ms 动画再真正卸载。
+   * 直接 setMoreOpen(false) / setClearTarget(null) 会让浮层一帧内硬消失，
+   * 与入场那 160ms / 200ms 的弹出完全不对称。时长与曲线跟
+   * src/client/modal-animation.ts 的 MODAL_ANIM_MS 对齐（240ms、
+   * 出场用加速曲线 cubic-bezier(0.4, 0, 0.2, 1)）。
+   */
+  const [menuClosing, setMenuClosing] = useState(false)
+  const menuTimerRef = useRef<number | null>(null)
+  const [confirmClosing, setConfirmClosing] = useState(false)
+  const confirmTimerRef = useRef<number | null>(null)
+
+  /*
+   * 退场结束后要执行的动作（打开设置 / 群设置等）。
+   *
+   * 单独放 ref 而不是闭包捕获：退场途中又点了另一项时，后一项会覆盖前一项，
+   * 240ms 后只执行最后选的那条，不会两个面板一起弹出来。
+   */
+  const menuAfterRef = useRef<(() => void) | undefined>(undefined)
+
+  /** 收起「更多」菜单：先播退场，240ms 后再执行 after（打开设置 / 群设置等）。 */
+  const closeMenu = useCallback((after?: () => void): void => {
+    // 只有菜单项会带动作；外部点击关闭不能把已排队的动作冲掉。
+    if (after !== undefined) menuAfterRef.current = after
+    if (menuTimerRef.current !== null) return
+    setMenuClosing(true)
+    menuTimerRef.current = window.setTimeout(() => {
+      menuTimerRef.current = null
+      setMenuClosing(false)
+      setMoreOpen(false)
+      const run = menuAfterRef.current
+      menuAfterRef.current = undefined
+      run?.()
+    }, 240)
+  }, [])
+
+  /** 撤销退场：退场途中再点一次「更多」，菜单原地弹回，不必等这 240ms。 */
+  const cancelMenuClose = useCallback((): void => {
+    if (menuTimerRef.current !== null) {
+      window.clearTimeout(menuTimerRef.current)
+      menuTimerRef.current = null
+    }
+    menuAfterRef.current = undefined
+    setMenuClosing(false)
+  }, [])
+
+  /** 关闭「清空对话」确认卡：先播退场，再执行原来的关闭 / 清空动作。 */
+  const closeConfirm = useCallback((after?: () => void): void => {
+    if (confirmTimerRef.current !== null) return
+    setConfirmClosing(true)
+    confirmTimerRef.current = window.setTimeout(() => {
+      confirmTimerRef.current = null
+      setConfirmClosing(false)
+      setClearTarget(null)
+      after?.()
+    }, 240)
+  }, [])
+
+  useEffect(() => () => {
+    if (menuTimerRef.current !== null) window.clearTimeout(menuTimerRef.current)
+    if (confirmTimerRef.current !== null) window.clearTimeout(confirmTimerRef.current)
+  }, [])
 
   /**
    * 拖拽对话列左右边缘调整宽度。
@@ -73,6 +136,10 @@ export function ChatPanel(): JSX.Element {
     : activeRoom.memberIds
       .map((id) => state.bots.find((bot) => bot.id === id))
       .filter((bot): bot is Bot => bot !== undefined)
+  /** 群聊自定义头像（activeRoom 只裁了 id/name/memberIds，头像要从原始 rooms 里取）。 */
+  const roomAvatar = activeRoom === null
+    ? undefined
+    : state.rooms.find((room) => room.id === activeRoom.id)?.avatar
 
   const title = activeRoom !== null ? activeRoom.name : activeBot.name
   const subtitle = activeRoom !== null ? `${roomBots.length} 个 Bot · 群聊` : activeBot.role
@@ -83,11 +150,24 @@ export function ChatPanel(): JSX.Element {
     if (!moreOpen) return undefined
     const close = (event: MouseEvent): void => {
       if (moreRef.current !== null && event.target instanceof Node && moreRef.current.contains(event.target)) return
-      setMoreOpen(false)
+      closeMenu()
     }
     document.addEventListener('mousedown', close)
     return () => document.removeEventListener('mousedown', close)
-  }, [moreOpen])
+  }, [moreOpen, closeMenu])
+
+  /* Esc 逐层关闭：确认卡优先，其次收起「更多」菜单；两条路径都走同一个退场。 */
+  useEffect(() => {
+    if (!moreOpen && clearTarget === null) return undefined
+    const onKeyDown = (event: KeyboardEvent): void => {
+      // 被下层控件（例如 PaSelect 的 Esc）先处理过的事件不再重复响应。
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      if (clearTarget !== null) closeConfirm()
+      else closeMenu()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [moreOpen, clearTarget, closeMenu, closeConfirm])
 
   const handleCall = (): void => {
     if (ui.call.status !== 'idle') {
@@ -97,9 +177,9 @@ export function ChatPanel(): JSX.Element {
     actions.startCall(callBotId)
   }
 
+  /** 菜单项点击：等菜单退场播完再执行动作，避免「面板已经换了、菜单还在飞」。 */
   const runMenuAction = (action: () => void): void => {
-    setMoreOpen(false)
-    action()
+    closeMenu(action)
   }
 
   return (
@@ -114,11 +194,15 @@ export function ChatPanel(): JSX.Element {
         <div className="pa-chat__head-inner">
         <div className="pa-chat__head-avatar">
           {activeRoom !== null ? (
-            <div className="pa-chat__stack">
-              {roomBots.slice(0, 3).map((bot) => (
-                <BotAvatar key={bot.id} avatar={bot.avatar} size={20} />
-              ))}
-            </div>
+            roomAvatar !== undefined ? (
+              <BotAvatar avatar={roomAvatar} size={28} />
+            ) : (
+              <div className="pa-chat__stack">
+                {roomBots.slice(0, 3).map((bot) => (
+                  <BotAvatar key={bot.id} avatar={bot.avatar} size={20} />
+                ))}
+              </div>
+            )
           ) : (
             <BotAvatar avatar={activeBot.avatar} size={28} online={activeBot.status === 'online'} />
           )}
@@ -145,46 +229,59 @@ export function ChatPanel(): JSX.Element {
               title="更多"
               aria-label="更多"
               aria-expanded={moreOpen}
-              onClick={() => setMoreOpen((open) => !open)}
+              onClick={() => {
+                // 退场途中再点一次：撤销退场原地弹回，而不是等它消失后再开。
+                if (menuClosing) {
+                  cancelMenuClose()
+                  return
+                }
+                if (moreOpen) closeMenu()
+                else setMoreOpen(true)
+              }}
             >
               <IconMore size={18} />
             </button>
             {moreOpen ? (
-              <div className="pa-chat__menu" role="menu">
+              <div className="pa-chat__menu" role="menu" data-closing={menuClosing ? '1' : undefined}>
                 {activeRoom !== null ? (
                   <button type="button" role="menuitem" onClick={() => runMenuAction(() => actions.openGroupSettings(activeRoom.id))}>
                     <IconUsers size={14} />
                     群聊设置
                   </button>
                 ) : null}
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => runMenuAction(() => actions.openBotSettings(callBot.id))}
-                >
-                  <IconSettings size={14} />
-                  Bot 设置
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => runMenuAction(() => {
-                    /*
-                     * 任务记录是右栏的一张卡，不另开弹层：先把右栏打开，
-                     * 再 toast 告诉用户去哪看——右栏关着时点「任务记录」
-                     * 如果不打开右栏，会看起来什么都没发生。
-                     */
-                    actions.toggleRightPanel(true)
-                    actions.toast('任务记录在右侧栏')
-                  })}
-                >
-                  <IconClock size={14} />
-                  任务记录
-                </button>
-                <button type="button" role="menuitem" onClick={() => runMenuAction(() => actions.proactiveNow(callBotId))}>
-                  <IconMessage size={14} />
-                  让 {callBot.name} 主动说一句
-                </button>
+                {/*
+                 * Bot 设置只在私聊里给：群聊是群聊，它的设置入口是上面那条
+                 * 「群聊设置」；在群聊里再摆一个「Bot 设置」，用户会以为改的是
+                 * 整个群（实际只改 callBot 一个成员），点进去还会看到「子 Bot 管理」
+                 * 这种只属于单个 Bot 的段落。
+                 */}
+                {activeRoom === null ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => runMenuAction(() => actions.openBotSettings(callBot.id))}
+                  >
+                    <IconSettings size={14} />
+                    Bot 设置
+                  </button>
+                ) : null}
+                {/*
+                 * 「任务记录」不放进菜单：它本来就是右栏里常驻的一张卡
+                 * （RightPanel 的 TaskRecordCard），菜单里再给一条入口只会
+                 * 让人以为要「打开」它——点了其实只是把右栏拉开。
+                 */}
+                {/*
+                 * 主动说一句只留给主 Bot：它是对「某一个 Bot」的指令，群聊里执行
+                 * 只会让 callBot 一个成员冒泡，用户会以为是在叫整个群说话；子 Bot
+                 * 本来就是被主 Bot 调度的，用户也很少直接催它开口（要催就在主 Bot
+                 * 那边派活）。所以这条入口按「私聊 + 主 Bot」两个条件一起收。
+                 */}
+                {activeRoom === null && activeBot.isMain ? (
+                  <button type="button" role="menuitem" onClick={() => runMenuAction(() => actions.proactiveNow(callBotId))}>
+                    <IconMessage size={14} />
+                    让 {callBot.name} 主动说一句
+                  </button>
+                ) : null}
                 <button type="button" role="menuitem" onClick={() => runMenuAction(() => { void actions.generateJournal(callBotId) })}>
                   <IconBook size={14} />
                   生成今日期刊
@@ -241,14 +338,15 @@ export function ChatPanel(): JSX.Element {
       {clearTarget !== null ? (
         <div
           className="pa-overlay"
+          data-closing={confirmClosing ? '1' : undefined}
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setClearTarget(null)
+            if (event.target === event.currentTarget) closeConfirm()
           }}
         >
           <div className="pa-modal pa-confirm" onMouseDown={(event) => event.stopPropagation()}>
             <div className="pa-modal__head">
               <div className="pa-modal__title">清空对话</div>
-              <button className="pa-modal__close" type="button" onClick={() => setClearTarget(null)} aria-label="关闭">
+              <button className="pa-modal__close" type="button" onClick={() => closeConfirm()} aria-label="关闭">
                 <IconX size={16} />
               </button>
             </div>
@@ -259,7 +357,7 @@ export function ChatPanel(): JSX.Element {
               </p>
             </div>
             <div className="pa-modal__foot">
-              <button className="pa-btn pa-btn--ghost" type="button" onClick={() => setClearTarget(null)}>
+              <button className="pa-btn pa-btn--ghost" type="button" onClick={() => closeConfirm()}>
                 取消
               </button>
               <button
@@ -267,8 +365,10 @@ export function ChatPanel(): JSX.Element {
                 type="button"
                 onClick={() => {
                   const target = clearTarget
-                  setClearTarget(null)
-                  void actions.clearConversation(target.id)
+                  // 清空动作等退场播完再执行：卡片滑出时背景消息同步刷新，不会先闪一下空流。
+                  closeConfirm(() => {
+                    void actions.clearConversation(target.id)
+                  })
                 }}
               >
                 清空

@@ -261,7 +261,7 @@ const CSS = [
   '  background: var(--dsw-alias-state-business-primary, #4176e6);',
   '  transition: transform .15s ease, filter .15s ease; }',
   '.dtt-iu__kmove[hidden] { display: block; visibility: hidden; opacity: 0; pointer-events: none; }',
-  '.dtt-iu__kmove:not([hidden]) { visibility: visible; opacity: 1; animation: dtt-iu-kmove-in .2s cubic-bezier(.2,.7,.3,1);',
+  '.dtt-iu__kmove:not([hidden]) { visibility: visible; opacity: 1; animation: dtt-iu-kmove-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1);',
   '  transition: opacity .18s ease, transform .15s ease, filter .15s ease; }',
   '.dtt-iu__kmove:hover { filter: brightness(1.08); }',
   '.dtt-iu__kmove:active { transform: translateY(0); }',

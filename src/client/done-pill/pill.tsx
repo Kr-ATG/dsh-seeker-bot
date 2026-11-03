@@ -540,6 +540,31 @@ const PILL_CSS = `
 .dpl-settings-select .dpl-settings-chev{flex:none}
 @keyframes dpPop{0%{transform:scale(.5);opacity:0}100%{transform:scale(1);opacity:1}}
 @keyframes dpRowIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+/* ── 浮层退场动效（2026-11-04 补：此前一律瞬关，用户要求划入 + 划出）──
+   关闭时先播一段退场再卸载。时长 .24s 对齐 modal-animation.ts 的
+   MODAL_ANIM_MS；曲线 cubic-bezier(.4,0,.2,1) 是加速语义——入场走减速
+   （.32,.72,0,1），退场反向才有「被收回去」而不是「又弹一下」的观感。
+   形态：淡出 + 下滑 8px + 缩到 .97（popover 尺度，位移比 modal 小）。
+   !important 是必需的：这些浮层的入场 animation 写在内联 style 上
+   （如 sidebar-card 的 popStyle），CSS 选择器不靠 !important 压不过内联声明。
+   选择器用 [data-dpp-pop] 收窄：.dsh-done-pill 还被录屏面板的卡片复用，
+   不加这层限定会把 popover 的 8px 位移套到居中 modal 上。 */
+@keyframes dpPopOut{from{opacity:1;transform:none}to{opacity:0;transform:translateY(8px) scale(.97)}}
+.dsh-done-pill[data-dpp-pop="1"][data-closing="1"]{animation:dpPopOut .24s cubic-bezier(.4,0,.2,1) forwards !important}
+/* 注意这里**不能**加 pointer-events:none：sidebar-card 的鼠标从卡片滑回弹窗时
+   靠 onMouseEnter → showPop → cancelClose 撤销退场；禁掉指针后那条回弹路径就断了。 */
+/* 录屏目标选择面板（rec-picker-panel.tsx）：居中 modal，退场比 popover 多下移
+   一点（14px）；遮罩单独 ease 淡出——两层节奏分开，否则整块像一起塌下去。 */
+@keyframes dplPickerMaskOut{from{opacity:1}to{opacity:0}}
+@keyframes dplPickerCardOut{from{opacity:1;transform:none}to{opacity:0;transform:translateY(14px) scale(.97)}}
+.dpl-rec-picker-mask[data-closing="1"]{animation:dplPickerMaskOut .24s ease forwards !important;pointer-events:none}
+.dpl-rec-picker-card[data-closing="1"]{animation:dplPickerCardOut .24s cubic-bezier(.4,0,.2,1) forwards !important}
+/* reduced-motion：新动画一律进关闭列表（只关动画，卸载时机仍由 JS 计时器控制）。 */
+@media (prefers-reduced-motion:reduce){
+  .dsh-done-pill[data-dpp-pop="1"][data-closing="1"],
+  .dpl-rec-picker-mask[data-closing="1"],
+  .dpl-rec-picker-card[data-closing="1"]{animation:none !important}
+}
 /* 跳转失败提示条（nav-toast.tsx）：从下方滑入 + 微缩放，收起时反向淡出。
    与胶囊同一套节奏（.32,.72,0,1），保持整插件的动效语言一致。 */
 @keyframes dplToastIn{from{opacity:0;transform:translateY(10px) scale(.97)}to{opacity:1;transform:none}}
@@ -608,7 +633,7 @@ body[data-ds-dark-theme] .dsh-done-pill{
   -webkit-backdrop-filter:blur(12px);
   color:var(--dpl-fg);
   box-shadow:var(--dpl-shell-shadow);
-  animation:dpMount .5s cubic-bezier(.32,.72,0,1) backwards;
+  animation:dpMount .24s cubic-bezier(.2,.8,.2,1) backwards;
 }
 body[data-ds-dark-theme] .dsh-done-pill-shell{
   background:rgba(32,32,32,.92);
@@ -678,7 +703,7 @@ body[data-ds-dark-theme] .dsh-done-pill-shell{
   transition:transform .22s cubic-bezier(.32,.72,0,1),color .2s ease;
 }
 .dsh-done-pill-main:hover .dpl-chev{transform:translateX(2px);color:var(--dpl-fg)}
-.dsh-done-pill-row{animation:dpRowIn .32s cubic-bezier(.32,.72,0,1) backwards}
+.dsh-done-pill-row{animation:dpRowIn .24s cubic-bezier(.2,.8,.2,1) backwards}
 @media (prefers-reduced-motion:reduce){
   .dsh-done-pill-shell,.dpl-run-arc,.dsh-done-pill-row{animation:none !important}
   .dsh-done-pill-shell,.dsh-done-pill-main .dpl-chev,.dsh-done-pill-row{transition:none !important}
@@ -725,7 +750,7 @@ body[data-ds-dark-theme] .dsh-done-pill-shell{
 /* 卡片挂载入场：只淡入不位移——弹窗 portal 挂在本容器内用 fixed 定位，
    祖先留 transform 会把 fixed 变成相对定位（弹窗错位）。 */
 @keyframes dppCardIn{from{opacity:0}to{opacity:1}}
-[data-dpp-card]{animation:dppCardIn .45s ease backwards}
+[data-dpp-card]{animation:dppCardIn .24s cubic-bezier(.2,.8,.2,1) backwards}
 /* 进行中常态：有条目时呼吸辉光（hover / 一次性动画期间让位，避免抢通道）。 */
 @keyframes dppBreath{0%,100%{box-shadow:var(--dpl-shell-shadow)}50%{box-shadow:var(--dpl-shell-shadow-unread)}}
 .dpp-bar[data-state="running"]:not(:hover):not(.dpp-fx-start):not(.dpp-fx-done){
@@ -744,9 +769,9 @@ body[data-ds-dark-theme] .dsh-done-pill-shell{
 .dpp-bar.dpp-fx-done{animation:dppFxDone .85s cubic-bezier(.32,.72,0,1)}
 /* 条上文案 / 图标 / 徽标随内容切换淡入弹跳（组件用 key 变化重挂载触发）。 */
 @keyframes dppSwapIn{0%{transform:scale(.4);opacity:0}60%{transform:scale(1.08);opacity:1}100%{transform:scale(1)}}
-.dpp-bar-label{animation:dpLineIn .3s cubic-bezier(.32,.72,0,1) backwards}
-.dpp-icon-swap{display:inline-flex;animation:dppSwapIn .45s cubic-bezier(.32,.72,0,1) backwards}
-.dpp-badge-pop{animation:dpPop .35s cubic-bezier(.32,.72,0,1)}
+.dpp-bar-label{animation:dpLineIn .24s cubic-bezier(.2,.8,.2,1) backwards}
+.dpp-icon-swap{display:inline-flex;animation:dppSwapIn .24s cubic-bezier(.2,.8,.2,1) backwards}
+.dpp-badge-pop{animation:dpPop .24s cubic-bezier(.2,.8,.2,1)}
 /* 面板滚动条：最细细条（3px、无轨道、无上下箭头按钮）——作用于面板本身
    与内部所有可滚动元素（记录卡内的 <pre> 全文等）。
    ⚠ 不能同时写标准 scrollbar-width/scrollbar-color：现代 Chromium 一旦
@@ -772,7 +797,7 @@ body[data-ds-dark-theme] .dsh-done-pill-shell{
 .dpl-rec-btn:focus-visible{outline:2px solid var(--dpl-fg);outline-offset:1px}
 .dpl-rec-btn:disabled{cursor:default;opacity:.5}
 .dpl-rec-icon{position:relative;display:inline-flex;align-items:center;justify-content:center;color:var(--dpl-fg-dim)}
-.dpl-rec-label{animation:dpLineIn .28s cubic-bezier(.32,.72,0,1) backwards;color:var(--dpl-fg-dim)}
+.dpl-rec-label{animation:dpLineIn .24s cubic-bezier(.2,.8,.2,1) backwards;color:var(--dpl-fg-dim)}
 /* 待机图标 hover 微亮。 */
 .dpl-rec-btn:hover:not(:disabled) .dpl-rec-icon{color:var(--dpl-fg)}
 /* 录制中：红点语义色 + 呼吸光环（::before 环从中心扩散淡出）。 */
@@ -789,7 +814,7 @@ body[data-ds-dark-theme] .dsh-done-pill-shell{
 /* 编码中：spinner 匀速自转。 */
 .dpl-rec-btn[data-state="encoding"] .dpl-rec-icon{color:var(--dpl-fg-dim);animation:dplRecSpin .8s linear infinite}
 /* 弹窗头部的录制状态芯片：红点脉冲 + 计时；编码中 spinner 自转。 */
-.dpl-rec-chip{animation:dpLineIn .28s cubic-bezier(.32,.72,0,1) backwards}
+.dpl-rec-chip{animation:dpLineIn .24s cubic-bezier(.2,.8,.2,1) backwards}
 .dpl-rec-chip-dot{position:relative;flex:none;width:7px;height:7px;border-radius:50%;background:#e5484d}
 .dpl-rec-chip-dot::after{content:'';position:absolute;inset:-4px;border-radius:50%;border:1.5px solid #e5484d;animation:dplRecChipPing 1.5s cubic-bezier(0,0,.2,1) infinite}
 .dpl-rec-chip-spin{display:inline-flex;animation:dplRecSpin .8s linear infinite}
@@ -971,7 +996,7 @@ const checkBadgeStyle: CSSProperties = {
   borderRadius: '50%',
   display: 'inline-flex',
   background: 'var(--dpl-fg)',
-  animation: 'dpPop .35s cubic-bezier(.32,.72,0,1)',
+  animation: 'dpPop .24s cubic-bezier(.2,.8,.2,1)',
 }
 
 /** 灯泡徽章容器：单色线稿（底色走 .dpl-bulb-badge，极简无环）。 */

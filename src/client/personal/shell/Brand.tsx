@@ -11,6 +11,20 @@
  */
 import { BRAND_WORDMARK_RATIO, BRAND_WORDMARK_SVG, FISH_LOGO_PATH, FISH_LOGO_VIEWBOX } from './brand-svg.ts'
 
+/**
+ * 内联官方 wordmark 的 clipPath id 加 pa- 前缀。
+ *
+ * 官方 SVG 里有两个全局 clipPath id（dsh-wordmark-whale-clip /
+ * dsh-wordmark-badge-clip）。Work 模式官方品牌行本身也带同 id 的 SVG；
+ * Bot 模式下官方 logoRow 只是 visibility:hidden（为了不重播 wide-in 动画，
+ * 不能 display:none），两棵子树同时留在渲染树里时，url(#...) 会按文档顺序
+ * 解析到另一份定义，HARNESS 徽标的字母会被裁掉、只剩一块黑底。
+ * 本插件这份改用独立 id，跨组件不再冲突。
+ */
+const BRAND_WORDMARK_SVG_SCOPED = BRAND_WORDMARK_SVG
+  .replaceAll('dsh-wordmark-whale-clip', 'pa-brand-wordmark-whale-clip')
+  .replaceAll('dsh-wordmark-badge-clip', 'pa-brand-wordmark-badge-clip')
+
 /** 鲸鱼 mark（官方 FishLogo 的同款几何，高度按 viewBox 比例算）。 */
 export function BrandMark({ size = 24 }: { size?: number }): JSX.Element {
   return (
@@ -38,17 +52,23 @@ export function BrandWordmark({ height = 24 }: { height?: number }): JSX.Element
       className="pa-brand__wordmark"
       style={{ height: `${height}px`, width: `${height * BRAND_WORDMARK_RATIO}px` }}
       // 官方 SVG 是静态素材（不含用户输入），内联渲染不会引入注入面。
-      dangerouslySetInnerHTML={{ __html: BRAND_WORDMARK_SVG }}
+      dangerouslySetInnerHTML={{ __html: BRAND_WORDMARK_SVG_SCOPED }}
       aria-hidden="true"
     />
   )
 }
 
 /**
- * 侧栏收起 / 展开图标（官方 IconPanelLeftOutlineRegular 的同款形态）。
+ * 侧栏收起 / 展开图标（官方 IconPanelLeftOutlineRegular 的**逐路径复刻**）。
  *
- * 外框是圆角矩形，左侧一条竖线把「面板」与「内容区」分开；不画箭头，
- * 与 Work 模式侧栏右上角那枚按钮一致。
+ * 2026-11-03 用户指出「Work 与 Bot 切换上方的收起图标不一致」：旧版是自绘的
+ * rect（1.7/2.7/12.6×10.6、rx 2.6）配 1.3px 描边，比 Work 模式官方那枚
+ * （见 dsh-client-ui-primitives 的 #dsw-icon-panel-left-outline-regular）
+ * 更圆、更粗、整体小一圈，两模式来回切能明显看出图标在变。
+ *
+ * 这里直接照抄官方 symbol 的 viewBox / 路径 / 描边宽度（1px、无圆头圆角），
+ * 不再用 <rect> 近似——连 rx 的贝塞尔曲线都保持原样，任何缩放比例下都与
+ * Work 模式那一枚逐像素一致。改这里必须同步核对官方 symbol，不要凭手感调。
  */
 export function IconPanelLeft({ size = 16 }: { size?: number }): JSX.Element {
   return (
@@ -58,13 +78,11 @@ export function IconPanelLeft({ size = 16 }: { size?: number }): JSX.Element {
       viewBox="0 0 16 16"
       fill="none"
       stroke="currentColor"
-      strokeWidth={1.3}
-      strokeLinecap="round"
-      strokeLinejoin="round"
+      strokeWidth={1}
       aria-hidden="true"
     >
-      <rect x="1.7" y="2.7" width="12.6" height="10.6" rx="2.6" />
-      <path d="M6.1 2.7v10.6" />
+      <path d="M13.5 1.5H2.5C1.94772 1.5 1.5 1.94772 1.5 2.5V13.5C1.5 14.0523 1.94772 14.5 2.5 14.5H13.5C14.0523 14.5 14.5 14.0523 14.5 13.5V2.5C14.5 1.94772 14.0523 1.5 13.5 1.5Z" />
+      <path d="M5.5 1.5V14.5" />
     </svg>
   )
 }

@@ -26,7 +26,6 @@ import { useSessionOutputs } from './use-session-outputs.ts'
 import { getCapabilitiesStore } from './capabilities-store.ts'
 import { KR_MEMORY_CARD_VISIBLE, KR_OUTPUTS_CARD_VISIBLE, KR_PLAIN_TIMELINE_CARD_VISIBLE, KR_SUBAGENTS_CARD_VISIBLE, KR_TOOL_CALLS_CARD_VISIBLE } from './enabled.ts'
 import { subscribeToolCallsVisible, toolCallsVisible } from '../tool-calls-visible.js'
-import { subscribePlainTimelineVisible, plainTimelineVisible } from '../plain-timeline-visible.js'
 import { KrPanelSettings } from './KrPanelSettings.tsx'
 import { installConversationScrollGuard } from './scroll-guard.ts'
 import { installConversationScrollbarAutoHide } from './scrollbar-autohide.ts'
@@ -114,8 +113,6 @@ export const KrAgentPanel = memo(function KrAgentPanel({
   // 工具调用卡的运行时展示开关（localStorage 呈现偏好，与构建开关叠加）。
   // 走 useSyncExternalStore：别的窗口拨动同一开关时本面板同步响应。
   const toolCallsOn = useSyncExternalStore(subscribeToolCallsVisible, toolCallsVisible, toolCallsVisible)
-  // 操作面板卡的同款展示开关（同族：纯呈现偏好、localStorage、跨窗口同步）。
-  const plainTimelineOn = useSyncExternalStore(subscribePlainTimelineVisible, plainTimelineVisible, plainTimelineVisible)
 
   /*
    * 功能开关（live）——右栏各卡是否渲染。
@@ -885,12 +882,12 @@ export const KrAgentPanel = memo(function KrAgentPanel({
          * 上面，用户看到的是「怎么跑到最上面去了」。现在按阅读顺序排：
          * 子智能体（谁在干活）→ 操作面板（我干了什么）→ 任务概览（计划）→ 产出物。
          *
-         * 后缀 plainTimelineOn 是**运行时**展示开关（「大盘设置 → 展示」里那枚），
-         * 与构建开关 KR_PLAIN_TIMELINE_CARD_VISIBLE、功能开关 view.panel-live 三层
-         * 叠加：构建开关决定这张卡还存不存在，功能开关是插件页面的统一入口，
-         * 运行时开关决定用户此刻要不要看。三个都开才渲染。
+         * 这道卡**不允许关闭**（2026-11-03 用户：「移除操作面板开关，不允许关闭」）：
+         * 原先「大盘设置 → 展示」里那枚运行时开关已整条移除，只保留构建开关
+         * KR_PLAIN_TIMELINE_CARD_VISIBLE（决定这张卡还存不存在）与功能开关
+         * view.panel-live（插件页面的统一入口）。两者都开就渲染，用户没有关掉它的入口。
          */}
-        {KR_PLAIN_TIMELINE_CARD_VISIBLE && plainTimelineOn && panelLiveOn && (
+        {KR_PLAIN_TIMELINE_CARD_VISIBLE && panelLiveOn && (
           <KrPlainTimelineCard
             timeline={plainTimeline}
             running={currentRunning}

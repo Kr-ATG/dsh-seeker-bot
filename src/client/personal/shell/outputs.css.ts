@@ -310,7 +310,7 @@ export const PERSONAL_OUTPUTS_CSS = `
   padding: 32px;
   background: rgba(0, 0, 0, 0.58);
   backdrop-filter: blur(6px);
-  animation: pa-out-fade 160ms ease both;
+  animation: pa-out-fade 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-out-preview__panel {
   display: flex;
@@ -325,7 +325,7 @@ export const PERSONAL_OUTPUTS_CSS = `
   color: var(--pa-text);
   box-shadow: var(--pa-shadow-pop);
   overflow: hidden;
-  animation: pa-out-pop 190ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  animation: pa-out-pop 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-out-preview__head {
   flex: none;
@@ -467,6 +467,30 @@ export const PERSONAL_OUTPUTS_CSS = `
   from { opacity: 0; transform: translateY(8px) scale(0.975); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
+/*
+ * 退场：遮罩淡出 + 面板下沉 14px 并轻微缩小。
+ *
+ * 入场是 160ms 淡入 + 190ms 弹入，出场原来是硬消失（父层 preview 一置 null
+ * 这层就被摘掉）。时长与曲线对齐 modal-animation.ts 的 MODAL_ANIM_MS：240ms，
+ * 出场用加速曲线（从静止启动、峰值速度结束），与插件其它弹层同一套手感。
+ *
+ * 页面卡（PagesCard 的 PagePreview）复用同一组 pa-out-preview-* 类，所以这一处
+ * 退场同时覆盖「产出物预览」与「页面预览」两个灯箱。
+ */
+@keyframes pa-out-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes pa-out-away {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(14px) scale(0.97); }
+}
+.pa-out-preview[data-closing='1'] {
+  animation: pa-out-fade-out 240ms ease both;
+}
+.pa-out-preview[data-closing='1'] .pa-out-preview__panel {
+  animation: pa-out-away 240ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
 
 @media (max-width: 640px) {
   .pa-out-preview { padding: 12px; }
@@ -482,6 +506,10 @@ export const PERSONAL_OUTPUTS_CSS = `
   .pa-out-head__chev { transition: none; }
   .pa-out-preview { animation: none; }
   .pa-out-preview__panel { animation: none; }
+  /* 退场规则带 [data-closing='1']，权重比上面两条高；媒体查询不增加权重，
+     不原样再列一遍的话，减少动效偏好下退场动画会照播。 */
+  .pa-out-preview[data-closing='1'],
+  .pa-out-preview[data-closing='1'] .pa-out-preview__panel { animation: none; }
 }
 `
 

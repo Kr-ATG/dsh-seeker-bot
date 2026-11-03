@@ -11,9 +11,10 @@
  * 数据源是工具结果文本（b64_json），不走 markdown 图片策略，因此即使
  * 模型在正文里只写了图片路径文字，图也会直接显示。
  */
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { injectGalleryStyles } from '../styles'
+import { MODAL_ANIM_MS } from '../modal-animation.ts'
 
 const NS = 'dgi'
 const cls = {
@@ -126,6 +127,42 @@ export function GeneratedImageStrip({ images, model }: {
   const [openIndex, setOpenIndex] = useState<number | null>(null)
   const [broken, setBroken] = useState<ReadonlySet<number>>(new Set())
   const [saveState, setSaveState] = useState<SaveState>('idle')
+  /**
+   * 灯箱退场态（240ms，见 modal-animation.ts 的 MODAL_ANIM_MS）。
+   *
+   * Esc 与点空白此前都是 setOpenIndex(null) 瞬关，而入场的 dgi-fade-in /
+   * dgi-zoom-in 却是有动画的——一进一出不对称。现在置 closing 让样式表播
+   * dgi-fade-out / dgi-zoom-out，播完才真正卸载。
+   */
+  const [closing, setClosing] = useState(false)
+  const closeTimerRef = useRef<number | null>(null)
+
+  /** 两条关闭入口（Esc / 点空白）统一走这里：先播退场再卸载。 */
+  const requestClose = useCallback((): void => {
+    if (closeTimerRef.current !== null) return
+    setClosing(true)
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null
+      setClosing(false)
+      setOpenIndex(null)
+    }, MODAL_ANIM_MS)
+  }, [])
+
+  /**
+   * 撤销尚未播完的退场：退场窗口里点了另一张缩略图时原地弹回。
+   * 少了它，计时器到点会把刚打开的大图一起关掉。
+   */
+  const cancelClose = useCallback((): void => {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current)
+      closeTimerRef.current = null
+    }
+    setClosing(false)
+  }, [])
+
+  useEffect(() => () => {
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
+  }, [])
 
   // 幂等注入样式（SSR 环境无 document 时静默跳过）
   useEffect(() => { injectGalleryStyles() }, [])
@@ -133,11 +170,12 @@ export function GeneratedImageStrip({ images, model }: {
   useEffect(() => {
     if (openIndex === null) return
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setOpenIndex(null)
+      // Esc 也先播退场（与点空白同一条路径）。
+      if (event.key === 'Escape') requestClose()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [openIndex])
+  }, [openIndex, requestClose])
 
   const open = openIndex !== null ? images[openIndex] : undefined
   const onSave = async (): Promise<void> => {
@@ -159,7 +197,7 @@ export function GeneratedImageStrip({ images, model }: {
             type="button"
             key={`${url.slice(0, 48)}:${index}`}
             className={cls.item}
-            onClick={() => { setOpenIndex(index); setSaveState('idle') }}
+            onClick={() => { cancelClose(); setOpenIndex(index); setSaveState('idle') }}
             title={L.open}
           >
             <img
@@ -179,10 +217,11 @@ export function GeneratedImageStrip({ images, model }: {
       {open !== undefined && createPortal(
         <div
           className={cls.backdrop}
+          data-closing={closing ? '1' : undefined}
           role="dialog"
           aria-modal="true"
           aria-label={`${L.lightboxAria} ${(openIndex as number) + 1}`}
-          onClick={() => setOpenIndex(null)}
+          onClick={requestClose}
         >
           <div className={cls.stage} onClick={event => event.stopPropagation()}>
             <button
@@ -210,6 +249,7 @@ export function GeneratedImageStrip({ images, model }: {
                 src={open}
                 alt={`${L.lightboxAria} ${(openIndex as number) + 1}`}
                 className={cls.full}
+                data-closing={closing ? '1' : undefined}
                 onError={() => markBroken(openIndex as number)}
               />
             )}

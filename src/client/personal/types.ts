@@ -16,11 +16,23 @@ export interface Avatar {
   color: string
   /** 可选第二色，用于 blob 高光 / 渐变 */
   tint?: string
+  /**
+   * 本地导入的图片（data URL，压到 160×160 的 JPEG，约 10–20KB）。
+   *
+   * 有值时优先渲染图片；形状与颜色留着当回退——用户移除图片后立刻回到原来
+   * 那个 SVG 头像，不用重新挑一遍。存进 localStorage，跟 Bot 数据一起持久化。
+   */
+  image?: string
 }
 
 export interface BotModel {
   provider: string
   model: string
+  /**
+   * 推理强度档位（模型公布的可选 id，如 `high` / `max`）。
+   * 缺省或空串 = 不下发 `reasoningEffort`，跟随模型自己的默认档。
+   * 可选值来自宿主 `/api/personal-agent/models` 返回的 `reasoningEfforts`。
+   */
   effort?: string
 }
 
@@ -77,6 +89,14 @@ export interface Bot {
    * 是 `undefined`，按「跟随全局默认」处理即可，不需要迁移。
    */
   liveVendor?: string
+  /**
+   * 自动朗读回复：新回复到达后自动用「通话里设置的音色与供应商」念出来。
+   *
+   * **默认关**（旧数据没有这个字段 = 不朗读）：朗读会占用扬声器、在安静场合
+   * 很打扰，属于「用户明确打开才生效」的增强。只影响**文字回复**的朗读，
+   * 不影响语音通话本身——通话那条链路本来就在播语音。
+   */
+  autoSpeak?: boolean
   /** 工具权限档位；旧数据没有这个字段时按 `full` 处理。 */
   permission?: BotPermission
   proactive: ProactiveConfig
@@ -90,7 +110,6 @@ export interface BotGroup {
   id: string
   name: string
   order: number
-  collapsed?: boolean
 }
 
 export interface Room {
@@ -98,6 +117,19 @@ export interface Room {
   name: string
   memberIds: string[]
   unread: number
+  /**
+   * 置顶：侧栏「群聊」区块里排到最前（旧数据没有这个字段 = 不置顶）。
+   *
+   * 与 Bot.pinned 同一套语义：只影响侧栏排序，不动 createdAt 之类的原始顺序，
+   * 取消置顶后就回到原来的位置。
+   */
+  pinned?: boolean
+  /**
+   * 群聊自己的头像（与 Bot.avatar 同一套结构）。
+   *
+   * 缺省 = 用成员头像叠加（旧行为）；用户选了头像后侧栏 / 会话头 / 轨道都改用它。
+   */
+  avatar?: Avatar
   lastMessage?: string
   lastAt?: number
   modelMode: 'inherit' | 'unified'
@@ -870,6 +902,22 @@ export interface PersonalUi {
    * 不改变当前选中的 Bot / 群聊，所以不需要在折叠时动 `selectedBotId`。
    */
   sidebarCollapsed: boolean
+  /**
+   * 收起的分区 id 列表（侧栏手风琴）：Bot 分组用 group.id，群聊区块用 'rooms'。
+   *
+   * 为什么放 ui 而不是 BotGroup 上：折叠是「这一次想不想看」，不是 Bot 数据；
+   * 而且群聊区块没有 group 实体，放同一份列表里两处才能共用一套交互。
+   * 存进 `pa:ui:v1`，刷新 / 重开页面保持。
+   */
+  collapsedSections: string[]
+  /**
+   * 各会话的「已读时刻」：key 为 `bot:<id>` / `room:<id>`，值是切进该会话的时间。
+   *
+   * 侧栏用它判断「有没有新回复」——比维护 unread 计数稳：流式回复是多条消息、
+   * 还可能先来一条 pending 占位，按条累加既会漏（占位不计）也会虚高（一轮多条）。
+   * 用「消息 at > 已读时刻」判定，流式过程中就能亮起来，切进会话即清零。
+   */
+  readAt: Record<string, number>
   rightPanelOpen: boolean
   /**
    * 右栏宽度（px）。用户拖拽右栏左边缘调整，松手后写进 `pa:ui:v1`。
@@ -964,6 +1012,8 @@ export interface NewBotInput {
   instructions?: string
   color?: string
   shape?: AvatarShape
+  /** 完整头像（含本地图片）；给定时优先于 color / shape。 */
+  avatar?: Avatar
   groupId?: string
   /** 通话音色；留空 = 跟随全局默认（见 `Bot.voice`）。 */
   voice?: string

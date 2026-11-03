@@ -258,6 +258,13 @@ export interface InjectStateView {
    */
   todoRuleEnabled?: boolean
   /**
+   * 动效技能强制加载通道是否开启。
+   *
+   * 与其余通道**口径相反**：它默认关（升级不改变现状），因此旧 host 不回该字段时
+   * 按 false 兜底——缺字段意味着这版 host 根本没有这条通道，显示「开」是假阳性。
+   */
+  motionEnabled?: boolean
+  /**
    * 当前**工作区**（cwd）派生的项目 hash（12 位 hex）；拿不到工作区时为 null。
    *
    * 由 /inject-state 顺带回传，而不是另开一个新 GET。
@@ -555,6 +562,8 @@ export function createMemoryApi(): MemoryApi {
     setTodoClosureState: (enabled) => sendJson<ZhInjectStateView & { ok: boolean }>('/todo-closure-state', { enabled }),
     getTodoRuleInjectState: () => getJson<ZhInjectStateView>('/todo-rule-inject-state'),
     setTodoRuleInjectState: (enabled) => sendJson<ZhInjectStateView & { ok: boolean }>('/todo-rule-inject-state', { enabled }),
+    getMotionInjectState: () => getJson<ZhInjectStateView>('/motion-inject-state'),
+    setMotionInjectState: (enabled) => sendJson<ZhInjectStateView & { ok: boolean }>('/motion-inject-state', { enabled }),
     consolidate: (scope = 'all', projectHash) => sendJson<{ ok: boolean; results: ConsolidateResultView[] }>('/consolidate', { scope, projectHash }),
     revisions: () => getJson<{ revisions: RevisionView[] }>('/revisions'),
     rollback: (revisionId) => sendJson<{ ok: boolean }>('/rollback', { revisionId }),

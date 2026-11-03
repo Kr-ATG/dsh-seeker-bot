@@ -19,9 +19,10 @@
  * 或跟着抽屉一起滑，还会被困在抽屉的层叠上下文里。挂到 body 才是真正的满屏。
  */
 
-import { useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import type { ChangeEvent, JSX } from 'react'
 import { createPortal } from 'react-dom'
+import { useModalClose } from '../triad-modal-animation.js'
 import type { VaultConfig, VaultPhoto, VaultRecord } from '../../../triad/vault/types.js'
 import {
   compressOptionsOf,
@@ -53,6 +54,14 @@ interface LightboxState {
 }
 
 /**
+ * 灯箱淡出时长（ms）。
+ *
+ * 它是小浮层（一张图 + 一行信息），不需要弹窗那 240ms；160ms 足够让人看清
+ * 「它收走了」，又不至于在关图时显得拖。
+ */
+const LIGHTBOX_ANIM_MS = 160
+
+/**
  * 上传角色：证件类场景按「正面 / 背面 / 其它」轮着来。
  *
  * role 在宿主侧只作展示与排序提示（见 types.ts 的 VaultPhoto.role），但把
@@ -73,6 +82,18 @@ export function VaultPhotoGrid({
   const [uploading, setUploading] = useState<string>('')
   const [lightbox, setLightbox] = useState<LightboxState | null>(null)
   const [deleting, setDeleting] = useState<string>('')
+
+  /**
+   * 灯箱退场：关闭时先播 160ms 淡出，播完才真正 setLightbox(null)。
+   *
+   * 用共享的 useModalClose 而不是自己计时：三处关闭入口（点遮罩 / 关闭钮 /
+   * 删掉正在看的那张）要走同一条路径，分散写三份计时器迟早漏一处。
+   * 渲染条件不用改——退场期间 lightbox 仍非 null，组件还在树上。
+   */
+  const {
+    closing: lightboxClosing,
+    requestClose: requestLightboxClose,
+  } = useModalClose(lightbox !== null, useCallback(() => { setLightbox(null) }, []), LIGHTBOX_ANIM_MS)
 
   const maxPhotos = typeof config.maxPhotosPerRecord === 'number' ? config.maxPhotosPerRecord : 12
   const full = record.photos.length >= maxPhotos
@@ -129,7 +150,8 @@ export function VaultPhotoGrid({
     try {
       const next = await deleteVaultPhoto(record.id, photo.id)
       onRecord(next)
-      if (lightbox !== null && lightbox.photo.id === photo.id) setLightbox(null)
+      // 删掉的正好是灯箱里那张：同样走退场，不要「啪」地闪回网格。
+      if (lightbox !== null && lightbox.photo.id === photo.id) requestLightboxClose()
     } catch (error) {
       onError('删除照片失败：' + (error instanceof Error ? error.message : String(error)))
     } finally {
@@ -205,9 +227,11 @@ export function VaultPhotoGrid({
           <div
             className={css.lightbox}
             data-role="lightbox"
+            // 退场标记：样式表里 .dsh-vault-lightbox[data-closing="true"] 播 160ms 淡出
+            data-closing={lightboxClosing ? 'true' : undefined}
             role="dialog"
             aria-label={lightbox.photo.label}
-            onClick={() => { setLightbox(null) }}
+            onClick={() => { requestLightboxClose() }}
           >
             <img
               className={css.lightboxImg}
@@ -226,7 +250,7 @@ export function VaultPhotoGrid({
               className={css.photoDel}
               style={{ opacity: 1, top: 18, right: 18, width: 30, height: 30 }}
               aria-label="关闭大图"
-              onClick={(event) => { event.stopPropagation(); setLightbox(null) }}
+              onClick={(event) => { event.stopPropagation(); requestLightboxClose() }}
             >
               <CloseIcon size={15} />
             </button>

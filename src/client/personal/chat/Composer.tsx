@@ -2,22 +2,40 @@
  * Personal Agent — 输入框。
  *
  * 图片（粘贴 / 选文件）→ 先上传落盘（`POST /api/personal-agent/upload`）→
- * 消息块只存同源 URL 与相对路径；textarea 自动增高到 140px、Enter 发送 /
- * Shift+Enter 换行、麦克风语音转写（录音 → DSH speech Remote / host ASR，
+ * 消息块只存同源 URL 与相对路径；textarea 自动增高（上限与 Work 对话框一致，
+ * 336px）、Enter 发送 / Shift+Enter 换行、麦克风语音转写（录音 → DSH speech Remote / host ASR，
  * 与 Work 模式同一条 SenseVoice 链路）、群聊 @ 成员菜单。
  *
  * 语音输入不再在输入框上方堆一行状态文字：录音时整块输入框让位给
  * VoiceBar（X / 实时波形 / 停止 / 发送），录完把文字交回输入框或直接发。
  */
-import { useCallback, useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type ClipboardEvent } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
 import { IconMessage, IconPaperclip, IconPlus, IconSend, IconStop, IconUsers, IconWave, IconX } from '../icons.tsx'
 import { usePersonal } from '../store.tsx'
 import { SpeechRecorder, transcribeWav } from '../audio.ts'
+import { primeSpeech } from '../speech.ts'
 import { VoiceBar, type VoiceBarPhase } from './VoiceBar.tsx'
 import type { Bot, ChatImage } from '../types.ts'
 
 type VoicePhase = 'idle' | VoiceBarPhase
+
+/**
+ * 输入框自适应高度：先按内容撑开，涨到上限为止，再超出才在框内滚动。
+ *
+ * 上限不写死在这里——读 CSS 的 max-height（见 chat.css.ts 的
+ * .pa-composer__textarea）。Work 模式的对话框上限是 DSH 的
+ * --dsh-composer-text-max-height（336px），Bot 模式跟它对齐：以前这里硬编码
+ * 140px，多行消息到五行就不再长，长文本只能在小框里滚。
+ */
+function autoGrowTextarea(element: HTMLTextAreaElement): void {
+  element.style.height = 'auto'
+  const maxHeight = Number.parseFloat(getComputedStyle(element).maxHeight)
+  const next = Number.isFinite(maxHeight) && maxHeight > 0
+    ? Math.min(element.scrollHeight, maxHeight)
+    : element.scrollHeight
+  element.style.height = `${next}px`
+}
 
 export function Composer(): JSX.Element {
   const { state, ui, actions, activeBot, activeRoom, activeMessages } = usePersonal()
@@ -27,6 +45,13 @@ export function Composer(): JSX.Element {
   const [uploading, setUploading] = useState(0)
   const [voicePhase, setVoicePhase] = useState<VoicePhase>('idle')
   const [mentionOpen, setMentionOpen] = useState(false)
+  /*
+   * @ 提及气泡的退场状态：关闭时先播 240ms（淡出 + 向右位移缩小），再卸载。
+   * 直接 setMentionOpen(false) 会让气泡硬消失；时长 / 曲线与
+   * src/client/modal-animation.ts 的 MODAL_ANIM_MS 对齐。
+   */
+  const [mentionClosing, setMentionClosing] = useState(false)
+  const mentionTimerRef = useRef<number | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -41,12 +66,32 @@ export function Composer(): JSX.Element {
       .map((id) => state.bots.find((bot) => bot.id === id))
       .filter((bot): bot is Bot => bot !== undefined)
 
+  /*
+   * 用 layout effect：发送后立刻回到单行高度，避免下一帧还闪一下高框。
+   * voicePhase 也进依赖：录音时 textarea 会被 VoiceBar 换下，取消录音回到输入框
+   * 是一次重新挂载——此时 text 没变，只靠 [text] 不会重新量，多行草稿会塌回一行。
+   */
+  useLayoutEffect(() => {
+    const element = textareaRef.current
+    if (element !== null) autoGrowTextarea(element)
+  }, [text, voicePhase])
+
+  /*
+   * 对话列被左右拖宽 / 窗口缩放时重新量一次：同一段文本在窄列里会多折几行，
+   * 不重算就会留下截断或空白。只认宽度变化，避免高度写入触发观察器自循环。
+   */
   useEffect(() => {
     const element = textareaRef.current
-    if (element === null) return
-    element.style.height = 'auto'
-    element.style.height = `${Math.min(element.scrollHeight, 140)}px`
-  }, [text])
+    if (element === null || typeof ResizeObserver === 'undefined') return undefined
+    let width = element.clientWidth
+    const observer = new ResizeObserver(() => {
+      if (element.clientWidth === width) return
+      width = element.clientWidth
+      autoGrowTextarea(element)
+    })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [voicePhase])
 
   useEffect(() => () => {
     const recorder = recorderRef.current
@@ -54,15 +99,52 @@ export function Composer(): JSX.Element {
     if (recorder !== null) void recorder.cancel()
   }, [])
 
+  /** 收起 @ 气泡：先播退场，240ms 后再真正卸载。 */
+  const closeMention = useCallback((): void => {
+    // 气泡本来就没开（例如单聊里直接发送）：不能起退场，否则会凭空渲染一个空气泡。
+    if (!mentionOpen) return
+    if (mentionTimerRef.current !== null) return
+    setMentionClosing(true)
+    mentionTimerRef.current = window.setTimeout(() => {
+      mentionTimerRef.current = null
+      setMentionClosing(false)
+      setMentionOpen(false)
+    }, 240)
+  }, [mentionOpen])
+
+  /** 撤销退场：退场途中再点「@ 提及」，气泡原地弹回。 */
+  const cancelMentionClose = useCallback((): void => {
+    if (mentionTimerRef.current !== null) {
+      window.clearTimeout(mentionTimerRef.current)
+      mentionTimerRef.current = null
+    }
+    setMentionClosing(false)
+  }, [])
+
+  useEffect(() => () => {
+    if (mentionTimerRef.current !== null) window.clearTimeout(mentionTimerRef.current)
+  }, [])
+
   useEffect(() => {
     if (!mentionOpen) return undefined
     const close = (event: MouseEvent): void => {
       if (rootRef.current !== null && event.target instanceof Node && rootRef.current.contains(event.target)) return
-      setMentionOpen(false)
+      closeMention()
     }
     document.addEventListener('mousedown', close)
     return () => document.removeEventListener('mousedown', close)
-  }, [mentionOpen])
+  }, [mentionOpen, closeMention])
+
+  /* Esc 关闭 @ 气泡：与点外部、选中成员走同一个退场。 */
+  useEffect(() => {
+    if (!mentionOpen) return undefined
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      closeMention()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [mentionOpen, closeMention])
 
   const readLevel = useCallback((): number => recorderRef.current?.level() ?? 0, [])
 
@@ -74,6 +156,12 @@ export function Composer(): JSX.Element {
       actions.toast('图片还在上传，稍等一下')
       return
     }
+    /*
+     * 发送是一次用户手势：顺手把朗读的 AudioContext 建好并恢复。
+     * 自动朗读发生在「消息到达」那一刻（非手势），浏览器会拦掉那时新建的上下文；
+     * 在这里预热之后，打开「自动朗读回复」的用户才会真的听见声音。
+     */
+    primeSpeech()
     actions.sendMessage(value, {
       images,
       // 输入框挂着引用就带上（store 里还会兜底读 ui.replyTo，这里显式传更清楚）
@@ -82,7 +170,7 @@ export function Composer(): JSX.Element {
     setText('')
     setImages([])
     setAttachments([])
-    setMentionOpen(false)
+    closeMention()
   }
 
   const startVoice = async (): Promise<void> => {
@@ -222,7 +310,8 @@ export function Composer(): JSX.Element {
     const prefix = text !== '' && !text.endsWith(' ') && !text.endsWith('\n') ? ' ' : ''
     const next = `${text}${prefix}@${name} `
     setText(next)
-    setMentionOpen(false)
+    // 插入文字是即时的，气泡只负责滑出——不必等退场播完才把 @ 写进输入框。
+    closeMention()
     window.requestAnimationFrame(() => {
       element?.focus()
       element?.setSelectionRange(next.length, next.length)
@@ -262,7 +351,19 @@ export function Composer(): JSX.Element {
       {activeRoom !== null || attachments.length > 0 ? (
         <div className="pa-composer__chips">
           {activeRoom !== null ? (
-            <button className="pa-composer__chip pa-composer__chip--at" type="button" onClick={() => setMentionOpen((open) => !open)}>
+            <button
+              className="pa-composer__chip pa-composer__chip--at"
+              type="button"
+              onClick={() => {
+                // 退场途中再点一次：撤销退场原地弹回，不必等它消失后再开。
+                if (mentionClosing) {
+                  cancelMentionClose()
+                  return
+                }
+                if (mentionOpen) closeMention()
+                else setMentionOpen(true)
+              }}
+            >
               <IconUsers size={12} />
               <span>@ 提及</span>
             </button>
@@ -351,8 +452,8 @@ export function Composer(): JSX.Element {
             )}
           </div>
 
-          {mentionOpen && activeRoom !== null ? (
-            <div className="pa-composer__mention">
+          {(mentionOpen || mentionClosing) && activeRoom !== null ? (
+            <div className="pa-composer__mention" data-closing={mentionClosing ? '1' : undefined}>
               {members.length === 0 ? <div className="pa-chat-empty__desc">这个群还没有成员</div> : null}
               {members.map((member) => (
                 <button type="button" key={member.id} onClick={() => insertMention(member.name)}>

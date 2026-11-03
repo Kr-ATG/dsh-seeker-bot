@@ -190,7 +190,7 @@ export const PERSONAL_TASK_CSS = `
   background: rgba(0, 0, 0, 0.6);
   -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
-  animation: pa-taskdetail-fade 160ms ease both;
+  animation: pa-taskdetail-fade 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
 /* 居中大卡：宽 min(920px, 94vw)，最大高 82vh；整块内容滚动。 */
@@ -205,7 +205,7 @@ export const PERSONAL_TASK_CSS = `
   background: var(--pa-card);
   box-shadow: var(--pa-shadow-pop);
   overflow: hidden;
-  animation: pa-taskdetail-rise 200ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  animation: pa-taskdetail-rise 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
 /* 头部：badge + 任务标题 + 元信息 chips，右上角关闭钮。 */
@@ -503,6 +503,30 @@ export const PERSONAL_TASK_CSS = `
   from { opacity: 0; transform: translateY(10px) scale(0.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
+/*
+ * 退场：遮罩淡出 + 大卡下沉 14px 并轻微缩小。
+ *
+ * 与上面那条入场的起点几乎对称（入场从下方 10px 升起，出场向下方 14px 沉下去），
+ * 关掉时就不会是「啪」地硬消失。时长与曲线对齐 modal-animation.ts 的
+ * MODAL_ANIM_MS：240ms，出场用加速曲线（从静止启动、峰值速度结束）。
+ *
+ * 只在外层挂一个 data-closing，卡片用后代选择器跟随——组件侧只改一处属性，
+ * 不会出现「遮罩淡出了、卡片还在」的错位。
+ */
+@keyframes pa-taskdetail-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes pa-taskdetail-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(14px) scale(0.97); }
+}
+.pa-taskdetail-overlay[data-closing='1'] {
+  animation: pa-taskdetail-fade-out 240ms ease both;
+}
+.pa-taskdetail-overlay[data-closing='1'] .pa-taskdetail-card {
+  animation: pa-taskdetail-out 240ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
 
 /* 窄屏：卡片贴近视口边缘，正文左右留白收窄（单栏时间线不需要改结构）。 */
 @media (max-width: 900px) {
@@ -524,7 +548,11 @@ export const PERSONAL_TASK_CSS = `
   /* 进行中停转：静态齿轮本身已经是「进行中」的形状，转圈是多余的动效。 */
   .pa-status-running svg { animation: none; }
   .pa-taskdetail-overlay,
-  .pa-taskdetail-card {
+  .pa-taskdetail-card,
+  /* 退场规则带 [data-closing='1']，权重比上面两条高；媒体查询不增加权重，
+     不原样再列一遍的话，减少动效偏好下退场动画会照播。 */
+  .pa-taskdetail-overlay[data-closing='1'],
+  .pa-taskdetail-overlay[data-closing='1'] .pa-taskdetail-card {
     animation: none;
   }
 }

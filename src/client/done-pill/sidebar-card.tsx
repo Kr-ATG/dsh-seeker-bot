@@ -25,6 +25,9 @@ import { consumeDoneEntries, consumeOpenRequest } from './notify-center'
 import { IdleRobot } from './idle-robot'
 import { RunningArc } from './status-orbit'
 import { RecButton, RecStatusChip } from './rec-button'
+import { BriefCard } from './brief-card'
+import { FeatureGate } from '../features/gate.tsx'
+import { MODAL_ANIM_MS } from '../modal-animation.ts'
 
 /** sidebar.footer.action 的 owner props（ui-sidebar 契约）：只有列宽状态。 */
 export interface SidebarBarCardProps {
@@ -43,6 +46,64 @@ interface DoneEntry {
   durationMs?: number
   turn: number
   reasonKind: string
+}
+
+/**
+ * 把一段文本写进官方输入框（情报卡「继续聊这个」的出口）。
+ *
+ * ## 为什么不用官方的 inputActions.setDraft
+ *
+ * 那是官方 session 标准套件的座位 props，只有挂在对话节点上的组件才拿得到；
+ * 本卡片挂在 `sidebar.footer.action`，不在会话座位里，拿不到那份 props。
+ * 所以按「能拿到的三条路径」依次降级：
+ *
+ *   1. `window.__dshFill`（宿主若有全局回写桥，最干净）；
+ *   2. 官方 composer 的 textarea / contenteditable —— 用**原生 setter** 写值再派发
+ *      input 事件。直接 `el.value = text` 会被 React 的受控值追踪拦掉，界面不更新
+ *      （这是最容易踩的一脚，GitRosterModal 里的旧写法就有这个隐患）；
+ *   3. 都失败 → 写剪贴板，让用户自己粘贴（静默失败比复制到剪贴板更糟）。
+ *
+ * @returns 是否写进了输入框（false = 已退回剪贴板或全失败）。
+ */
+export function fillComposerDraft(text: string): boolean {
+  const body = String(text ?? '')
+  if (body.trim() === '') return false
+
+  try {
+    const globalFill = (window as unknown as { __dshFill?: (value: string) => void }).__dshFill
+    if (typeof globalFill === 'function') {
+      globalFill(body)
+      return true
+    }
+  } catch { /* 忽略：继续走 DOM */ }
+
+  try {
+    const textarea = document.querySelector<HTMLTextAreaElement>(
+      '[class*="composer"] textarea, textarea[placeholder]',
+    )
+    if (textarea !== null) {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+      if (typeof setter === 'function') setter.call(textarea, body)
+      else textarea.value = body
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+      textarea.focus()
+      return true
+    }
+    const editable = document.querySelector<HTMLElement>(
+      '[class*="composer"] [contenteditable="true"], [contenteditable="true"]',
+    )
+    if (editable !== null) {
+      editable.textContent = body
+      editable.dispatchEvent(new Event('input', { bubbles: true }))
+      editable.focus()
+      return true
+    }
+  } catch { /* 忽略：继续走剪贴板 */ }
+
+  try {
+    void navigator.clipboard?.writeText(body)
+  } catch { /* 剪贴板也不可用：只能认了 */ }
+  return false
 }
 
 /** 轮询间隔（ms，与悬浮胶囊一致）。 */
@@ -316,7 +377,7 @@ const popStyle = (anchor: { left: number; bottom: number } | null, ratio: number
     color: 'var(--dpl-fg)',
     boxShadow: 'var(--dpl-panel-shadow)',
     zIndex: 9500,
-    animation: 'dpRowIn .22s cubic-bezier(.32,.72,0,1) backwards',
+    animation: 'dpRowIn .24s cubic-bezier(.2,.8,.2,1) backwards',
     '--dpt': String(ratio),
   } as CSSProperties
 }
@@ -540,6 +601,18 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
   const [readIds, setReadIds] = useState<Set<string>>(() => loadReadIds())
   const [runInfo, setRunInfo] = useState<Record<string, { since: number; question: string; title: string }>>({})
   const [open, setOpen] = useState(false)
+  /**
+   * 退场动画态：置 true 后根节点挂 `data-closing`，样式表（pill.tsx 的
+   * `[data-dpp-pop][data-closing]` 规则）播 240ms 淡出 + 下滑 + 缩到 .97，
+   * 播完才真正 setOpen(false) 卸载。
+   *
+   * 为什么另开一套计时器而不复用 hover 桥接的 closeTimer：那是「给鼠标从卡片
+   * 滑到弹窗的 150ms 宽限」，退场是「关闭后播动画的 240ms」，两段等待语义不同、
+   * 可能同时存在，共用一个 ref 会互相覆盖（滑出时把退场取消掉）。
+   */
+  const [closing, setClosing] = useState(false)
+  const animTimer = useRef<number | null>(null)
+  const closingRef = useRef(false)
   const [nowTick, setNowTick] = useState(() => Date.now())
   /** 首轮轮询是否已回填数据：完成/开始动画只在拿到基线后的**变化**时播。 */
   const [hydrated, setHydrated] = useState(false)
@@ -554,6 +627,41 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
   useEffect(() => enabledStore.subscribe(setEnabled), [])
   useEffect(() => appearanceStore.subscribe(setAppearance), [])
   useEffect(() => fontRatioStore.subscribe(setFontRatio), [])
+
+  /**
+   * 关闭入口统一走这里：先播退场，播完再真正关闭。
+   *
+   * 三条关闭路径（hover 离开、点条目跳转、Esc）外加「再点一次卡片」全部改走
+   * 本函数——此前它们各自 setOpen(false)，弹窗都是瞬关，没有划出。
+   */
+  const requestClose = useCallback((): void => {
+    if (closingRef.current) return
+    closingRef.current = true
+    setClosing(true)
+    animTimer.current = window.setTimeout(() => {
+      animTimer.current = null
+      closingRef.current = false
+      setClosing(false)
+      setOpen(false)
+    }, MODAL_ANIM_MS)
+  }, [])
+
+  /**
+   * 撤销尚未播完的退场：鼠标在退场中滑回弹窗时原地弹回。
+   * 少了它，面板会在用户手底下消失（240ms 窗口内回不来）。
+   */
+  const cancelClose = useCallback((): void => {
+    if (animTimer.current !== null) {
+      window.clearTimeout(animTimer.current)
+      animTimer.current = null
+    }
+    closingRef.current = false
+    setClosing(false)
+  }, [])
+
+  useEffect(() => () => {
+    if (animTimer.current !== null) window.clearTimeout(animTimer.current)
+  }, [])
 
   const active = enabled && mode === 'card'
 
@@ -763,8 +871,9 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
         return next
       })
     }
-    if (outcome.ok) setOpen(false)
-  }, [])
+    // 跳转成功也先播退场：弹窗和会话切换同时发生才不会「先闪一下再切走」。
+    if (outcome.ok) requestClose()
+  }, [requestClose])
 
   // ---- 弹窗开合（含 hover 桥接）----
 
@@ -791,22 +900,32 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
 
   const showPop = useCallback((): void => {
     clearCloseTimer()
+    // 鼠标在退场中滑回来（或弹窗重新获得焦点）：撤销退场，面板原地弹回。
+    cancelClose()
     measureAnchor()
     setOpen(true)
-  }, [clearCloseTimer, measureAnchor])
+  }, [clearCloseTimer, cancelClose, measureAnchor])
 
   const scheduleHide = useCallback((): void => {
     clearCloseTimer()
-    closeTimer.current = setTimeout(() => { setOpen(false) }, CLOSE_DELAY_MS)
-  }, [clearCloseTimer])
+    // 先等 150ms 宽限（让鼠标能滑进弹窗），再播 240ms 退场——总等待 390ms，
+    // 比原来「150ms 后瞬关」多出来的只有动画本身。
+    closeTimer.current = setTimeout(() => {
+      closeTimer.current = null
+      requestClose()
+    }, CLOSE_DELAY_MS)
+  }, [clearCloseTimer, requestClose])
 
   const togglePop = useCallback((): void => {
     clearCloseTimer()
-    setOpen(prev => {
-      if (!prev) measureAnchor()
-      return !prev
-    })
-  }, [clearCloseTimer, measureAnchor])
+    // 关闭分支同样走 requestClose：直接 setOpen(false) 会「啪一下」消失。
+    if (open) {
+      requestClose()
+      return
+    }
+    measureAnchor()
+    setOpen(true)
+  }, [clearCloseTimer, measureAnchor, open, requestClose])
 
   // 弹窗展开时窗口缩放跟随重定位。
   useEffect(() => {
@@ -836,6 +955,27 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
     ? `对话动态：${runningSessions.length} 个进行中，${unreadCount} 个已完成未读；${truncate(firstRunningLabel !== '' ? firstRunningLabel : latestLabel, 40)}`
     : '对话动态：暂无新动态；悬停或点按查看记录'
 
+  /**
+   * 弹出面板里每一行的错峰延迟（「进行中 → 最近完成」按阅读顺序连排）。
+   *
+   * 为什么只在这里做：这个面板是 `open && createPortal(...)` 条件渲染的，
+   * 每次打开都重新挂载，行上的 dpRowIn 会从头播 —— 错峰才有意义。
+   * 悬浮胶囊（pill.tsx）那两个面板是常驻 DOM，只改 opacity / transform，
+   * 加了永远不会重播，属于白加，所以那边不加。
+   *
+   * 两个分区各最多 5 行，最大延迟 198ms，仍在 240ms 的入场节奏内。
+   */
+  const rowDelay = (index: number): string => `${Math.min(index, 9) * 22}ms`
+  /** 最近完成的分组 + 它在整体错峰序列里的起始序号。 */
+  const recentRows = ((): Array<{ group: ReturnType<typeof groupByMinute>[number]; offset: number }> => {
+    let offset = Math.min(runningSessions.length, POP_RUNNING_N)
+    return groupByMinute(visibleEntries.slice(0, POP_RECENT_N)).map((group) => {
+      const at = offset
+      offset += group.items.length
+      return { group, offset: at }
+    })
+  })()
+
   const scale = appearance.scale
   const fontStack = fontStackOf(appearance.font)
 
@@ -844,9 +984,22 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
       className="dsh-done-pill"
       data-dpp-card={wide ? 'wide' : 'rail'}
       style={wrapStyle(wide, fontStack, scale, fontRatio)}
-      onMouseEnter={showPop}
+      onMouseEnter={(event) => {
+        // 情报卡是绝对定位的子节点，鼠标滑过它也会冒泡到这里。不拦的话，
+        // 「悬停看情报卡」会同时弹出「对话动态」面板，两层浮层叠在一起。
+        const target = event.target as HTMLElement | null
+        if (target !== null && typeof target.closest === 'function' && target.closest('.dsh-daily-brief') !== null) return
+        showPop()
+      }}
       onMouseLeave={scheduleHide}
     >
+      {/* 每日情报卡：斜插在胶囊上方、只露半截的日报卡。
+          absolute 定位 + z-index:0，不参与这里的 flex 布局；胶囊自身
+          z-index:1 压在卡片下缘，视觉上就是「卡片插进胶囊」。
+          开关独立于胶囊（view.daily-brief）：关掉时组件整块卸载，轮询一起停。 */}
+      <FeatureGate feature="view.daily-brief">
+        <BriefCard scale={scale} ratio={fontRatio} wide={wide} onChat={fillComposerDraft} />
+      </FeatureGate>
       {wide ? (
         <>
         {/* 录屏按钮与 dpp-bar 并列（bar 本身是 button，禁止嵌套 button）。
@@ -863,7 +1016,7 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
           onClick={togglePop}
           onFocus={showPop}
           onKeyDown={(event) => {
-            if (event.key === 'Escape') setOpen(false)
+            if (event.key === 'Escape') requestClose()
           }}
         >
           {/* key 随状态切换重挂载 → 播放 .dpp-icon-swap 弹入动画。
@@ -900,7 +1053,7 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
           onClick={togglePop}
           onFocus={showPop}
           onKeyDown={(event) => {
-            if (event.key === 'Escape') setOpen(false)
+            if (event.key === 'Escape') requestClose()
           }}
         >
           <span className="dpp-icon-swap" key={runningSessions.length > 0 ? 'run' : totalBadge > 0 ? 'done' : 'idle'} aria-hidden>
@@ -919,13 +1072,18 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
         <div
           ref={popRef}
           className="dsh-done-pill"
+          // data-dpp-pop 把退场规则限定在本弹窗（.dsh-done-pill 还被录屏面板
+          // 的卡片复用，不加这层限定会把 8px 下滑套到居中 modal 上）；
+          // data-closing 触发 pill.tsx 里的 dpPopOut。
+          data-dpp-pop="1"
+          data-closing={closing ? '1' : undefined}
           style={popStyle(anchor, fontRatio)}
           role="dialog"
           aria-label="对话动态：进行中与最近完成"
           onMouseEnter={showPop}
           onMouseLeave={scheduleHide}
           onKeyDown={(event) => {
-            if (event.key === 'Escape') setOpen(false)
+            if (event.key === 'Escape') requestClose()
           }}
         >
           <div style={popHeadStyle}>
@@ -946,14 +1104,14 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
           {runningSessions.length > 0 && (
             <>
               <div style={sectionLabelStyle}><span style={sectionDotStyle} aria-hidden />{`进行中 ${runningSessions.length}`}</div>
-              {runningSessions.slice(0, POP_RUNNING_N).map((session) => {
+              {runningSessions.slice(0, POP_RUNNING_N).map((session, index) => {
                 const label = session.question !== '' ? session.question : session.displayTitle
                 return (
                   <button
                     key={session.id}
                     type="button"
                     className="dsh-done-pill-row"
-                    style={rowStyle}
+                    style={{ ...rowStyle, animationDelay: rowDelay(index) }}
                     title={`「${session.displayTitle}」正在执行 — 点击打开会话`}
                     onClick={() => { openSession(session.id) }}
                   >
@@ -969,20 +1127,20 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
           {visibleEntries.length === 0 ? (
             <div style={emptyStyle}>暂无记录 — 任一会话的对话完成后会出现在这里</div>
           ) : (
-            groupByMinute(visibleEntries.slice(0, POP_RECENT_N)).map((group) => (
+            recentRows.map(({ group, offset }) => (
               <div key={`${group.time}|${group.items[0].id}`}>
                 <div style={groupHeadStyle}>
                   <span>{group.time === '' ? '未知时间' : group.time}</span>
                   {group.items.length > 1 && <span style={groupCountStyle}>{`${group.items.length} 条`}</span>}
                 </div>
-                {group.items.map((item) => {
+                {group.items.map((item, itemIndex) => {
                   const headLabel = item.question !== '' ? item.question : item.title
                   const unread = !readIds.has(item.id)
                   return (
                     <div
                       key={item.id}
                       className="dsh-done-pill-row"
-                      style={{ ...rowStyle, cursor: 'pointer' }}
+                      style={{ ...rowStyle, cursor: 'pointer', animationDelay: rowDelay(offset + itemIndex) }}
                       role="button"
                       tabIndex={0}
                       title={`「${item.title}」 — 点击打开会话`}

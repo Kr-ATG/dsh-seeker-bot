@@ -161,7 +161,7 @@ html[data-dsh-glass] .peff-ms-menu,html[data-dsh-glass] .peff-eff-panel{backgrou
 @keyframes peff-eff-sink{from{opacity:1;transform:none}to{opacity:0;transform:translateY(6px) scale(.97)}}
 .peff-eff-panel-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:2px}
 .peff-eff-panel-title{font-size:12px;font-weight:600;letter-spacing:.02em;color:var(--dsw-alias-label-secondary,#bbb)}
-.peff-eff-panel-value{font-size:12px;font-weight:600;color:var(--eff-accent,var(--dsw-alias-state-business-primary));animation:peff-eff-value-in 200ms cubic-bezier(.2,.9,.25,1)}
+.peff-eff-panel-value{font-size:12px;font-weight:600;color:var(--eff-accent,var(--dsw-alias-state-business-primary));animation:peff-eff-value-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1)}
 @keyframes peff-eff-value-in{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
 
 /* 滑杆：实色圆角轨道 + 渐变填充 + 点阵画布 + 白色大圆滑块（对齐参考图）。 */
@@ -200,7 +200,7 @@ body[data-ds-dark-theme] .peff-eff-thumb-core{box-shadow:0 0 0 1px rgba(130,160,
 .peff-eff-labels-item{flex:1;min-width:0;text-align:center;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#888);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:color 200ms ease,transform 200ms cubic-bezier(.22,1.2,.36,1);cursor:pointer}
 .peff-eff-labels-item:hover{color:var(--dsw-alias-label-secondary,#bbb)}
 .peff-eff-labels-item-on{color:var(--dsw-alias-label-primary,#eee);font-weight:600;transform:scale(1.04)}
-.peff-eff-empty{margin-top:4px;padding:6px 2px 2px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;text-align:center;animation:peff-eff-value-in 220ms cubic-bezier(.2,.9,.25,1)}
+.peff-eff-empty{margin-top:4px;padding:6px 2px 2px;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px;text-align:center;animation:peff-eff-value-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1)}
 .peff-eff-busy{opacity:.55;pointer-events:none}
 
 @media (prefers-reduced-motion: reduce){

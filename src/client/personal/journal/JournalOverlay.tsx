@@ -15,7 +15,7 @@
  * 空态保留「生成今日期刊」按钮（actions.generateJournal）。
  * 响应式：<900px 时书架变成顶部横向滚动条，<640px 标题字号再降一档。
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { journalCoverSvg } from '../engine.ts'
 import {
   IconArrowLeft,
@@ -143,6 +143,31 @@ export function JournalOverlay(): JSX.Element | null {
   const theme = usePaTheme()
   const readerRef = useRef<HTMLDivElement | null>(null)
 
+  /**
+   * 退场状态：关闭时先播 240ms 退场（整层淡出 + 纸张下沉），再真正关。
+   *
+   * 之前这里所有关闭入口都是直接 actions.openJournal(null) —— 期刊层瞬间
+   * 消失，和入场那 180ms/300ms 的淡入完全不对称。时长与曲线跟
+   * modal-animation.ts 的 MODAL_ANIM_MS 对齐，整套插件手感统一。
+   */
+  const [closing, setClosing] = useState(false)
+  const closeTimerRef = useRef<number | null>(null)
+
+  const requestClose = useCallback((): void => {
+    if (closeTimerRef.current !== null) return
+    setClosing(true)
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null
+      setClosing(false)
+      setRuleOpen(false)
+      actions.openJournal(null)
+    }, 240)
+  }, [actions])
+
+  useEffect(() => () => {
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
+  }, [])
+
   useEffect(() => {
     injectJournalStyles()
   }, [])
@@ -188,7 +213,7 @@ export function JournalOverlay(): JSX.Element | null {
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
         if (ruleOpen) setRuleOpen(false)
-        else actions.openJournal(null)
+        else requestClose()
         return
       }
       const target = event.target as HTMLElement | null
@@ -203,20 +228,14 @@ export function JournalOverlay(): JSX.Element | null {
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [visible, ruleOpen, actions, older, newer])
+  }, [visible, ruleOpen, actions, older, newer, requestClose])
 
   if (!visible) return null
 
-  const backToChat = (): void => {
-    setRuleOpen(false)
-    actions.openJournal(null)
-    actions.setView('chat')
-  }
+  // 两个关闭入口都走 requestClose：先播退场，再真正关（见 requestClose 注释）。
+  const backToChat = (): void => { requestClose() }
 
-  const closeOverlay = (): void => {
-    setRuleOpen(false)
-    actions.openJournal(null)
-  }
+  const closeOverlay = (): void => { requestClose() }
 
   const generateToday = async (): Promise<void> => {
     if (generating) return
@@ -252,7 +271,7 @@ export function JournalOverlay(): JSX.Element | null {
     : `journal-${dateKey !== '' ? dateKey : 'undated'}-${issueLabel.replace(/[^a-zA-Z0-9]+/g, '-')}`
 
   return (
-    <div className="pa-journal-overlay" role="dialog" aria-label="期刊日记">
+    <div className="pa-journal-overlay" role="dialog" aria-label="期刊日记" data-closing={closing ? '1' : undefined}>
       <div className="pa-journal-shell">
         <aside className="pa-journal-shelf" data-collapsed={shelfOpen ? 'false' : 'true'}>
           <div className="pa-journal-shelf__head">

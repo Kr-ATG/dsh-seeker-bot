@@ -7,6 +7,7 @@
 import { createRoot } from 'react-dom/client'
 import { PersonalProvider } from './store.tsx'
 import { PersonalApp } from './index.tsx'
+import { ensureOverlayMotionStyles } from '../motion/overlay-motion.ts'
 import { injectPersonalBaseStyles } from './base.css.ts'
 import { injectShellStyles } from './shell/shell.css.ts'
 import { injectOutputsStyles } from './shell/outputs.css.ts'
@@ -16,6 +17,12 @@ import { injectChatStyles } from './chat/chat.css.ts'
 import { injectCallStyles } from './call/call.css.ts'
 import { injectJournalStyles } from './journal/journal.css.ts'
 
+/*
+ * 全局动效样式（浮层 + 页面转场）：正式插件里由 client/index.ts 注入，
+ * 独立演示页没有那条 apply 链，必须自己注入一次——否则页面转场属性在
+ * 演示页上完全没有效果（验收时会被误判成「没做」）。
+ */
+ensureOverlayMotionStyles()
 injectPersonalBaseStyles()
 injectShellStyles()
 injectOutputsStyles()

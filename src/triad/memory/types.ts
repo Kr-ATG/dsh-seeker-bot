@@ -207,6 +207,14 @@ export interface StoreState {
    * 缺省 = 跟随 config.todoRuleInjectDefaultEnabled（默认开）。
    */
   todoRuleInjectEnabled?: boolean
+  /**
+   * 动效技能强制加载通道开关（全局单值，三态缺省）。
+   * 与 zh / html / team / todo-rule 同一范式：投一段静态规范文本，每会话首步一次。
+   * 它回答的是「涉及 UI 动效时先加载 harmonyos-motion 技能」，属于**用户偏好**
+   * 而非能力声明——技能存在与否由技能目录决定，这条通道只负责让模型「想起来用它」。
+   * 缺省 = 跟随 config.motionInjectDefaultEnabled（默认关：升级不改变现状）。
+   */
+  motionInjectEnabled?: boolean
 }
 
 /** 单个会话的 ticker 状态。 */
@@ -363,6 +371,14 @@ export interface MemoryConfig {
    * 它与「回合结束自动收口」是同一件事的两半：纪律让模型做对，收口兜底。
    */
   todoRuleInjectDefaultEnabled: boolean
+  /**
+   * 动效技能强制加载默认开关（内置通道，**默认关**）。
+   *
+   * 与其他四条通道默认开不同，它默认关，理由是**升级不该改变现状**：技能是否被加载
+   * 原本由模型的语义匹配决定，这条通道是把它变成确定性行为——这是用户主动要的
+   * 开关，不是能力补齐。文本约 300 字，每会话首步一次。
+   */
+  motionInjectDefaultEnabled: boolean
   /** 注入检索 top-k（当前任务相关记忆注入条数；identity/pinned/长期常驻不占此预算）。 */
   injectTopK: number
   /**
@@ -497,6 +513,9 @@ export const DEFAULT_CONFIG: MemoryConfig = {
   // 默认开：模型默认不会自己维护清单（一次性补标 / 把交棒事项挂 pending），
   // 而清单收尾不干净会让右栏任务卡残留过期状态——与「回合结束自动收口」互为两半。
   todoRuleInjectDefaultEnabled: true,
+  // 默认关：技能加载原本靠语义匹配，这条通道把「想起来用技能」变成确定性行为，
+  // 属于用户主动打开的偏好，默认开等于替所有人改了行为（见字段注释）。
+  motionInjectDefaultEnabled: false,
   injectTopK: 8,
   // 检索层每 5 轮重检索一次并替换旧块：话题通常不会两三轮就跳，而每次替换都会
   // 让 prompt 前缀缓存失效一次（见字段注释）。
@@ -631,7 +650,7 @@ export type ConfigNumberKey = keyof typeof CONFIG_NUMBER_BOUNDS
 
 const CONFIG_NUMBER_KEYS = Object.keys(CONFIG_NUMBER_BOUNDS) as ConfigNumberKey[]
 
-const CONFIG_BOOLEAN_KEYS = ['dailyCompileEnabled', 'consolidateEnabled', 'logApiRequests', 'injectDefaultEnabled', 'zhInjectDefaultEnabled', 'htmlInjectDefaultEnabled', 'teamInjectDefaultEnabled', 'todoClosureDefaultEnabled', 'todoRuleInjectDefaultEnabled'] as const
+const CONFIG_BOOLEAN_KEYS = ['dailyCompileEnabled', 'consolidateEnabled', 'logApiRequests', 'injectDefaultEnabled', 'zhInjectDefaultEnabled', 'htmlInjectDefaultEnabled', 'teamInjectDefaultEnabled', 'todoClosureDefaultEnabled', 'todoRuleInjectDefaultEnabled', 'motionInjectDefaultEnabled'] as const
 
 /** 可调布尔字段名。 */
 export type ConfigBooleanKey = (typeof CONFIG_BOOLEAN_KEYS)[number]

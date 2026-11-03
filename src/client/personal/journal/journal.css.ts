@@ -66,7 +66,7 @@ export const JOURNAL_CSS = `
   color: var(--j-ui-text);
   background:
     radial-gradient(130% 100% at 50% -10%, var(--j-ui-panel-2) 0%, var(--j-ui-bg) 58%, var(--j-ui-bg) 100%);
-  animation: pa-journal-fade 180ms ease both;
+  animation: pa-journal-fade 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-root[data-pa-theme='dark'] .pa-journal-overlay {
   --j-ui-bg: #101114;
@@ -525,7 +525,7 @@ export const JOURNAL_CSS = `
   background-image: radial-gradient(var(--j-paper-grain) 1px, transparent 1px);
   background-size: 3px 3px;
   box-shadow: var(--j-shadow);
-  animation: pa-journal-paper-in 300ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: pa-journal-paper-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-journal-paper ::selection { background: var(--j-accent-soft); }
 
@@ -934,7 +934,7 @@ export const JOURNAL_CSS = `
   border: 1px solid var(--j-ui-line-2);
   border-radius: 14px;
   box-shadow: var(--j-shadow);
-  animation: pa-journal-slide-in 220ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  animation: pa-journal-slide-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-journal-rule__head {
   flex: none;
@@ -1196,9 +1196,36 @@ export const JOURNAL_CSS = `
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
 }
+/* 退场：整层淡出 + 纸张下沉缩小。出场用加速曲线（HarmonyOS 的出场语义：
+   从静止启动、峰值速度结束），240ms —— 与 modal-animation 的 MODAL_ANIM_MS
+   对齐，整套插件的手感才是一套。 */
+@keyframes pa-journal-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes pa-journal-paper-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(22px) scale(0.965); }
+}
+.pa-journal-overlay[data-closing='1'] {
+  animation: pa-journal-fade-out 240ms ease both;
+}
+.pa-journal-overlay[data-closing='1'] .pa-journal-paper {
+  animation: pa-journal-paper-out 240ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
 @keyframes pa-journal-slide-in {
   from { opacity: 0; transform: translateX(18px); }
   to { opacity: 1; transform: translateX(0); }
+}
+/* 规则面板（右侧抽屉）的退场：整层淡出 + 向右 46px + 轻微缩小。
+   与入场 pa-journal-slide-in 的右滑入形成对称；240ms 加速曲线与
+   modal-animation.ts 的 MODAL_ANIM_MS 一致。 */
+@keyframes pa-journal-rule-out {
+  from { opacity: 1; transform: translateX(0) scale(1); }
+  to { opacity: 0; transform: translateX(46px) scale(0.97); }
+}
+.pa-journal-rule[data-closing='1'] {
+  animation: pa-journal-rule-out 240ms cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 @keyframes pa-journal-spin {
   to { transform: rotate(360deg); }
@@ -1212,6 +1239,8 @@ export const JOURNAL_CSS = `
   .pa-journal-overlay,
   .pa-journal-paper,
   .pa-journal-rule,
+  /* 退场规则比入场更具体，必须连 [data-closing] 一起列进来才压得住。 */
+  .pa-journal-rule[data-closing='1'],
   .pa-journal-card,
   .pa-journal-card__cover img,
   .pa-journal-mini,

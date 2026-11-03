@@ -13,7 +13,7 @@
  *
  * 视觉与阅读器同一套 --j-* token（见 journal.css.ts），不写死颜色。
  */
-import { useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { IconClock, IconRefresh, IconX } from '../icons.tsx'
 import { usePersonal } from '../store.tsx'
 
@@ -54,6 +54,57 @@ function readJournalStatus(state: unknown): JournalStatusLike {
 export function JournalRulePanel({ onClose }: JournalRulePanelProps): JSX.Element {
   const { state, actions } = usePersonal()
   const [checking, setChecking] = useState(false)
+  /*
+   * 退场状态：收起规则面板时先播 240ms（整层淡出 + 向右 46px + 轻微缩小），
+   * 再调用父级 onClose 真正卸载。直接 onClose() 会让抽屉硬消失，和入场那
+   * 220ms 的滑入不对称。时长 / 曲线与 modal-animation.ts 的 MODAL_ANIM_MS 一致。
+   */
+  const [closing, setClosing] = useState(false)
+  const closeTimerRef = useRef<number | null>(null)
+  /*
+   * onClose 由期刊层用内联箭头函数传入，每次父级渲染都会换引用。放进 ref
+   * 之后 requestClose 保持稳定，捕获阶段的 Esc 监听不必每次渲染都摘挂一遍。
+   */
+  const onCloseRef = useRef(onClose)
+  useEffect(() => {
+    onCloseRef.current = onClose
+  }, [onClose])
+
+  /** 收起：先播退场，240ms 后再真正卸载。 */
+  const requestClose = useCallback((): void => {
+    if (onCloseRef.current === undefined) return
+    if (closeTimerRef.current !== null) return
+    setClosing(true)
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null
+      setClosing(false)
+      onCloseRef.current?.()
+    }, 240)
+  }, [])
+
+  useEffect(() => () => {
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
+  }, [])
+
+  /*
+   * Esc 收起规则面板：与右上角关闭按钮走同一个退场。
+   *
+   * 用捕获阶段 + stopImmediatePropagation：期刊层（JournalOverlay）也在 window
+   * 上监听 Esc，且它看到 ruleOpen 仍为 true 时会直接 setRuleOpen(false) 把本面板
+   * 硬卸载——退场就播不出来。捕获阶段先接管并截断，Esc 才能和按钮一致。
+   */
+  const canClose = onClose !== undefined
+  useEffect(() => {
+    if (!canClose) return undefined
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      requestClose()
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [canClose, requestClose])
   const rule = state.settings.journalRule
   const logs = state.journalLogs.slice(0, 8)
   const status = readJournalStatus(state)
@@ -101,14 +152,19 @@ export function JournalRulePanel({ onClose }: JournalRulePanelProps): JSX.Elemen
   const hostGenerating = status.generating === true
 
   return (
-    <aside className="pa-journal-rule" role="dialog" aria-label="期刊触发规则">
+    <aside
+      className="pa-journal-rule"
+      role="dialog"
+      aria-label="期刊触发规则"
+      data-closing={closing ? '1' : undefined}
+    >
       <header className="pa-journal-rule__head">
         <div className="pa-journal-rule__heading">
           <h2 className="pa-journal-rule__title">期刊触发规则</h2>
           <p className="pa-journal-rule__sub">Personal Agent · 自动日记</p>
         </div>
         {onClose !== undefined ? (
-          <button className="pa-journal-iconbtn" type="button" title="收起规则" aria-label="收起规则" onClick={onClose}>
+          <button className="pa-journal-iconbtn" type="button" title="收起规则" aria-label="收起规则" onClick={requestClose}>
             <IconX size={16} />
           </button>
         ) : null}

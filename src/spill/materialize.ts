@@ -35,11 +35,20 @@
  *
  * 写盘是新增能力（原路由只读），所以还多一道：GET/POST 都过跨站闸门
  * （`rejectCrossSite`）。否则任意网页一个 CORS 简单请求就能反复往磁盘写文件。
+ *
+ * ## 2026-11-03 补：新格式结果（图已由工具落盘）
+ *
+ * `generate_image` 不再把 3.8MB 的 base64 回给模型（那会让模型以为没拿到图、
+ * 重复生成一张），而是自己落盘并返回 `images: [{ path, ... }]`。于是这里的
+ * 解析多认一种形态：path → 同源文件路由 URL（客户端能显示），落盘时再由
+ * {@link localPathOfImageRef} 还原成本地路径读文件。两种格式的解析都走同一个
+ * {@link parseGeneratedResult}，不允许出现「画廊显示 3 张、落盘只有 2 张」的漂移。
  */
 
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { rejectCrossSite } from '../shared/csrf.ts'
 import { admitSpillPath, spillRoots } from './index.ts'
 
@@ -65,6 +74,21 @@ const MIME_EXT: Readonly<Record<string, string>> = {
   'image/jpg': 'jpg',
   'image/webp': 'webp',
   'image/gif': 'gif',
+}
+
+/**
+ * 同源文件路由：与 host/personal/agent.ts 的 `IMAGE_FILE_ROUTE` 逐字同口径。
+ *
+ * 2026-11-03 起 generate_image 自己把图落盘，结果里只有 `images[].path`（宿主
+ * 绝对路径，落在 {@link materializeRoot} 之内）。客户端不能直接 `<img src>` 一个
+ * 本地路径，但这个路由的准入白名单正好包含那个根 —— 于是把 path 拼成同源 URL，
+ * 客户端能直接显示，host 侧再用 {@link localPathOfImageRef} 还原成路径读文件。
+ */
+export const GENERATED_FILE_ROUTE = '/api/personal-agent/file'
+
+/** 本地图片扩展名白名单（落盘命名用；不在表里的一律 png）。 */
+const LOCAL_IMAGE_EXT: Readonly<Record<string, string>> = {
+  png: 'png', jpg: 'jpg', jpeg: 'jpg', webp: 'webp', gif: 'gif',
 }
 
 /** 落盘结果（顺序 = 图片顺序）。 */
@@ -94,6 +118,156 @@ function collectImageUrls(data: unknown): string[] {
 }
 
 /**
+ * 一条 `images[]` 项 → 可显示的 URL。
+ *
+ * 新格式（2026-11-03 起）每项形如 `{ path, mime, bytes, width, height }`；网关
+ * 只给 url 而下载失败时退化成 `{ url }`。url 原样保留（可能是 http 或 data URL），
+ * path 转成同源文件路由 URL —— 客户端拿到的必须是能直接塞进 `<img src>` 的形态。
+ */
+function urlOfGeneratedItem(item: unknown): string | null {
+  if (typeof item !== 'object' || item === null) return null
+  const record = item as { url?: unknown; path?: unknown }
+  if (typeof record.url === 'string' && record.url !== '') return record.url
+  if (typeof record.path === 'string' && record.path !== '') {
+    return `${GENERATED_FILE_ROUTE}?path=${encodeURIComponent(record.path)}`
+  }
+  return null
+}
+
+/**
+ * 一条图片引用 → 本地绝对路径。
+ *
+ * 认三种形态：同源文件路由 URL、`file://` URL、裸绝对路径。2026-11-03 起
+ * generate_image 自己落盘，结果里给的是 `images[].path`（经 {@link urlOfGeneratedItem}
+ * 转成同源 URL）；host 侧要读文件时再还原成路径。
+ *
+ * @param url - 图片引用。
+ * @returns 本地绝对路径；不是本地引用返回 null。
+ */
+export function localPathOfImageRef(url: string): string | null {
+  const local = rawLocalPathOf(url)
+  // 准入：本地引用只认工具落盘根（materializeRoot）之下的文件。
+  // 不加这道，网关响应里的任意绝对路径（半可信输入）就能让宿主去读本机图片，
+  // 再经 /file 路由显示到界面上 —— 工具落盘目录是固定的，收紧不影响正常链路。
+  return local !== null && insideMaterializeRoot(local) ? local : null
+}
+
+/**
+ * 把一条引用解析成绝对路径（**不做准入**，只给 {@link localPathOfImageRef} 内部用）。
+ *
+ * 拆成两步是为了让「解析」与「准入」各自可测：准入漏了是安全洞，解析漏了是
+ * 兼容性 bug，混在一起时两者都难排查。
+ */
+function rawLocalPathOf(url: string): string | null {
+  if (typeof url !== 'string' || url === '') return null
+  if (url.startsWith(`${GENERATED_FILE_ROUTE}?`)) {
+    try {
+      const path = new URL(url, 'http://localhost').searchParams.get('path') ?? ''
+      return path !== '' ? path : null
+    } catch {
+      return null
+    }
+  }
+  if (/^file:/i.test(url)) {
+    try {
+      return fileURLToPath(url)
+    } catch {
+      return null
+    }
+  }
+  return isAbsolute(url) ? url : null
+}
+
+/**
+ * 路径是否落在 {@link materializeRoot} 之内（含子目录，不含根本身）。
+ *
+ * 用 `relative()` 而不是字符串前缀比较：前缀比较会把同前缀的兄弟目录
+ * （例如 materializeRoot 后面多一截名字的目录）当成根内路径，大小写、分隔符、
+ * `..` 也各有坑。
+ */
+function insideMaterializeRoot(path: string): boolean {
+  try {
+    const rel = relative(materializeRoot(), path)
+    return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 本地图片文件 → 字节。
+ *
+ * 大小上限与 data URL 分支同口径（{@link MAX_IMAGE_BYTES}）：一张超限的图不该
+ * 把整批落盘拖垮，也不该被整份读进内存。
+ *
+ * @param path - 本地绝对路径。
+ * @returns 图片字节；不存在 / 非普通文件 / 超限一律 null（调用方跳过这一张）。
+ */
+export function readLocalImageBytes(path: string): Buffer | null {
+  try {
+    const info = statSync(path)
+    if (!info.isFile() || info.size <= 0 || info.size > MAX_IMAGE_BYTES) return null
+    return readFileSync(path)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 图片字节 → 扩展名（png / jpg / gif / webp）。
+ *
+ * 为什么不直接用 {@link extensionFor}：那个只认 data URL 的 MIME，http(s) 与本地
+ * 路径一律当 png —— 于是「网关给 jpg 地址」或「本地已是 .jpg」会落出
+ * `img-1.png` 装着 JPEG 字节的文件，侧栏按扩展名声明的 content-type 就错了。
+ * 这里只看 magic number：字节是什么，扩展名就是什么。
+ *
+ * @param bytes - 已通过 {@link looksLikeImage} 校验的图片字节。
+ * @returns 扩展名（不带点）。
+ */
+export function extensionFromBytes(bytes: Buffer): string {
+  if (bytes.byteLength >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8) return 'jpg'
+  if (bytes.byteLength >= 4 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return 'gif'
+  if (bytes.byteLength >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[8] === 0x57 && bytes[9] === 0x45) return 'webp'
+  return 'png'
+}
+
+/**
+ * 一条图片 URL 的落盘扩展名。
+ *
+ * 本地引用优先取路径本身的扩展名（`generated/<sha1>.jpg` 已经是权威信息，且不用
+ * 先把几 MB 字节读进来）；其余沿用 {@link extensionFor} 的既有契约（data URL 看
+ * MIME，未知一律 png）—— 那个函数被冒烟对拍着，行为不能改。
+ *
+ * @param url - 已解析出的一条图片 URL。
+ * @returns 扩展名（不带点）。
+ */
+export function extensionOfImageUrl(url: string): string {
+  const local = localPathOfImageRef(url)
+  if (local === null) return extensionFor(url)
+  const match = /\.([a-z0-9]+)$/i.exec((local.split(/[?#]/)[0] ?? local))
+  const ext = match?.[1]?.toLowerCase() ?? ''
+  return LOCAL_IMAGE_EXT[ext] ?? 'png'
+}
+
+/**
+ * 一条图片 URL → 字节。
+ *
+ * 2026-11-03 起多一条本地文件分支：generate_image 自己落盘后，结果里给的是
+ * `images[].path`（{@link parseGeneratedResult} 会把它转成同源文件路由 URL）。
+ * 没有这条分支，这类结果在落盘路由里会「解析得出、落不出」，画廊条目直接 500。
+ *
+ * @param url - 已解析出的一条图片 URL。
+ * @returns 图片字节；任何失败都返回 null（调用方跳过这张，不整批失败）。
+ */
+async function imageBytesOf(url: string): Promise<Buffer | null> {
+  if (url.startsWith('data:')) return decodeDataUrl(url)
+  const local = localPathOfImageRef(url)
+  if (local !== null) return readLocalImageBytes(local)
+  if (/^https?:\/\//i.test(url)) return fetchImageBytes(url)
+  return null
+}
+
+/**
  * 解析生图结果 JSON 文本，提取 { ok, urls, model }（对齐客户端 parse.ts）。
  *
  * 从 host.ts 原样搬来这里并 export：读图与落盘两条路由必须共用同一份解析，
@@ -115,6 +289,18 @@ export function parseGeneratedResult(text: string): { ok: boolean; urls: string[
   if (record.ok !== true) return { ok: false, urls: [], model: null }
   const data = record.data as { data?: unknown } | undefined
   let urls = collectImageUrls(data?.data)
+  /*
+   * 新通道（2026-11-03 起）：generate_image 已把图落盘，结果里只有
+   * `images: [{ path, mime, bytes, width, height }]`（下载失败时是 `{ url }`）。
+   * 放在主通道之后、旧 vision-helper 通道之前：新格式没有 data.data[]，但历史
+   * spill 文件里三种形态都可能出现，顺序只影响「优先用哪一份」，不影响兼容。
+   */
+  if (urls.length === 0 && Array.isArray(record.images)) {
+    for (const item of record.images) {
+      const url = urlOfGeneratedItem(item)
+      if (url !== null && !urls.includes(url)) urls.push(url)
+    }
+  }
   if (urls.length === 0 && Array.isArray(record.imageUrls)) {
     urls = record.imageUrls.filter((item): item is string => typeof item === 'string' && item !== '')
   }
@@ -302,16 +488,15 @@ export async function materializeImages(spillText: string, outDir: string): Prom
   const files: MaterializedFile[] = []
   for (let index = 0; index < parsed.urls.length; index++) {
     const url = parsed.urls[index]
-    const name = 'img-' + String(index + 1) + '.' + extensionFor(url)
+    const name = 'img-' + String(index + 1) + '.' + extensionOfImageUrl(url)
     const target = join(outDir, name)
     // 幂等：已经落过盘就直接复用，不重复解码 base64（每张约 9MB，代价很实在）。
     if (reusable(target)) {
       files.push({ path: target, name })
       continue
     }
-    const bytes = url.startsWith('data:')
-      ? decodeDataUrl(url)
-      : /^https?:\/\//i.test(url) ? await fetchImageBytes(url) : null
+    // 字节来源三种：data URL / 本地文件（新格式 images[].path）/ http(s)。
+    const bytes = await imageBytesOf(url)
     if (bytes === null || !looksLikeImage(bytes)) continue
     try {
       writeAtomic(target, bytes)

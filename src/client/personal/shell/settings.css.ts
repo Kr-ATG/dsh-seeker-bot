@@ -1,9 +1,12 @@
 /**
  * Personal Agent — 设置卡样式（Bot 设置 / 群聊设置 / 全局设置共用）。
  *
- * 统一的「右侧滑出卡片」：半透明遮罩 + 右贴边、全高、左侧圆角的容器。
- * 与旧版居中弹窗的区别只在容器，卡内控件继续沿用 base.css.ts 的
- * `.pa-field` / `.pa-btn` / `.pa-select`，所以深浅主题、字号跟随等行为一致。
+ * 两种容器形态，卡内控件共用（继续沿用 base.css.ts 的 `.pa-field` /
+ * `.pa-btn` / `.pa-select`，所以深浅主题、字号跟随等行为一致）：
+ *  · 右贴边滑出卡（默认 `.pa-sheet`）：半透明遮罩 + 右贴边、全高、左侧圆角，
+ *    全局设置用它；
+ *  · 居中弹窗卡片（`.pa-sheet--dialog`）：760px 宽、高度贴合内容并封顶 84vh，
+ *    Bot 设置与群聊设置用它——这两个设置字段多，窄列排不开。
  *
  * 约定：
  *  · 类名前缀 `pa-sheet-*`（容器 / 分区 / 表单行）与 `pa-bset-*`（Bot 设置专用行）；
@@ -28,7 +31,7 @@ export const SETTINGS_CSS = `
   background: rgba(0, 0, 0, 0.42);
   -webkit-backdrop-filter: blur(4px);
   backdrop-filter: blur(4px);
-  animation: pa-sheet-fade 160ms ease both;
+  animation: pa-sheet-fade 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-sheet {
   --pa-sheet-shadow: -28px 0 70px rgba(0, 0, 0, 0.46);
@@ -44,13 +47,80 @@ export const SETTINGS_CSS = `
   border-radius: 16px 0 0 16px;
   box-shadow: var(--pa-sheet-shadow);
   overflow: hidden;
-  animation: pa-sheet-slide 220ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+  animation: pa-sheet-slide 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .pa-root[data-pa-theme='light'] .pa-sheet-overlay {
   background: rgba(15, 17, 21, 0.22);
 }
 .pa-root[data-pa-theme='light'] .pa-sheet {
   --pa-sheet-shadow: -20px 0 52px rgba(15, 17, 21, 0.18);
+}
+
+/* ───────────────────────── 居中弹窗卡片（Bot 设置 / 群聊设置） ───────────────────────── */
+/*
+ * 这两个设置项多、字段长，右贴边 460px 的滑出卡里一列排不开（模型 / 音色 / 成员
+ * 这些控件在窄列里只能缩成一条）。改成居中弹窗后给到 760px 宽，字段与控件横向
+ * 更松快，也让「设置」看起来像一件有始有终的模态任务，而不是一块常驻面板。
+ *
+ * 全局设置仍走右贴边滑出：它的入口在侧栏底部，语境是「调工作台外观」，与
+ * 「编辑某个 Bot / 群聊」不是同一类操作。
+ *
+ * 高度写 auto + max-height：内容少时卡片贴合内容（不出现一大片空面板），
+ * 内容多时封顶 84vh，滚动交给内部的 .pa-sheet__body。
+ */
+.pa-sheet-overlay--dialog {
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.pa-sheet--dialog {
+  width: min(760px, 92vw);
+  height: auto;
+  max-height: min(84vh, 880px);
+  border: 1px solid var(--pa-line-2);
+  border-radius: 16px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.46);
+  animation: pa-sheet-pop 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.pa-root[data-pa-theme='light'] .pa-sheet--dialog {
+  box-shadow: 0 20px 52px rgba(15, 17, 21, 0.18);
+}
+
+/* ───────────────────────── 退场（closing 态） ───────────────────────── */
+/*
+ * 三个设置卡（全局设置右贴边抽屉 / Bot 设置 / 群聊设置）共用这套：关闭时先播
+ * 240ms 退场再真正卸载，而不是条件渲染一置 null 就硬消失。
+ *
+ * 只在 .pa-sheet-overlay 上挂一个 data-closing 就够了，卡片用后代选择器跟随——
+ * 组件侧只改一处属性，不会出现「遮罩淡出了、卡片还在」的错位。
+ *
+ * 时长与曲线跟 src/client/modal-animation.ts 的 MODAL_ANIM_MS 对齐（240ms、
+ * 出场用加速曲线 cubic-bezier(0.4,0,0.2,1)），整套插件的手感才是同一套。
+ */
+@keyframes pa-sheet-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes pa-sheet-slide-out {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(46px); }
+}
+@keyframes pa-sheet-pop-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(14px) scale(0.97); }
+}
+.pa-sheet-overlay[data-closing='1'] {
+  animation: pa-sheet-fade-out 240ms ease both;
+}
+.pa-sheet-overlay[data-closing='1'] .pa-sheet {
+  animation: pa-sheet-slide-out 240ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+.pa-sheet-overlay[data-closing='1'] .pa-sheet--dialog {
+  animation: pa-sheet-pop-out 240ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+@media (max-width: 720px) {
+  .pa-sheet-overlay--dialog { padding: 12px; }
+  .pa-sheet--dialog { width: 100%; max-height: 88vh; }
 }
 
 .pa-sheet__head {
@@ -169,6 +239,27 @@ export const SETTINGS_CSS = `
   margin-top: 10px;
 }
 
+/* ───────────────────────── 模型两级选择器（Bot 设置 / 群聊设置共用） ───────────────────────── */
+/*
+ * 供应商 → 模型两个 PaSelect 并排（都走 36px 表单档）。每格 flex-basis 210px：
+ * 设置卡宽 760px 时两列各占一半；窄屏放不下时 flex-wrap 自动折成上下两行，
+ * 不会把供应商名 / 模型名压成一条省略号。
+ */
+.pa-model-picker { display: flex; flex-wrap: wrap; gap: 10px; width: 100%; }
+.pa-model-picker__field {
+  flex: 1 1 210px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.pa-model-picker__label {
+  display: block;
+  font-size: calc(10.5px + var(--pa-font-delta));
+  line-height: 1.4;
+  color: var(--pa-text-3);
+}
+
 /* ───────────────────────── Bot 设置专用 ───────────────────────── */
 /* 基本资料：字段 + 右上角保存按钮 */
 .pa-bset-profile-head {
@@ -194,25 +285,6 @@ export const SETTINGS_CSS = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
-/* 模型下拉：宿主 llm 注册表（原生 select 分组展示） */
-.pa-bset-model {
-  width: 100%;
-  height: 34px;
-  padding: 0 10px;
-  border-radius: 9px;
-  border: 1px solid var(--pa-line-2);
-  background: var(--pa-card-2);
-  color: var(--pa-text);
-  font-size: calc(12px + var(--pa-font-delta));
-  outline: none;
-  cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease;
-}
-.pa-bset-model:hover { background: var(--pa-card-3); }
-.pa-bset-model:focus { border-color: var(--pa-accent); }
-.pa-bset-model optgroup,
-.pa-bset-model option { background: var(--pa-card); color: var(--pa-text); }
 
 /* 设置行（主动询问等：左文案 + 右控件） */
 .pa-bset-row {
@@ -953,9 +1025,21 @@ export const SETTINGS_CSS = `
   from { transform: translateX(34px); opacity: 0.55; }
   to { transform: translateX(0); opacity: 1; }
 }
+/* 弹窗卡片的入场：从下方轻推上来 + 轻微放大，和右滑出区分开。 */
+@keyframes pa-sheet-pop {
+  from { transform: translateY(10px) scale(0.97); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+/*
+ * 退场规则的选择器是「类 + [data-closing] 属性」，特异性高于下面这条普通类
+ * 选择器：不把退场选择器一起列进来，开启「减少动态效果」时退场仍会照播。
+ */
 @media (prefers-reduced-motion: reduce) {
   .pa-sheet-overlay,
-  .pa-sheet { animation: none; }
+  .pa-sheet,
+  .pa-sheet-overlay[data-closing='1'],
+  .pa-sheet-overlay[data-closing='1'] .pa-sheet,
+  .pa-sheet-overlay[data-closing='1'] .pa-sheet--dialog { animation: none; }
 }
 `
 

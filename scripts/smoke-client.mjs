@@ -292,11 +292,24 @@ const slotsService = {
     if (comp === undefined) throw new Error('slots.register called without component')
     registeredSlots.push({
       slot: spec?.name, key: spec?.key, priority: spec?.priority, locale: spec?.locale,
-      id: spec?.id, order: spec?.order,
+      id: spec?.id, order: spec?.order, inject: spec?.inject,
     })
     return () => {}
   },
-  entries: (name) => [],
+  /*
+   * 模拟 DSH 0.2.1 的 slots.entries() 形状：**inject 挂在 StoredEntry 顶层**，
+   * options 里只有 key / priority。插件必须从 entry.inject 复制——从
+   * options.inject 读会拿到 undefined，assistant-step 视图随后因 fileMentions
+   * 缺失而整条崩溃、总结卡退回官方纯正文（2026-11-03「修复总结卡外框」根因）。
+   */
+  entries: (name) => {
+    if (name !== 'conversation.chat.node') return []
+    const officialAssistantInject = () => ({ fileMentions: () => undefined })
+    return [
+      { options: { key: 'turn-process', priority: 0 }, component: () => null, inject: () => ({}) },
+      { options: { key: 'assistant-step', priority: 0 }, component: () => null, inject: officialAssistantInject },
+    ]
+  },
 }
 // 融合后的 client 需要五类 service（slots 之外）。原 dsh-seeker-bot 只要 slots；
 // 原 dsh-triad 的四个工作台要 locale / inputTriggers / sessions / modelDirectories，
@@ -381,7 +394,7 @@ const krEnabled = /export const KR_CHAT_ENABLED = (true|false)/.exec(
 const styleIds = headItems.filter((item) => item?.tagName === 'STYLE').map((item) => item?.id ?? '')
 const expectedStyles = [
   'dsh-chat-flow-styles', 'dsh-tool-summary-styles',
-  'dsh-chat-flow-shot-styles', 'dsh-modal-animation-styles',
+  'dsh-chat-flow-shot-styles', 'dsh-overlay-motion-styles',
   'dsh-chat-flow-proto-styles', 'dsh-chat-flow-diagram-styles',
   // 对话内 HTML 卡片（src/client/html-embed/styles.ts）：标题栏 + 沙箱舞台 +
   // 全屏层。与 diagram 同批注入，独立 style id。
@@ -423,11 +436,17 @@ const expectedStyles = [
   // apply 时随 attachSidebarSections 注入。横滑分类条（strip.tsx）已于 2026-10-25
   // 删除——四个入口收进「操作间」屏，不再平铺在侧栏。
   'dsh-sidebar-nav-sections-styles',
+  // 侧栏底部「MCP服务器」胶囊（src/client/triad/connectors/sidebar-pill.tsx）：
+  // apply 时随 attachConnectorPill 注入。连接器入口从操作间菜单行改成这颗胶囊。
+  'dsh-mcp-pill-styles',
   // 界面字体覆盖（src/client/ui-font/font.ts）：把 --dsh-font-family-text/-code
   // （官方 0.2.1 的可写槽位）与 --dsw-font-family / --ds-font-family-code（消费值）
   // 改写成所选字体。必须在 apply 阶段就注入（不等 React），否则首帧会先按系统
   // 字体渲染、再闪成所选字体。
   'dsh-seeker-bot-ui-font',
+  // 界面字体下拉触发钮（src/client/ui-font/Row.tsx）：官方 selector pill 的
+  // hover / focus-visible 伪类必须走真实样式表，apply 时注入一次。
+  'dsh-seeker-bot-ui-font-select-css',
   // 首 token 平均平铺读数（src/client/stats-ttft/styles.ts）：只定分隔与入场，
   // 字号颜色全部继承官方 pill。apply 阶段随桥一起注入。
   'dsh-stats-ttft-styles',
@@ -838,13 +857,13 @@ if (krEnabled) {
   } else {
     pass('总结卡外观开关：接在大盘设置抽屉里 + 本地状态')
   }
-  // 三条 localStorage 行的 busy 必须恒为 false：它们同步落盘、没有网络往返，
+  // 两条 localStorage 行的 busy 必须恒为 false：它们同步落盘、没有网络往返，
   // 写成 busy={busy} 会让它们在别的 host 通道保存时莫名变灰、点不动。
   const localRows = [drawerSrc.match(/busy=\{false\}/g)?.length ?? 0]
-  if (localRows[0] < 3) {
-    fail(`三条外观偏好行都该 busy={false}（实得 ${localRows[0]} 处）——写成 busy 会让它们被 host 保存连坐变灰`)
+  if (localRows[0] < 2) {
+    fail(`两条外观偏好行都该 busy={false}（实得 ${localRows[0]} 处）——写成 busy 会让它们被 host 保存连坐变灰`)
   } else {
-    pass(`外观偏好行 busy 恒 false（${localRows[0]} 处：总结卡外框 / 工具调用卡 / 操作面板）`)
+    pass(`外观偏好行 busy 恒 false（${localRows[0]} 处：总结卡外框 / 工具调用卡）`)
   }
   // 抽屉必须分组：注入通道 / 按工作区的记录开关 / 纯外观 / 行为纪律，
   // 四者混一列会被读成同一种能力。抽屉里的组标题是**硬编码中文**（与它其余各行
@@ -1271,8 +1290,12 @@ if (processSeat === undefined) {
   fail(`key turn-process priority = ${processSeat.priority}, expected -100`)
 } else if (processSeat.locale !== 'chat') {
   fail(`key turn-process locale = ${processSeat.locale}, expected "chat"`)
+} else if (typeof processSeat.inject !== 'function') {
+  // 2026-11-03：entries() 的 inject 在 StoredEntry 顶层（不在 options），
+  // 读错位置会让座位组件缺注入 props，整条视图静默崩溃。
+  fail('turn-process 座位必须复制官方 inject（应从 entry.inject 读，否则组件缺注入 props）')
 } else {
-  pass('seat conversation.chat.node / turn-process @ priority -100')
+  pass('seat conversation.chat.node / turn-process @ priority -100（带官方 inject）')
 }
 
 const asst = cell('assistant-step')
@@ -1282,8 +1305,12 @@ if (asst === undefined) {
   fail(`key assistant-step priority = ${asst.priority}, expected -100`)
 } else if (asst.locale !== 'chat') {
   fail(`key assistant-step locale = ${asst.locale}, expected "chat"`)
+} else if (typeof asst.inject !== 'function') {
+  // 正是这一条没被守住时：fileMentions 未注入 → assistant-step 渲染抛
+  // TypeError → 总结卡（.dtt__card--reply）消失、只剩官方无框纯正文。
+  fail('assistant-step 座位必须复制官方 inject（应从 entry.inject 读，否则总结卡视图崩溃）')
 } else {
-  pass('seat conversation.chat.node / assistant-step @ priority -100')
+  pass('seat conversation.chat.node / assistant-step @ priority -100（带官方 inject，总结卡视图可渲染）')
 }
 
 const shot = registeredSlots.find((s) => s?.slot === 'conversation.chat.assistant-actions')
@@ -3335,11 +3362,10 @@ if (krEnabled) {
   const tabIds = tabsBlock === null ? [] : [...tabsBlock[1].matchAll(/id: '([a-z]+)'/g)].map(m => m[1])
   // 「系统提示词」(prompt) 是 2026-10-27 新增的第六类：只读视图；
   // 「同步设置」(sync) 是新增的第七类：工作台资产云端双向同步。
-  // 「连接器」(connectors) 是 2026-11 新增的第八类：MCP 市场，排在 SKILL 之后
-  // （用户点名「在 skill 菜单下方增加一个连接器菜单」）。用量工作台已下线，
-  // 现为七类。七类同源（都从 WORKBENCH_TABS 出），侧栏、浮层、⌘N 直切三处同步生效。
-  if (tabIds.join(',') !== 'memory,skills,connectors,gallery,vault,prompt,sync') {
-    reasons.push(`WORKBENCH_TABS 必须是 memory/skills/connectors/gallery/vault/prompt/sync 七项，实得 [${tabIds.join(', ')}]`)
+  // 连接器已于 2026-11-03 按要求改成弹窗卡片（不用工作台页承载），
+  // 所以 WORKBENCH_TABS 现为六类；六类同源，侧栏、浮层、⌘N 直切三处同步生效。
+  if (tabIds.join(',') !== 'memory,skills,gallery,vault,prompt,sync') {
+    reasons.push(`WORKBENCH_TABS 必须是 memory/skills/gallery/vault/prompt/sync 六项，实得 [${tabIds.join(', ')}]`)
   }
   if (!/return 'memory'/.test(flyoutSrc)) {
     reasons.push("readWorkbenchTab 的非法值回落必须是 'memory'")
@@ -3401,7 +3427,9 @@ if (krEnabled) {
 
   // 1. 注册表驱动：挂载器必须挂在座位里，且分类清单来自 WORKBENCH_TABS
   if (!/attachSidebarSections/.test(seatSrc)) reasons.push('双屏导航没有挂进工作台座位')
-  if (!/WORKBENCH_TABS\.map/.test(sectionsSrc)) reasons.push('默认条目必须遍历 WORKBENCH_TABS（不另起一份真相）')
+  // flatMap 也满足「遍历 WORKBENCH_TABS」：2026-11-03 连接器改成侧栏胶囊后，
+  // 默认清单要跳过 connectors 一行（仍从同一张表取，不另起第二份清单）。
+  if (!/WORKBENCH_TABS\.(?:map|flatMap)/.test(sectionsSrc)) reasons.push('默认条目必须遍历 WORKBENCH_TABS（不另起一份真相）')
   if (!/openWorkbench/.test(sectionsSrc)) reasons.push('工作台条目必须走 openWorkbench（复用官方 selectPanel）')
   if (!/entriesOfSection/.test(sectionsSrc)) reasons.push('条目必须按区域从注册表取（entriesOfSection）')
   if (!/orderedNavSections/.test(sectionsSrc)) reasons.push('区域必须从注册表按 order 取（orderedNavSections）')
@@ -5597,22 +5625,25 @@ if (krEnabled) {
     const hostWriters = [
       'setZhInjectState', 'setHtmlInjectState',
       'setTeamInjectState', 'setTodoRuleInjectState', 'setTodoClosureState',
+      'setMotionInjectState',
     ]
     const missingWriter = hostWriters.filter(name => !src.includes(name))
     const rowCount = (src.match(/<SettingsRow\b/g) ?? []).length
-    // 8 处 = 3（中文 / 交互卡片 / 团队）+ 1（任务清单纪律）+ 1（自动收口）+ 3（展示组）。
+    // 7 处 = 3（中文 / 交互卡片 / 团队）+ 1（任务清单纪律）+ 1（自动收口）+ 2（展示组）。
     // 灵魂注入那一行 2026-10-21 随灵魂模块整块删除：通道没了，闸门也就没有意义。
     // 2026-11-01「Agent 邮箱」整条功能移除，那一行（源码里两个分支）一并删掉 ——
     // 源码计数与渲染行数从此一一对应。
     // 「工作区记忆」那一组 2026-10-18 改成了**逐工作区列表**（不再是固定的 SettingsRow），
     // 因此不计入这个数字 —— 它的判据在下面 6c。
+    // 2026-11-03：新增「动效技能强制加载」行（提示词通道组第 4 行），由 7 变 8。
     const expectedRows = 8
-    // 8 个行序号（0..7）。
+    // 7 个行序号（0..6）。
     // 2026-10-25 由 9 变 10：step 纪律从提示词通道组挪进「任务清单」组，与
     // 「回合结束自动收口」并列 —— 用户要求「任务清单相关的全部归到一个组」。
     // 2026-10-28：step 纪律整条退役（用户要求「step 去掉，任务清单保留」），原先挂在
     // 它第五节的任务清单纪律独立成通道、占同一个行位。
     // 2026-11-01：邮箱行删除后由 10 变 8。
+    // 2026-11-03：操作面板开关整条移除（不允许关闭），由 8 变 7。
     // 开关**没有合并**：两者作用机理相反（一个写提示词、一个改状态），绑成一个
     // 开关会强迫用户做无意义的交易（想关"末项转圈"就得连带关掉"少往返"）。
     const expectedIndexes = 8
@@ -5629,11 +5660,11 @@ if (krEnabled) {
     } else if (!/busy/.test(src)) {
       fail('host 写入缺少 busy 门控（写盘期间连点会出竞态，开关状态弹来弹去）')
     } else if (rowCount !== expectedRows) {
-      fail(`大盘设置应有 ${expectedRows} 处 <SettingsRow>（3 注入 + 任务清单纪律 + 自动收口 + 展示 3），实得 ${rowCount}`)
+      fail(`大盘设置应有 ${expectedRows} 处 <SettingsRow>（4 注入 + 任务清单纪律 + 自动收口 + 展示 2），实得 ${rowCount}`)
     } else if (!consecutive) {
       fail(`行序号 --row-i 必须从 0 起连续到 ${expectedIndexes - 1}（新增行要顺延后面的序号，否则两行同时浮现）：实得 ${JSON.stringify(distinctIndexes)}`)
     } else {
-      pass(`大盘设置：${expectedRows} 个开关行接线完整（5 条 host 通道 + 3 条外观偏好；--row-i 0..${expectedIndexes - 1} 连续，含 busy 门控）`)
+      pass(`大盘设置：${expectedRows} 个开关行接线完整（5 条 host 通道 + 2 条外观偏好；--row-i 0..${expectedIndexes - 1} 连续，含 busy 门控）`)
     }
 
     // 6c) 「工作区记忆」组（2026-10-18 改成逐工作区列表）：用户要求「显示出来所有工作区
@@ -5675,24 +5706,24 @@ if (krEnabled) {
       pass('大盘设置：灵魂注入行已随模块删除（无空开关、无悬挂引用）')
     }
 
-    // 6b) 操作面板显隐（同族第三条）：抽屉里一行 + 大盘消费 + apply 初始化，
-    //     三处缺一，用户拨了就没反应（而这既不报错也不打日志）。
+    // 6b) 操作面板**不允许关闭**（2026-11-03 用户要求「移除操作面板开关，不允许关闭」）：
+    //     设置行、localStorage 开关模块、KrAgentPanel 的运行时消费必须整条消失，
+    //     右栏渲染条件只剩「构建开关 + 功能开关」两层。
     //
-    // 注意两处的文案来源**刻意不同**：抽屉里的行是硬编码中文（与它其余 7 行同款），
-    // composer 侧走 i18n 键 plainTimelineLabel（键保留给别处复用/将来再入口）。
-    // 断言要按各自的实际写法钉，不能拿 i18n 键去要求硬编码的那份。
-    if (!/label="操作面板"/.test(src) || !/setPlainTimelineVisible\(!plainTimelineOn\)/.test(src)) {
-      fail('大盘设置缺「操作面板」开关行（label / onToggle 未接 setPlainTimelineVisible）')
-    } else if (!/plainTimelineOn/.test(src)) {
-      fail('大盘设置未消费操作面板展示开关（拨了没反应）')
-    } else if (!/plainTimelineVisible/.test(agent)) {
-      fail('KrAgentPanel 未消费操作面板展示开关（右栏那张卡不会隐藏）')
-    } else if (!/KR_PLAIN_TIMELINE_CARD_VISIBLE && plainTimelineOn/.test(agent)) {
-      fail('操作面板的运行时开关必须与构建开关 KR_PLAIN_TIMELINE_CARD_VISIBLE 叠加（两个都开才渲染）')
-    } else if (!/installPlainTimelineVisible/.test(readFileSync(resolve(ROOT, 'src/client/index.ts'), 'utf8'))) {
-      fail('client/index.ts 未初始化 installPlainTimelineVisible（刷新后不读盘、跨窗口不同步）')
+    //     这组断言钉的是**删除**而不是接线：任何一处残留都会让用户重新拿到
+    //     「关掉操作面板」的入口 —— 这不是审美偏好，是用户明确要求的能力边界。
+    if (/label="操作面板"/.test(src) || /plainTimelineOn|setPlainTimelineVisible|subscribePlainTimelineVisible/.test(src)) {
+      fail('大盘设置不得再留「操作面板」开关行（用户要求不允许关闭）')
+    } else if (/plainTimelineVisible|plain-timeline-visible/.test(agent)) {
+      fail('KrAgentPanel 不得再消费操作面板展示开关（该卡必须常显）')
+    } else if (!/KR_PLAIN_TIMELINE_CARD_VISIBLE && panelLiveOn/.test(agent)) {
+      fail('操作面板渲染条件应为 KR_PLAIN_TIMELINE_CARD_VISIBLE && panelLiveOn（不再有运行时开关）')
+    } else if (existsSync(resolve(ROOT, 'src/client/plain-timeline-visible.ts'))) {
+      fail('plain-timeline-visible.ts 应已删除（开关模块不再有消费者）')
+    } else if (/installPlainTimelineVisible/.test(readFileSync(resolve(ROOT, 'src/client/index.ts'), 'utf8'))) {
+      fail('client/index.ts 不得再初始化 installPlainTimelineVisible')
     } else {
-      pass('大盘设置：操作面板开关三处在位（抽屉行 / 大盘消费 / apply 初始化）')
+      pass('大盘设置：操作面板开关已整条移除，右栏常显（构建开关 + 功能开关两层）')
     }
 
     // 8) 定位硬约束（2026-10-18 卡片化后**整体反转**，改动前务必读完）：
@@ -5785,7 +5816,7 @@ if (krEnabled) {
 
     // 9b2) 两栏布局（2026-10-18 用户点名「布局需要调整下」）：
     //
-    //      左栏 = 提示词通道 6 行（说明最长），右栏 = 工作区记忆 1 行 + 展示 3 行。
+    //      左栏 = 提示词通道 3 行（说明最长），右栏 = 工作区记忆 1 行 + 展示 2 行。
     //      三处缺一即失效，而且**都不报错**：
     //        · body 不是 grid → 两栏塌回单列，看着像没改；
     //        · 缺 __col 两个容器 → 左栏那一组把右栏两组顶到下面去，白改；
@@ -6151,16 +6182,26 @@ if (krEnabled) {
     else if (!/Microsoft YaHei/.test(system.body)) reasons.push('system 档必须显式写 Microsoft YaHei')
     else if (system.webfont !== undefined) reasons.push('system 档不该带 webfont（默认档必须零下载）')
 
-    // 下拉框恰好两个选项，且第二项是霞鹜新致宋。
-    if (FONT_OPTIONS.length !== 2) reasons.push(`下拉框应恰好 2 个选项，实得 ${FONT_OPTIONS.length}`)
-    const lx = FONT_OPTIONS.find(o => o.id === 'lxgw-neozhisong')
-    if (lx === undefined) reasons.push('缺少 lxgw-neozhisong 档')
-    else {
-      if (lx.label !== '霞鹜新致宋') reasons.push(`档位标签应为「霞鹜新致宋」，实得 ${lx.label}`)
-      if (lx.webfont === undefined) reasons.push('lxgw 档必须声明 webfont（否则永远拿不到真字体）')
-      else if (!/@font-face/.test(fontOverrideCss(lx))) reasons.push('lxgw 档的覆盖 CSS 必须带 @font-face')
-      else if (!fontFileUrl(lx.webfont.file).startsWith('/api/chat-flow/fonts/')) {
-        reasons.push(`webfont URL 必须指向 host 路由，实得 ${fontFileUrl(lx.webfont.file)}`)
+    // 下拉框四档：微软雅黑 / 霞鹜文楷（落霞孤鹜）/ HarmonyOS Sans / 霞鹜新致宋。
+    if (FONT_OPTIONS.length !== 4) reasons.push(`下拉框应恰好 4 个选项，实得 ${FONT_OPTIONS.length}`)
+    for (const [id, label, format] of [
+      ['lxgw-wenkai', '霞鹜文楷', 'woff2'],
+      ['harmonyos-sans', 'HarmonyOS Sans', 'truetype'],
+      ['lxgw-neozhisong', '霞鹜新致宋', 'woff2'],
+    ]) {
+      const option = FONT_OPTIONS.find(o => o.id === id)
+      if (option === undefined) { reasons.push(`缺少 ${id} 档`); continue }
+      if (option.label !== label) reasons.push(`档位 ${id} 标签应为「${label}」，实得 ${option.label}`)
+      if (id === 'harmonyos-sans' && !/Huawei/.test(option.notice ?? '')) reasons.push('HarmonyOS 档必须带 Huawei 授权署名（许可要求软件内显著提示）')
+      if (option.webfont === undefined) reasons.push(`${id} 档必须声明 webfont（否则永远拿不到真字体）`)
+      else {
+        if ((option.webfont.format ?? 'woff2') !== format) reasons.push(`${id} 档 format 应为 ${format}，实得 ${option.webfont.format ?? 'woff2'}`)
+        const faceCss = fontOverrideCss(option)
+        if (!/@font-face/.test(faceCss)) reasons.push(`${id} 档的覆盖 CSS 必须带 @font-face`)
+        else if (!faceCss.includes(`format("${format}")`)) reasons.push(`${id} 档的 @font-face 必须写 format("${format}")`)
+        else if (!fontFileUrl(option.webfont.file).startsWith('/api/chat-flow/fonts/')) {
+          reasons.push(`${id} webfont URL 必须指向 host 路由，实得 ${fontFileUrl(option.webfont.file)}`)
+        }
       }
     }
 
@@ -6198,7 +6239,7 @@ if (krEnabled) {
     if (fontOptionOf(null).id !== DEFAULT_FONT_ID) reasons.push('null 未回落默认档')
 
     if (reasons.length > 0) fail('界面字体契约：' + reasons.join('；'))
-    else pass('界面字体：默认微软雅黑 + 两档下拉 + 通用回退齐备 + 两层变量齐备')
+    else pass('界面字体：默认微软雅黑 + 四档下拉（霞鹜文楷 / HarmonyOS Sans / 霞鹜新致宋）+ 通用回退齐备 + 两层变量齐备')
 
     // 设置行座位：官方「通用」页的 settings.general.item，order 排在官方两行之后。
     const fontRow = registeredSlots.find(s => s?.slot === 'settings.general.item' && s?.id === 'ui-font')
@@ -6224,8 +6265,14 @@ if (krEnabled) {
     // 失败必须可见：切换中/失败都要有状态文案，静默等待会被当成「点了没反应」。
     const rowSrc = readFileSync(resolve(ROOT, 'src/client/ui-font/Row.tsx'), 'utf8')
     if (!/加载失败/.test(rowSrc)) fail('字体加载失败必须给出可见提示（否则用户只会觉得字体坏了）')
-    else if (!/加载中/.test(rowSrc)) fail('5.0MB 字体下载期间必须显示「加载中」（否则像是卡死）')
-    else pass('字体状态可见：加载中 / 加载失败提示齐备')
+    else if (!/加载中/.test(rowSrc)) fail('大体积字体下载期间必须显示「加载中」（否则像是卡死）')
+    else if (!/from '@deepseek-ai\/dsh-client-ui-primitives'/.test(rowSrc) || !/<Menu/.test(rowSrc)) {
+      fail('界面字体下拉必须改用官方 primitives 的 Menu（DSH 样式弹层），不得继续使用原生 select 的系统弹层')
+    } else if (/<select/.test(rowSrc)) {
+      fail('界面字体设置行里仍有原生 select —— 系统 option 弹层无法做成 DSH 样式')
+    } else {
+      pass('字体状态可见：加载中 / 加载失败提示齐备；下拉为官方 Menu（DSH 样式）')
+    }
 
     // 覆盖样式表必须真的出现在 head 里（apply 阶段注入，id 契约见 font.ts 的 STYLE_ID）。
     if (!styleIds.includes('dsh-seeker-bot-ui-font')) {
@@ -6297,7 +6344,7 @@ if (krEnabled) {
  * ── BOT 模式（Personal Agent）字号轴：正文必须等于通用设置里的字号 ──────────
  *
  * 用户要求（2026-11-03）：「BOT 模式下的所有的字体与字号跟随通用设置里面的」
- * —— 设置页那两行是「字号大小 14px」+「界面字体 霞鹜新致宋」。
+ * —— 设置页那两行是「字号大小 14px」+「界面字体 霞鹜文楷」。
  *
  * 字体一直是对的：`.pa-root` 继承 `--dsw-font-family`（界面字体写入的上层槽位
  * `--dsh-font-family-text` 由官方在 body 上解析成它），实测默认视图 / 右栏 /
@@ -6359,11 +6406,18 @@ if (krEnabled) {
   const offenders = []
   for (const file of cssFiles) {
     const raw = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, ' ')
+    /*
+     * 唯一例外（2026-11-03 用户要求）：「期刊日记 / 设置」两项要与 Work 模式侧栏
+     * 设置行的字号**对等**（那两处是官方固定 14px，不跟随通用字号）。规则见
+     * shell.css.ts 的 .pa-root .pa-side-bottom-item 注释。扫描时把这组声明剔掉，
+     * 其余所有 font-size 仍必须走 --pa-font-delta / --pa-font-size。
+     */
+    const scoped = raw.replace(/\.pa-root \.pa-side-bottom-item\s*\{[\s\S]*?\}/g, ' ')
     // 前置断言排除 --pa-font-size / --dsh-content-font-size 这类**变量名**里
     // 也含 font-size 的声明（否则变量定义本身会被当成写死的字号）。
     const re = /(?<![-\w])font-size:\s*([^;{}]+)/g
     let m
-    while ((m = re.exec(raw)) !== null) {
+    while ((m = re.exec(scoped)) !== null) {
       const value = m[1].trim()
       const follows = value.includes('var(--pa-font-delta)')
         || value === 'var(--pa-font-size)'

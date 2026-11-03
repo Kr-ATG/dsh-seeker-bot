@@ -68,7 +68,7 @@ const cardStyle = (leaving: boolean): CSSProperties => ({
   textAlign: 'left',
   animation: leaving
     ? `dplNoticeOut ${OUT_MS}ms cubic-bezier(.4,0,1,1) forwards`
-    : 'dplNoticeIn .38s cubic-bezier(.32,.72,0,1)',
+    : 'dplNoticeIn .24s cubic-bezier(.2,.8,.2,1)',
 })
 
 /** 左侧语义竖条：出错用暖赭色，正常完成用墨色（与提示条同一套语义色）。 */

@@ -60,6 +60,12 @@ body[data-ds-dark-theme]{--tsh-control-surface:var(--dsw-static-neutral-bluish-8
 
 /* ── 遮罩 + 面板 ── */
 .tsh-mask{position:fixed;inset:0;z-index:1399;background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.45))}
+/* 遮罩淡入淡出：只动 opacity，且用 ease（遮罩不是被「甩走」的对象，只是跟着面板退场）。
+   时长与 .tsh-panel 的 240ms 对齐，两条动画同时开始、同时结束，中间不会有断层。 */
+.tsh-mask[data-anim='in']{animation:tsh-mask-in 240ms ease}
+.tsh-mask[data-anim='out']{animation:tsh-mask-out 240ms ease forwards}
+@keyframes tsh-mask-in{from{opacity:0}to{opacity:1}}
+@keyframes tsh-mask-out{from{opacity:1}to{opacity:0}}
 .tsh-panel{position:fixed;z-index:1400;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;flex-direction:column;box-sizing:border-box;width:min(calc(100vw - 48px),2160px);height:min(calc(100vh - 40px),1720px);border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));border-radius:14px;background:var(--tsh-panel-surface);box-shadow:var(--dsw-shadow-lv3,0 8px 40px rgba(0,0,0,.5));overflow:hidden}
 html[data-dsh-glass] .tsh-panel{background:var(--tsh-panel-surface);backdrop-filter:none;-webkit-backdrop-filter:none}
 /* 居中面板的开合动画自带 translate(-50%,-50%)，不能复用通用滑入类（会覆盖定位）。 */
@@ -116,7 +122,7 @@ html[data-dsh-glass] .tsh-panel{background:var(--tsh-panel-surface);backdrop-fil
   background:color-mix(in srgb,var(--dsw-alias-state-warning-primary,#d29922) 10%,transparent);
   border:1px solid color-mix(in srgb,var(--dsw-alias-state-warning-primary,#d29922) 28%,transparent);
   border-radius:8px;
-  animation:tsh-warn-in .32s cubic-bezier(.22,.61,.36,1) both;
+  animation:tsh-warn-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 @keyframes tsh-warn-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion:reduce){.tsh-warn{animation:none}}
@@ -125,7 +131,7 @@ html[data-dsh-glass] .tsh-panel{background:var(--tsh-panel-surface);backdrop-fil
 /* 编辑中：选项条整体减淡并禁止交互（改了选项会脱离编辑，需要先退出重渲染）。 */
 .tsh-panel[data-editing] .tsh-bar{opacity:.55;pointer-events:none}
 /* 编辑工具条：位于选项条下方、预览台上方，滑入动画。 */
-.tsh-edit-bar{flex:none;box-sizing:border-box;width:100%;display:flex;align-items:center;gap:12px;padding:9px 16px;background:var(--tsh-panel-surface);border-bottom:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.08));animation:tsh-editbar-in 180ms ease}
+.tsh-edit-bar{flex:none;box-sizing:border-box;width:100%;display:flex;align-items:center;gap:12px;padding:9px 16px;background:var(--tsh-panel-surface);border-bottom:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.08));animation:tsh-editbar-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1)}
 @keyframes tsh-editbar-in{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
 .tsh-edit-hint{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary,#bbb);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tsh-edit-count{flex:none;font-size:12px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
@@ -148,6 +154,7 @@ html[data-dsh-glass] .tsh-panel{background:var(--tsh-panel-surface);backdrop-fil
 .tsh-toast{color:var(--dsw-alias-state-success-primary,#3fb950)}
 @media (prefers-reduced-motion:reduce){
   .tsh-panel{animation:none!important}
+  .tsh-mask{animation:none!important}
   .tsh-spinner{animation:none}
   .tsh-edit-bar{animation:none}
 }

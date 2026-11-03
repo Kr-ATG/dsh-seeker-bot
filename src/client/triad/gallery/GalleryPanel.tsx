@@ -79,6 +79,8 @@ import { getClientCtx } from '../../client-ctx.js'
 import { openWithDefaultApp } from '../../open-default-app.js'
 import { openWithDefaultBrowser } from '../../open-file.js'
 import { readGalleryKind, requestGalleryKind, subscribeWorkbenchIntent } from '../hub/workbench-intent.js'
+import { useModalClose } from '../triad-modal-animation.js'
+import { PAGE_MOTION_IN } from '../../motion/overlay-motion.js'
 
 /** 筛选状态：当前选中的分类。 */
 type KindFilter = GalleryKind
@@ -114,6 +116,13 @@ const DEL_CARD_MS = 260
 
 /** 错峰等待封顶：条目多时不再线性拉长，否则点一下要等好几秒才发请求。 */
 const DEL_STAGGER_CAP = 900
+
+/* ── 时间筛选气泡的退场节奏 ────────────────────────────────────────────
+ *
+ * 小 popover 用 120ms：面积小、离点击点近，比面板那 240ms 更快脱手；
+ * 与 styles.ts 的 tg-pop-out 时长成对维护，两处写死同一个数。
+ */
+const TIME_POP_OUT_MS = 120
 
 /** 退场动画整体要等多久（与卡片数相关，封顶见上）。 */
 function delAnimationMs(count: number): number {
@@ -700,6 +709,20 @@ export function GalleryPanel({ onClose }: GalleryPanelProps): JSX.Element {
   /** 显式时间筛选（时钟钮弹层设置）；null = 不限。 */
   const [timeFilter, setTimeFilter] = useState<TimeRange | null>(null)
   const [timePopover, setTimePopover] = useState(false)
+  /**
+   * 时间筛选气泡的退场态。
+   *
+   * 气泡原来只有入场（tg-pop-in 170ms），关的时候是条件渲染直接摘掉 ——
+   * 「啪」地消失，和划入不对等。改用共用的 useModalClose：requestClose 先把
+   * closing 置 true 播 tg-pop-out 120ms，播完才真正 setTimePopover(false)。
+   * 小 popover 用 120ms（不是面板那 240ms）：它面积小、离手指近，慢半拍会黏。
+   */
+  const closeTimePopover = useCallback(() => { setTimePopover(false) }, [])
+  const {
+    closing: timePopoverClosing,
+    requestClose: requestTimePopoverClose,
+    cancelClose: cancelTimePopoverClose,
+  } = useModalClose(timePopover, closeTimePopover, TIME_POP_OUT_MS)
   /** 自定义区间的两个 date input（弹层内）。 */
   const [customFrom, setCustomFrom] = useState('')
   const [customTo, setCustomTo] = useState('')
@@ -773,13 +796,15 @@ export function GalleryPanel({ onClose }: GalleryPanelProps): JSX.Element {
   }, [])
 
   // 点弹层外部 / Esc 关闭时间筛选弹层。
+  // 两条出口都走 requestTimePopoverClose：它先播 120ms 退场再卸载，
+  // 直接 setTimePopover(false) 会让气泡「啪」地消失（与划入不对等）。
   useEffect(() => {
     if (!timePopover) return undefined
     const onPointer = (event: MouseEvent) => {
-      if (!popoverRef.current?.contains(event.target as Node)) setTimePopover(false)
+      if (!popoverRef.current?.contains(event.target as Node)) requestTimePopoverClose()
     }
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setTimePopover(false)
+      if (event.key === 'Escape') requestTimePopoverClose()
     }
     document.addEventListener('mousedown', onPointer)
     document.addEventListener('keydown', onKey)
@@ -787,7 +812,9 @@ export function GalleryPanel({ onClose }: GalleryPanelProps): JSX.Element {
       document.removeEventListener('mousedown', onPointer)
       document.removeEventListener('keydown', onKey)
     }
-  }, [timePopover])
+    // requestTimePopoverClose 由 useModalClose 保证引用稳定（onClose 是 useCallback），
+    // 放进依赖不会让监听每帧重挂。
+  }, [timePopover, requestTimePopoverClose])
 
   useEffect(() => {
     mounted.current = true
@@ -1017,11 +1044,11 @@ export function GalleryPanel({ onClose }: GalleryPanelProps): JSX.Element {
    */
   const hasFilter = sessionId !== null || effectiveRange !== null || query.trim() !== ''
 
-  /** 应用一个时间预设（'all' = 清除）。 */
+  /** 应用一个时间预设（'all' = 清除）。关气泡走 requestClose（播完退场再卸载）。 */
   const applyPreset = useCallback((id: Exclude<TimePresetId, 'custom'>) => {
-    setTimePopover(false)
+    requestTimePopoverClose()
     setTimeFilter(id === 'all' ? null : presetRange(id))
-  }, [])
+  }, [requestTimePopoverClose])
 
   /** 应用自定义区间（date input：起日 00:00 → 止日次日 00:00）。 */
   const applyCustom = useCallback(() => {
@@ -1032,8 +1059,8 @@ export function GalleryPanel({ onClose }: GalleryPanelProps): JSX.Element {
     const from = fromDate.getTime()
     const to = toDate.getTime() + 86_400_000
     setTimeFilter({ from, to, label: `${customFrom || '起始'} ~ ${customTo || '现在'}` })
-    setTimePopover(false)
-  }, [customFrom, customTo])
+    requestTimePopoverClose()
+  }, [customFrom, customTo, requestTimePopoverClose])
 
   /**
    * 打开一个条目：**先交给系统默认应用**（2026-10-20 按用户要求改）。
@@ -1275,7 +1302,13 @@ export function GalleryPanel({ onClose }: GalleryPanelProps): JSX.Element {
             title="按时间筛选"
             aria-label="按时间筛选"
             aria-expanded={timePopover}
-            onClick={() => { setTimePopover((open) => !open) }}
+            onClick={() => {
+              // 退场途中再点：撤销退场让气泡原地弹回。少了这一支，那 120ms 窗口里
+              // 的点击会被 requestClose 的 closing 守卫吞掉，看起来就是按钮失灵。
+              if (timePopoverClosing) { cancelTimePopoverClose(); return }
+              if (timePopover) { requestTimePopoverClose(); return }
+              setTimePopover(true)
+            }}
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <circle cx="12" cy="12" r="9" />
@@ -1283,8 +1316,9 @@ export function GalleryPanel({ onClose }: GalleryPanelProps): JSX.Element {
             </svg>
             {timeFilter !== null && <span className="tg-time__badge">{timeFilter.label}</span>}
           </button>
-          {timePopover && (
-            <div className="tg-time-pop" role="menu">
+          {/* closing 期间仍留在 DOM 里播 tg-pop-out，播完才由 useModalClose 卸载。 */}
+          {(timePopover || timePopoverClosing) && (
+            <div className={timePopoverClosing ? 'tg-time-pop tg-time-pop--out' : 'tg-time-pop'} role="menu">
               <div className="tg-time-pop__presets">
                 {(['all', 'today', 'yesterday', 'last7', 'last30', 'thisWeek', 'thisMonth', 'lastMonth'] as const).map((id) => {
                   const isCurrent = id === 'all'
@@ -1580,7 +1614,7 @@ export function GalleryPanel({ onClose }: GalleryPanelProps): JSX.Element {
       ) : view === 'timeline' ? (
         /* 时间轴：左侧极简细轨 + 按天折叠，日期头作为收起/展开开关，卡片走 compact 方格。
            key 只随**视图形态**变化（见 viewKey 的说明）：切类别时不再整棵重建。 */
-        <div className="tg-scroll" key={viewKey}>
+        <div className="tg-scroll" key={viewKey} {...PAGE_MOTION_IN}>
           {dayGroups.map((group, groupIndex) => {
             const isCollapsed = collapsedDays.has(group.key)
             return (
@@ -1630,7 +1664,12 @@ export function GalleryPanel({ onClose }: GalleryPanelProps): JSX.Element {
           })}
         </div>
       ) : (
-        <div className="tg-scroll">
+        /* 网格 ⇄ 时间轴是这一页唯一的「页面级视图切换」：key 随 view 变化 →
+           整个滚动容器重挂，重播 {...PAGE_MOTION_IN}。
+           卡片自己已有 tg-card-in 的逐张入场（--tg-i 错峰），所以这里**只给容器**
+           挂整页转场，不再叠加 PAGE_MOTION_STAGGER —— 两层错峰会变成双重位移，
+           而且一百多张卡片同时起跑正是「长列表全量错峰会卡」的场景。 */
+        <div className="tg-scroll" key={viewKey} {...PAGE_MOTION_IN}>
           {/* key 只随视图形态变化：切类别不再重建网格（否则 140 张缩略图全部重载） */}
           <div className="tg-grid" key={viewKey}>
             {visible.slice(0, renderLimit).map((item, index) => (

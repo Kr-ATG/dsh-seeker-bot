@@ -55,7 +55,7 @@ const cardStyle = (leaving: boolean): CSSProperties => ({
   lineHeight: fontScaleCss(20),
   animation: leaving
     ? `dplToastOut ${OUT_MS}ms cubic-bezier(.4,0,1,1) forwards`
-    : 'dplToastIn .34s cubic-bezier(.32,.72,0,1)',
+    : 'dplToastIn .24s cubic-bezier(.2,.8,.2,1)',
 })
 
 /** 左侧语义竖条：错误态用暖赭色（与提醒芯片同源），信息态用墨色。 */

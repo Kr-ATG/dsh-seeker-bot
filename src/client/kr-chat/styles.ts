@@ -688,10 +688,10 @@ body[data-kr-resizing="true"] * {
    * 浮起」的根因就在这里。backwards 只垫住 delay 期间的首帧，播完就把控制权
    * 还回普通声明，悬停位移、折叠时的位移都能正常工作。
    *
-   * 动画本体也降了一档：位移 6px → 4px、时长走 card 令牌。右栏一屏叠着五张
+   * 动画本体也降了一档：位移 6px → 4px、时长走统一的 240ms。右栏一屏叠着五张
    * 卡，6px 的位移在窄栏里读作「整块面板在弹」，4px 只够说明「这里多了一张」。
    */
-  animation: kr-card-in var(--kr-dur-card) var(--kr-ease-out) backwards;
+  animation: kr-card-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
 /* hover：抬升 1px + 阴影再开一档，让「可交互」和「可折叠」被看见。 */
@@ -978,10 +978,10 @@ body[data-kr-resizing="true"] * {
   /*
    * 入场只走 backwards（理由同 .kr-card）：both 会让 to 帧永久占据 transform
    * 这条通道，行内其它依赖 transform 的效果（如完成时的对勾 pop 之外的位移）
-   * 就会被压住。位移收到 2px、时长走 row 令牌：一列任务最多十几行，每行都
+   * 就会被压住。位移收到 2px、时长走统一的 240ms：一列任务最多十几行，每行都
    * 滑 6px 叠起来读作「列表在抖」，2px 只够让人看见「这一条是新的」。
    */
-  animation: kr-task-item-in var(--kr-dur-row) var(--kr-ease-out) backwards;
+  animation: kr-task-item-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
   transition: background-color var(--kr-dur-tap) linear;
 }
 
@@ -1030,8 +1030,8 @@ body[data-kr-resizing="true"] * {
    * 呼吸会从第 0 帧就盖住入场，scaleY 直接跳到 .72~1 的循环，那条「自上而下长出
    * 来」的入场等于不存在。
    */
-  animation: kr-task-bar-in var(--kr-dur-row) var(--kr-ease-out) backwards,
-             kr-task-bar-breathe 2.2s var(--kr-ease-loop) var(--kr-dur-row) infinite;
+  animation: kr-task-bar-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards,
+             kr-task-bar-breathe 2.2s var(--kr-ease-loop) 240ms infinite;
   z-index: -1;
 }
 
@@ -1206,7 +1206,7 @@ body[data-kr-resizing="true"] * {
 }
 
 .kr-num-roll--up .kr-num-roll__new {
-  animation: kr-num-in-up 320ms var(--kr-ease-out) both;
+  animation: kr-num-in-up 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
 .kr-num-roll--down .kr-num-roll__old {
@@ -1214,7 +1214,7 @@ body[data-kr-resizing="true"] * {
 }
 
 .kr-num-roll--down .kr-num-roll__new {
-  animation: kr-num-in-down 320ms var(--kr-ease-out) both;
+  animation: kr-num-in-down 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
 @keyframes kr-num-out-up {
@@ -1895,7 +1895,7 @@ body[data-ds-dark-theme] .kr-card--reasoning[data-inline] {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  animation: kr-fade-in var(--kr-dur-fade) var(--kr-ease-out) backwards;
+  animation: kr-fade-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
 /* 台账信息标签 */
@@ -2508,7 +2508,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   /* 与 Hero 之间留一点呼吸，别把「探索未至之境」顶得太紧。 */
   padding: 4px 0 8px;
   /* 入场：与右栏那张卡头同一套节奏（淡入 + 上浮 4px），两处出现时读起来是一件事。 */
-  animation: kr-hero-head-in var(--kr-dur-card) var(--kr-ease-out) backwards;
+  animation: kr-hero-head-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
 /* 卡头本体在 Hero 里不需要悬停浮起（它不可折叠，点它没有动作）。 */
@@ -2685,7 +2685,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  animation: kr-git-modal-fade-in 0.15s ease-out;
+  animation: kr-git-modal-fade-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .kr-git-roster-modal {
@@ -2700,7 +2700,35 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  animation: kr-git-modal-scale-in 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: kr-git-modal-scale-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/*
+ * Git 大盘 / 能力明细弹窗的退场（两个弹窗共用这套 class，改这一处即同时覆盖）。
+ *
+ * 为什么用后代选择器而不是给 .kr-git-roster-modal 也挂 data-closing：根节点
+ * .kr-git-roster-overlay 拿到 data-closing='1' 就够了，卡片通过后代关系一并接住。
+ * 特异性（0,2,0）高于入场规则（0,1,0），能覆盖上面那条 scale-in；240ms 与
+ * modal-animation.ts 的 MODAL_ANIM_MS 同值，代码里的卸载定时器与这里对齐。
+ */
+@keyframes kr-git-modal-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes kr-git-modal-scale-out {
+  from { opacity: 1; transform: scale(1) translateY(0); }
+  to { opacity: 0; transform: scale(0.97) translateY(14px); }
+}
+
+.kr-git-roster-overlay[data-closing='1'] {
+  /* 遮罩淡出用 ease：它不是「被加速甩走」的对象，只是跟着退场。 */
+  animation: kr-git-modal-fade-out 240ms ease forwards;
+}
+
+.kr-git-roster-overlay[data-closing='1'] .kr-git-roster-modal {
+  /* 加速语义曲线：收起比展开更「果断」，不需要入场那种减速收尾。 */
+  animation: kr-git-modal-scale-out 240ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
 
 /* 顶部 Header */
@@ -3100,6 +3128,8 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
 @media (prefers-reduced-motion: reduce) {
   .kr-git-roster-overlay,
   .kr-git-roster-modal,
+  .kr-git-roster-overlay[data-closing='1'],
+  .kr-git-roster-overlay[data-closing='1'] .kr-git-roster-modal,
   .kr-git-roster-segmented__btn,
   .kr-git-action-btn {
     animation: none !important;
@@ -3143,12 +3173,15 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   opacity: 0.85;
 }
 
-.kr-cap-badge__item--mcp .kr-cap-badge__icon {
-  color: #0ea5e9;
-}
-
+/*
+ * 两枚图标不再各自染品牌色（2026-11-03 用户要求「MCP 技能图标不要底色」）：
+ * 原来 MCP 插头是品牌蓝 #0ea5e9、Skill 闪电是品牌紫 #8b5cf6，在卡头里比
+ * Git / 齿轮显眼得多，读起来像两个彩色小色块。现在统一继承旁边文字的
+ * label-secondary 灰，与另外两枚工具图标同一档，不再抢注意力。
+ */
+.kr-cap-badge__item--mcp .kr-cap-badge__icon,
 .kr-cap-badge__item--skill .kr-cap-badge__icon {
-  color: #8b5cf6;
+  color: inherit;
 }
 
 .kr-cap-badge__num {
@@ -3231,11 +3264,11 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
 
 .kr-cap-group__icon {
   flex: none;
-  color: #0ea5e9;
+  color: var(--dsw-alias-label-secondary);
 }
 
 .kr-cap-group__icon--skill {
-  color: #8b5cf6;
+  color: var(--dsw-alias-label-secondary);
 }
 
 .kr-cap-group__title {
@@ -3617,7 +3650,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
     background-color var(--kr-dur-tap) linear,
     transform var(--kr-dur-tap) var(--kr-ease-out);
   animation:
-    kr-plain-browser-in var(--kr-dur-row) var(--kr-ease-out) backwards,
+    kr-plain-browser-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards,
     kr-plain-browser-breathe 1.6s ease-in-out .22s infinite;
   will-change: opacity;
 }
@@ -3735,7 +3768,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   /* 字号 = DSH 正文 +2（与名字、动作行同一口径）。 */
   font-size: max(12px, calc(var(--dsh-content-font-size, 14px) + 2px));
   color: var(--dsw-alias-label-tertiary);
-  animation: kr-plain-idle-in var(--kr-dur-row) var(--kr-ease-out) backwards;
+  animation: kr-plain-idle-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
 @keyframes kr-plain-idle-in {
@@ -3943,7 +3976,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   font-size: var(--kr-fs-12, 12px);
   color: var(--dsw-alias-label-secondary);
   /*
-   * 入场：位移 6px → 3px，填充 both → backwards，时长走 row 令牌。
+   * 入场：位移 6px → 3px，填充 both → backwards，时长走统一的 240ms。
    *
    * 6px 在 22px 行高的列表里接近三分之一行高，一列十几条一起铺开时读作「列表
    * 在往下淌」；3px 是「上一行比下一行早一点点出现」的量级。both 改 backwards
@@ -3952,7 +3985,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
    *
    * 删除行（data-status="removed" 等）不在这里处理，见文件末尾统一的退场段。
    */
-  animation: kr-plain-step-in var(--kr-dur-row) var(--kr-ease-out) backwards;
+  animation: kr-plain-step-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
   transition: background-color var(--kr-dur-tap) linear;
 }
 
@@ -4088,7 +4121,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   color: var(--dsw-alias-label-secondary, #61666b);
   background: color-mix(in srgb, var(--dsw-alias-label-primary, #1f2329) 12%, transparent);
   font-variant-numeric: tabular-nums;
-  animation: kr-count-in var(--kr-dur-row) var(--kr-ease-out) backwards;
+  animation: kr-count-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
 /*
@@ -4145,7 +4178,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
  * 进行中的活动竖线：**一条规则里挂两个动画**，入场与呼吸错开起点。
  *
  * 原来只有一条 1.7s 无限脉冲，行刚出现时竖线直接以半高开始——同一步骤在「刚刚
- * 开始跑」和「已经跑了两秒」看起来一模一样。现在前面接一段 260ms 的自上而下
+ * 开始跑」和「已经跑了两秒」看起来一模一样。现在前面接一段 240ms 的自上而下
  * 展开，后面接无限呼吸，第二个动画延迟一拍再起：展开播完，呼吸正好接上。
  *
  * 两段都只动 transform 与 opacity。呼吸曲线取令牌里的 loop（首尾同速）——
@@ -4161,8 +4194,8 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   border-radius: 1px;
   background: var(--dsw-alias-label-primary, #1f2329);
   transform-origin: center top;
-  animation: kr-plain-active-in var(--kr-dur-row) var(--kr-ease-out) backwards,
-             kr-plain-active 1.7s var(--kr-ease-loop) var(--kr-dur-row) infinite;
+  animation: kr-plain-active-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards,
+             kr-plain-active 1.7s var(--kr-ease-loop) 240ms infinite;
 }
 
 @keyframes kr-plain-active-in {
@@ -4218,7 +4251,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   line-height: calc(15px + var(--dsh-content-font-delta, 0px) * 1.4286);
   color: var(--kr-error);
   background: color-mix(in srgb, var(--kr-error) 12%, transparent);
-  animation: kr-plain-issue-in var(--kr-dur-row) var(--kr-ease-out) backwards;
+  animation: kr-plain-issue-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
 @keyframes kr-plain-issue-in {
@@ -4269,7 +4302,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
               background-color var(--kr-dur-fade) linear,
               border-color var(--kr-dur-fade) linear,
               transform var(--kr-dur-tap) var(--kr-ease-soft);
-  animation: kr-open-chip-in var(--kr-dur-row) var(--kr-ease-out) backwards;
+  animation: kr-open-chip-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
 @keyframes kr-open-chip-in {
@@ -4335,7 +4368,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   color: var(--dsw-alias-label-secondary, #61666b);
   background: color-mix(in srgb, var(--dsw-alias-label-primary, #1f2329) 10%, transparent);
   font-variant-numeric: tabular-nums;
-  animation: kr-count-in var(--kr-dur-row) var(--kr-ease-out) backwards;
+  animation: kr-count-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
 /* ══ 「子智能体」卡（这次对话派出去几个独立干活的）═════════════════════════
@@ -4487,7 +4520,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   /* 错峰入场：与操作面板 / 产出物同一套节奏（新行从下方 3px 淡入），
      三张卡「有东西出现」读起来是一件事。位移统一收到 3px：右栏一屏最多叠
      三张卡各几十行，6px 一列铺下来读作「整块面板在下淌」。 */
-  animation: kr-subs-row-in var(--kr-dur-row) var(--kr-ease-out) backwards;
+  animation: kr-subs-row-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
   transition: background-color var(--kr-dur-tap) linear;
 }
 
@@ -4819,7 +4852,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
 /* 折叠区内每行错峰入场：与进行中那些行同一套节奏，展开时是"一层层落下来"，
    而不是"整块闪出来"。 */
 .kr-subs-done__body .kr-subs-row {
-  animation: kr-subs-row-in var(--kr-dur-row) var(--kr-ease-out) backwards;
+  animation: kr-subs-row-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
 /* 跳转失败（旧宿主没有 uiWorkspace）时的一枚提示：说清事实，而不是"点了没反应"。
@@ -4829,7 +4862,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   /* 异常提示小字：跟随字号轴（见「字号轴」段）。 */
   font-size: var(--kr-fs-10-5, 10.5px);
   color: var(--kr-warning);
-  animation: kr-subs-blocked-in var(--kr-dur-row) var(--kr-ease-out) backwards;
+  animation: kr-subs-blocked-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
 @keyframes kr-subs-blocked-in {
@@ -5028,7 +5061,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   transition: background-color var(--kr-dur-tap) linear, opacity var(--kr-dur-fade) linear;
   /* 错峰入场：与操作面板同一套节奏（新行从下方 3px 淡入），
      两张卡的「有东西出现」读起来是一件事。 */
-  animation: kr-out-row-in var(--kr-dur-row) var(--kr-ease-out) backwards;
+  animation: kr-out-row-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
 @keyframes kr-out-row-in {
@@ -5244,12 +5277,27 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   border-radius: 10px;
   background: var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base, #fff));
   box-shadow: 0 12px 32px color-mix(in srgb, var(--dsw-alias-label-primary, #000) 16%, transparent), 0 2px 8px rgba(0, 0, 0, .06);
-  animation: kr-out-menu-in 120ms var(--kr-ease-out);
+  animation: kr-out-menu-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 @keyframes kr-out-menu-in {
   from { opacity: 0; transform: translateY(-3px); }
   to { opacity: 1; transform: none; }
+}
+
+/*
+ * 右键菜单退场：160ms（小 popover 档），向右缩回 + 轻微缩小 + 淡出。
+ *
+ * 菜单是从指针位置弹出的，向右上缩回读起来是「收回到指针点」，比原地淡出更像
+ * 一次有方向的撤回。forwards 保留终态，避免定时器到点卸载前闪回不透明。
+ */
+@keyframes kr-out-menu-out {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateX(10px) scale(0.97); }
+}
+
+.kr-out-menu[data-closing='1'] {
+  animation: kr-out-menu-out 160ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
 
 .kr-out-menu__item {
@@ -5274,7 +5322,9 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .kr-out-menu { animation: none; }
+  /* data-closing 那条特异性更高，这里必须 !important 才能真的关掉退场。 */
+  .kr-out-menu,
+  .kr-out-menu[data-closing='1'] { animation: none !important; }
 }
 
 /* 2026-10-30 用户要求去掉行尾落点图标：整行按钮 + aria-label 仍是唯一入口。 */
@@ -5762,7 +5812,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   border-radius: 6px;
   cursor: pointer;
   transition: background-color var(--kr-dur-tap) linear, box-shadow var(--kr-dur-fade) linear;
-  animation: kr-memory-row-in var(--kr-dur-row) var(--kr-ease-out) backwards;
+  animation: kr-memory-row-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
 .kr-memory__row:hover {
@@ -6465,7 +6515,7 @@ body[data-ds-dark-theme] .kr-agent-mini-shell {
   background: var(--dsw-alias-bg-layer-1, var(--dsw-alias-bg-base));
   box-shadow: 0 10px 28px rgba(15, 17, 21, .10);
   transform-origin: 0 0;
-  animation: kr-agent-avatar-menu-in var(--kr-dur-tap) var(--kr-ease-soft) backwards;
+  animation: kr-agent-avatar-menu-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 
 body[data-ds-dark-theme] .kr-agent-avatar-menu {
@@ -6667,6 +6717,22 @@ body[data-ds-dark-theme] .kr-agent-avatar-menu {
   to { opacity: 1; transform: none; }
 }
 
+/*
+ * 头像设置气泡退场：160ms（小 popover 档）。
+ *
+ * 气泡的 transform-origin 是 0 0（左上角，即指针按下头像的那个点），所以
+ * scale(.97) + translateY(-4px) 读起来是「缩回按下时的原点」，与入场的展开方向
+ * 严格对称。forwards 保留终态，直到状态机的定时器把它卸载。
+ */
+@keyframes kr-agent-avatar-menu-out {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateY(-4px) scale(.97); }
+}
+
+.kr-agent-avatar-menu[data-closing='1'] {
+  animation: kr-agent-avatar-menu-out 160ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
 @keyframes kr-agent-mini-in {
   from { opacity: 0; transform: translateY(7px) scale(.99); }
   to { opacity: 1; transform: translateY(0) scale(1); }
@@ -6705,6 +6771,7 @@ body[data-ds-dark-theme] .kr-agent-avatar-menu {
   .kr-agent-mini-shell[data-closing="true"][data-committed="true"],
   .kr-agent-mini-shell[data-closing="true"][data-committed="true"] .kr-agent-mini-card,
   .kr-agent-avatar-menu,
+  .kr-agent-avatar-menu[data-closing='1'],
   .kr-agent-mini-avatar__status {
     animation: none !important;
   }
@@ -7856,7 +7923,7 @@ body[data-ds-dark-theme] .kr-settings {
    播放，每次打开都重新浮现一次，不需要任何 JS 重播逻辑。
    both 的 backwards 填充让 delay 期间保持透明，afterwards 停在终态。 */
 .kr-settings[data-open="true"] .kr-settings__row {
-  animation: kr-settings-row-in var(--kr-dur-card) var(--kr-ease-soft) backwards;
+  animation: kr-settings-row-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
   animation-delay: calc(var(--row-i, 0) * 26ms);
 }
 

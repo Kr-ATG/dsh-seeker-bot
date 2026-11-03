@@ -2,12 +2,14 @@
  * dsh-seeker-bot — 生图结果文本解析（纯函数）。
  *
  * generate_image 工具（dsh-provider-hub 的 model-capabilities）把结果以
- * `JSON.stringify(value, null, 2)` 写进 tool-call 节点的 content 文本块，
- * 形状为 `{ ok, model, endpoint, data: { data: [{ b64_json | url }] } }`
- * （OpenAI 兼容 images/generations 原始响应）；旧 vision-helper 通道另返回
- * `{ ok, imageUrls, imageUrl, imageDataUrl }`。这里兼容两种，产出统一的
- * 画廊条目列表（b64_json → data URL 交给 <img> 直接渲染，绕开 DSH
- * markdown 只放行 http(s) 的图片策略）。
+ * `JSON.stringify(value, null, 2)` 写进 tool-call 节点的 content 文本块。三种形态
+ * 都要认：
+ *  - 旧：`{ ok, model, endpoint, data: { data: [{ b64_json | url }] } }`（OpenAI 兼容
+ *    images/generations 原始响应，b64_json 转 data URL 交给 <img> 直接渲染）；
+ *  - 旧 vision-helper 通道：`{ ok, imageUrls, imageUrl, imageDataUrl }`；
+ *  - 新（2026-11-03 起）：`{ ok, model, endpoint, images: [{ path, mime, bytes, width, height }] }`
+ *    —— 工具已把图落盘，不再回 base64（那会让模型以为没拿到图、重复生成一张）。
+ *    path 是宿主绝对路径，拼成同源文件路由 URL 后 <img> 能直接加载。
  */
 
 export interface GeneratedImageEntry {
@@ -24,6 +26,33 @@ interface RawCandidate {
 function pushUnique(list: GeneratedImageEntry[], url: string, model: string | null): void {
   if (url === '') return
   if (!list.some(entry => entry.url === url)) list.push({ url, model })
+}
+
+/**
+ * 同源文件路由：与 host 侧 `src/host/personal/agent.ts` 的 IMAGE_FILE_ROUTE 同口径。
+ *
+ * 为什么客户端能拼出这个 URL：`/api/personal-agent/file` 的准入白名单包含
+ * `materializeRoot()`（`<DSH_HOME>/storages/dsh-seeker-bot-generated`），而新格式
+ * 的 `images[].path` 正是落在那里的绝对路径 —— 拼成同源 URL 后浏览器能直接加载，
+ * 不需要把几 MB 的图再塞回 JSON。
+ */
+const GENERATED_FILE_ROUTE = '/api/personal-agent/file'
+
+/**
+ * 一条 `images[]` 项 → 可显示的 URL。
+ *
+ * `url`（网关直给的 http / data URL）优先，其次 `path` 转同源文件路由 URL。
+ * 两项都没有 / 类型不对就返回 null —— 这个函数**绝不抛错**：画廊是「少一张能接受、
+ * 崩了不能接受」的地方。
+ */
+function urlOfGeneratedItem(item: unknown): string | null {
+  if (typeof item !== 'object' || item === null) return null
+  const record = item as { url?: unknown; path?: unknown }
+  if (typeof record.url === 'string' && record.url !== '') return record.url
+  if (typeof record.path === 'string' && record.path !== '') {
+    return `${GENERATED_FILE_ROUTE}?path=${encodeURIComponent(record.path)}`
+  }
+  return null
 }
 
 /** 从 OpenAI 兼容响应体里提取图片 URL（b64_json 转 data URL 优先，其次 url）。 */
@@ -63,6 +92,16 @@ export function parseGeneratedImageText(text: string): readonly GeneratedImageEn
   const data = record.data as Record<string, unknown> | undefined
   if (typeof data === 'object' && data !== null) {
     collectFromData(data.data, model, list)
+  }
+  /*
+   * 新通道（2026-11-03 起）：工具已把图落盘，结果里只有 `images[].path`。
+   * 放在 data.data[] 之后：历史结果里两种形态可能同时存在，顺序只影响优先级。
+   */
+  if (Array.isArray(record.images)) {
+    for (const item of record.images) {
+      const url = urlOfGeneratedItem(item)
+      if (url !== null) pushUnique(list, url, model)
+    }
   }
   // 旧 vision-helper 通道：imageUrls / imageUrl / imageDataUrl。
   if (Array.isArray(record.imageUrls)) {

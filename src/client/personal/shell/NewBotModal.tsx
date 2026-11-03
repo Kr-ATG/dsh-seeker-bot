@@ -5,12 +5,13 @@
  * 随机建议卡片一键填入。「换一批」重新抽取四个建议；发送后由
  * store.createBot 负责创建并让新 Bot 主动发第一条消息。
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { IconBot, IconRefresh, IconSparkles, IconX } from '../icons.tsx'
-import { NEW_BOT_SUGGESTIONS } from '../engine.ts'
+import { NEW_BOT_SUGGESTIONS, randomBotAppearance } from '../engine.ts'
+import { AvatarPicker } from '../shared/AvatarPicker.tsx'
 import { PaSelect, type PaSelectOption } from '../shared/PaSelect.tsx'
 import { useLiveVendors, usePersonal } from '../store.tsx'
-import { liveVendorOptions } from '../types.ts'
+import { liveVendorOptions, type Avatar } from '../types.ts'
 import { REALTIME_VOICES } from '../../../shared/realtime-protocol.ts'
 
 type Suggestion = (typeof NEW_BOT_SUGGESTIONS)[number]
@@ -35,6 +36,8 @@ function pickFour(): Suggestion[] {
 export function NewBotModal(): JSX.Element | null {
   const { ui, actions } = usePersonal()
   const [name, setName] = useState('')
+  /** 头像：随机外观起步，用户可以在预设里换或从本地导入图片。 */
+  const [avatar, setAvatar] = useState<Avatar>(() => randomBotAppearance())
   const [draft, setDraft] = useState('')
   /** 通话音色 id；空串 = 跟随全局默认（不落 Bot 字段）。 */
   const [voice, setVoice] = useState('')
@@ -53,10 +56,66 @@ export function NewBotModal(): JSX.Element | null {
     [liveVendors.vendors, liveVendors.defaultVendor, liveVendor],
   )
 
+  /*
+   * 退场状态：ui.newBotOpen 变 false 时先播 240ms 退场，再从 DOM 摘掉。
+   *
+   * 关闭入口不止「关闭 / 取消」：创建成功后 store 会自己把 newBotOpen 置 false
+   * （store.tsx 的 createBot），所以不能只在一个 requestClose 里挂定时器——
+   * 这里统一监听 open 变 false，任何路径都能播完退场再卸载。
+   */
+  const [rendered, setRendered] = useState(ui.newBotOpen)
+  const [closing, setClosing] = useState(false)
+  const closeTimerRef = useRef<number | null>(null)
+  const renderedRef = useRef(ui.newBotOpen)
+
+  useEffect(() => {
+    if (ui.newBotOpen) {
+      // 打开（含退场途中重新打开）：撤销退场，立刻可见。
+      if (closeTimerRef.current !== null) {
+        window.clearTimeout(closeTimerRef.current)
+        closeTimerRef.current = null
+      }
+      renderedRef.current = true
+      setClosing(false)
+      setRendered(true)
+      return
+    }
+    if (!renderedRef.current) return
+    setClosing(true)
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null
+      renderedRef.current = false
+      setClosing(false)
+      setRendered(false)
+    }, 240)
+  }, [ui.newBotOpen])
+
+  useEffect(() => () => {
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
+  }, [])
+
+  const close = useCallback((): void => {
+    if (busy) return
+    actions.openNewBot(false)
+  }, [busy, actions])
+
+  /* Esc 关闭：与关闭按钮、点遮罩走同一个退场。 */
+  useEffect(() => {
+    if (!ui.newBotOpen) return undefined
+    const onKeyDown = (event: KeyboardEvent): void => {
+      // 被内层控件（如 PaSelect 的下拉）先处理过的 Esc 不再重复响应。
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      close()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [ui.newBotOpen, close])
+
   /* 每次打开都回到干净状态。 */
   useEffect(() => {
     if (!ui.newBotOpen) return
     setName('')
+    setAvatar(randomBotAppearance())
     setDraft('')
     setVoice('')
     setLiveVendor('')
@@ -65,7 +124,12 @@ export function NewBotModal(): JSX.Element | null {
     setBusy(false)
   }, [ui.newBotOpen])
 
-  if (!ui.newBotOpen) return null
+  /*
+   * 打开的首帧直接用 ui.newBotOpen 兜住：rendered 要等 effect 才置 true，
+   * 只看 rendered 会让点击「新建 Bot」后先空一帧。关闭时 open 已为 false，
+   * rendered 仍为 true，所以退场期间照常渲染。
+   */
+  if (!rendered && !ui.newBotOpen) return null
 
   const submit = async (): Promise<void> => {
     if (busy) return
@@ -73,6 +137,7 @@ export function NewBotModal(): JSX.Element | null {
     try {
       await actions.createBot({
         name: name.trim() === '' ? undefined : name.trim(),
+        avatar,
         role: picked !== null ? picked.role : (draft.trim() === '' ? undefined : draft.trim()),
         description: picked !== null ? picked.description : undefined,
         // 空串 = 跟随全局默认，createBot 里不会落这个字段
@@ -86,14 +151,10 @@ export function NewBotModal(): JSX.Element | null {
     }
   }
 
-  const close = (): void => {
-    if (busy) return
-    actions.openNewBot(false)
-  }
-
   return (
     <div
       className="pa-overlay"
+      data-closing={closing ? '1' : undefined}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) close()
       }}
@@ -115,6 +176,10 @@ export function NewBotModal(): JSX.Element | null {
         <div className="pa-create-body">
           <div className="pa-create-sec">
             <div className="pa-create-sec__head"><span>基本信息</span></div>
+            <div className="pa-form-row">
+              <label className="pa-label">头像</label>
+              <AvatarPicker value={avatar} onChange={setAvatar} />
+            </div>
             <div className="pa-form-row">
               <label className="pa-label" htmlFor="pa-new-bot-name">名字 <em>可选</em></label>
               <input

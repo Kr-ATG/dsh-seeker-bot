@@ -20,9 +20,13 @@
  *   node scripts/test-personal-ptc-image.mjs
  */
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+// capabilities-host.js 是 host 半身源码（依赖 vendor 里的 TS 副本，Node 直接加载不了），
+// 用项目自带的 esbuild 现场打成临时 ESM 再 import —— 与 scripts/test-vault.mjs 同款。
+import { build } from 'esbuild'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..')
@@ -107,6 +111,113 @@ function createHarness(botId, spillStore = null) {
     },
   }
   return { agent, ctx, streamEvents, emitEvent }
+}
+
+/* ───────────────── 假网关 / 假 ctx（驱动真的 capabilities-host）───────────────── */
+
+/** 一张「真 PNG + 尾部填充」的大图：尺寸解析只看 IHDR，填充用来模拟真实大图体积。 */
+function bigPngBytes(padding = 240_000) {
+  return Buffer.concat([Buffer.from(PNG_B64, 'base64'), Buffer.alloc(padding, 0x41)])
+}
+
+/** 一段最小合法 mp4 头（4 字节 box 长度 + 'ftyp' + brand）+ 填充，magic 判据能过。 */
+function fakeMp4Bytes(padding = 2_000) {
+  return Buffer.concat([
+    Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0x00, 0x00, 0x02, 0x00]),
+    Buffer.alloc(padding, 0x11),
+  ])
+}
+
+/**
+ * 只在 127.0.0.1 上监听的假网关：按请求路径回固定 JSON。
+ *
+ * 为什么要起真 HTTP server 而不是 stub fetch：被测的是 callGeneration 的完整
+ * 出网路径（拼 URL、带 header、读 body、解析 JSON），stub 掉 fetch 就只剩
+ * 「瘦身函数」本身可测，拼错 URL 这类错误测不出来。
+ */
+async function startFakeGateway(routes) {
+  const server = createServer((req, res) => {
+    const chunks = []
+    req.on('data', (chunk) => chunks.push(chunk))
+    req.on('end', () => {
+      const route = routes[req.url ?? '']
+      // 原始字节路由：模拟「网关给的是图片 url，工具要去下载落盘」这条分支。
+      if (route !== undefined && Buffer.isBuffer(route.raw)) {
+        res.writeHead(200, { 'content-type': route.contentType ?? 'application/octet-stream' })
+        res.end(route.raw)
+        return
+      }
+      const payload = route ?? { error: `no route: ${req.url}` }
+      res.writeHead(payload.error === undefined ? 200 : 404, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(payload))
+    })
+  })
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise))
+  const address = server.address()
+  return { server, baseURL: `http://127.0.0.1:${address.port}` }
+}
+
+/**
+ * 驱动 capabilities-host 的最小 ctx。
+ *
+ * 只提供 apply 路径上真正用到的四个服务（settings / llm / tools / webServer）
+ * 与 effect：settings.register 返回一个内存 scope，于是 ownConfig() 读到我们
+ * 指定的 imageActive / videoActive，工具就能按「已选模型」正常走 callGeneration。
+ * ctx.get('credentials') 返回 undefined —— 假 profile 不设 apiKeyEnv，不会因此报错。
+ */
+function createCapabilitiesHarness({ config, providers }) {
+  const registered = new Map()
+  const state = { ...config }
+  const ctx = {
+    effect(fn) {
+      const dispose = fn()
+      return typeof dispose === 'function' ? dispose : () => {}
+    },
+    logger: { warn() {}, error() {}, info() {}, debug() {} },
+    settings: {
+      writable: true,
+      register: () => ({
+        get: () => ({ ...state }),
+        update: async (patch) => { Object.assign(state, patch) },
+      }),
+      get: (ns) => (ns === 'llm-pi-ai' ? { providers } : undefined),
+      describe: () => [],
+    },
+    llm: {
+      listConfigurableProviders: () => [],
+      listProviders: () => [],
+      listModels: async () => [],
+    },
+    tools: {
+      register(definition) {
+        registered.set(definition.name, definition)
+        return () => registered.delete(definition.name)
+      },
+    },
+    webServer: { register: () => () => {} },
+    get: () => undefined,
+  }
+  return { ctx, registered }
+}
+
+/** 把 host 半身的 capabilities-host.js 打成临时 ESM 再 import（Node 认不了 .js 里的 .ts import）。 */
+async function loadCapabilitiesHost() {
+  const outfile = join(tempRoot, 'capabilities-host.bundle.mjs')
+  await build({
+    entryPoints: [join(ROOT, 'src', 'provider', 'capabilities-host.js')],
+    outfile,
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    target: ['node22'],
+    logLevel: 'silent',
+  })
+  return await import(pathToFileURL(outfile).href)
+}
+
+/** 生图/生视频工具的落盘根（与 spill/materialize.ts 的 materializeRoot() 同口径）。 */
+function generatedRoot() {
+  return join(process.env.DSH_HOME, 'storages', 'dsh-seeker-bot-generated')
 }
 
 /** 一轮里最典型的 PTC 生图事件序列。 */
@@ -244,6 +355,306 @@ try {
     assertEqual((settled?.run?.images ?? []).length, 1, 'spill 用例：从 spill 文件里读回 1 张图')
     assertEqual(settled?.run?.model, 'test/image-model-spill', 'spill 用例：模型名来自 spill 全文')
   }
+  /* ── 5. 生图工具瘦身：大 base64 不再回给模型（2026-11-03 修复）──────── */
+  /*
+   * 根因：工具把网关原始 JSON（约 3.8MB b64_json）直接回给模型，模型在
+   * run_code 里打印被截断，误以为「没拿到图」→ 再调一次 → 用户要一张得两张。
+   * 这条用例用假网关 + 假 ctx 驱动**真的** capabilities-host，断言：
+   *   1. 返回体里没有 b64（小到不可能被截断）；
+   *   2. 图真的落在 <DSH_HOME>/storages/dsh-seeker-bot-generated/generated；
+   *   3. images[] 带 path / mime / bytes / width / height；
+   *   4. 再调一次落在同一个文件上（幂等，不重复写盘）。
+   */
+  const hostMod = await loadCapabilitiesHost()
+  {
+    const pngBytes = bigPngBytes()
+    const b64 = pngBytes.toString('base64')
+    const gateway = await startFakeGateway({
+      '/images/generations': { created: 1, data: [{ b64_json: b64 }] },
+    })
+    try {
+      const harness = createCapabilitiesHarness({
+        config: {
+          flags: { 'fake-route/fake-image': { image: true, video: true, speech: false, enabled: true } },
+          imageActive: 'fake-route/fake-image',
+          videoActive: 'fake-route/fake-image',
+          imagePath: 'images/generations',
+          videoPath: 'videos/generations',
+          proxyUrl: '',
+        },
+        providers: { 'fake-route': { baseURL: gateway.baseURL } },
+      })
+      hostMod.apply(harness.ctx)
+      const tool = harness.registered.get('generate_image')
+      assert(tool !== undefined, 'generate_image 工具已注册（假 ctx 驱动真 capabilities-host）')
+
+      const result = await tool.execute({ prompt: '氷越しの夏' }, { signal: undefined })
+      const text = JSON.stringify(result)
+      assert(!text.includes('b64_json'), '返回体里没有 b64_json（模型不会再看到被截断的 base64）')
+      assert(text.length < 4000, `返回体足够小（${text.length} 字节；修复前是 3.8MB 量级）`)
+      assertEqual(result.ok, true, '生图工具返回 ok:true')
+      assertEqual(result.model, 'fake-route/fake-image', '返回体带上模型名')
+      assertEqual(result.images?.length, 1, '返回 images[] 里有一张图')
+
+      const image = result.images?.[0] ?? {}
+      assert(typeof image.path === 'string' && isAbsolute(image.path), 'images[0].path 是绝对路径')
+      assert(image.path.startsWith(generatedRoot()), '落盘路径在 materializeRoot() 之内（前端 /file 路由能读）')
+      assert(existsSync(image.path), '图片真的落到了磁盘上')
+      assertEqual(image.mime, 'image/png', 'images[0].mime 是 image/png')
+      assertEqual(image.bytes, pngBytes.byteLength, 'images[0].bytes 是落盘字节数')
+      assertEqual(image.width, 1, 'images[0].width 从 IHDR 解析（1）')
+      assertEqual(image.height, 1, 'images[0].height 从 IHDR 解析（1）')
+      assert(
+        String(result.note ?? '').includes('不要用同一提示词重复生成'),
+        'note 明确告诉模型「图已落盘、别重复生成」',
+      )
+
+      const again = await tool.execute({ prompt: '氷越しの夏' }, { signal: undefined })
+      assertEqual(again.images?.[0]?.path, image.path, '同一张图再调一次落在同一个文件上（幂等）')
+      const files = readdirSync(join(generatedRoot(), 'generated'))
+      assertEqual(files.length, 1, '重复调用不会写出第二个文件')
+    } finally {
+      await new Promise((resolvePromise) => gateway.server.close(resolvePromise))
+    }
+  }
+
+  /* ── 5b. 生视频瘦身：异步任务 id 保留、大 b64 不进返回体 ────────────── */
+  {
+    const gateway = await startFakeGateway({
+      '/videos/generations': {
+        data: { id: 'task-42', status: 'queued', progress: 10, video_b64: 'A'.repeat(50_000) },
+      },
+    })
+    try {
+      const harness = createCapabilitiesHarness({
+        config: {
+          flags: { 'fake-route/fake-image': { image: true, video: true, speech: false, enabled: true } },
+          imageActive: 'fake-route/fake-image',
+          videoActive: 'fake-route/fake-image',
+          imagePath: 'images/generations',
+          videoPath: 'videos/generations',
+          proxyUrl: '',
+        },
+        providers: { 'fake-route': { baseURL: gateway.baseURL } },
+      })
+      hostMod.apply(harness.ctx)
+      const tool = harness.registered.get('generate_video')
+      assert(tool !== undefined, 'generate_video 工具已注册')
+
+      const result = await tool.execute({ prompt: '海边日落' }, { signal: undefined })
+      const text = JSON.stringify(result)
+      assert(!text.includes('A'.repeat(1000)), '返回体里没有那段 50KB 的 base64')
+      assert(text.length < 4000, `视频返回体足够小（${text.length} 字节）`)
+      assertEqual(result.videos?.length, 0, '异步任务形态：没有可播放文件')
+      assertEqual(result.task?.id, 'task-42', 'task.id 原样保留（模型据此转告 / 轮询）')
+      assertEqual(result.task?.status, 'queued', 'task.status 原样保留')
+      assert(String(result.note ?? '').includes('异步任务'), 'note 说明这是异步任务、不要重复提交')
+    } finally {
+      await new Promise((resolvePromise) => gateway.server.close(resolvePromise))
+    }
+  }
+
+  /* ── 5c. 生视频：网关给 b64 时也能落盘成真实文件 ───────────────────── */
+  {
+    const mp4Bytes = fakeMp4Bytes()
+    const gateway = await startFakeGateway({
+      '/videos/generations': { data: { data: [{ b64_json: mp4Bytes.toString('base64') }] } },
+    })
+    try {
+      const harness = createCapabilitiesHarness({
+        config: {
+          flags: { 'fake-route/fake-image': { image: true, video: true, speech: false, enabled: true } },
+          imageActive: 'fake-route/fake-image',
+          videoActive: 'fake-route/fake-image',
+          imagePath: 'images/generations',
+          videoPath: 'videos/generations',
+          proxyUrl: '',
+        },
+        providers: { 'fake-route': { baseURL: gateway.baseURL } },
+      })
+      hostMod.apply(harness.ctx)
+      const tool = harness.registered.get('generate_video')
+      const result = await tool.execute({ prompt: '海边日落' }, { signal: undefined })
+      assertEqual(result.videos?.length, 1, 'b64 视频被落盘成一条 videos[]')
+      const video = result.videos?.[0] ?? {}
+      assert(typeof video.path === 'string' && existsSync(video.path), '视频文件真的落到了磁盘上')
+      assertEqual(video.mime, 'video/mp4', '视频 mime 是 video/mp4')
+      assert(!JSON.stringify(result).includes(mp4Bytes.toString('base64').slice(0, 200)), '返回体里没有视频 base64')
+    } finally {
+      await new Promise((resolvePromise) => gateway.server.close(resolvePromise))
+    }
+  }
+
+  /* ── 5d. 网关给 url（不是 b64）时也下载落盘；下载失败保留 url ────── */
+  /*
+   * 真实网关有两种形态：有的回 b64_json，有的只回一个 CDN 地址。后一种如果不
+   * 下载落盘，模型拿到的 path 就是空的，前端也显示不出图 —— 任务要求「url 也要
+   * 落盘；下载失败则保留 images[].url 不丢信息」，这条用例把两个分支都钉住。
+   */
+  {
+    const pngBytes = Buffer.from(PNG_B64, 'base64')
+    const routes = {}
+    const gateway = await startFakeGateway(routes)
+    routes['/files/img.png'] = { raw: pngBytes, contentType: 'image/png' }
+    routes['/images/generations'] = { data: [{ url: `${gateway.baseURL}/files/img.png` }] }
+    try {
+      const harness = createCapabilitiesHarness({
+        config: {
+          flags: { 'fake-route/fake-image': { image: true, video: true, speech: false, enabled: true } },
+          imageActive: 'fake-route/fake-image',
+          videoActive: 'fake-route/fake-image',
+          imagePath: 'images/generations',
+          videoPath: 'videos/generations',
+          proxyUrl: '',
+        },
+        providers: { 'fake-route': { baseURL: gateway.baseURL } },
+      })
+      hostMod.apply(harness.ctx)
+      const tool = harness.registered.get('generate_image')
+
+      const downloaded = await tool.execute({ prompt: 'url 形态' }, { signal: undefined })
+      const downloadedImage = downloaded.images?.[0] ?? {}
+      assert(typeof downloadedImage.path === 'string' && existsSync(downloadedImage.path), 'url 形态：图片被下载并落盘')
+      assertEqual(downloadedImage.bytes, pngBytes.byteLength, 'url 形态：落盘字节与远端一致')
+      assertEqual(downloadedImage.width, 1, 'url 形态：尺寸仍从 IHDR 解析')
+
+      // 下载失败（404）：保留原 url，不丢信息。
+      routes['/images/generations'] = { data: [{ url: `${gateway.baseURL}/files/missing.png` }] }
+      const fallback = await tool.execute({ prompt: 'url 形态 404' }, { signal: undefined })
+      const fallbackImage = fallback.images?.[0] ?? {}
+      assertEqual(fallbackImage.path, undefined, '下载失败时不伪造 path')
+      assertEqual(
+        fallbackImage.url,
+        `${gateway.baseURL}/files/missing.png`,
+        '下载失败时保留原 url（信息不丢）',
+      )
+    } finally {
+      await new Promise((resolvePromise) => gateway.server.close(resolvePromise))
+    }
+  }
+
+  /* ── 6. 新格式（图已落盘）→ 对话流仍能显示 ───────────────────────── */
+  /*
+   * 这是修复的另一半：工具只回 path，如果下游不认新格式，生图卡就是
+   * 「ok 但没有图」—— 比重复生成更糟。这里断言 agent.ts 能把本地文件复制进
+   * bot 工作区并生成同源 URL（前端直接 <img src>）。
+   */
+  const newFormatImagePath = join(generatedRoot(), 'generated', 'fedcba9876543210.png')
+  mkdirSync(dirname(newFormatImagePath), { recursive: true })
+  writeFileSync(newFormatImagePath, Buffer.from(PNG_B64_ALT, 'base64'))
+  {
+    const botId = 'ptc-image-new-format-bot'
+    const harness = createHarness(botId)
+    const resultText = JSON.stringify({
+      ok: true,
+      model: 'test/new-format-model',
+      endpoint: 'http://127.0.0.1/v1/images/generations',
+      images: [{
+        path: newFormatImagePath,
+        mime: 'image/png',
+        bytes: Buffer.from(PNG_B64_ALT, 'base64').byteLength,
+        width: 1,
+        height: 1,
+      }],
+      note: '图片已落盘为真实文件（images[].path 是绝对路径），无需再解码保存：可直接 present，或把路径告知用户；不要用同一提示词重复生成。',
+    })
+    harness.agent.followup = () => scriptImageTurn(harness.emitEvent, {
+      subCallId: 'call-run-code-5:ptc:1',
+      prompt: '新格式一张图',
+      size: '1024x1536',
+      n: 1,
+      resultText,
+    })
+
+    const turn = await runBotTurn(
+      harness.ctx,
+      { botId, name: 'PTC 新格式机器人', role: '助手', description: '', instructions: '', model: { provider: 'test-provider', model: 'test-model' } },
+      '生成一张图',
+      (event) => harness.streamEvents.push(event),
+    )
+    assertEqual(turn.ok, true, '新格式用例跑完一轮')
+
+    const settled = [...harness.streamEvents].reverse().find((event) => event.type === 'tool' && event.run?.name === 'generate_image')
+    assertEqual(settled?.run?.status, 'ok', '新格式：生图块状态为 ok')
+    assertEqual(settled?.run?.model, 'test/new-format-model', '新格式：模型名解析出来了')
+    const images = settled?.run?.images ?? []
+    assertEqual(images.length, 1, '新格式：生图块带 1 张图（本地 path 被复制进工作区）')
+    assert(
+      typeof images[0] === 'string' && images[0].startsWith('/api/personal-agent/file?path='),
+      '新格式：图片地址是同源文件路由（前端可直接 <img src>）',
+    )
+    assertEqual(turn.blocks.filter((block) => block.type === 'tool' && block.run?.name === 'generate_image').length, 1, '新格式：只有一张生图卡')
+  }
+
+  /* ── 7. 解析器：新旧格式都认，新格式能落出文件 ───────────────────── */
+  {
+    const materialize = await import(pathToFileURL(join(ROOT, 'src', 'spill', 'materialize.ts')).href)
+    const newFormat = materialize.parseGeneratedResult(JSON.stringify({
+      ok: true,
+      model: 'test/new-format-model',
+      images: [{ path: newFormatImagePath, mime: 'image/png', bytes: 1, width: 1, height: 1 }],
+    }))
+    assertEqual(newFormat.ok, true, 'parseGeneratedResult：新格式解析成功')
+    assertEqual(newFormat.urls.length, 1, 'parseGeneratedResult：新格式解析出 1 张图')
+    assert(
+      String(newFormat.urls[0]).startsWith('/api/personal-agent/file?path='),
+      'parseGeneratedResult：path 转成同源文件路由 URL（客户端能显示）',
+    )
+    assertEqual(
+      materialize.localPathOfImageRef(newFormat.urls[0]),
+      newFormatImagePath,
+      'localPathOfImageRef：同源 URL 能还原成本地绝对路径（host 侧读文件）',
+    )
+
+    const oldFormat = materialize.parseGeneratedResult(imageResultText('test/old', PNG_B64))
+    assertEqual(oldFormat.urls.length, 1, 'parseGeneratedResult：旧格式（b64_json）仍然解析出 1 张')
+    assert(String(oldFormat.urls[0]).startsWith('data:image/png;base64,'), 'parseGeneratedResult：旧格式仍是 data URL（行为不变）')
+
+    const urlFirst = materialize.parseGeneratedResult(JSON.stringify({
+      ok: true,
+      images: [{ url: 'https://cdn.example.com/a.png', path: '/nowhere/a.png' }],
+    }))
+    assertEqual(urlFirst.urls[0], 'https://cdn.example.com/a.png', 'images[].url 优先于 path')
+
+    const outDir = join(tempRoot, 'materialize-out')
+    const files = await materialize.materializeImages(
+      JSON.stringify({ ok: true, images: [{ path: newFormatImagePath }] }),
+      outDir,
+    )
+    assertEqual(files.length, 1, 'materializeImages：新格式能落出文件（本地文件分支）')
+    assert(files[0] !== undefined && existsSync(files[0].path), 'materializeImages：落盘文件真的写出来了')
+    assertEqual(files[0]?.name, 'img-1.png', 'materializeImages：扩展名取本地文件真实后缀')
+  }
+
+  /* ── 8. 客户端画廊解析：新格式也能出可显示 URL ─────────────────── */
+  {
+    const clientParse = await import(pathToFileURL(join(ROOT, 'src', 'client', 'generated-images', 'parse.ts')).href)
+    const entries = clientParse.parseGeneratedImageText(JSON.stringify({
+      ok: true,
+      model: 'test/client-model',
+      images: [{ path: 'D:\\imgs\\a.png', mime: 'image/png', bytes: 1 }],
+    }))
+    assertEqual(entries.length, 1, 'parseGeneratedImageText：新格式解析出 1 张图')
+    assert(
+      String(entries[0]?.url).startsWith('/api/personal-agent/file?path='),
+      'parseGeneratedImageText：path 拼成同源文件路由 URL',
+    )
+    assertEqual(entries[0]?.model, 'test/client-model', 'parseGeneratedImageText：带上模型名')
+
+    const oldEntries = clientParse.parseGeneratedImageText(imageResultText('test/old', PNG_B64))
+    assertEqual(oldEntries.length, 1, 'parseGeneratedImageText：旧格式仍然解析出 1 张（行为不变）')
+
+    let threw = false
+    try {
+      clientParse.parseGeneratedImageText('{not json')
+      clientParse.parseGeneratedImageText(JSON.stringify({ ok: true, images: [null, 42, {}, { path: '' }] }))
+      clientParse.parseGeneratedImageText(JSON.stringify({ ok: false, images: [{ path: '/x.png' }] }))
+    } catch {
+      threw = true
+    }
+    assertEqual(threw, false, 'parseGeneratedImageText：坏输入 / 空项 / ok:false 都不会抛错')
+  }
+
   /* ── 3. 文档进度：模型用 document_progress 声明（不再猜关键词）──────── */
   /*
    * 旧实现拿参数关键词猜（.docx / python-docx）：猜不中整段空白，猜中了也只是

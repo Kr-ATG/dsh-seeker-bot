@@ -1,81 +1,28 @@
 /**
- * 弹窗开合动画（用量工作台 / 技能面板 / 记忆面板共用）：
- * - 弹出：fade + 自底部 24px 上滑进入（无缩放），mount 时播放。
- * - 收回：fade + 下滑 24px 退出，closing 阶段播放，结束后再卸载。
- * - 内容：`.dsh-modal-stagger` 容器在卡片滑入后 60ms 轻微上浮跟进（rise-in），
- *   关闭时动画自动解除、随卡片整体收回渐隐。
+ * 弹窗开合动画（KR 主区）—— **样式与 keyframes 已收敛到 motion/overlay-motion.ts**。
  *
- * 用法：入口组件用 useModalClose 持有 closing 态，把 closing 传给弹窗，
- * 弹窗把 closing 映射成 slide-out class（卡片）与 mask 的淡出 class；
- * 需要内容错落感的面板在内容根容器上加 `dsh-modal-stagger` 即可。
+ * 这个文件现在只保留「老 API 的薄壳」：`modalAnimClass` 这类 class 名与
+ * `useModalClose` 状态机继续可用，但样式表只有全局那一份（`dsh-overlay-motion-styles`）。
+ *
+ * 为什么收敛：审计发现同一个插件里有三份几乎一样的动效实现（主区一份、sidebar 一份、
+ * 各组件自研若干），入场时长从 120ms 到 380ms 不等。新增浮层每次都要再抄一遍
+ * keyframes，抄错没人看得出来，只是「手感不一样」。现在：
+ *
+ *   · **新增浮层**：用 `useOverlayMotion` + `data-motion` 属性（见 motion/overlay-motion.ts），
+ *     一个 keyframes 都不用写；
+ *   · **老组件**：继续用下面的 `modalAnimClass` / `modalMaskAnimClass` / `useModalClose`，
+ *     class 名与行为完全不变。
  */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { ensureOverlayMotionStyles, OVERLAY_MOTION_MS } from './motion/overlay-motion'
 
-/** 动画时长（ms），CSS 与 hook 计时保持一致。 */
-export const MODAL_ANIM_MS = 240
+/** 动画时长（ms）：与全局动效层同源，改那边一处即可。 */
+export const MODAL_ANIM_MS = OVERLAY_MOTION_MS
 
-const STYLE_ID = 'dsh-modal-animation-styles'
-
-const SHEET = `
-@keyframes dsh-modal-slide-in {
-  from { opacity: 0; transform: translateY(24px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-@keyframes dsh-modal-slide-out {
-  from { opacity: 1; transform: translateY(0); }
-  to { opacity: 0; transform: translateY(24px); }
-}
-@keyframes dsh-modal-side-in {
-  from { opacity: 0; transform: translateX(-14px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-@keyframes dsh-modal-side-out {
-  from { opacity: 1; transform: translateX(0); }
-  to { opacity: 0; transform: translateX(-10px); }
-}
-@keyframes dsh-modal-rise-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-@keyframes dsh-modal-mask-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-@keyframes dsh-modal-mask-out {
-  from { opacity: 1; }
-  to { opacity: 0; }
-}
-.dsh-modal-slide-in { animation: dsh-modal-slide-in ${MODAL_ANIM_MS}ms cubic-bezier(0.2, 0.8, 0.2, 1); }
-.dsh-modal-slide-out { animation: dsh-modal-slide-out ${MODAL_ANIM_MS}ms cubic-bezier(0.4, 0, 0.2, 1) forwards; }
-.dsh-modal-side-in { animation: dsh-modal-side-in ${MODAL_ANIM_MS}ms cubic-bezier(0.2, 0.8, 0.2, 1); }
-.dsh-modal-side-out { animation: dsh-modal-side-out ${MODAL_ANIM_MS}ms cubic-bezier(0.4, 0, 0.2, 1) forwards; }
-/* 内容错落：卡片播放滑入（底部上滑 / 右侧滑入均可）时生效，关闭时随卡片整体收回。
-   fill-mode 必须用 backwards（延迟期应用 from 帧隐藏）而非 both——both 会在动画
-   结束后残留 to 帧 transform（即使 translateY(0)），使该容器成为后代 position:fixed
-   元素（图表 tooltip）的包含块，浮层整体偏移。 */
-.dsh-modal-slide-in .dsh-modal-stagger,
-.dsh-modal-side-in .dsh-modal-stagger {
-  animation: dsh-modal-rise-in ${MODAL_ANIM_MS}ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
-  animation-delay: 60ms;
-}
-.dsh-modal-mask-in { animation: dsh-modal-mask-in ${MODAL_ANIM_MS}ms ease; }
-.dsh-modal-mask-out { animation: dsh-modal-mask-out ${MODAL_ANIM_MS}ms ease forwards; }
-@media (prefers-reduced-motion: reduce) {
-  .dsh-modal-slide-in, .dsh-modal-slide-out, .dsh-modal-side-in, .dsh-modal-side-out,
-  .dsh-modal-mask-in, .dsh-modal-mask-out { animation: none; }
-  .dsh-modal-slide-in .dsh-modal-stagger, .dsh-modal-side-in .dsh-modal-stagger { animation: none; }
-}
-`
-
-/** 注入弹窗动画样式（幂等）。 */
+/** 注入弹窗动画样式（幂等）——样式表已收敛到 motion/overlay-motion.ts。 */
 export function ensureModalAnimStyles(): void {
-  if (typeof document === 'undefined') return
-  if (document.getElementById(STYLE_ID) !== null) return
-  const tag = document.createElement('style')
-  tag.id = STYLE_ID
-  tag.textContent = SHEET
-  document.head.appendChild(tag)
+  ensureOverlayMotionStyles()
 }
 
 /** 卡片动画 class（open 阶段滑入，closing 阶段滑出）。 */

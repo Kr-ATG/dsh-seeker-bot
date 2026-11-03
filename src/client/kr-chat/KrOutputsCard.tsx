@@ -174,6 +174,9 @@ interface OutputMenuState {
   readonly y: number
 }
 
+/** 菜单退场时长（ms），必须与样式表 kr-out-menu-out 的 160ms 一致。 */
+const MENU_EXIT_MS = 160
+
 /**
  * 产出物行的右键菜单。
  *
@@ -188,26 +191,62 @@ function OutputContextMenu({ menu, onClose, onQuote, onOpenDefault }: {
 }): ReactElement {
   const ref = useRef<HTMLDivElement | null>(null)
   const firstRef = useRef<HTMLButtonElement | null>(null)
+  /*
+   * 退场动画状态机。
+   *
+   * 原先所有关闭入口（外部点击 / Esc / 滚动 / 点菜单项）都是直接 onClose()，父组件
+   * 立刻把菜单从树上摘掉，看起来是「啪」地消失。这里统一改成：置 closing 播 160ms
+   * 缩回淡出，定时器到点再执行原关闭动作。
+   *
+   * 菜单项需要一个「播完动画再执行的动作」：点「引用到对话框」要立刻插入引用，
+   * 但菜单不能立刻消失。所以 requestClose 允许带一个延后动作，退场播完先关菜单
+   * 再跑它 —— 视觉上是「菜单收回去，动作同时发生」，而不是菜单卡着不动。
+   */
+  const [closing, setClosing] = useState(false)
+  const closeTimerRef = useRef<number | null>(null)
+  const pendingActionRef = useRef<(() => void) | null>(null)
+  const requestClose = useCallback((after?: () => void): void => {
+    // 先判重入再记动作：退场途中再点一次菜单项，不能把已排好的动作顶掉。
+    if (closeTimerRef.current !== null) return
+    if (after !== undefined) pendingActionRef.current = after
+    setClosing(true)
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null
+      setClosing(false)
+      const action = pendingActionRef.current
+      pendingActionRef.current = null
+      onClose()
+      action?.()
+    }, MENU_EXIT_MS)
+  }, [onClose])
+
+  // 卸载时清掉未完成的定时器，否则回调会打到已卸载的组件上。
+  useEffect(() => () => {
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
+  }, [])
+
   useEffect(() => {
     firstRef.current?.focus()
     const pointer = (event: PointerEvent): void => {
       if (ref.current !== null && event.target instanceof Node && ref.current.contains(event.target)) return
-      onClose()
+      requestClose()
     }
     const key = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onClose()
+      if (event.key === 'Escape') requestClose()
     }
+    // 滚动 / 尺寸变化时菜单的锚点已经不对了：跟着一起收，别让它停在错误的位置上。
+    const dismiss = (): void => { requestClose() }
     document.addEventListener('pointerdown', pointer, true)
     window.addEventListener('keydown', key)
-    window.addEventListener('resize', onClose)
-    window.addEventListener('scroll', onClose, true)
+    window.addEventListener('resize', dismiss)
+    window.addEventListener('scroll', dismiss, true)
     return () => {
       document.removeEventListener('pointerdown', pointer, true)
       window.removeEventListener('keydown', key)
-      window.removeEventListener('resize', onClose)
-      window.removeEventListener('scroll', onClose, true)
+      window.removeEventListener('resize', dismiss)
+      window.removeEventListener('scroll', dismiss, true)
     }
-  }, [onClose])
+  }, [requestClose])
   const width = 208
   const height = 84
   const left = Math.max(8, Math.min(menu.x, window.innerWidth - width - 8))
@@ -216,14 +255,15 @@ function OutputContextMenu({ menu, onClose, onQuote, onOpenDefault }: {
     <div
       ref={ref}
       className="kr-out-menu"
+      data-closing={closing ? '1' : undefined}
       role="menu"
       style={{ left: left + 'px', top: top + 'px', width: width + 'px' }}
       onContextMenu={(event) => { event.preventDefault() }}
     >
-      <button ref={firstRef} type="button" role="menuitem" className="kr-out-menu__item" onClick={onQuote}>
+      <button ref={firstRef} type="button" role="menuitem" className="kr-out-menu__item" onClick={() => { requestClose(onQuote) }}>
         引用到对话框
       </button>
-      <button type="button" role="menuitem" className="kr-out-menu__item" onClick={onOpenDefault}>
+      <button type="button" role="menuitem" className="kr-out-menu__item" onClick={() => { requestClose(onOpenDefault) }}>
         使用系统默认程序打开
       </button>
     </div>,

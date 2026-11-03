@@ -86,7 +86,7 @@ function buildCss(): string {
 .dtt__card {
   min-width: 0;
   border-radius: 14px;
-  animation: dtt-card-in .18s cubic-bezier(.2, .8, .25, 1) both;
+  animation: dtt-card-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
 /* 中间步骤：轻量竖线卡 */
@@ -306,7 +306,7 @@ function buildCss(): string {
 
 /* 新段淡入：挂载即播（同 key 的流式追加不重挂、不重播）。 */
 .dtt__reasoning-live-seg {
-  animation: dtt-seg-in .3s cubic-bezier(.22, 1, .36, 1) both;
+  animation: dtt-seg-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
 @keyframes dtt-seg-in {
@@ -643,7 +643,7 @@ function buildCss(): string {
       等价：底色常驻 + 光带；数字仍等宽）。 */
 .dtt__fresh[data-fresh] {
   display: block;
-  animation: dtt-fresh-in .3s cubic-bezier(.22, 1, .36, 1);
+  animation: dtt-fresh-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 @keyframes dtt-fresh-in {
@@ -804,7 +804,7 @@ function buildCss(): string {
   align-items: center;
   justify-content: center;
   background: rgba(8, 10, 14, .92);
-  animation: dgi-fade-in .18s ease;
+  animation: dgi-fade-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .dgi__stage {
@@ -824,7 +824,7 @@ function buildCss(): string {
   object-fit: contain;
   border-radius: 8px;
   box-shadow: 0 24px 64px rgba(0, 0, 0, .5);
-  animation: dgi-zoom-in .2s ease;
+  animation: dgi-zoom-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .dgi__save-button {
@@ -903,6 +903,37 @@ function buildCss(): string {
   to { transform: scale(1); opacity: 1; }
 }
 
+/* 灯箱退场（GeneratedImageStrip）：Esc 与点空白先播这一段再卸载。
+   240ms 对齐 modal-animation.ts 的 MODAL_ANIM_MS；遮罩 ease 淡出、图片用
+   加速曲线缩回 .97——入场 dgi-zoom-in 是减速，退场反向才有「收回去」的观感。
+   !important：入场 animation 写在 .dgi__full / .dgi__backdrop 自身规则里，
+   这里要靠更高权重压过它（同权重时下面的 reduced-motion 块再关一次）。 */
+@keyframes dgi-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes dgi-zoom-out {
+  from { transform: scale(1); opacity: 1; }
+  to { transform: scale(.97); opacity: 0; }
+}
+
+.dgi__backdrop[data-closing="1"] {
+  animation: dgi-fade-out .24s ease forwards !important;
+  pointer-events: none;
+}
+
+.dgi__full[data-closing="1"] {
+  animation: dgi-zoom-out .24s cubic-bezier(.4, 0, .2, 1) forwards !important;
+}
+
+/* reduced-motion：新动画进关闭列表（卸载时机仍由 JS 的 240ms 计时器控制）。
+   必须与上面的规则同权重且排在后面，否则 !important 会把它压回去。 */
+@media (prefers-reduced-motion: reduce) {
+  .dgi__backdrop[data-closing="1"],
+  .dgi__full[data-closing="1"] { animation: none !important; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .dgi__backdrop,
   .dgi__full,
@@ -924,7 +955,7 @@ function buildCss(): string {
   border: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.16));
   border-radius: 14px;
   background: transparent;
-  animation: dgi-stage-in .22s ease;
+  animation: dgi-stage-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 body[data-ds-dark-theme] .dgi-stage {
@@ -1240,7 +1271,7 @@ header:has([role='tablist']) [role='tablist'] {
   gap: 22px;
   margin: 0 18px 0 0;
   padding-left: 0;
-  animation: dsh-header-tabs-in .3s cubic-bezier(.2, .8, .2, 1) both;
+  animation: dsh-header-tabs-in 240ms cubic-bezier(.2, .8, .2, 1) both;
 }
 
 header:has([role='tablist']) [class*='_titleRow'] > [class*='_headerUtilities'] {
@@ -1291,7 +1322,7 @@ header:has([role='tablist']) [class*='_tabs']:not([role='tablist']) {
   gap: 0;
   align-items: center;
   flex-wrap: nowrap;
-  animation: dsh-header-tabs-in .3s cubic-bezier(.2, .8, .2, 1) both;
+  animation: dsh-header-tabs-in 240ms cubic-bezier(.2, .8, .2, 1) both;
 }
 
 /* 标题区在 rc.3 下不再抢剩余空间：它按内容宽，剩余宽度全给标签容器，

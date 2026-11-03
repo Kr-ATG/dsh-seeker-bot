@@ -19,7 +19,7 @@
  *
  * 预览面板默认收起：一条消息里可能连着三四个产出物，全展开会把对话流顶掉。
  */
-import { useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { IconChevronDown, IconDownload, IconExpand } from '../icons.tsx'
 import {
   artifactKindOf,
@@ -228,6 +228,33 @@ export function ArtifactCard({ path, label, size, stale }: ArtifactCardProps): J
   const [open, setOpen] = useState(false)
   /** 全屏预览层：点缩略图打开，点遮罩关闭。 */
   const [lightbox, setLightbox] = useState(false)
+
+  /*
+   * 灯箱的退场状态：关闭时先播 240ms 退场（遮罩淡出 + 面板下沉缩小），播完再卸载。
+   *
+   * 两条入口（点遮罩 / 关闭按钮）原来都直接 setLightbox(false)，灯箱在下一帧就没了，
+   * 而入场有 160ms 弹入——一关就是硬消失。时长与曲线对齐 modal-animation.ts 的
+   * MODAL_ANIM_MS（240ms、出场加速曲线），与插件其它浮层同一套手感。
+   */
+  const [lightboxClosing, setLightboxClosing] = useState(false)
+  const lightboxTimerRef = useRef<number | null>(null)
+
+  /** 关闭灯箱：先播 240ms 退场，再真正卸载（直接置 false 会硬消失）。 */
+  const requestLightboxClose = useCallback((): void => {
+    if (lightboxTimerRef.current !== null) return
+    setLightboxClosing(true)
+    lightboxTimerRef.current = window.setTimeout(() => {
+      lightboxTimerRef.current = null
+      setLightboxClosing(false)
+      setLightbox(false)
+    }, 240)
+  }, [])
+
+  /* 卸载时清定时器：整条消息被移除时卡片会直接消失，别让回调打在已卸载的组件上。 */
+  useEffect(() => () => {
+    if (lightboxTimerRef.current !== null) window.clearTimeout(lightboxTimerRef.current)
+  }, [])
+
   const [thumbFailed, setThumbFailed] = useState(false)
   useEffect(() => { setThumbFailed(false) }, [path])
   const previewable = kind !== 'file'
@@ -330,7 +357,8 @@ export function ArtifactCard({ path, label, size, stale }: ArtifactCardProps): J
           role="dialog"
           aria-modal="true"
           aria-label={`${name} 预览`}
-          onClick={() => setLightbox(false)}
+          data-closing={lightboxClosing ? '1' : undefined}
+          onClick={requestLightboxClose}
         >
           {/* 阻止冒泡：点内容区不该关掉整个预览层 */}
           <div className="pa-media__lightbox-inner" onClick={(event) => event.stopPropagation()}>
@@ -340,7 +368,7 @@ export function ArtifactCard({ path, label, size, stale }: ArtifactCardProps): J
                 <IconDownload size={12} />
                 <span>下载</span>
               </a>
-              <button className="pa-media__btn" type="button" onClick={() => setLightbox(false)} aria-label="关闭预览">
+              <button className="pa-media__btn" type="button" onClick={requestLightboxClose} aria-label="关闭预览">
                 关闭
               </button>
             </div>

@@ -40,7 +40,6 @@ import { ThinkingStepNodeView } from './thinking/ThinkingStepNodeView.tsx'
 import { RetryShadowView } from './retry/RetryShadowView.tsx'
 import { installReplyCardChrome } from './reply-card-chrome.ts'
 import { installToolCallsVisible } from './tool-calls-visible.js'
-import { installPlainTimelineVisible } from './plain-timeline-visible.js'
 import { applyMessageScreenshot } from './shot/index.tsx'
 import { mountShellChrome } from './shell-chrome.ts'
 import { installOpenPathFix } from './open-path-fix.ts'
@@ -56,6 +55,7 @@ import { applyBrowserFlagClient } from './browser-flag/index.ts'
 import { applySidebarDocument } from './sidebar-doc/index.tsx'
 import { applyUiFont } from './ui-font/index.ts'
 import { applyDonePill } from './done-pill/pill.tsx'
+import { ensureOverlayMotionStyles } from './motion/overlay-motion.ts'
 import { startShellHotReporter } from './done-pill/shell-hot.ts'
 import { applySidebarMedia } from './sidebar-media/index.tsx'
 import { setClientCtx } from './client-ctx.ts'
@@ -235,6 +235,10 @@ export function apply(ctx: ClientContext): void {
 
   // 样式：工具聚合（dts__）、思考/流卡（dtt__）两枚 + 截图面板（tsh__）独立
   // <style>，幂等注入。
+  // 浮层动效的全局样式表（src/client/motion/overlay-motion.ts）：所有弹窗 / 抽屉 /
+  // 气泡 / 灯箱的入场与退场 keyframes 只此一份，apply 期注入一次。新增浮层只需挂
+  // data-motion 属性（或复用 dsh-modal-* class），不用再写 keyframes。
+  guarded(ctx, 'overlay motion styles', ensureOverlayMotionStyles)
   guarded(ctx, 'tool-summary styles', injectToolSummaryStyles)
   guarded(ctx, 'chat-flow styles', injectBaseStyles)
   guarded(ctx, 'proto card styles', injectProtoStyles)
@@ -284,9 +288,6 @@ export function apply(ctx: ClientContext): void {
   // KrAgentPanel 经 useSyncExternalStore 订阅，拨完即时生效、刷新后保留。
   guarded(ctx, 'tool calls visible', installToolCallsVisible)
 
-  // 操作面板卡展示开关（同族第三条：localStorage 呈现偏好）。
-  guarded(ctx, 'plain timeline visible', installPlainTimelineVisible)
-
   // 捕获官方原生的 assistant-step / turn-process 渲染组件：普通「对话」模式下
   // 两个座位都原样委托回官方，插件只负责 KR 那一栏。
   try {
@@ -306,6 +307,12 @@ export function apply(ctx: ClientContext): void {
   // 回合过程座位：KR 模式挂单张实时活动卡；普通「对话」把座位原样还给官方
   // 的折叠 control（工具调用 / 思考都在那条行里）。这个座位仍必须在首条
   // assistant 输出前占位，供 KR 使用。
+  //
+  // ⚠ inject 必须从 **StoredEntry 顶层**读（entry.inject），不是 options.inject：
+  // slots.entries() 返回的条目把 inject 挂在顶层，options 里只剩 key / priority。
+  // 读错位置的后果不是报错，而是「复制官方 inject」静默变成空对象 —— 座位上的
+  // 插件组件拿不到 fileMentions 等注入 props，最终整条 assistant-step 渲染崩溃、
+  // 退回官方无卡片外框的纯正文（2026-11-03 用户报「修复总结卡外框」的根因）。
   guarded(ctx, 'turn-process seat', () => {
     const entries = ctx.slots.entries('conversation.chat.node')
     const processEntry = entries.find((entry: any) => entry.options?.key === 'turn-process' && (entry.options?.priority ?? 0) >= 0)
@@ -314,12 +321,16 @@ export function apply(ctx: ClientContext): void {
       key: 'turn-process',
       priority: -100,
       locale: 'chat',
-      ...(processEntry?.options?.inject ? { inject: processEntry.options.inject } : {}),
+      ...(processEntry?.inject ? { inject: processEntry.inject } : {}),
     }, TurnProcessShadowView))
   })
 
   // 助手正文：流式期保持官方 Markdown / image 链路，回合结束后呈现步骤与
   // 总结卡；普通「对话」模式整体委托回官方 AssistantNodeView。
+  //
+  // ⚠ 同 turn-process：inject 在 StoredEntry 顶层（entry.inject），不在 options。
+  // 少了它，总结卡（.dtt__card--reply）会因 fileMentions 未注入而整条崩溃，
+  // 界面看到的是官方纯正文、没有卡片外框。
   guarded(ctx, 'assistant-step seat', () => {
     const entries = ctx.slots.entries('conversation.chat.node')
     const assistantEntry = entries.find((e: any) => e.options?.key === 'assistant-step' && (e.options?.priority ?? 0) >= 0)
@@ -328,7 +339,7 @@ export function apply(ctx: ClientContext): void {
       key: 'assistant-step',
       priority: -100,
       locale: 'chat',
-      ...(assistantEntry?.options?.inject ? { inject: assistantEntry.options.inject } : {}),
+      ...(assistantEntry?.inject ? { inject: assistantEntry.inject } : {}),
     }, ThinkingStepNodeView))
   })
   // download 原子卡片：接管内置 download 工具行（keyed tool.call.toolview，
@@ -582,17 +593,6 @@ export {
   subscribeToolCallsVisible,
   installToolCallsVisible,
 } from './tool-calls-visible.js'
-
-/**
- * 操作面板卡展示开关：同族纯逻辑（读写 + 订阅），供 smoke 直接钉住。
- * 判据错了同样静默无反应，必须能被测试断言。
- */
-export {
-  plainTimelineVisible,
-  setPlainTimelineVisible,
-  subscribePlainTimelineVisible,
-  installPlainTimelineVisible,
-} from './plain-timeline-visible.js'
 
 /**
  * 首 token 平均平铺的纯逻辑：供 smoke 直接钉住口径（平均值 / 紧凑时长 /

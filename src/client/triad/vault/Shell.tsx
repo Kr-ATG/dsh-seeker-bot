@@ -19,6 +19,7 @@
  */
 
 import type { JSX, ReactNode } from 'react'
+import { ensureModalAnimStyles, modalMaskAnimClass } from '../triad-modal-animation.js'
 import { css } from './styles.js'
 
 export interface VaultModalProps {
@@ -26,6 +27,18 @@ export interface VaultModalProps {
   label: string
   /** 点遮罩 / 按 Esc 时调用。 */
   onClose: () => void
+  /**
+   * 是否处于退场中（由调用方的 useModalClose 给出）。
+   *
+   * 为什么计时器归调用方、壳只收一个布尔：这层壳没有自己的 open 状态，
+   * 渲染与卸载由调用方的条件（reminderOpen 之类）决定；壳里再起一个计时器
+   * 也拦不住调用方把整棵子树摘掉。所以调用方用共享状态机计时，壳只负责把
+   * closing 翻译成遮罩淡出与卡片 pop-out 两个动画类。
+   *
+   * 省略时按 false 处理：保持「点一下就消失」的旧行为，还没接入状态机的
+   * 调用点不受影响。
+   */
+  closing?: boolean
   children: ReactNode
 }
 
@@ -36,10 +49,13 @@ export interface VaultModalProps {
  * 时候该关哪个由 Panel 那一个 keydown 统一裁决（顺序＝层叠顺序）。这里再挂一
  * 个监听会导致一次 Esc 关掉两层。
  */
-export function VaultModal({ label, onClose, children }: VaultModalProps): JSX.Element {
+export function VaultModal({ label, onClose, closing = false, children }: VaultModalProps): JSX.Element {
+  // 遮罩的淡入/淡出 keyframes 在 triad 的共享样式表里，这里保证它已注入（幂等）。
+  ensureModalAnimStyles()
   return (
     <div
-      className={css.backdrop}
+      // 遮罩：入场淡入 + 退场淡出都由共享的 modalMaskAnimClass 决定（240ms）。
+      className={css.backdrop + ' ' + modalMaskAnimClass(closing)}
       // 只在点到遮罩本身时关闭。用 target 判断而不是 stopPropagation：弹窗内部
       // 有些自绘控件会自己冒泡，冒到遮罩上就误关了。
       onClick={(event) => { if (event.target === event.currentTarget) onClose() }}
@@ -47,6 +63,10 @@ export function VaultModal({ label, onClose, children }: VaultModalProps): JSX.E
     >
       <div
         className={css.modal}
+        // 卡片：退场标记交给样式表（.dsh-vault-modal[data-closing="true"]），
+        // 用属性而不是再挂一个动画类，是为了让退场规则的 specificity 稳定压过
+        // 本文件里的入场声明——不依赖两张样式表的注入先后。
+        data-closing={closing ? 'true' : undefined}
         role="dialog"
         aria-modal="true"
         aria-label={label}

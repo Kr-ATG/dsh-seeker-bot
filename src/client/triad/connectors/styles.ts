@@ -80,6 +80,8 @@ const STYLE_ID = 'dsh-mcp-connectors-style'
 
 const CSS_TEXT = [
   '.dsh-mc{display:flex;flex-direction:column;gap:0;height:100%;min-height:0;box-sizing:border-box;padding:22px 26px 0;}',
+  '.dsh-mc--card{padding:14px 22px 0;}',
+  '.dsh-mc--card .dsh-mc-head{padding:0 0 12px;}',
   '.dsh-mc-head{flex:none;padding:0 0 14px;display:flex;flex-direction:column;gap:10px;}',
   '.dsh-mc-head-top{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;}',
   '.dsh-mc-eyebrow{display:inline-flex;align-items:center;gap:6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--dsw-alias-label-tertiary,#8a8a8a);}',
@@ -161,6 +163,20 @@ const CSS_TEXT = [
   '@media (max-width:760px){.dsh-mc{padding:16px 14px 0;}}',
   '@keyframes dsh-mc-fade{from{opacity:0}to{opacity:1}}',
   '@keyframes dsh-mc-pop{from{opacity:0;transform:translateY(10px) scale(.985)}to{opacity:1;transform:none}}',
+  // ── 退场动效（2026-11-04）──────────────────────────────────────────
+  // 抽屉原来只有入场（dsh-mc-fade / dsh-mc-pop），关闭时组件直接卸载，
+  // 卡片是「啪」地消失的。现在入场退场统一交给 triad-modal-animation 的共享
+  // keyframes（dsh-modal-mask-in/out、dsh-modal-drawer-in/out），时长 240ms：
+  // 遮罩淡出用 ease，抽屉滑出用 cubic-bezier(0.4,0,0.2,1)（加速收走）。
+  // 两张样式表都在 head 里、注入顺序由首屏先打开哪个面板决定，所以用双类名
+  // 提高 specificity，保证这几条压过上面 .dsh-mc-mask / .dsh-mc-drawer 自带的
+  // animation，不依赖先后。
+  '.dsh-mc-mask.dsh-modal-mask-in{animation:dsh-modal-mask-in 240ms ease;}',
+  '.dsh-mc-mask.dsh-modal-mask-out{animation:dsh-modal-mask-out 240ms ease forwards;}',
+  '.dsh-mc-drawer.dsh-modal-drawer-in{animation:dsh-modal-drawer-in 240ms cubic-bezier(0.2,0.8,0.2,1);}',
+  '.dsh-mc-drawer.dsh-modal-drawer-out{animation:dsh-modal-drawer-out 240ms cubic-bezier(0.4,0,0.2,1) forwards;}',
+  // 减少动态偏好：抽屉与遮罩的入场退场一律关掉（含上面自带的 dsh-mc-fade/pop）。
+  '@media (prefers-reduced-motion:reduce){.dsh-mc-mask,.dsh-mc-drawer{animation:none!important;}}',
 ].join('')
 
 /** 注入样式（幂等：同一份文档只插一次）。 */

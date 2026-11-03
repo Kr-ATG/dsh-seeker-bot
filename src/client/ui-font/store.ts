@@ -12,7 +12,7 @@
  * 落盘 + 改 DOM + 通知订阅者，三者原子完成，不存在中间态。
  *
  * 加载状态也放这里：切换到大体积 webfont 时，UI 需要如实告诉用户
- * 「正在下载 4.2MB」还是「加载失败、已回退系统字体」——静默等待会让人以为卡死。
+ * 「正在下载 5–10MB」还是「加载失败、已回退系统字体」——静默等待会让人以为卡死。
  */
 import { fontOptionOf, applyFont, readStoredFontId, writeStoredFontId } from './font.js'
 import type { FontOption } from './font.js'
@@ -67,7 +67,9 @@ function emit(): void {
 async function probeWebfont(family: string): Promise<boolean> {
   if (typeof document === 'undefined' || document.fonts === undefined) return false
   try {
-    await document.fonts.load(`16px "${family}"`, '霞鹜新致宋')
+    // 探测字符必须覆盖中英文：任一 webfont 档缺失时 fonts.load 会返回空数组，
+    // 单测拉丁字符无法判断中文字形是否真的就位。
+    await document.fonts.load(`16px "${family}"`, 'Aa界面字体')
     return document.fonts.check(`16px "${family}"`)
   } catch {
     return false

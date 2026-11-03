@@ -59,6 +59,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { publish } from './events.ts'
+import { botRoomOf } from './room-context.ts'
 import type { BotMessage } from './agent.ts'
 
 /** 宿主的结算词汇（见 @deepseek-ai/dsh-user-approval 的 types）。 */
@@ -412,7 +413,13 @@ export function requestApproval(
     ...(risk !== undefined ? { risk } : {}),
     allowAlways: options?.allowAlways === true,
   })
-  publish(botId, { type: 'message', message, source: 'approval' })
+  /*
+   * 带上所属群：本卡是宿主异步发的，不带 roomId 会被前端归到该 Bot 的私聊，
+   * 群里那个回复气泡就一直转圈。展开写法而不是 `roomId: undefined`，私聊回合
+   * 才会真的不带这个键。
+   */
+  const roomId = botRoomOf(botId)
+  publish(botId, { type: 'message', message, source: 'approval', ...(roomId !== undefined ? { roomId } : {}) })
 
   return new Promise<ApprovalOutcome>((resolve) => {
     let settled = false
@@ -440,7 +447,8 @@ export function requestApproval(
         )),
         at: Date.now(),
       }
-      publish(botId, { type: 'message-update', message: decided, source: 'approval' })
+      // 更新也必须带同一个 roomId：否则前端找不到原来那张卡，点完按钮还是转圈
+      publish(botId, { type: 'message-update', message: decided, source: 'approval', ...(roomId !== undefined ? { roomId } : {}) })
       resolve(outcome)
     }
     /*

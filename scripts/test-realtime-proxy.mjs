@@ -21,7 +21,7 @@
  *   - `/realtime/diagnose` 返回配置且不含 key 明文；
  *   - 跨站 Origin 的 upgrade 被拒绝。
  *
- * 语音里「让 Bot 干活」的闭环（function calling，[O]~[T]）：
+ * 语音里「让 Bot 干活」的闭环（function calling，[O]~[X]）：
  *   - start 带 agent → `session.update` 注册 `run_task` 工具；
  *   - 注入 `response.function_call_arguments.done` → 宿主调注入的 `runTask`
  *     （task / botId / callId / agent 都对），并推 `task_started` / `task_progress` / `task_done`；
@@ -30,7 +30,11 @@
  *   - start 没带 agent 时模型乱调 `run_task`：宿主回一条可读 output，不挂住、不误调；
  *   - 同一 `call_id` 的 `arguments.done` 重复投递（含「任务已跑完再来一条」）只执行一次；
  *   - **另一种上游形状** `conversation.item.created` + `item.type='function_call'` 同样能触发；
- *   - `call_id` 缺失时明确报错（retryable=false）、不误跑任务、不断开会话。
+ *   - `call_id` 缺失时明确报错（retryable=false）、不误跑任务、不断开会话；
+ *   - **竞态**（[V]~[X]，用户实测红条 `ongoing response already exists` 的回归）：
+ *     任务完成时上游那轮响应还没结束 → 宿主不发 `response.create`、记 pending，
+ *     等 `response.done` 后补发一次；上游直接回该 error 时同样不转发给前端、done 后
+ *     补发；补发也被拒时放弃（不死循环）；没有竞态时仍立刻发（正常路径行为不变）。
  *
  * Usage: node scripts/test-realtime-proxy.mjs
  */
@@ -172,6 +176,22 @@ async function waitForClientMessageOrNull(client, predicate, options) {
 async function waitForOutputOrNull(fake, predicate, options) {
   try {
     return await fake.waitForFunctionCallOutput(predicate, options)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 等一个任意条件成立，超时返回 null（不抛错）。
+ *
+ * 为什么需要它：`waitForClientMessage` 会命中**已经收到过的**旧消息。断言「补发之后
+ * 又来了一条 response_done」时不能用它——注入那轮早就发过一条 response_done，等待
+ * 会立刻返回旧的那条，补发还没发生就判定通过了。这类场景一律用「计数增加」条件 +
+ * 这个 helper。
+ */
+async function waitForOrNull(predicate, options) {
+  try {
+    return await waitFor(predicate, options)
   } catch {
     return null
   }
@@ -1628,6 +1648,388 @@ try {
   })
 } finally {
   await envStreamed.close()
+}
+
+/* ========================================================================== */
+/* V. 竞态：任务完成时上游那一轮响应还在跑                                      */
+/* ========================================================================== */
+
+console.log('\n[V] 竞态：任务完成时上游还在响应 → 不报错、response.done 后补发 response.create')
+
+/*
+ * 用户实测那条红条的复现：语音里让它生图，任务其实成功了，通话界面却弹
+ * `ongoing response already exists`，而且模型不开口汇报。
+ *
+ * 成因是 finishAgentTask 回灌 `function_call_output` 之后立刻发 `response.create`，
+ * 而上游此刻可能正有一轮响应在跑（模型在说话 / 用户刚开口触发 VAD）。上游对这条
+ * `response.create` 只回一句 error 就丢掉，**不排队也不补发**。
+ *
+ * 这里用 `holdDoneMs` 把上游的 `response.done` 压后 250ms，让 runTask（30ms）
+ * 先跑完——宿主处理任务结果时 responseActive 仍是 true，正是真实竞态的形状。
+ */
+const CALL_ID_RACE = 'call_race_1'
+const RACE_SUMMARY = '图好了：海边日落.png'
+const envRace = await startEnv({
+  fakeOptions: {
+    audioBytesThreshold: 1920,
+    injectFunctionCall: {
+      arguments: JSON.stringify({ task: '生成一张海边日落的插画' }),
+      callId: CALL_ID_RACE,
+      holdDoneMs: 250,
+    },
+  },
+  routeOptions: {
+    runTask: async () => {
+      await sleep(30)
+      return { ok: true, summary: RACE_SUMMARY }
+    },
+  },
+})
+try {
+  const client = await openClient(envRace.proxy.url)
+  client.sendJson({
+    type: 'start',
+    botId: AGENT_SPEC.botId,
+    instructions: AGENT_SPEC.instructions,
+    agent: AGENT_SPEC,
+  })
+  await waitForClientMessage(client, (m) => m.type === 'ready', { label: 'ready (race)' })
+  const connection = await envRace.fake.waitForConnection(() => true, { label: 'upstream (race)' })
+  client.sendBinary(Buffer.alloc(1920, 0x66))
+
+  const taskDone = await waitForClientMessageOrNull(client, (m) => m.type === 'task_done', {
+    label: 'task_done (race)',
+    timeoutMs: NEW_CASE_TIMEOUT_MS,
+  })
+  // 任务完成这一刻，上游那一轮响应还没结束（holdDoneMs 还没到点）
+  const sentTypesAtTaskDone = connection.sent.map((event) => event.type)
+  const createCountAtTaskDone = connection.responseCreateCount
+
+  // 再等一小段（仍在上游那轮响应期间）：宿主不能在这段时间里发 response.create
+  await sleep(80)
+  const createCountDuringHold = connection.responseCreateCount
+
+  // holdDoneMs 到点 → 上游发 response.done → 宿主补发 → 假上游走正常响应脚本
+  const responseDone = await waitForClientMessageOrNull(client, (m) => m.type === 'response_done', {
+    label: 'response_done (race)',
+    timeoutMs: NEW_CASE_TIMEOUT_MS,
+  })
+  const clientErrors = client.messages.filter((m) => m.type === 'error')
+
+  await check('竞态前提成立：task_done 到达时上游那一轮响应还没 done（输入侧有效）', () => {
+    assert.ok(taskDone !== null, '客户端没收到 task_done')
+    assert.equal(taskDone.ok, true, `任务本身应该成功，实际 ok=${taskDone.ok}`)
+    assert.ok(
+      sentTypesAtTaskDone.includes('response.created'),
+      '假上游没发过 response.created，竞态前提不成立',
+    )
+    assert.ok(
+      !sentTypesAtTaskDone.includes('response.done'),
+      'task_done 到达时上游已经 done 了，holdDoneMs 没生效，这条用例测不到竞态',
+    )
+  })
+
+  await check('上游响应进行中：宿主不发 response.create（发过去必被拒）', () => {
+    assert.equal(
+      createCountAtTaskDone,
+      0,
+      `task_done 那一刻宿主已经发了 ${createCountAtTaskDone} 条 response.create（上游还在响应中）`,
+    )
+    assert.equal(
+      createCountDuringHold,
+      0,
+      `上游那轮响应期间宿主发了 ${createCountDuringHold} 条 response.create`,
+    )
+  })
+
+  await check('上游 response.done 之后补发了一次 response.create（模型这才有机会汇报）', () => {
+    assert.equal(
+      connection.responseCreateCount,
+      1,
+      `上游共收到 ${connection.responseCreateCount} 条 response.create（期望恰好 1 条补发）`,
+    )
+    assert.ok(responseDone !== null, '客户端没收到 response_done：补发没让模型开口')
+  })
+
+  await check('全程没有把竞态错误转给前端（不弹红条）', () => {
+    assert.deepEqual(
+      clientErrors.map((m) => m.message),
+      [],
+      '客户端收到了 error（任务成功却弹红条，正是用户截图里那条）',
+    )
+  })
+} finally {
+  await envRace.close()
+}
+
+/* ========================================================================== */
+/* W. 上游直接回 ongoing response already exists                               */
+/* ========================================================================== */
+
+console.log('\n[W] 上游回 ongoing response already exists → 不转发、response.done 后补发一次')
+
+/*
+ * 另一种形状：宿主发 `response.create` 时本地还以为没人在说话（responseActive 为
+ * false），但上游那边确实有一轮响应在跑，于是直接回 error。这条路径上宿主既没有
+ * 「先判断」的机会，只能靠**收到 error 后**记 pending、等 done 补发。
+ *
+ * 用 `errorOnResponseCreate` 让假上游拒掉第一条、放行第二条（补发那一条）：
+ * 若宿主只是把 error 吞掉不补发，客户端就永远收不到 response_done（模型不开口）。
+ */
+const CALL_ID_ONGOING = 'call_ongoing_1'
+const envOngoing = await startEnv({
+  fakeOptions: {
+    audioBytesThreshold: 1920,
+    injectFunctionCall: {
+      arguments: JSON.stringify({ task: '生成一段海边日落的视频' }),
+      callId: CALL_ID_ONGOING,
+    },
+    errorOnResponseCreate: { message: 'ongoing response already exists', times: 1 },
+  },
+  routeOptions: {
+    runTask: async () => {
+      await sleep(20)
+      return { ok: true, summary: '视频好了：海边日落.mp4' }
+    },
+  },
+})
+try {
+  const client = await openClient(envOngoing.proxy.url)
+  client.sendJson({
+    type: 'start',
+    botId: AGENT_SPEC.botId,
+    instructions: AGENT_SPEC.instructions,
+    agent: AGENT_SPEC,
+  })
+  await waitForClientMessage(client, (m) => m.type === 'ready', { label: 'ready (ongoing)' })
+  const connection = await envOngoing.fake.waitForConnection(() => true, { label: 'upstream (ongoing)' })
+  client.sendBinary(Buffer.alloc(1920, 0x67))
+
+  const taskDone = await waitForClientMessageOrNull(client, (m) => m.type === 'task_done', {
+    label: 'task_done (ongoing)',
+    timeoutMs: NEW_CASE_TIMEOUT_MS,
+  })
+  // 等宿主把第一条 response.create 发出去（假上游已经回了 error）
+  await waitFor(() => connection.responseCreateCount >= 1, {
+    label: 'first response.create (ongoing)',
+    timeoutMs: NEW_CASE_TIMEOUT_MS,
+  })
+  await sleep(60) // 给宿主处理那条 error 的时间
+  const errorsBeforeDone = client.messages.filter((m) => m.type === 'error')
+  const createsBeforeDone = connection.responseCreateCount
+
+  // 上游那一轮（假想中）进行中的响应终于结束：宿主应当在这之后补发
+  const doneCountBeforeResend = client.messages.filter((m) => m.type === 'response_done').length
+  connection.sendEvent({ type: 'response.done', response: { id: 'resp_ongoing_done', status: 'completed' } })
+
+  // 等宿主补发（假上游收到第二条 response.create），再等补发那轮响应跑完
+  const resent = await waitForOrNull(() => connection.responseCreateCount >= 2, {
+    label: 'resend response.create (ongoing)',
+    timeoutMs: NEW_CASE_TIMEOUT_MS,
+  })
+  const resentDone = await waitForOrNull(
+    () => client.messages.filter((m) => m.type === 'response_done').length > doneCountBeforeResend,
+    { label: 'response_done (ongoing 补发那一轮)', timeoutMs: NEW_CASE_TIMEOUT_MS },
+  )
+  const allClientErrors = client.messages.filter((m) => m.type === 'error')
+
+  await check('ongoing response already exists 不转发给前端', () => {
+    assert.ok(taskDone !== null, '客户端没收到 task_done')
+    assert.equal(
+      errorsBeforeDone.length,
+      0,
+      `客户端收到了 error：${JSON.stringify(errorsBeforeDone)}`,
+    )
+  })
+
+  await check('被拒后不忙重试（等 response.done，而不是立刻再发）', () => {
+    assert.equal(
+      createsBeforeDone,
+      1,
+      `response.done 之前上游收到了 ${createsBeforeDone} 条 response.create（期望 1 条，多出来的是忙重试）`,
+    )
+  })
+
+  await check('response.done 之后补发了一次 response.create', () => {
+    assert.ok(resent !== null, '上游没有在 response.done 之后收到补发的 response.create（模型不会开口）')
+    assert.equal(
+      connection.responseCreateCount,
+      2,
+      `上游共收到 ${connection.responseCreateCount} 条 response.create（期望 2：1 次被拒 + 1 次补发）`,
+    )
+    assert.ok(resentDone !== null, '客户端没收到补发那一轮的 response_done：补发没让模型开口')
+  })
+
+  await check('全程客户端零 error（会话没有被竞态带坏）', () => {
+    assert.deepEqual(allClientErrors.map((m) => m.message), [])
+    assert.equal(client.closed, false, '会话被这条竞态关掉了')
+  })
+} finally {
+  await envOngoing.close()
+}
+
+/* ========================================================================== */
+/* W2. 补发也被拒：放弃补发，不许死循环                                         */
+/* ========================================================================== */
+
+console.log('\n[W2] 补发也被拒 → 放弃补发（不忙重试、不死循环）')
+
+/*
+ * 极端情况：上游连着拒两次（用户刚打断、上游又自己起了一轮）。没有上限的实现会
+ * 「done → 补发 → 被拒 → 等 done → 再补发」一直转下去，模型永远开不了口，日志里
+ * 刷满同一句。宿主的上限是「同一份结果最多补发一次」，这条用例把它钉住。
+ */
+const CALL_ID_STUCK = 'call_stuck_1'
+const envStuck = await startEnv({
+  fakeOptions: {
+    audioBytesThreshold: 1920,
+    injectFunctionCall: {
+      arguments: JSON.stringify({ task: '生成一张图（补发也会被拒）' }),
+      callId: CALL_ID_STUCK,
+    },
+    // 前两次 response.create 都回 ongoing：原始那条 + 补发那条
+    errorOnResponseCreate: { message: 'ongoing response already exists', times: 2 },
+  },
+  routeOptions: {
+    runTask: async () => {
+      await sleep(20)
+      return { ok: true, summary: '图好了' }
+    },
+  },
+})
+try {
+  const client = await openClient(envStuck.proxy.url)
+  client.sendJson({
+    type: 'start',
+    botId: AGENT_SPEC.botId,
+    instructions: AGENT_SPEC.instructions,
+    agent: AGENT_SPEC,
+  })
+  await waitForClientMessage(client, (m) => m.type === 'ready', { label: 'ready (stuck)' })
+  const connection = await envStuck.fake.waitForConnection(() => true, { label: 'upstream (stuck)' })
+  client.sendBinary(Buffer.alloc(1920, 0x69))
+
+  await waitForClientMessageOrNull(client, (m) => m.type === 'task_done', {
+    label: 'task_done (stuck)',
+    timeoutMs: NEW_CASE_TIMEOUT_MS,
+  })
+  // 原始那条被拒 → 宿主等 done 补发
+  await waitForOrNull(() => connection.responseCreateCount >= 1, {
+    label: 'first response.create (stuck)',
+    timeoutMs: NEW_CASE_TIMEOUT_MS,
+  })
+  await sleep(60)
+  connection.sendEvent({ type: 'response.done', response: { id: 'resp_stuck_1', status: 'completed' } })
+
+  // 补发那条也被拒
+  await waitForOrNull(() => connection.responseCreateCount >= 2, {
+    label: 'resend response.create (stuck)',
+    timeoutMs: NEW_CASE_TIMEOUT_MS,
+  })
+  await sleep(60)
+  const countAfterResend = connection.responseCreateCount
+  connection.sendEvent({ type: 'response.done', response: { id: 'resp_stuck_2', status: 'completed' } })
+
+  // 再等一段：宿主不能再发第三条
+  await sleep(250)
+  const countAfterSecondDone = connection.responseCreateCount
+  const clientErrors = client.messages.filter((m) => m.type === 'error')
+
+  await check('补发只做一次（第二次 done 之后不再补发）', () => {
+    assert.equal(countAfterResend, 2, `补发后上游共收到 ${countAfterResend} 条 response.create（期望 2）`)
+    assert.equal(
+      countAfterSecondDone,
+      2,
+      `第二次 response.done 之后上游又收到了 ${countAfterSecondDone - 2} 条 response.create（补发没有上限，会死循环）`,
+    )
+  })
+
+  await check('放弃补发也不报错、不断会话', () => {
+    assert.deepEqual(
+      clientErrors.map((m) => m.message),
+      [],
+      '放弃补发时把 error 转给了前端',
+    )
+    assert.equal(client.closed, false, '会话被这条竞态关掉了')
+  })
+} finally {
+  await envStuck.close()
+}
+
+/* ========================================================================== */
+/* X. 正常路径：没有进行中的响应 → 立刻发 response.create                      */
+/* ========================================================================== */
+
+console.log('\n[X] 正常路径：上游没有进行中的响应 → 立即发 response.create（行为不变）')
+
+/*
+ * 竞态修复不能把正常路径也拖成「等 done 再发」——那样每轮任务结果都会晚一拍，
+ * 而且上游根本不会再有 done 可等。这里把「立刻发、只发一次、不报错」钉住。
+ */
+const CALL_ID_PLAIN = 'call_plain_1'
+const envPlain = await startEnv({
+  fakeOptions: {
+    audioBytesThreshold: 1920,
+    injectFunctionCall: {
+      arguments: JSON.stringify({ task: '生成一张图' }),
+      callId: CALL_ID_PLAIN,
+    },
+  },
+  routeOptions: {
+    runTask: async () => {
+      await sleep(20)
+      return { ok: true, summary: '图好了' }
+    },
+  },
+})
+try {
+  const client = await openClient(envPlain.proxy.url)
+  client.sendJson({
+    type: 'start',
+    botId: AGENT_SPEC.botId,
+    instructions: AGENT_SPEC.instructions,
+    agent: AGENT_SPEC,
+  })
+  await waitForClientMessage(client, (m) => m.type === 'ready', { label: 'ready (plain)' })
+  const connection = await envPlain.fake.waitForConnection(() => true, { label: 'upstream (plain)' })
+  client.sendBinary(Buffer.alloc(1920, 0x68))
+
+  const taskDone = await waitForClientMessageOrNull(client, (m) => m.type === 'task_done', {
+    label: 'task_done (plain)',
+    timeoutMs: NEW_CASE_TIMEOUT_MS,
+  })
+  // 注入那一轮 + 回灌后那一轮，一共两条 response_done；等到两条才说明模型真的接着说话了
+  const responseDone = await waitForOrNull(
+    () => client.messages.filter((m) => m.type === 'response_done').length >= 2,
+    { label: 'response_done (plain 回灌后那一轮)', timeoutMs: NEW_CASE_TIMEOUT_MS },
+  )
+  const clientErrors = client.messages.filter((m) => m.type === 'error')
+
+  await check('上游在 function_call_output 之后立刻收到 response.create（不等 done）', () => {
+    assert.ok(taskDone !== null, '客户端没收到 task_done')
+    const received = connection.received
+    const outputIndex = received.findIndex(
+      (entry) => entry.type === 'conversation.item.create' && entry.raw?.item?.type === 'function_call_output',
+    )
+    assert.ok(outputIndex >= 0, '上游没收到 function_call_output')
+    const createIndex = received.findIndex((entry, index) => index > outputIndex && entry.type === 'response.create')
+    assert.ok(createIndex > outputIndex, 'function_call_output 之后没有 response.create（正常路径被改坏了）')
+  })
+
+  await check('只发一次 response.create（没有多余补发）', () => {
+    assert.equal(
+      connection.responseCreateCount,
+      1,
+      `上游收到 ${connection.responseCreateCount} 条 response.create（期望 1）`,
+    )
+    assert.ok(responseDone !== null, '客户端没收到 response_done')
+  })
+
+  await check('正常路径客户端零 error', () => {
+    assert.deepEqual(clientErrors.map((m) => m.message), [])
+  })
+} finally {
+  await envPlain.close()
 }
 
 /* ========================================================================== */

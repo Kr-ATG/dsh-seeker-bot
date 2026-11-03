@@ -225,20 +225,68 @@ function PreviewBody({ item }: { readonly item: BotOutputItem }): ReactElement {
  * `/api/personal-agent/file`，官方渲染器不认识。整个弹层渲染在卡片内部，
  * `position: fixed` 覆盖视口；Escape、点遮罩、点关闭按钮都能退出。
  */
-function OutputPreview({ item, onClose }: {
+function OutputPreview({ item, onClose, closeHandle }: {
   readonly item: BotOutputItem
   readonly onClose: () => void
+  /**
+   * 把本层的 requestClose 交给父组件。
+   *
+   * 切换 Bot 时父层要立刻关掉预览（不能看到上一台 Bot 的文件），但直接
+   * setPreview(null) 会让这一层硬消失——挂一个句柄出去，父层就能走同一条
+   * 「先播退场再卸载」的路径。
+   */
+  readonly closeHandle?: { current: (() => void) | null } | undefined
 }): ReactElement {
+  /*
+   * 退场状态：关闭时先播 240ms 退场（遮罩淡出 + 面板下沉缩小），播完再真正卸载。
+   *
+   * 原来三条入口都直接 onClose()，父层的 preview 一置 null 这层就被摘掉——入场是
+   * 160ms 淡入 + 190ms 弹入，出场却是硬消失。时长与曲线对齐 modal-animation.ts
+   * 的 MODAL_ANIM_MS（240ms、出场加速曲线），与插件其它弹层同一套手感。
+   */
+  const [closing, setClosing] = useState(false)
+  const closeTimerRef = useRef<number | null>(null)
+
+  /** 关闭：先播 240ms 退场，再真正卸载（直接 onClose 会硬消失）。 */
+  const requestClose = useCallback((): void => {
+    if (closeTimerRef.current !== null) return
+    setClosing(true)
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null
+      setClosing(false)
+      onClose()
+    }, 240)
+  }, [onClose])
+
+  /*
+   * 卸载收尾：清定时器；如果退场还没播完就被强行摘掉（切 Bot 后清单清空、
+   * 整卡早退都会这样），仍要把父层的 preview 一并收干净——否则它会留在
+   * 父层 state 里，下次清单回来时这张旧预览会自己弹开。
+   */
+  useEffect(() => () => {
+    if (closeTimerRef.current === null) return
+    window.clearTimeout(closeTimerRef.current)
+    closeTimerRef.current = null
+    onClose()
+  }, [onClose])
+
+  /* 句柄在挂载期间指向最新一次渲染的 requestClose，卸载时收回。 */
+  useEffect(() => {
+    if (closeHandle === undefined) return undefined
+    closeHandle.current = requestClose
+    return () => { closeHandle.current = null }
+  }, [closeHandle, requestClose])
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
         event.stopPropagation()
-        onClose()
+        requestClose()
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => { window.removeEventListener('keydown', onKeyDown) }
-  }, [onClose])
+  }, [requestClose])
 
   const time = formatOutputTime(item.time)
 
@@ -248,8 +296,9 @@ function OutputPreview({ item, onClose }: {
       role="dialog"
       aria-modal="true"
       aria-label={item.name}
+      data-closing={closing ? '1' : undefined}
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose()
+        if (event.target === event.currentTarget) requestClose()
       }}
     >
       <div className="pa-out-preview__panel" onMouseDown={(event) => event.stopPropagation()}>
@@ -272,7 +321,7 @@ function OutputPreview({ item, onClose }: {
             type="button"
             title="关闭预览"
             aria-label="关闭预览"
-            onClick={onClose}
+            onClick={requestClose}
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
               <path d="m4 4 8 8M12 4l-8 8" />
@@ -302,6 +351,8 @@ export const BotOutputsCard = memo(function BotOutputsCard({
   const [refreshTick, setRefreshTick] = useState(0)
   /** 上一轮请求的 botId：切换 Bot 时清掉旧清单，同一 Bot 刷新则保留旧清单避免闪空。 */
   const lastBotRef = useRef<string | null>(null)
+  /** 预览层的关闭句柄：切换 Bot 时让它播完退场再卸载（见 OutputPreview 的 closeHandle）。 */
+  const previewCloseRef = useRef<(() => void) | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -310,8 +361,14 @@ export const BotOutputsCard = memo(function BotOutputsCard({
     if (switched) {
       setItems([])
       setError(null)
-      // 切换 Bot 时把上一台 Bot 的预览弹层一起关掉，避免看到别人的文件。
-      setPreview(null)
+      /*
+       * 切换 Bot 时把上一台 Bot 的预览弹层一起关掉，避免看到别人的文件。
+       *
+       * 走预览层自己的 requestClose（不是直接 setPreview(null)）：这一层要跟关闭
+       * 按钮 / Esc / 点遮罩走同一条 240ms 退场，不然切 Bot 就成了唯一的硬消失路径。
+       * 没有开着预览时句柄是 null，什么也不做。
+       */
+      previewCloseRef.current?.()
     }
 
     /*
@@ -465,7 +522,9 @@ export const BotOutputsCard = memo(function BotOutputsCard({
         </div>
       ) : null}
 
-      {preview !== null ? <OutputPreview item={preview} onClose={closePreview} /> : null}
+      {preview !== null ? (
+        <OutputPreview item={preview} onClose={closePreview} closeHandle={previewCloseRef} />
+      ) : null}
     </div>
   )
 })

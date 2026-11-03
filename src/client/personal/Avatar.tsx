@@ -48,6 +48,21 @@ function Shape({ shape }: { shape: Avatar['shape'] }): JSX.Element {
 
 export function BotAvatar({ avatar, size = 34, online = false, className, muted = false }: BotAvatarProps): JSX.Element {
   const gradientId = `pa-av-${avatar.color.replace('#', '')}-${avatar.shape}`
+  /*
+   * 本地导入的图片优先：它盖住整块头像（圆形裁切），SVG 造型与渐变只作为
+   * 「没图时的回退」。两个都渲染会让半透明形状压在照片上，很难看。
+   */
+  if (avatar.image !== undefined && avatar.image !== '') {
+    return (
+      <span
+        className={`pa-avatar pa-avatar--image ${className ?? ''}`}
+        style={{ width: size, height: size, opacity: muted ? 0.55 : 1 }}
+      >
+        <img className="pa-avatar__image" src={avatar.image} alt="" draggable={false} />
+        {online ? <i className="pa-avatar__online" /> : null}
+      </span>
+    )
+  }
   return (
     <span
       className={`pa-avatar ${className ?? ''}`}

@@ -53,7 +53,7 @@ const SHEET = `
 .tg-count{flex:none;font-size:11.5px;color:var(--dsw-alias-label-tertiary,#888);font-variant-numeric:tabular-nums;white-space:nowrap}
 
 /* ── 会话筛选行（选了某个会话时出现）───────────────────────────── */
-.tg-session-bar{flex:none;display:flex;align-items:center;gap:8px;padding:6px 18px;font-size:12px;color:var(--dsw-alias-label-secondary,#6b7280);border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.12));animation:tg-fade-in 180ms ease}
+.tg-session-bar{flex:none;display:flex;align-items:center;gap:8px;padding:6px 18px;font-size:12px;color:var(--dsw-alias-label-secondary,#6b7280);border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.12));animation:tg-fade-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1)}
 .tg-session-bar__name{color:var(--dsw-alias-label-primary,#111827);font-weight:600;max-width:46ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tg-session-clear{display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 8px;border-radius:11px;border:none;background:var(--dsw-alias-bg-layer-2,color-mix(in srgb,var(--dsw-alias-label-primary,#000) 6%,transparent));color:var(--dsw-alias-label-secondary,#6b7280);font-size:11.5px;font-family:inherit;cursor:pointer;transition:background 140ms ease,color 140ms ease}
 .tg-session-clear:hover{background:var(--dsw-alias-bg-layer-3,color-mix(in srgb,var(--dsw-alias-label-primary,#000) 12%,transparent));color:var(--dsw-alias-label-primary,#111827)}
@@ -66,7 +66,7 @@ const SHEET = `
 @media (max-width:640px){.tg-grid{grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:10px}}
 
 /* ── 卡片 ──────────────────────────────────────────────────────── */
-.tg-card{position:relative;display:flex;flex-direction:column;border-radius:12px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.14));background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.04));cursor:pointer;overflow:hidden;padding:0;text-align:left;font-family:inherit;color:inherit;transition:transform 180ms cubic-bezier(.2,.8,.2,1),box-shadow 180ms ease,border-color 180ms ease;animation:tg-card-in 320ms cubic-bezier(.2,.8,.2,1) backwards;animation-delay:calc(var(--tg-i,0) * 22ms)}
+.tg-card{position:relative;display:flex;flex-direction:column;border-radius:12px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.14));background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.04));cursor:pointer;overflow:hidden;padding:0;text-align:left;font-family:inherit;color:inherit;transition:transform 180ms cubic-bezier(.2,.8,.2,1),box-shadow 180ms ease,border-color 180ms ease;animation:tg-card-in 240ms cubic-bezier(.2,.8,.2,1) backwards;animation-delay:calc(var(--tg-i,0) * 22ms)}
 .tg-card:hover{transform:translateY(-3px);border-color:var(--dsw-alias-border-l2,rgba(127,127,127,.28));box-shadow:0 8px 24px color-mix(in srgb,var(--dsw-alias-label-primary,#000) 12%,transparent)}
 .tg-card:active{transform:translateY(-1px) scale(.985)}
 .tg-card:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#3b82f6);outline-offset:2px}
@@ -117,7 +117,7 @@ const SHEET = `
 }
 
 /* ── 骨架屏（加载态）────────────────────────────────────────────── */
-.tg-skel{border-radius:12px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.12));background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.04));overflow:hidden;animation:tg-card-in 260ms cubic-bezier(.2,.8,.2,1) backwards;animation-delay:calc(var(--tg-i,0) * 30ms)}
+.tg-skel{border-radius:12px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.12));background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.04));overflow:hidden;animation:tg-card-in 240ms cubic-bezier(.2,.8,.2,1) backwards;animation-delay:calc(var(--tg-i,0) * 30ms)}
 .tg-skel__thumb{width:100%;aspect-ratio:4/3;position:relative;overflow:hidden;background:var(--dsw-alias-bg-module-platform,color-mix(in srgb,var(--dsw-alias-label-primary,#000) 4%,transparent))}
 .tg-skel__thumb::after{content:"";position:absolute;inset:0;background:linear-gradient(100deg,transparent 20%,color-mix(in srgb,var(--dsw-alias-label-primary,#000) 4%,transparent) 45%,color-mix(in srgb,var(--dsw-alias-label-primary,#000) 7%,transparent) 55%,transparent 80%);transform:translateX(-100%);animation:tg-shimmer 1.4s ease-in-out infinite}
 @keyframes tg-shimmer{to{transform:translateX(100%)}}
@@ -126,7 +126,7 @@ const SHEET = `
 .tg-skel__line--short{width:55%}
 
 /* ── 空态 / 错误态 ─────────────────────────────────────────────── */
-.tg-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:48px 24px;color:var(--dsw-alias-label-tertiary,#888);animation:tg-fade-in 240ms ease}
+.tg-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:48px 24px;color:var(--dsw-alias-label-tertiary,#888);animation:tg-fade-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1)}
 .tg-empty__icon{opacity:.5;animation:tg-float 3.2s ease-in-out infinite}
 @keyframes tg-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
 .tg-empty__title{font-size:14px;font-weight:600;color:var(--dsw-alias-label-secondary,#6b7280)}
@@ -134,7 +134,7 @@ const SHEET = `
 @keyframes tg-fade-in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
 
 /* ── stale 提示条 ───────────────────────────────────────────────── */
-.tg-stale{flex:none;display:flex;align-items:center;gap:8px;padding:6px 18px;font-size:11.5px;color:var(--dsw-alias-label-secondary,#6b7280);background:transparent;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.12));animation:tg-fade-in 200ms ease}
+.tg-stale{flex:none;display:flex;align-items:center;gap:8px;padding:6px 18px;font-size:11.5px;color:var(--dsw-alias-label-secondary,#6b7280);background:transparent;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.12));animation:tg-fade-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1)}
 .tg-stale__dot{width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-label-tertiary,#888);animation:tg-pulse 1.4s ease-in-out infinite;flex:none}
 @keyframes tg-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.8)}}
 
@@ -146,7 +146,7 @@ const SHEET = `
   color:var(--dsw-alias-label-primary,#111827);
   background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#dc2626) 8%,transparent);
   border-bottom:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary,#dc2626) 24%,transparent);
-  animation:tg-fade-in 180ms ease}
+  animation:tg-fade-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1)}
 .tg-del-error__icon{display:flex;flex:none;color:var(--dsw-alias-state-error-primary,#dc2626)}
 .tg-del-error__text{flex:1;min-width:0;word-break:break-word}
 .tg-del-error__close{flex:none;display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:10px;
@@ -163,8 +163,14 @@ const SHEET = `
 .tg-time__btn:hover{color:var(--dsw-alias-label-primary,#111827);background:var(--dsw-alias-bg-layer-2,color-mix(in srgb,var(--dsw-alias-label-primary,#000) 5%,transparent))}
 .tg-time__btn[data-active="true"]{color:var(--dsw-alias-state-business-primary,#3b82f6);background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#3b82f6) 12%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary,#3b82f6) 24%,transparent);font-weight:600}
 .tg-time__badge{font-size:11px;font-weight:600;white-space:nowrap;max-width:14ch;overflow:hidden;text-overflow:ellipsis}
-.tg-time-pop{position:absolute;top:calc(100% + 8px);left:0;z-index:40;width:296px;padding:12px;border-radius:12px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.18));background:var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg-base,#fff));box-shadow:0 12px 36px color-mix(in srgb,var(--dsw-alias-label-primary,#000) 18%,transparent),0 2px 8px rgba(0,0,0,.06);transform-origin:top left;animation:tg-pop-in 170ms cubic-bezier(.2,.8,.2,1)}
+.tg-time-pop{position:absolute;top:calc(100% + 8px);left:0;z-index:40;width:296px;padding:12px;border-radius:12px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.18));background:var(--dsw-alias-bg-layer-1,var(--dsw-alias-bg-base,#fff));box-shadow:0 12px 36px color-mix(in srgb,var(--dsw-alias-label-primary,#000) 18%,transparent),0 2px 8px rgba(0,0,0,.06);transform-origin:top left;animation:tg-pop-in 240ms cubic-bezier(.2,.8,.2,1)}
 @keyframes tg-pop-in{from{opacity:0;transform:translateY(-6px) scale(.96)}to{opacity:1;transform:translateY(0) scale(1)}}
+/* 退场与 tg-pop-in 反向对称：淡出 + 上收 6px + 缩到 .96，120ms。
+   小 popover 用 120ms 而非面板的 240ms——面积小、离点击点近，慢半拍会黏手。
+   曲线取加速语义（cubic-bezier(.4,0,.2,1)）：出场元素正在离开视线，
+   不需要入场那种减速收尾。forwards 保住末帧，等定时器到点才卸载。 */
+@keyframes tg-pop-out{from{opacity:1;transform:translateY(0) scale(1)}to{opacity:0;transform:translateY(-6px) scale(.96)}}
+.tg-time-pop.tg-time-pop--out{animation:tg-pop-out 120ms cubic-bezier(.4,0,.2,1) forwards}
 .tg-time-pop__presets{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
 .tg-time-pop__preset{height:28px;padding:0 10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.14));background:transparent;color:var(--dsw-alias-label-secondary,#6b7280);font-size:12px;font-family:inherit;cursor:pointer;text-align:left;transition:color 140ms ease,background 140ms ease,border-color 140ms ease,transform 120ms cubic-bezier(.2,.8,.2,1)}
 .tg-time-pop__preset:hover{color:var(--dsw-alias-label-primary,#111827);background:var(--dsw-alias-bg-layer-2,color-mix(in srgb,var(--dsw-alias-label-primary,#000) 5%,transparent));transform:translateY(-1px)}
@@ -182,7 +188,7 @@ const SHEET = `
 
 /* ── 搜索框内的时间命中标记 ─────────────────────────────────────── */
 .tg-search__input[data-time-hit="true"]{padding-right:104px;border-color:var(--dsw-alias-state-business-primary,#3b82f6)}
-.tg-search__time-tag{position:absolute;right:7px;top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;gap:4px;height:19px;padding:0 7px;border-radius:10px;background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#3b82f6) 12%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-state-business-primary,#3b82f6) 24%,transparent);color:var(--dsw-alias-state-business-primary,#3b82f6);font-size:10.5px;font-weight:600;white-space:nowrap;pointer-events:none;animation:tg-tag-in 200ms cubic-bezier(.2,.8,.2,1)}
+.tg-search__time-tag{position:absolute;right:7px;top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;gap:4px;height:19px;padding:0 7px;border-radius:10px;background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#3b82f6) 12%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-state-business-primary,#3b82f6) 24%,transparent);color:var(--dsw-alias-state-business-primary,#3b82f6);font-size:10.5px;font-weight:600;white-space:nowrap;pointer-events:none;animation:tg-tag-in 240ms cubic-bezier(.2,.8,.2,1)}
 @keyframes tg-tag-in{from{opacity:0;transform:translateY(-50%) translateX(6px) scale(.9)}to{opacity:1;transform:translateY(-50%) translateX(0) scale(1)}}
 
 /* ── 视图切换（网格 ⇄ 时间轴，对齐分段控制样式）─────────────────── */
@@ -193,7 +199,7 @@ const SHEET = `
 .tg-view__btn[data-active="true"]{color:var(--dsw-alias-state-business-primary,#3b82f6);background:var(--dsw-alias-bg-layer-1,#fff);font-weight:600;box-shadow:0 1px 3px color-mix(in srgb,var(--dsw-alias-label-primary,#000) 10%,transparent)}
 
 /* ── 时间筛选条 ─────────────────────────────────────────────────── */
-.tg-time-bar{flex:none;display:flex;align-items:center;gap:8px;padding:7px 18px;font-size:12px;color:var(--dsw-alias-label-secondary,#6b7280);background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#3b82f6) 4%,transparent);border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.12));animation:tg-fade-in 200ms ease}
+.tg-time-bar{flex:none;display:flex;align-items:center;gap:8px;padding:7px 18px;font-size:12px;color:var(--dsw-alias-label-secondary,#6b7280);background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#3b82f6) 4%,transparent);border-bottom:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.12));animation:tg-fade-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1)}
 .tg-time-bar__icon{display:flex;color:var(--dsw-alias-state-business-primary,#3b82f6);animation:tg-clock-sway 3.6s ease-in-out infinite}
 @keyframes tg-clock-sway{0%,100%{transform:rotate(0deg)}25%{transform:rotate(-9deg)}75%{transform:rotate(9deg)}}
 .tg-time-bar__name{color:var(--dsw-alias-label-primary,#111827);font-weight:600;max-width:46ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -202,7 +208,7 @@ const SHEET = `
 /* 不用 content-visibility:auto：滚动时分组进出视口会触发整组重布局 + 组内
    lazy 图集中加载，实测掉到 43fps 且伴随 longtask 卡顿；去掉后 280+fps。
    屏外成本改由 img loading=lazy 单独承担。 */
-.tg-day{position:relative;padding-left:26px;margin-bottom:26px;transition:margin-bottom 180ms ease;animation:tg-day-in 340ms cubic-bezier(.2,.8,.2,1) backwards;animation-delay:calc(var(--tg-day-i,0) * 45ms)}
+.tg-day{position:relative;padding-left:26px;margin-bottom:26px;transition:margin-bottom 180ms ease;animation:tg-day-in 240ms cubic-bezier(.2,.8,.2,1) backwards;animation-delay:calc(var(--tg-day-i,0) * 45ms)}
 .tg-day[data-collapsed="true"]{margin-bottom:8px}
 @keyframes tg-day-in{from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:translateX(0)}}
 /* 竖轨：极简细线，自上而下生长 */
@@ -212,7 +218,7 @@ const SHEET = `
 .tg-day:last-child[data-collapsed="true"]::before{bottom:auto;height:14px}
 @keyframes tg-rail-grow{from{transform:scaleY(0);opacity:0}to{transform:scaleY(1);opacity:1}}
 /* 日期头：整行作为收起/展开按钮，悬浮微底色，干净极简 */
-.tg-day__head{position:relative;display:inline-flex;align-items:center;gap:6px;padding:3px 8px 3px 4px;margin-bottom:12px;border-radius:8px;border:none;background:transparent;color:inherit;cursor:pointer;font-family:inherit;text-align:left;user-select:none;transition:background 140ms ease,transform 120ms ease;animation:tg-fade-in 240ms ease backwards;animation-delay:calc(var(--tg-day-i,0) * 45ms)}
+.tg-day__head{position:relative;display:inline-flex;align-items:center;gap:6px;padding:3px 8px 3px 4px;margin-bottom:12px;border-radius:8px;border:none;background:transparent;color:inherit;cursor:pointer;font-family:inherit;text-align:left;user-select:none;transition:background 140ms ease,transform 120ms ease;animation:tg-fade-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;animation-delay:calc(var(--tg-day-i,0) * 45ms)}
 .tg-day__head:hover{background:var(--dsw-alias-bg-layer-2,color-mix(in srgb,var(--dsw-alias-label-primary,#000) 5%,transparent))}
 .tg-day__head:active{transform:scale(.985)}
 .tg-day__head:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#3b82f6);outline-offset:1px}
@@ -303,7 +309,7 @@ const SHEET = `
   padding:clamp(12px,3vh,40px);
   background:color-mix(in srgb, #06070a 78%, transparent);
   backdrop-filter:blur(14px) saturate(.9);-webkit-backdrop-filter:blur(14px) saturate(.9);
-  animation:glb-veil-in 200ms cubic-bezier(.32,.72,0,1);
+  animation:glb-veil-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
   font-family:inherit;-webkit-font-smoothing:antialiased}
 .glb[data-closing="true"]{animation:glb-veil-out 170ms ease forwards}
 @keyframes glb-veil-in{from{opacity:0;backdrop-filter:blur(0) saturate(1)}to{opacity:1}}
@@ -316,7 +322,7 @@ const SHEET = `
   background:color-mix(in srgb, #14161c 96%, transparent);
   border:1px solid rgba(255,255,255,.09);
   box-shadow:0 0 0 1px rgba(0,0,0,.5),0 32px 80px -12px rgba(0,0,0,.7),0 8px 24px -8px rgba(0,0,0,.5);
-  animation:glb-panel-in 340ms cubic-bezier(.16,1,.3,1)}
+  animation:glb-panel-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1)}
 .glb[data-closing="true"] .glb-panel{animation:glb-panel-out 170ms cubic-bezier(.4,0,1,1) forwards}
 @keyframes glb-panel-in{from{opacity:0;transform:scale(.96) translateY(8px)}to{opacity:1;transform:none}}
 @keyframes glb-panel-out{from{opacity:1;transform:none}to{opacity:0;transform:scale(.98) translateY(4px)}}
@@ -377,7 +383,7 @@ const SHEET = `
 .glb-media{display:block;max-width:100%;max-height:100%;min-height:0;min-width:0;
   width:auto;height:auto;object-fit:contain;border-radius:10px;
   background:transparent;box-shadow:0 12px 40px -10px rgba(0,0,0,.65);
-  animation:glb-media-in 320ms cubic-bezier(.16,1,.3,1) 40ms backwards}
+  animation:glb-media-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) 40ms backwards}
 .glb-media--video{background:#000}
 @keyframes glb-media-in{from{opacity:0;transform:scale(.985)}to{opacity:1;transform:none}}
 
@@ -461,7 +467,7 @@ const SHEET = `
 /* 已缩放：百分比 + 复位钮（亮起来，因为它现在是有信息量的状态）。 */
 .glb-zoom[data-active="true"]{padding:2px 2px 2px 9px;border-radius:8px;
   background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.08);
-  animation:glb-zoom-in 220ms cubic-bezier(.16,1,.3,1)}
+  animation:glb-zoom-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1)}
 @keyframes glb-zoom-in{from{opacity:0;transform:scale(.9)}to{opacity:1;transform:none}}
 .glb-zoom__pct{font-size:11px;font-weight:600;color:rgba(255,255,255,.86);
   font-variant-numeric:tabular-nums;min-width:3.2em;text-align:right}
@@ -527,7 +533,7 @@ const SHEET = `
   .tg-empty__icon,.tg-stale__dot,.tg-icon-btn[data-spinning="true"] svg{animation:none!important}
   .glb,.glb-panel,.glb-head,.glb-body,.glb-media,.glb-note,.glb-paged__bar,.glb-zoom{animation:none!important}
   .glb-btn,.glb-nav,.glb-paged__step,.glb-paged__img,.glb-zoom__hint,.glb-zoom__reset{transition:none!important}
-  .tg-day,.tg-day::before,.tg-day__head,.tg-day__dot,.tg-time-pop,.tg-search__time-tag,.tg-time-bar{animation:none!important}
+  .tg-day,.tg-day::before,.tg-day__head,.tg-day__dot,.tg-time-pop,.tg-time-pop--out,.tg-search__time-tag,.tg-time-bar{animation:none!important}
   .tg-day__chevron,.tg-day__dot,.tg-day__head{transition:none!important}
   /* 时间轴格子的名称浮层（2026-10-25）：只关过渡，**不动 opacity / display** ——
      hover 该浮现还是浮现，只是没有过渡帧。 */

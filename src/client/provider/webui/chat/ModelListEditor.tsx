@@ -13,11 +13,12 @@
  * 约定省略（有安全风险）。文案使用本地中文字典，不依赖 locale 插件。
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, ReactNode } from 'react'
 import type { DiscoveredModelView, IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
 import { messageOf } from './store.ts'
+import { ensureModalAnimStyles, modalAnimClass, modalMaskAnimClass, useModalClose } from '../../../modal-animation.ts'
 
 /** 「模型供应商」区块的本地文案（中文）。 */
 export const chatCopy = {
@@ -302,6 +303,14 @@ const CAPACITY_PRESETS: Readonly<Record<CapacityField, readonly string[]>> = {
   contextWindow: ['2M', '1M', '512K', '400K', '256K', '200K', '128K', '96K', '64K', '48K', '32K', '24K', '16K', '8K'],
   maxTokens: ['386K', '256K', '128K', '64K', '32K', '24K', '16K', '12K', '8K', '4K', '2K'],
 }
+
+/**
+ * 容量预设面板的退场时长（ms）。
+ *
+ * 这是贴在输入框下缘的小 popover，比 modal 的 240ms 短一档（160ms）——
+ * 小面板走 240ms 会显得拖沓，160ms 已经够读出「缩回去了」。
+ */
+const CAPACITY_MENU_ANIM_MS = 160
 
 /**
  * 一个模型 profile 可声明的全部推理等级，按升级顺序。与官方 llm-pi-ai 的
@@ -773,6 +782,9 @@ function EffortSaved({ model }: { model: ModelDraft }): ReactNode {
 
 /** 渲染模型列表及其获取动作。 */
 export function ModelListEditor(props: ModelListEditorProps): ReactNode {
+  // 候选弹窗的进出场样式表（共享 modal-animation，幂等注入）。渲染期调用与
+  // confirm-dialog 同一惯例：首次打开弹窗前样式一定已经在 head 里。
+  ensureModalAnimStyles()
   const { models, onChange, probe, api, disabled } = props
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | undefined>(undefined)
@@ -790,6 +802,58 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
   // 至多一个面板展开。自绘面板而非原生 datalist：后者的弹出层由浏览器绘制，
   // 在部分环境里点击无响应，且无法与主题同步。
   const [capacityMenu, setCapacityMenu] = useState<string | undefined>(undefined)
+  /**
+   * 预设面板的退场态（160ms）：置 true 后面板挂 `data-closing`，注入样式里的
+   * `.dsh-capacity-menu[data-closing="1"]` 播淡出 + 上移缩回，播完才清
+   * capacityMenu 卸载。此前这个面板是瞬关的。
+   */
+  const [capacityClosing, setCapacityClosing] = useState(false)
+  const capacityTimer = useRef<number | null>(null)
+  const capacityClosingRef = useRef(false)
+
+  /** 关闭预设面板：先播退场再卸载（所有关闭入口都走这里）。 */
+  const requestCapacityClose = useCallback((): void => {
+    if (capacityClosingRef.current) return
+    capacityClosingRef.current = true
+    setCapacityClosing(true)
+    capacityTimer.current = window.setTimeout(() => {
+      capacityTimer.current = null
+      capacityClosingRef.current = false
+      setCapacityClosing(false)
+      setCapacityMenu(undefined)
+    }, CAPACITY_MENU_ANIM_MS)
+  }, [])
+
+  /**
+   * 打开预设面板：先撤销可能还在播的退场。
+   * 少了这一步，退场那 160ms 里点开另一个字段，旧计时器到点会把新面板一起清掉。
+   */
+  const openCapacityMenu = useCallback((menuKey: string): void => {
+    if (capacityTimer.current !== null) {
+      window.clearTimeout(capacityTimer.current)
+      capacityTimer.current = null
+    }
+    capacityClosingRef.current = false
+    setCapacityClosing(false)
+    setCapacityMenu(menuKey)
+  }, [])
+
+  useEffect(() => () => {
+    if (capacityTimer.current !== null) window.clearTimeout(capacityTimer.current)
+  }, [])
+
+  /**
+   * 「获取可用模型」候选弹窗的退场状态机。
+   *
+   * 这套弹窗此前零入场零退场：点遮罩/取消时整块瞬间消失，和插件其它弹窗
+   * 手感完全脱节。这里直接复用 modal-animation 的共享动画（遮罩淡入淡出 +
+   * 卡片自底部 24px 滑入滑出、240ms），不另造 keyframes。
+   */
+  const closePickerNow = useCallback((): void => {
+    setCandidates(undefined)
+    setPicked(new Set())
+  }, [])
+  const fetchDialog = useModalClose(candidates !== undefined, closePickerNow)
 
   // 一键能力检测:后台任务 + 轮询。host 每完成一项写入状态,前端每 800ms
   // 拉取一次,逐条实时点亮;全部完成后 host 自动落盘,client 同步本地草稿。
@@ -1036,8 +1100,20 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
     if (document.getElementById(marker) !== null) return
     const style = document.createElement('style')
     style.id = marker
-    style.textContent =
-      '.dsh-capacity-menu-item:hover{background:var(--dsw-alias-interactive-bg-hover, rgba(22,93,255,0.08))}'
+    style.textContent = [
+      '.dsh-capacity-menu-item:hover{background:var(--dsw-alias-interactive-bg-hover, rgba(22,93,255,0.08))}',
+      /* 预设面板开合：入场轻微下滑展开（减速），退场淡出 + 上移缩回（加速）。
+       * 入场走全局统一的 240ms；退场仍是 160ms（收得比展开快一档）。
+       * 入场不写 animation-fill-mode:both——both 会在动画结束后残留 to 帧
+       * transform，让面板成为后代 position:fixed 元素的包含块（下拉里的
+       * tooltip/浮层会整体偏移）；这里默认 fill-mode:none 即可。 */
+      '@keyframes dsh-capacity-menu-in{from{opacity:0;transform:translateY(-4px) scale(.98)}to{opacity:1;transform:none}}',
+      '@keyframes dsh-capacity-menu-out{from{opacity:1;transform:none}to{opacity:0;transform:translateY(-4px) scale(.97)}}',
+      '.dsh-capacity-menu{animation:dsh-capacity-menu-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1)}',
+      '.dsh-capacity-menu[data-closing="1"]{animation:dsh-capacity-menu-out .16s cubic-bezier(.4,0,.2,1) forwards;pointer-events:none}',
+      /* reduced-motion：两段动画都关掉（卸载时机仍由 JS 的 160ms 计时器控制）。 */
+      '@media (prefers-reduced-motion:reduce){.dsh-capacity-menu,.dsh-capacity-menu[data-closing="1"]{animation:none}}',
+    ].join('\n')
     document.head.append(style)
   }, [])
 
@@ -1123,6 +1199,9 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
   }
 
   const fetchModels = async (): Promise<void> => {
+    // 上一轮退场若还没播完，先撤销：否则它的计时器到点会把这次新打开的
+    // 候选弹窗一起关掉。
+    fetchDialog.cancelClose()
     setBusy(true)
     setFailure(undefined)
     try {
@@ -1171,10 +1250,8 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
     }
   }
 
-  const closePicker = (): void => {
-    setCandidates(undefined)
-    setPicked(new Set())
-  }
+  /** 关闭候选弹窗：先播退场（真正卸载在 closePickerNow 里）。 */
+  const closePicker = (): void => { fetchDialog.requestClose() }
 
   const adoptPicked = (): void => {
     /* v8 ignore next -- 对话框只在候选加载后渲染 */
@@ -1349,20 +1426,23 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
                           aria-controls={`dsh-capacity-menu-${field}`}
                           disabled={disabled}
                           onChange={(event) => { editCapacity(index, field, event.target.value) }}
-                          onClick={() => { setCapacityMenu(current => current === menuKey ? undefined : menuKey) }}
+                          // 关闭分支也要播退场：直接 setCapacityMenu(undefined) 会瞬关。
+                          onClick={() => { if (menuOpen) requestCapacityClose(); else openCapacityMenu(menuKey) }}
                           onKeyDown={(event) => {
-                            if (event.key === 'Escape') setCapacityMenu(undefined)
+                            if (event.key === 'Escape') requestCapacityClose()
                           }}
                         />
                         {menuOpen
                           ? (
                             <>
                               {/* 透明遮罩：点面板外任意处收起，免挂全局监听。 */}
-                              <div style={capacityMenuBackdropStyle} onClick={() => { setCapacityMenu(undefined) }} />
+                              <div style={capacityMenuBackdropStyle} onClick={() => { requestCapacityClose() }} />
                               <div
                                 id={`dsh-capacity-menu-${field}`}
                                 role="listbox"
                                 aria-label={chatCopy[field]}
+                                className="dsh-capacity-menu"
+                                data-closing={capacityClosing ? '1' : undefined}
                                 style={capacityMenuPanelStyle}
                               >
                                 {CAPACITY_PRESETS[field].map(preset => (
@@ -1376,7 +1456,8 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
                                     onMouseDown={(event) => {
                                       event.preventDefault()
                                       editCapacity(index, field, preset)
-                                      setCapacityMenu(undefined)
+                                      // 选完也先播退场再收起，与点外部关闭一致。
+                                      requestCapacityClose()
                                     }}
                                   >
                                     {preset}
@@ -1469,51 +1550,63 @@ export function ModelListEditor(props: ModelListEditorProps): ReactNode {
           留在组件树里的遮罩/弹窗会被钉进面板坐标系（错位 + 遮罩不铺满，
           点不到东西）——与 PerfBenchModal 同一条 dsh-webui 玻璃铁律。 */}
       {candidates !== undefined ? createPortal(
-        <div style={overlayStyle} onClick={closePicker}>
+        <>
+          {/* 遮罩与居中容器拆成两层：遮罩只播 dsh-modal-mask-*，卡片播
+              dsh-modal-slide-*。同一个元素上同时挂两段 animation 会互相覆盖
+              （CSS 只保留最后一条声明），拆开才各演各的。点遮罩 = 关闭。 */}
           <div
-            role="dialog"
-            aria-modal="true"
-            aria-label={chatCopy.fetchTitle}
-            style={modalStyle}
-            onClick={(event) => { event.stopPropagation() }}
-          >
-            <div style={{ fontSize: 14, lineHeight: '22px', fontWeight: 500, color: 'var(--dsw-alias-label-primary, #1f2329)' }}>
-              {chatCopy.fetchTitle}
+            className={modalMaskAnimClass(fetchDialog.closing)}
+            style={fetchMaskStyle}
+            aria-hidden="true"
+            onClick={closePicker}
+          />
+          <div style={fetchWrapStyle}>
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label={chatCopy.fetchTitle}
+              className={modalAnimClass(fetchDialog.closing)}
+              style={modalStyle}
+              onClick={(event) => { event.stopPropagation() }}
+            >
+              <div style={{ fontSize: 14, lineHeight: '22px', fontWeight: 500, color: 'var(--dsw-alias-label-primary, #1f2329)' }}>
+                {chatCopy.fetchTitle}
+              </div>
+              <p style={hintStyle}>{chatCopy.fetchDescription}</p>
+              <ul style={{ listStyle: 'none', margin: 0, padding: 0, maxHeight: 320, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 2 }}>
+                {candidates.map(candidate => (
+                  <li key={candidate.id} style={candidateStyle}>
+                    <label style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '6px 8px', borderRadius: 6, cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={picked.has(candidate.id)}
+                        onChange={() => { toggle(candidate.id) }}
+                      />
+                      <span style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
+                        <span style={candidateIdStyle}>{candidate.id}</span>
+                        {candidateSummary(candidate) === ''
+                          ? null
+                          : (
+                            <span style={{ fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary, #8f959e)' }}>
+                              {candidateSummary(candidate)}
+                            </span>
+                          )}
+                      </span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+                <button type="button" className="dsh-webui-secondary-btn" style={secondaryButtonStyle} onClick={closePicker}>
+                  {chatCopy.cancel}
+                </button>
+                <button type="button" className="dsh-webui-primary-btn" style={primaryButtonStyle} onClick={adoptPicked}>
+                  {chatCopy.fetchAdopt}
+                </button>
+              </div>
+              </div>
             </div>
-            <p style={hintStyle}>{chatCopy.fetchDescription}</p>
-            <ul style={{ listStyle: 'none', margin: 0, padding: 0, maxHeight: 320, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 2 }}>
-              {candidates.map(candidate => (
-                <li key={candidate.id} style={candidateStyle}>
-                  <label style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '6px 8px', borderRadius: 6, cursor: 'pointer' }}>
-                    <input
-                      type="checkbox"
-                      checked={picked.has(candidate.id)}
-                      onChange={() => { toggle(candidate.id) }}
-                    />
-                    <span style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
-                      <span style={candidateIdStyle}>{candidate.id}</span>
-                      {candidateSummary(candidate) === ''
-                        ? null
-                        : (
-                          <span style={{ fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary, #8f959e)' }}>
-                            {candidateSummary(candidate)}
-                          </span>
-                        )}
-                    </span>
-                  </label>
-                </li>
-              ))}
-            </ul>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
-              <button type="button" className="dsh-webui-secondary-btn" style={secondaryButtonStyle} onClick={closePicker}>
-                {chatCopy.cancel}
-              </button>
-              <button type="button" className="dsh-webui-primary-btn" style={primaryButtonStyle} onClick={adoptPicked}>
-                {chatCopy.fetchAdopt}
-              </button>
-            </div>
-          </div>
-        </div>,
+        </>,
         document.body,
       ) : null}
     </section>
@@ -1902,20 +1995,32 @@ const errorStyle: CSSProperties = {
   color: 'var(--dsw-alias-state-error-primary, #d54941)',
 }
 
-/* 候选弹窗遮罩：z-index 必须高于官方设置弹层（SettingsRoot overlay z-1000），
- * 否则同层级下靠 DOM 序竞争，portal 时机一变就会被面板压住。 */
-const overlayStyle: CSSProperties = {
+/* 候选弹窗遮罩：只负责压暗与承接「点空白关闭」，动画走 modal-animation 的
+ * dsh-modal-mask-*（淡入淡出）。z-index 必须高于官方设置弹层（SettingsRoot
+ * overlay z-1000），否则同层级下靠 DOM 序竞争，portal 时机一变就会被面板压住。 */
+const fetchMaskStyle: CSSProperties = {
   position: 'fixed',
   inset: 0,
   zIndex: 1200,
   background: 'rgba(0,0,0,0.35)',
+}
+
+/* 候选弹窗居中容器：**不接指针**（卡片自己 pointer-events:auto）。它整层盖在
+ * 遮罩上，一旦接了指针，点空白处就永远关不掉弹窗。 */
+const fetchWrapStyle: CSSProperties = {
+  position: 'fixed',
+  inset: 0,
+  zIndex: 1201,
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
+  pointerEvents: 'none',
 }
 
-/* 官方 .fetchDialog：候选弹窗最大 520px，滚动列表收在浮层内。 */
+/* 官方 .fetchDialog：候选弹窗最大 520px，滚动列表收在浮层内。
+ * pointerEvents:auto —— 外层居中容器是 pointer-events:none，卡片要自己接回来。 */
 const modalStyle: CSSProperties = {
+  pointerEvents: 'auto',
   width: 'min(520px, calc(100vw - 48px))',
   maxHeight: '70vh',
   overflowY: 'auto',

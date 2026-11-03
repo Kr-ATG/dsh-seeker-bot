@@ -35,13 +35,14 @@ import { extname, isAbsolute, join, resolve, sep } from 'node:path'
 import { botWorkspaceDir, cancelBotTurn, ensureBotAgent, getLastTurnDebug, resetBotConversation, runBotTurn, type BotAgentSpec, type PersonalStreamEvent } from './agent.ts'
 import { scanBotOutputs } from './outputs.ts'
 import { recallBotTurn } from './recall.ts'
+import { botRoomOf, buildRoomContextBlock, setBotRoom } from './room-context.ts'
 import { addApprovalRule, approvalRulesFile, decideApproval, pendingApprovalCount, readApprovalRules, removeApprovalRule, type ApprovalChoice, type ApprovalRisk } from './approval.ts'
 import { answerQuestion, pendingQuestionCount } from './questions.ts'
 import { currentSeq, parseSinceByBot, publish, subscribe, subscribeAll } from './events.ts'
 import { readCreatedBots, removeCreatedBot } from './bot-create.ts'
 import { purgeBot } from './bot-delete.ts'
 import { applyPersonalAgentScheduler, nextProactiveAt, nextRoutineAt, normalizeNoDataPolicy, normalizeRetryPolicy, readProactive, readRoutines, readServerMessages, runProactiveNow, writeProactive, writeRoutines, type HostProactive, type HostRoutine } from './scheduler.ts'
-import { buildWorkingMemoryBlock, injectWorkingMemoryIntoAgent, pruneWorkingTasks, readWorkingTasks, resetWorkingMemoryInjection, upsertWorkingTask, workingMemoryFile, type WorkingTask } from './working-memory.ts'
+import { buildWorkingMemoryBlock, createWorkingMemoryMessage, injectWorkingMemoryIntoAgent, pruneWorkingTasks, readWorkingTasks, resetWorkingMemoryInjection, upsertWorkingTask, workingMemoryFile, type WorkingTask } from './working-memory.ts'
 import { listPages, readPage, writePage } from './pages.ts'
 import {
   checkJournalTrigger,
@@ -384,7 +385,7 @@ interface ReplyBody {
     isMain?: boolean
   }
   text?: string
-  history?: Array<{ role?: string; text?: string }>
+  history?: Array<{ role?: string; text?: string; name?: string }>
   memories?: string[]
   /**
    * 本轮附带的「全量 Bot 花名册」（可选，向后兼容）。
@@ -414,6 +415,14 @@ interface ReplyBody {
   images?: Array<{ path?: string; name?: string }>
   /** 该 bot 自己的工具权限档位（缺省按完全权限）。 */
   permission?: 'full' | 'approval'
+  /**
+   * 这一轮从哪个群里发起的（群聊回合才有；私聊缺省）。
+   *
+   * 为什么路由要收它：审批卡 / 问答卡是宿主异步发的，只认 botId，不带群 id 就会
+   * 落进该 Bot 的私聊，群聊视图永远看不到那张卡。前端每轮带上来，这里登记进
+   * `room-context`，卡片发布时再取回。
+   */
+  roomId?: string
 }
 
 /**
@@ -586,6 +595,32 @@ async function injectWorkingMemoryForReply(ctx: any, spec: BotAgentSpec): Promis
     await injectWorkingMemoryIntoAgent(agent, spec.botId)
   } catch {
     /* agent 建不起来：交给 runBotTurn 报错 */
+  }
+}
+
+/**
+ * 在跑一轮群聊回复之前，把本群之前的对话作为 developer 消息投给 agent。
+ *
+ * 为什么需要：每个 Bot 只有一条终身会话，群消息并不在其中——不注入的话，被 @
+ * 的成员看不到其他成员说过什么，「多视角评审」会退化成三个互不知情的单聊。
+ * 私聊回合（`body.roomId` 缺省）不注入，避免把别处的群上下文串进私聊。
+ *
+ * 消息结构复用 working-memory 的 `createWorkingMemoryMessage`：同样是面向模型的
+ * developer 消息、同样要深冻结，只是内容来源不同。
+ *
+ * 失败一律吞掉：群上下文是增强项，它坏了不能连累对话本身。
+ */
+async function injectRoomContextForReply(ctx: any, spec: BotAgentSpec, body: ReplyBody): Promise<void> {
+  try {
+    const roomId = typeof body.roomId === 'string' ? body.roomId.trim() : ''
+    if (roomId === '') return
+    const text = buildRoomContextBlock(body.history ?? [])
+    if (text === '') return
+    const agent = await ensureBotAgent(ctx, spec)
+    if (agent === null || typeof agent !== 'object' || typeof agent.inject !== 'function') return
+    agent.inject(createWorkingMemoryMessage(text))
+  } catch {
+    /* 群上下文是增强项：注入失败不影响这一轮对话 */
   }
 }
 
@@ -1600,10 +1635,42 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
               if (providerId === '') continue
               try {
                 const models = await llm.listModels(providerId)
-                const entries = (Array.isArray(models) ? models : []).map((model: any) => ({
-                  id: String(model?.id ?? ''),
-                  name: String(model?.name ?? model?.id ?? ''),
-                })).filter((model: any) => model.id !== '')
+                const entries: Array<Record<string, unknown>> = []
+                for (const model of Array.isArray(models) ? models : []) {
+                  const id = String(model?.id ?? '').trim()
+                  if (id === '') continue
+                  /*
+                   * 推理档位：模型正式公布的可选档位（`resolveModelInfo` 读适配器
+                   * catalog，纯本地解析，不联网）。Bot 设置卡据此决定「推理强度」
+                   * 下拉给哪几档；解析失败或模型不支持推理时留空，界面自动隐藏。
+                   */
+                  let reasoningEfforts: Array<{ id: string; name: string }> = []
+                  let defaultEffort = ''
+                  try {
+                    if (typeof llm.resolveModelInfo === 'function') {
+                      const info = await llm.resolveModelInfo(providerId, id)
+                      const efforts = info?.reasoning?.efforts
+                      if (Array.isArray(efforts)) {
+                        reasoningEfforts = efforts
+                          .map((effort: any) => ({
+                            id: String(effort?.id ?? '').trim(),
+                            name: String(effort?.name ?? effort?.id ?? '').trim(),
+                          }))
+                          .filter((effort: { id: string }) => effort.id !== '')
+                      }
+                      const declaredDefault = String(info?.reasoning?.defaultEffort ?? '').trim()
+                      if (declaredDefault !== '') defaultEffort = declaredDefault
+                    }
+                  } catch {
+                    /* 单个模型解析失败：只丢档位，不影响模型本身可选 */
+                  }
+                  entries.push({
+                    id,
+                    name: String(model?.name ?? id),
+                    ...(reasoningEfforts.length > 0 ? { reasoningEfforts } : {}),
+                    ...(defaultEffort !== '' ? { defaultEffort } : {}),
+                  })
+                }
                 if (entries.length === 0) continue
                 groups.push({
                   provider: providerId,
@@ -1780,12 +1847,20 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
           if (text === '') return sendJson(res, 400, { ok: false, error: 'empty message' })
           const spec = toBotSpec(body)
           /*
+           * 记下这一轮属于哪个群：审批 / 问答卡是异步发的，发布时只能靠 botId
+           * 反查。私聊回合 body.roomId 缺省，这里就是删除登记——不删的话后台
+           * 例行任务的审批卡会被塞进上一轮那个群。
+           */
+          setBotRoom(spec.botId, body.roomId)
+          /*
            * 工作记忆注入（路线图 0.2）：每轮回复前把「当前任务状态」作为 developer
            * 消息投给 agent。放在 runBotTurn 之前，是因为 `inject()` 不唤醒驱动器——
            * 先注入、再 followup 用户消息，模型第一步就能看到任务进度，不依赖
            * 历史有没有被压缩过。
            */
           await injectWorkingMemoryForReply(webCtx, spec)
+          // 群聊回合把本群之前的对话也投进去（成员只有一条终身会话，不注入就互相看不见）；私聊回合内部直接返回
+          await injectRoomContextForReply(webCtx, spec, body)
 
           /*
            * 首选：把这个 bot 接到宿主的真 agent 会话上（能读文件 / 跑命令 / 搜索…）。
@@ -1838,6 +1913,8 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
           const text = withImageHints(String(body.text ?? '').trim(), body.images)
           if (text === '') return sendJson(res, 400, { ok: false, error: 'empty message' })
           const spec = toBotSpec(body)
+          // 与 /reply 同一口径：登记本回合的所属群，私聊回合即清除（见 room-context.ts）
+          setBotRoom(spec.botId, body.roomId)
           /*
            * 记下这个 Bot 的配置：派活时宿主需要知道「子 Bot 是谁」。
            * 前端每轮都会把完整配置带上来，所以这里缓存天然是新鲜的。
@@ -1847,6 +1924,8 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
           rememberRoster(body.roster)
           // 工作记忆注入：与 /reply 同一处理，放在开 SSE 之前（避免拖慢首字节）
           await injectWorkingMemoryForReply(webCtx, spec)
+          // 群聊历史注入：与 /reply 同一口径，同样放在开 SSE 之前
+          await injectRoomContextForReply(webCtx, spec, body)
 
           res.statusCode = 200
           res.setHeader('content-type', 'text/event-stream; charset=utf-8')
@@ -1867,10 +1946,20 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
              */
             const eventBotId = String(body.bot?.id ?? '').trim()
             if (eventBotId === '') return
+            /*
+             * 群聊回合的消息要带上群 id，否则「多窗口 / 多设备打开同一个 Bot」那条
+             * 同步路径会把群消息落到私聊：前端按 message.roomId 归组，广播事件里
+             * 没有它，另一处窗口就会多出一条只在私聊可见的重复气泡。
+             *
+             * 取登记表里的值而不是 body.roomId：后台例行任务（没有 body.roomId）在
+             * 同一 Bot 的群回合里发消息时，也该落到那个群（见 room-context.ts）。
+             */
+            const broadcastRoomId = botRoomOf(eventBotId)
+            const roomField = broadcastRoomId !== undefined ? { roomId: broadcastRoomId } : {}
             if (event.type === 'message') {
-              publish(eventBotId, { type: 'message', message: event.message, source: 'chat' })
+              publish(eventBotId, { type: 'message', message: event.message, source: 'chat', ...roomField })
             } else if (event.type === 'message-update') {
-              publish(eventBotId, { type: 'message-update', message: event.message, source: 'chat' })
+              publish(eventBotId, { type: 'message-update', message: event.message, source: 'chat', ...roomField })
             }
           }
 

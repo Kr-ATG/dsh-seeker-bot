@@ -18,6 +18,7 @@
  */
 import { useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
+import { PAGE_MOTION_IN, PAGE_MOTION_STAGGER } from '../../motion/overlay-motion.ts'
 import { IconExpand, IconPhoneOff, IconX } from '../icons.tsx'
 import { usePersonal } from '../store.tsx'
 import { formatDuration } from '../types.ts'
@@ -83,8 +84,13 @@ export function RightPanel(): JSX.Element {
     ? state.bots.find((bot) => bot.id === ui.call.botId)
     : undefined
 
+  /*
+   * 页面转场：右栏是一页「面板」——它随 ui.rightPanelOpen 挂载 / 卸载，
+   * 所以每次拉开都会重播入场（等价于视图容器换 key），不用额外写状态。
+   * 常驻不卸载的侧栏 / 主列不能这么用（不会重播），它们的重播靠模式切换。
+   */
   return (
-    <aside className="pa-right">
+    <aside className="pa-right" {...PAGE_MOTION_IN}>
       {/* 左边缘拖拽手柄：调宽度，松手写回 ui；双击恢复默认。 */}
       <div
         className="pa-right__resizer"
@@ -141,8 +147,14 @@ export function RightPanel(): JSX.Element {
         </button>
       </div>
 
-      {/* 结果区：页面（可回访的持久产物）+ 产出物 + 任务记录。 */}
-      <div className="pa-right__body">
+      {/*
+       * 结果区：页面（可回访的持久产物）+ 产出物 + 任务记录。
+       *
+       * 错峰入场：三张卡依次上浮（每张晚 22ms），右栏拉开时先看到「面板在」、
+       * 再看到内容一块块落位。只有三张卡、都在首屏内，不存在长列表全量错峰
+       * 拖慢首帧的问题；--i 由 shell.css.ts 按渲染顺序给（PagesCard 可能不渲染）。
+       */}
+      <div className="pa-right__body" {...PAGE_MOTION_STAGGER}>
         <PagesCard botId={activeBot.id} />
         <BotOutputsCard botId={activeBot.id} botName={activeBot.name} />
         <TaskRecordCard botId={activeBot.id} roomId={activeRoom?.id} />

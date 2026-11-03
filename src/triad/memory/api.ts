@@ -294,6 +294,8 @@ async function handle(
       const todoClosureEnabled = await store.isTodoClosureEnabled(config.todoClosureDefaultEnabled !== false)
       // 任务清单纪律通道同理并进回包（同一理由：开关浮层一次 hover 要知道全部通道状态）。
       const todoRuleEnabled = await store.isTodoRuleInjectEnabled(config.todoRuleInjectDefaultEnabled !== false)
+      // 动效技能通道同理并进回包（同一理由：开关浮层一次 hover 要知道全部通道状态）。
+      const motionEnabled = await store.isMotionInjectEnabled(config.motionInjectDefaultEnabled !== false)
       /*
        * 工作区「项目记忆记录开关」一并回传（= 项目 meta 的 autoMemory，写入侧闸门）。
        *
@@ -325,6 +327,7 @@ async function handle(
         teamEnabled,
         todoClosureEnabled,
         todoRuleEnabled,
+        motionEnabled,
       })
       return
     }
@@ -456,6 +459,23 @@ async function handle(
       const body = await readBody(req) as Record<string, unknown>
       const enabled = body.enabled !== false
       await store.setTodoRuleInjectEnabled(enabled)
+      json(res, 200, { ok: true, enabled, builtin: true })
+      return
+    }
+
+    // ── 动效技能强制加载开关（内置能力，全局单值） ────────────────────
+    // 与 team / todo-rule 端点同构，builtin:true 恒定——通道硬编码在插件里，无卸载入口。
+    // 与其余通道的差别只在默认值：这条**默认关**（升级不改变现状），因此回包缺字段时
+    // 客户端按 === true 兜底（见 client/triad/memory/Toggle.tsx 的 normalizeInjectState）。
+    if (method === 'GET' && rest === '/motion-inject-state') {
+      const enabled = await store.isMotionInjectEnabled(config.motionInjectDefaultEnabled !== false)
+      json(res, 200, { enabled, builtin: true })
+      return
+    }
+    if (method === 'POST' && rest === '/motion-inject-state') {
+      const body = await readBody(req) as Record<string, unknown>
+      const enabled = body.enabled === true
+      await store.setMotionInjectEnabled(enabled)
       json(res, 200, { ok: true, enabled, builtin: true })
       return
     }

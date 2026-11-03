@@ -2,8 +2,9 @@
  * Personal Agent — 「连接你的应用」推荐卡。
  *
  * 助手在对话里主动推荐几个可连接的 MCP 应用（Gmail / 日历 / Notion …），每条是
- * 一行「彩色图标 + 名称 + 一句说明」。点任意一行 → 打开连接器市场（工作台
- * connectors 页）去安装 / 授权，并当场把这一行标成「已打开」。
+ * 一行「彩色图标 + 名称 + 一句说明」。点任意一行 → 打开 MCP 服务器弹窗卡片
+ * （2026-11-03 起连接器页就是那颗居中弹窗，不再走工作台页）去安装 / 授权，
+ * 并当场把这一行标成「已打开」。
  *
  * 为什么不做成 `interactive` 那种要作答的卡：推荐不是提问，用户不需要在对话里
  * 选一个再提交——他只是被指了一条路。所以这里没有提交语义、不回写 store，
@@ -15,7 +16,7 @@
 import { useState } from 'react'
 import { IconCheck, IconChevronRight, IconCircleCheck } from '../icons.tsx'
 import type { ConnectorItem, MessageBlock } from '../types.ts'
-import { openWorkbench } from '../../triad/hub/row-flyout.tsx'
+import { openConnectorModal } from '../../triad/connectors/ConnectorModal.tsx'
 import { ensureConnectorSuggestStyles } from './connector-suggest.css.ts'
 
 export interface ConnectorSuggestCardProps {
@@ -126,10 +127,10 @@ export function ConnectorSuggestCard({ block }: ConnectorSuggestCardProps): JSX.
   const prompt = block.prompt !== undefined && block.prompt !== '' ? block.prompt : undefined
 
   const open = (item: ConnectorItem): void => {
-    /* 先记再跳：工作台会盖住对话流，用户切回来时这一行还亮着「已打开」，
+    /* 先记再弹：弹窗会盖住对话流，用户关掉回来时这一行还亮着「已打开」，
        否则他会怀疑刚才那一下有没有点中。 */
     setPicked(item.id)
-    openWorkbench('connectors')
+    openConnectorModal()
   }
 
   return (

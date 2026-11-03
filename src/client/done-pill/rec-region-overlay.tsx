@@ -49,6 +49,13 @@ import { recorder } from './recorder'
 const HANDLE_HIT = 14
 /** 手柄视觉边长（px）。 */
 const HANDLE_VIS = 8
+/**
+ * 退场动画时长（ms）：与根层 style 里的 opacity / transform 过渡时长一致。
+ * 保持 150ms 是既有节奏（confirm 本来就是这么淡出的），把 cancel / Esc 接进
+ * 同一段动画，不为了统一而把确认路径拖慢。
+ */
+const LEAVE_MS = 150
+
 /** 拖拽手柄的种类：四角 + 四边。 */
 type HandleId = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
 const HANDLES: Array<{ id: HandleId; cursor: string; x: number; y: number }> = [
@@ -84,7 +91,7 @@ const rootStyle = (ratio: number): CSSProperties => ({
   userSelect: 'none',
   touchAction: 'none',
   // 整层淡入（PILL_CSS 的 dpFadeIn 已有；这里用专用 keyframe 带一点缩放）。
-  animation: 'dplRegionIn .2s ease backwards',
+  animation: 'dplRegionIn .24s cubic-bezier(.2,.8,.2,1) backwards',
   '--dpt': String(ratio),
 } as CSSProperties)
 
@@ -105,7 +112,7 @@ const hintStyle: CSSProperties = {
   lineHeight: fontScaleCss(18),
   boxShadow: 'var(--dpl-panel-shadow)',
   pointerEvents: 'none',
-  animation: 'dpMount .26s cubic-bezier(.32,.72,0,1) backwards',
+  animation: 'dpMount .24s cubic-bezier(.2,.8,.2,1) backwards',
 }
 
 const hintDotStyle: CSSProperties = {
@@ -122,7 +129,7 @@ const selectionStyle: CSSProperties = {
   border: '1.5px solid color-mix(in srgb, #e5484d 78%, #fff)',
   boxShadow: '0 0 0 1px rgba(0,0,0,.35), 0 6px 24px rgba(0,0,0,.35)',
   cursor: 'move',
-  animation: 'dplRegionPick .18s cubic-bezier(.32,.72,0,1) backwards',
+  animation: 'dplRegionPick .24s cubic-bezier(.2,.8,.2,1) backwards',
 }
 
 const sizeTagStyle: CSSProperties = {
@@ -136,7 +143,7 @@ const sizeTagStyle: CSSProperties = {
   fontVariantNumeric: 'tabular-nums',
   whiteSpace: 'nowrap',
   pointerEvents: 'none',
-  animation: 'dpLineIn .2s ease backwards',
+  animation: 'dpLineIn .24s cubic-bezier(.2,.8,.2,1) backwards',
 }
 
 const barStyle: CSSProperties = {
@@ -152,7 +159,7 @@ const barStyle: CSSProperties = {
   background: 'var(--dpl-panel-bg)',
   color: 'var(--dpl-fg)',
   boxShadow: 'var(--dpl-panel-shadow)',
-  animation: 'dpMount .24s cubic-bezier(.32,.72,0,1) backwards',
+  animation: 'dpMount .24s cubic-bezier(.2,.8,.2,1) backwards',
 }
 
 const barMetaStyle: CSSProperties = {
@@ -218,6 +225,8 @@ export function RecRegionOverlay(): JSX.Element | null {
   const dragRef = useRef<Drag | null>(null)
   /** 确认是否已经发起过（退场动效期间挡住重复确认，见 confirm）。 */
   const leavingRef = useRef(false)
+  /** 退场计时器：confirm / cancel / Esc 共用同一段动画，同一时刻只能有一个。 */
+  const leaveTimerRef = useRef<number | null>(null)
   /** 按下时命中的操作条按钮（pointerup 通道要校验是**同一次**按下才触发）。 */
   const downActionRef = useRef<string | null>(null)
   /** 本次点击是否已被 pointerup 通道消化（click 通道据此去重，防重复开录）。 */
@@ -247,6 +256,11 @@ export function RecRegionOverlay(): JSX.Element | null {
   // 打开时重置：每次进来都是干净的「等你画框」状态。
   useEffect(() => {
     if (open) {
+      // 上一轮的退场计时器必须清掉：否则它到点会把这一轮刚打开的 overlay 关掉。
+      if (leaveTimerRef.current !== null) {
+        window.clearTimeout(leaveTimerRef.current)
+        leaveTimerRef.current = null
+      }
       setRect(null)
       setDragging(false)
       setLeaving(false)
@@ -260,28 +274,46 @@ export function RecRegionOverlay(): JSX.Element | null {
 
   const close = useCallback((): void => { regionStore.close() }, [])
 
-  /** 取消：直接收起，回到待机（不弹提示——用户主动取消不是错误）。 */
+  /**
+   * 退场（leaving）统一入口：确认、取消、Esc、双击全部走这里。
+   *
+   * 早先只有 confirm 有 150ms 淡出，cancel 是直接 close——同一个 overlay 有
+   * 两条手感不同的关闭路径（一条淡出、一条瞬没）。现在共用这一段：置 leaving
+   * 让根层淡出 + 缩到 .97，播完再关；`after` 决定关完之后做什么（确认要开录）。
+   */
+  const beginLeave = useCallback((after?: () => void): void => {
+    if (leavingRef.current) return
+    leavingRef.current = true
+    setLeaving(true)
+    leaveTimerRef.current = window.setTimeout(() => {
+      leaveTimerRef.current = null
+      leavingRef.current = false
+      close()
+      after?.()
+    }, LEAVE_MS)
+  }, [close])
+
+  useEffect(() => () => {
+    if (leaveTimerRef.current !== null) window.clearTimeout(leaveTimerRef.current)
+  }, [])
+
+  /** 取消：同样先播退场再收起，回到待机（不弹提示——用户主动取消不是错误）。 */
   const cancel = useCallback((): void => {
     // 已经发起确认（退场动效中）就不再响应取消，否则会出现「点了开始录制、
     // 又在 150ms 内点了取消」时序下 overlay 关了却仍然开录的怪状态。
     if (leavingRef.current) return
-    close()
-  }, [close])
+    beginLeave()
+  }, [beginLeave])
 
-  /** 确认：带一点退场动效再交给 recorder（动画期间不阻塞状态迁移）。 */
+  /** 确认：退场播完再交给 recorder（动画期间不阻塞状态迁移）。 */
   const confirm = useCallback((): void => {
     // 重入闸：pointerup 与 click 两条通道都可能命中同一次点击，重复确认会
     // 起两次录制（recorder.startWith 里 idle 判断挡不住同一 tick 内的两次调用）。
     if (leavingRef.current) return
     const picked = rect
     if (picked === null || picked.w < REC_REGION_MIN || picked.h < REC_REGION_MIN) return
-    leavingRef.current = true
-    setLeaving(true)
-    window.setTimeout(() => {
-      close()
-      recorder.startWith({ kind: 'region', rect: picked })
-    }, 150)
-  }, [rect, close])
+    beginLeave(() => { recorder.startWith({ kind: 'region', rect: picked }) })
+  }, [rect, beginLeave])
 
   /**
    * 操作条按钮的动作通道（**不依赖 click**）。
@@ -445,7 +477,16 @@ export function RecRegionOverlay(): JSX.Element | null {
 
   return createPortal(
     <div
-      style={{ ...rootStyle(fontRatio), opacity: leaving ? 0 : 1, transition: 'opacity .15s ease' }}
+      style={{
+        ...rootStyle(fontRatio),
+        opacity: leaving ? 0 : 1,
+        // 退场形态与其它浮层统一：淡出 + 缩到 .97。整层 fixed inset:0 缩放会
+        // 让边缘露出 3%，但 opacity 同时归零，150ms 里察觉不到。
+        transform: leaving ? 'scale(.97)' : 'none',
+        transition: 'opacity .15s ease, transform .15s ease',
+        // 退场窗口里不再接收指针：避免 150ms 内又拖出一个新框。
+        pointerEvents: leaving ? 'none' : undefined,
+      }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
@@ -466,7 +507,7 @@ export function RecRegionOverlay(): JSX.Element | null {
             background: maskColor,
             pointerEvents: 'none',
             // 打开瞬间遮罩一起淡入，避免「闪一下全黑」。
-            animation: 'dplRegionFade .22s ease backwards',
+            animation: 'dplRegionFade .24s cubic-bezier(.2,.8,.2,1) backwards',
           }}
         />
       ))}

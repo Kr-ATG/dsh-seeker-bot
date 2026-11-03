@@ -42,19 +42,27 @@ body[data-skb-mode="work"] .skb-console {
 
 /* ── Bot 模式：官方侧栏子元素让位，只留这枚分段控件（侧栏空白）──────── */
 /*
- * 隐藏标记对两种模式都生效：Bot 模式下用它让官方侧栏整体让位；Work 模式下
- * 用它藏掉混进官方会话列表的 Bot 宿主会话行（data-row-key="session:pa-bot-v2-…"）。
- * 属性只由本插件写，不会误伤官方自己的折叠状态。
+ * 两种隐藏标记，用途不同：
+ *
+ *  · data-skb-native-hide（display:none）—— Work 模式下藏掉混进官方会话列表的
+ *    Bot 宿主会话行（data-row-key="session:pa-bot-v2-…"）。这些行没有入场动画，
+ *    硬隐藏是安全的。
+ *
+ *  · data-skb-mode-hide（visibility:hidden）—— Bot 模式下让官方侧栏内容不可见。
+ *    必须用软隐藏：官方品牌 / 新会话 / 面板标题都带 .wide 的 wide-in 入场动画，
+ *    display:none 会重置动画，切回 Work 重新显示时整片文字会从 opacity:0 淡入
+ *    一下 —— 就是用户反馈的「切回 Work 会闪」。visibility 只影响绘制，动画时间轴
+ *    照常走完，切回来时元素保持最终状态。
  */
 [data-skb-native-hide="true"] { display: none !important; }
+[data-skb-mode-hide="true"] { visibility: hidden !important; pointer-events: none !important; }
 /*
  * Bot 模式下降级态（Personal Agent 没渲染出来时，侧栏里只剩这枚分段）：
- * 顶部留出与 .pa-sidebar__top 等高的 66px，分段仍落在 y=74，
- * 与 Bot 应用内的分段、以及 Work 模式的分段三处对齐，不会突然贴顶。
+ * 官方 logoRow 现在是软隐藏、仍占 66px，分段顶边自然落在 y=74，与 Bot 应用内
+ * 的分段、以及 Work 模式的分段三处对齐。
  */
 body[data-skb-mode="bot"] .skb-console {
-  /* 侧栏根有 6px padding，再补 68px，分段顶边落在 74 —— 与另两处一致。 */
-  padding: 68px 0 10px;
+  padding: 8px 0 10px;
 }
 
 /*
@@ -138,6 +146,16 @@ body[data-skb-mode="bot"] [data-slot="sidebar"] .hHd-Xa_root {
   pointer-events: none;
 }
 .skb-seg[data-mode="bot"] .skb-seg__thumb { transform: translateX(calc(100% + 3px)); }
+/*
+ * Work 模式显示期间滑块不做补间（2026-11-03）。
+ *
+ * Bot 模式里这枚分段一直保持 data-mode="bot" 且被 pa-root 盖住；切回 Work
+ * 时 body 与 data-mode 在同一帧变成 work，若 transition 仍生效，第一帧画面
+ * 会看到高亮块还停在 Bot 端、再用 220ms 滑到 Work —— 观感就是「切回来闪了
+ * 一下」。Work 模式下这个控件只会发生模式切换这一种状态变化，关掉补间不
+ * 影响任何正常交互。
+ */
+body[data-skb-mode="work"] .skb-seg__thumb { transition: none; }
 .skb-seg__btn {
   position: relative;
   z-index: 1;
@@ -149,7 +167,12 @@ body[data-skb-mode="bot"] [data-slot="sidebar"] .hHd-Xa_root {
   background: transparent;
   color: #a1a4aa;
   font: inherit;
-  font-size: 14px;
+  /*
+   * 与 Bot 侧栏 .pa-mode-seg button 同一个字号源（都是 DSH 通用字号）。
+   * 写死 14px 时，通用字号调到 15px 后 Bot 那一侧是 16px，切模式这排文字
+   * 会跳一下（用户 2026-11-03 反馈）。两处必须同源，谁也别单独钉死。
+   */
+  font-size: var(--dsh-content-font-size, 14px);
   font-weight: 500;
   letter-spacing: .01em;
   cursor: pointer;
@@ -201,10 +224,15 @@ body[data-ds-dark-theme] .skb-console {
 }
 `
 
-/** 幂等注入：同一 id 的 <style> 已存在就直接返回。 */
+/** 幂等注入：同一 id 的 <style> 已存在时把内容对齐到当前 bundle（live reload 用）。 */
 export function injectModeSwitchStyles(): void {
   if (typeof document === 'undefined') return
-  if (document.getElementById(MODE_SWITCH_STYLE_ID) !== null) return
+  const existing = document.getElementById(MODE_SWITCH_STYLE_ID)
+  if (existing !== null) {
+    // 只认 id 直接返回会让 live reload 后的样式改动永远不生效（旧样式残留在页面上）。
+    if (existing.textContent !== modeSwitchStyles) existing.textContent = modeSwitchStyles
+    return
+  }
   const style = document.createElement('style')
   style.id = MODE_SWITCH_STYLE_ID
   style.textContent = modeSwitchStyles

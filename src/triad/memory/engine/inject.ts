@@ -389,6 +389,27 @@ const TEAM_INJECTION_RULE = [
   '  · 让子代理干你已有上下文的活：fork 继承全部历史，起点就是那个大上下文。',
 ].join('\n')
 
+/**
+ * 动效技能强制加载（内置通道，**默认关**）。
+ *
+ * 解决的问题不是「模型不会写动效」，而是**想不起来先用技能**：技能目录里明明有
+ * harmonyos-motion（术语表 + 官方时长曲线 + 跟手正确做法 + 跨平台写法 + 常见坑），
+ * 模型却常凭已有印象直接写，于是反复踩「线性曲线 / 松手速度归零 / 用 duration
+ * 控制弹簧」这几个坑。这段文本把「先加载」从概率行为变成确定性动作。
+ *
+ * 默认关：它不声明任何能力，只是替用户固定一个习惯，升级不该改变现状。
+ * 文本长度受约束的理由同 team 通道——首步注入后进历史，之后每步都被 cacheRead。
+ */
+const MOTION_INJECTION_RULE = [
+  '【动效技能 · 内置通道】涉及 UI 动效的任务，先加载 harmonyos-motion 技能再动手。',
+  '',
+  '判据：出现「做个动画 / 加个过渡 / 交互太生硬 / 松手像急刹车 / 不跟手 / 点了没反馈 / 卡片展开 / 页面转场 / 下拉刷新 / 列表入场」这类诉求，或要评审动效、修手感、定动效参数时，先调用 skill 工具加载 harmonyos-motion。',
+  '',
+  '理由：该技能内置官方时长与曲线取值、弹性参数调法、跟手与速度继承的正确做法、跨平台等价写法与常见错误清单。不加载也能写出能跑的动画，但多半会踩「线性曲线 / 速度归零 / 用 duration 控制弹簧」这几个坑。',
+  '',
+  '不适用：纯视频剪辑、镜头叙事、生成式视频，以及不涉及动效的普通 UI 改动。',
+].join('\n')
+
 /** 创建注入器。 */
 export function createMemoryInjector(
   store: MemoryStore,
@@ -423,6 +444,12 @@ export function createMemoryInjector(
    * 共用一个 Map 会互相抢占首步名额。
    */
   const todoRuleStepCounters = new Map<string, number>()
+
+  /**
+   * 动效技能通道的每会话 step 计数，理由同上——各通道各记各的，共用一个 Map
+   * 会互相抢占首步名额。
+   */
+  const motionStepCounters = new Map<string, number>()
 
   /**
    * 每会话「上次注入时」的记忆内容版本号（store.revision）。
@@ -730,6 +757,34 @@ export function createMemoryInjector(
         } catch (error) {
           // 失败绝不能影响主注入与其它通道。
           logger?.warn?.(`[dsh-memory] todo-rule injection failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+    }
+
+    // ── 动效技能强制加载注入（内置通道） ────────────────────────────
+    // 位置同 zh / html / team / todo-rule：两道闸门之前。它回答的是「遇到动效
+    // 任务该先做什么」，与「记忆库要不要进上下文」正交。
+    // 开关读取在 stepCounters 检查之内（理由见上方 zh 通道的注释）。
+    if (!motionStepCounters.has(sessionId)) {
+      const motionEnabled = hostFeatureEnabled('prompt.motion') && await store.isMotionInjectEnabled(config.motionInjectDefaultEnabled !== false)
+      if (!motionEnabled) {
+        logger?.debug?.('[dsh-memory] motion injection off (switch disabled)')
+      } else {
+        motionStepCounters.set(sessionId, 1)
+        try {
+          messages = [...messages, createUserMessage({
+            content: [{ type: 'text', text: MOTION_INJECTION_RULE }],
+            source: {
+              kind: 'plugin:dsh-memory',
+              plugin: 'dsh-memory',
+              form: 'snapshot',
+              sections: [{ name: '动效技能', text: MOTION_INJECTION_RULE }],
+            },
+          })]
+          logger?.debug?.('[dsh-memory] motion injection ok')
+        } catch (error) {
+          // 失败绝不能影响主注入与其它通道。
+          logger?.warn?.(`[dsh-memory] motion injection failed: ${error instanceof Error ? error.message : String(error)}`)
         }
       }
     }

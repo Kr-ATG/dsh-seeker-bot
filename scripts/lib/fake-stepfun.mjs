@@ -31,6 +31,12 @@
  *   `conversation.item.create`（`item.type='function_call_output'`）+ `response.create`。
  *   本假上游把收到的 `function_call_output` 记在 `connection.functionCallOutputs`
  *   与 `fake.functionCallOutputs` 里供断言。
+ *   - `injectFunctionCall.holdDoneMs`：工具调用通知发完先**不**发 `response.done`，
+ *     拖这么久再发。用来复现真实竞态：任务在「上游那一轮响应还没结束」时跑完，
+ *     宿主此刻发 `response.create` 必被拒（见下面 `errorOnResponseCreate`）。
+ * - `errorOnResponseCreate`：收到 `response.create` 时回一条 error（默认
+ *   `ongoing response already exists`）而不是跑响应脚本，前 `times` 次这么回、
+ *   之后恢复正常。用来验证宿主「不把它转给前端 + 等 response.done 后补发一次」。
  *
  * Usage:
  *   import { createFakeStepfun } from './lib/fake-stepfun.mjs'
@@ -180,6 +186,22 @@ function splitIntoPieces(text, count) {
   return pieces
 }
 
+/**
+ * 把一段 Buffer 切成若干片（模拟上游边生成边吐音频）。
+ * @param {Buffer} buffer 原始数据。
+ * @param {number} count 期望片数；<=1 时原样返回一片（与旧行为逐字节一致）。
+ * @returns {Buffer[]} 分片；空 Buffer 返回空数组。
+ */
+function splitBufferIntoPieces(buffer, count) {
+  if (buffer.length === 0) return []
+  const total = Math.max(1, Number(count ?? 1) || 1)
+  if (total <= 1) return [buffer]
+  const size = Math.max(1, Math.ceil(buffer.length / total))
+  const pieces = []
+  for (let i = 0; i < buffer.length; i += size) pieces.push(buffer.subarray(i, i + size))
+  return pieces
+}
+
 /** 默认上游下行音频（4 字节 PCM16 占位，base64 后是 'ESIzRA=='）。 */
 export const DEFAULT_RESPONSE_AUDIO = Buffer.from([0x11, 0x22, 0x33, 0x44])
 
@@ -195,6 +217,13 @@ export const DEFAULT_RESPONSE_AUDIO = Buffer.from([0x11, 0x22, 0x33, 0x44])
  * @param {number} [options.slowResponseMs] 响应事件延迟。
  * @param {number} [options.audioBytesThreshold] 收到这么多上行 PCM 后触发一轮响应。
  * @param {Buffer} [options.responseAudio] 下行音频内容。
+ * @param {number} [options.responseChunkCount] 把 responseAudio 切成几片
+ *   `response.audio.delta` 发出去（默认 1 = 一整片，与旧行为一致）。流式朗读的测试
+ *   要靠它证明「宿主收到首片就转发」而不是等整段。
+ * @param {number} [options.responseChunkDelayMs] 片间延迟（默认 0 = 同一批发出）。
+ * @param {number} [options.sessionUpdatedDelayMs] 收到 session.update 后隔多久才回
+ *   `session.updated`（默认 0 = 立刻回）。宿主如果还在「等 session.updated 才发朗读
+ *   请求」，朗读总耗时会被这个值拖长——用它证明朗读已经不等它了。
  * @param {string} [options.transcript] ASR 转写文本。
  * @param {string} [options.botTranscript] Bot 转写文本。
  * @param {boolean} [options.immediateSessionCreated] 把 session.created 与 101 写在同一批。
@@ -220,6 +249,15 @@ export const DEFAULT_RESPONSE_AUDIO = Buffer.from([0x11, 0x22, 0x33, 0x44])
  *   再来一条重复投递」也幂等——这比连续两发更接近重连/乱序的真实场景。
  * @param {number} [options.injectFunctionCall.times] 前几轮响应注入（默认 1；
  *   `0` 表示每轮都注入——注意那会让宿主回灌后的 `response.create` 再次被注入，慎用）。
+ * @param {number} [options.injectFunctionCall.holdDoneMs] 工具调用通知发完后再等多久才发
+ *   `response.done`（默认 0=立刻发）。设成大于宿主 `runTask` 耗时的值，就能复现
+ *   「任务完成时上游那一轮响应仍在进行中」的竞态：此时宿主发 `response.create`
+ *   会被真上游以 `ongoing response already exists` 拒绝。
+ * @param {{ message?: string, times?: number }} [options.errorOnResponseCreate]
+ *   收到 `response.create` 时回一条 error 而不是跑响应脚本（默认 message 是
+ *   `ongoing response already exists`，默认只回 1 次，之后恢复正常）。
+ *   用来验证宿主：① 不把这条 error 转给前端；② 记下待补发，收到 `response.done`
+ *   后补发一次 `response.create`。
  * @param {(line: string) => void} [options.log] 调试日志。
  * @returns {Promise<object>} fake 句柄。
  */
@@ -233,11 +271,15 @@ export async function createFakeStepfun(options = {}) {
     slowResponseMs = 0,
     audioBytesThreshold = 3840,
     responseAudio = DEFAULT_RESPONSE_AUDIO,
+    responseChunkCount = 1,
+    responseChunkDelayMs = 0,
+    sessionUpdatedDelayMs = 0,
     transcript = '你好呀，我是假上游。',
     botTranscript = '你好，我在听。',
     immediateSessionCreated = false,
     rejectTools = false,
     injectFunctionCall = undefined,
+    errorOnResponseCreate = undefined,
     log = () => {},
   } = options
 
@@ -318,8 +360,17 @@ export async function createFakeStepfun(options = {}) {
       turns: 0,
       /** 本连接上发出去的事件（断言「宿主转发了什么」用）。 */
       sent: [],
+      /**
+       * 发出去的事件 + 时间戳（`{ type, at }`）。
+       *
+       * 与 `sent` 分开是因为时序断言需要时刻：流式朗读要证明「客户端收到首片的时刻
+       * 早于上游发 response.done 的时刻」，只有 `sent` 的顺序证明不了这一点。
+       */
+      sentLog: [],
       /** 本连接上收到的 `function_call_output`（宿主把 agent 结果回灌给模型）。 */
       functionCallOutputs: [],
+      /** 本连接上收到过几条 `response.create`（断言「补发了一次、没重复补」用）。 */
+      responseCreateCount: 0,
       sendEvent,
       sendRawText,
       sendBinary,
@@ -349,6 +400,15 @@ export async function createFakeStepfun(options = {}) {
     let injectionsLeft = injectFunctionCall === undefined
       ? 0
       : (injectFunctionCall.times === 0 ? Number.POSITIVE_INFINITY : Math.max(1, Number(injectFunctionCall.times ?? 1) || 1))
+    /**
+     * 还剩几次 `response.create` 要回 error（`errorOnResponseCreate` 注入）。
+     *
+     * 用完就恢复正常脚本：宿主的补发那一次必须能成功，否则断言不了「补发真的让
+     * 模型开口了」。
+     */
+    let responseCreateErrorsLeft = errorOnResponseCreate === undefined
+      ? 0
+      : Math.max(1, Number(errorOnResponseCreate.times ?? 1) || 1)
 
     function record(entry) {
       connection.received.push(entry)
@@ -359,6 +419,7 @@ export async function createFakeStepfun(options = {}) {
       if (connection.closed) return
       const raw = JSON.stringify(event)
       connection.sent.push(event)
+      connection.sentLog.push({ type: event.type, at: Date.now() })
       log(`[fake-stepfun] -> ${event.type}`)
       try {
         socket.write(encodeFrame({ opcode: OPCODE.text, payload: Buffer.from(raw, 'utf8') }))
@@ -411,9 +472,34 @@ export async function createFakeStepfun(options = {}) {
         sendEvent({ type: 'response.audio_transcript.delta', response_id: responseId, item_id: itemId, delta: '你好，' })
         sendEvent({ type: 'response.audio_transcript.delta', response_id: responseId, item_id: itemId, delta: '我在听。' })
         sendEvent({ type: 'response.audio_transcript.done', response_id: responseId, item_id: itemId, transcript: botTranscript })
-        sendEvent({ type: 'response.audio.delta', response_id: responseId, item_id: itemId, delta: responseAudio.toString('base64') })
-        sendEvent({ type: 'response.audio.done', response_id: responseId, item_id: itemId })
-        sendEvent({ type: 'response.done', response: { id: responseId, status: 'completed' } })
+        /*
+         * 下行音频：默认一整片（与旧行为逐字节一致）；responseChunkCount /
+         * responseChunkDelayMs 让上游「边生成边吐」。流式朗读的测试靠它证明宿主
+         * 收到首片就转发，而不是等 response.done 才回包。
+         */
+        const pieces = splitBufferIntoPieces(responseAudio, responseChunkCount)
+        const emitPiece = (index) => {
+          if (connection.closed) return
+          if (index >= pieces.length) {
+            sendEvent({ type: 'response.audio.done', response_id: responseId, item_id: itemId })
+            sendEvent({ type: 'response.done', response: { id: responseId, status: 'completed' } })
+            return
+          }
+          sendEvent({
+            type: 'response.audio.delta',
+            response_id: responseId,
+            item_id: itemId,
+            delta: pieces[index].toString('base64'),
+          })
+          const next = index + 1
+          if (next >= pieces.length) {
+            emitPiece(next)
+            return
+          }
+          if (responseChunkDelayMs > 0) setTimeout(() => emitPiece(next), responseChunkDelayMs)
+          else emitPiece(next)
+        }
+        emitPiece(0)
       }
       if (delayMs > 0) setTimeout(emit, delayMs)
       else emit()
@@ -528,6 +614,17 @@ export async function createFakeStepfun(options = {}) {
           }
           emitCallNotice(i)
         }
+        /*
+         * holdDoneMs：工具调用通知发完先别急着 done，模拟「任务跑完时上游那一轮响应
+         * 还没结束」（模型正在说话 / 用户刚开口触发 VAD）。宿主此刻的 responseActive
+         * 仍是 true，直接发 response.create 会被真上游以 ongoing response already
+         * exists 拒掉——这正是用户实测那条红条的成因。
+         */
+        const holdDoneMs = Math.max(0, Number(inject.holdDoneMs ?? 0) || 0)
+        if (holdDoneMs > 0) {
+          await sleep(holdDoneMs)
+          if (connection.closed) return
+        }
         sendEvent({ type: 'response.done', response: { id: responseId, status: 'completed' } })
       }
       if (delayMs > 0) setTimeout(() => { void emit() }, delayMs)
@@ -597,7 +694,21 @@ export async function createFakeStepfun(options = {}) {
             return
           }
           connection.sessionUpdate = parsed
-          sendEvent({ type: 'session.updated', session: { ...(parsed.session ?? {}) } })
+          /*
+           * sessionUpdatedDelayMs：把「会话配置已生效」的确认拖后。
+           *
+           * 宿主以前要等它才发朗读请求，这个延迟会直接变成用户听到第一个字前的
+           * 空白；现在宿主收到 session.created 就发，延迟多少都不影响出声时间。
+           */
+          if (sessionUpdatedDelayMs > 0) {
+            const timer = setTimeout(() => {
+              sendEvent({ type: 'session.updated', session: { ...(parsed.session ?? {}) } })
+            }, sessionUpdatedDelayMs)
+            // 不把测试进程钉在这个延迟上（连接早关了的话它什么也不做）
+            timer.unref?.()
+          } else {
+            sendEvent({ type: 'session.updated', session: { ...(parsed.session ?? {}) } })
+          }
           return
         }
         case 'input_audio_buffer.append': {
@@ -632,6 +743,25 @@ export async function createFakeStepfun(options = {}) {
           return
         }
         case 'response.create': {
+          connection.responseCreateCount += 1
+          /*
+           * errorOnResponseCreate：模拟「上游已经有一轮响应在跑」。真上游遇到第二条
+           * response.create 就是这么回的（error.message 里带 ongoing response already
+           * exists），而且**不会**替宿主排队。宿主必须自己过滤掉这条错误、并在那一轮
+           * response.done 之后补发一次——这个注入就是给那条路径做回归的。
+           */
+          if (errorOnResponseCreate !== undefined && responseCreateErrorsLeft > 0) {
+            responseCreateErrorsLeft -= 1
+            sendEvent({
+              type: 'error',
+              error: {
+                type: 'invalid_request_error',
+                code: 'ongoing_response',
+                message: String(errorOnResponseCreate.message ?? 'ongoing response already exists'),
+              },
+            })
+            return
+          }
           runResponseScript(slowResponseMs)
           return
         }

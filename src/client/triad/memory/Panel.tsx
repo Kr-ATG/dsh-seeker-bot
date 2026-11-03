@@ -54,7 +54,7 @@ import type {
 import { css, ensureStyles } from './styles.js'
 import { SettingsTab } from './SettingsTab.js'
 import { makeT, type MemoryLocaleKey, type MemoryT } from './locales.js'
-import { modalStaggerClass } from '../triad-modal-animation.js'
+import { modalStaggerClass, useModalClose } from '../triad-modal-animation.js'
 import { ConfirmDialog } from './ConfirmDialog.js'
 // 图标已抽到 ./icons.js（纯展示组件，零业务依赖）。
 // 这里 re-export 是刻意的：Toggle.tsx / index.ts 历史上从 Panel.js 取 BrainIcon，
@@ -66,6 +66,7 @@ export { BrainIcon, PinIcon } from './icons.js'
 // 菜单；LightbulbIcon 早在那之前就没消费点了）。
 import { BrainIcon, PinIcon, EraserIcon, ShieldIcon, CopyIcon, RingOffIcon, SortArrowsIcon, GlobeIcon, FolderIcon, PenIcon, SparkIcon, LayersIcon, VerifiedIcon, CheckMark, PowerIcon } from './icons.js'
 import { PshBody, PopoverShell } from '../popover-shell.js'
+import { PAGE_MOTION_IN } from '../../motion/overlay-motion.js'
 import { markReadIds, markViewed, readIds } from './Notify.js'
 import {
   readMemoryScope,
@@ -460,6 +461,15 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
   const [addProject, setAddProject] = useState('')
   // 主从布局：当前选中的条目。
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  /**
+   * 用户是否**主动**关掉了详情浮层。
+   *
+   * 窄屏（≤900px）下详情栏是覆盖在列表上的浮层（见 styles.ts 那条媒体查询），
+   * 原来没有任何关闭入口 —— 用户只能靠点别的条目换内容，浮层永远糊在列表右侧。
+   * 有了关闭钮就必须记住「这次是用户关的」，否则下面那条「选中失联就自动落回
+   * 第一条」的 effect 会立刻把第一条选回来，浮层刚退场又原地弹出。
+   */
+  const [detailClosed, setDetailClosed] = useState(false)
   // 多选删除模式。
   const [selecting, setSelecting] = useState(false)
   const [checkedIds, setCheckedIds] = useState<ReadonlySet<string>>(new Set())
@@ -1169,13 +1179,43 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
     () => filtered.find(entry => entry.id === selectedId) ?? null,
     [filtered, selectedId],
   )
+
+  /**
+   * 详情浮层的退场状态机（复用 triad-modal-animation 的 useModalClose）。
+   *
+   * 详情区原来只有入场 dsh-memory-detail-in，没有关闭入口、也没有退场：
+   * 窄屏浮层只能靠「点别的条目」换内容。这里补两件事——
+   *  1. requestDetailClose 先播 240ms 的 detail-out（与面板弹窗同一条时长），
+   *     播完才真正清掉选中项；
+   *  2. onClose 里顺手记下 detailClosed，避免自动落回第一条把它又拉起来。
+   */
+  const closeDetailNow = useCallback(() => {
+    setDetailClosed(true)
+    setSelectedId(null)
+  }, [])
+  const {
+    closing: detailClosing,
+    requestClose: requestDetailClose,
+    cancelClose: cancelDetailClose,
+  } = useModalClose(detail !== null, closeDetailNow)
+
   useEffect(() => {
     if (tab !== 'all' && tab !== 'trash') return
-    if (detail === null && filtered.length > 0) setSelectedId(filtered[0]?.id ?? null)
-    if (detail === null && filtered.length === 0 && selectedId !== null) setSelectedId(null)
-  }, [detail, filtered, tab, selectedId])
+    // 有选中条目 = 详情是开着的：清掉「用户主动关闭」的标记，下次失联仍能自动落回。
+    if (detail !== null) {
+      if (detailClosed) setDetailClosed(false)
+      return
+    }
+    // 用户刚点了关闭：别立刻把第一条自动选回来（那会让关闭钮形同虚设）。
+    if (detailClosed) return
+    if (filtered.length > 0) setSelectedId(filtered[0]?.id ?? null)
+    else if (selectedId !== null) setSelectedId(null)
+  }, [detail, filtered, tab, selectedId, detailClosed])
   const closeForms = (): void => { setEditing(null); setMoving(null); setAdding(false) }
   const selectEntry = (entry: MemoryEntryView): void => {
+    // 退场途中点了别的条目：撤销关闭。少了这一步，那 240ms 后到点的 onClose
+    // 会把刚选中的这一条一起清掉（用户看到的是「点了没反应」）。
+    cancelDetailClose()
     closeForms()
     setSelectedId(entry.id)
     // 记一次浏览：首页「最近浏览」卡的数据源（与「最近更新」区分开）
@@ -1841,6 +1881,19 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
           <div className={css.detailHead}>
             <h3 className={css.detailTitle}>{entryTitle(detail.content)}</h3>
             {detailActions(detail)}
+            {/* 窄屏浮层的显式关闭钮（宽屏由 CSS 隐藏：详情是常驻右栏，关掉只留空白）。
+                走 requestDetailClose，先播 240ms 退场再清选中项。 */}
+            <button
+              type="button"
+              className={css.detailClose}
+              aria-label={t('close')}
+              title={t('close')}
+              onClick={requestDetailClose}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                <path d="M18 6 6 18M6 6l12 12" />
+              </svg>
+            </button>
           </div>
           {renderDetailChips(detail)}
           <div className={css.importanceRow}>
@@ -2124,7 +2177,12 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
         {/* ── 主区：纯双栏（左列表 + 右详情）或全宽视图 ──
             2026-10-25：「首页」仪表盘整块删除，这里不再有 home 分支 ——
             主区只按「列表类视图 / 变更 / 修订 / 设置」三种形态渲染。 */}
-        <div className={css.mainCol}>
+        {/* 主区 = 这一页的「页面级视图容器」：顶栏（视图条 / 搜索 / 统计）常驻，
+            它下面换的是整块视图（列表 / 变更 / 修订 / 设置）。
+            key 跟着 tab 走 → 切视图时主区重挂，重播 {...PAGE_MOTION_IN} 的
+            减速入场；同一 tab 内的数据刷新（loading → ready）不重挂，不会每刷
+            一次就再浮一次。 */}
+        <div className={css.mainCol} key={tab} {...PAGE_MOTION_IN}>
           {notice !== '' && <p className={css.notice}>{notice}</p>}
           {error !== '' && <p className={css.error} role="alert">{error}</p>}
 
@@ -2289,8 +2347,13 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
                       </>
                     )}
                   </div>
-                  {/* 右栏：详情 */}
-                  <div className={css.detailCol}>
+                  {/* 右栏：详情。
+                      closing 期间仍留在 DOM 里播 detail-out，播完才由 useModalClose 收掉；
+                      data-empty 让窄屏的空浮层壳（背景 + 阴影 + 边框）不再占位。 */}
+                  <div
+                    className={detailClosing ? `${css.detailCol} ${css.detailOut}` : css.detailCol}
+                    data-empty={detail === null && !adding && editing === null && moving === null ? 'true' : undefined}
+                  >
                     {renderDetailPane()}
                   </div>
                 </div>

@@ -25,6 +25,7 @@
  */
 
 import { publish } from './events.ts'
+import { botRoomOf } from './room-context.ts'
 import type { BotMessage } from './agent.ts'
 
 /** 用户不回应时等多久。问答比审批更需要耐心，但也不能把 agent 无限挂住。 */
@@ -158,7 +159,12 @@ export function requestQuestion(botId: string, questions: HostQuestion[], signal
   }
   const questionId = `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   const message = buildQuestionMessage(questionId, questions)
-  publish(botId, { type: 'message', message, source: 'question' })
+  /*
+   * 带上所属群：问答卡同样由宿主异步发，不带 roomId 就落进私聊，群里那个
+   * 回复气泡会一直转圈。展开写法让私聊回合真的不带这个键。
+   */
+  const roomId = botRoomOf(botId)
+  publish(botId, { type: 'message', message, source: 'question', ...(roomId !== undefined ? { roomId } : {}) })
 
   return new Promise<HostAnswer>((resolve) => {
     let settled = false
@@ -192,7 +198,8 @@ export function requestQuestion(botId: string, questions: HostQuestion[], signal
         )),
         at: Date.now(),
       }
-      publish(botId, { type: 'message-update', message: decided, source: 'question' })
+      // 更新也必须带同一个 roomId：否则前端找不到原来那张卡，点完还是转圈
+      publish(botId, { type: 'message-update', message: decided, source: 'question', ...(roomId !== undefined ? { roomId } : {}) })
       resolve(answer)
     }
     const timer = setTimeout(() => finish(skipAll()), QUESTION_TIMEOUT_MS)

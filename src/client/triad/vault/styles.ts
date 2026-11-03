@@ -1162,9 +1162,34 @@ body[data-ds-dark-theme] .dsh-vault .dsh-vault-backdrop{background:rgba(0,0,0,.5
 @keyframes dsh-vault-fade{from{opacity:0}to{opacity:1}}
 @keyframes dsh-vault-pop{from{opacity:0;transform:translateY(10px) scale(.985)}to{opacity:1;transform:none}}
 @keyframes dsh-vault-shimmer{from{background-position:200% 0}to{background-position:-200% 0}}
+
+/* ── 退场动效（2026-11-04）────────────────────────────────────────────
+   这几层浮层原来只有入场：关闭时组件直接卸载，卡片是「啪」地消失的。
+   现在关闭先播退场（弹窗与原地展开 240ms，大图 160ms），播完才卸载。
+   退场曲线统一 cubic-bezier(0.4,0,0.2,1)（加速收走），遮罩与大图淡出用 ease。
+   选择器都带 data-closing 属性或第二类名，specificity 高于上面的入场规则，
+   因此不依赖「本表与 triad-modal-animation 表谁先注入」——两张表都在 head
+   里，先后顺序由首屏先打开哪个面板决定，靠不住。 */
+@keyframes dsh-vault-pop-out{from{opacity:1;transform:none}to{opacity:0;transform:translateY(10px) scale(.985)}}
+@keyframes dsh-vault-rise-out{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(-6px)}}
+@keyframes dsh-vault-fade-out{from{opacity:1}to{opacity:0}}
+/* 弹窗卡片：与入场 dsh-vault-pop 同形反向（下移 + 微缩）。不从侧面滑出——
+   入场上滑、出场横滑，用户会以为关掉的是另一个控件。 */
+.dsh-vault-modal[data-closing="true"]{animation:dsh-vault-pop-out 240ms cubic-bezier(0.4,0,0.2,1) forwards}
+/* 遮罩：keyframes 复用 triad-modal-animation 的共享表（dsh-modal-mask-in/out），
+   双类名压过本文件前面 dsh-vault-backdrop 自带的 160ms 入场，让遮罩与卡片同步 240ms。 */
+.dsh-vault-backdrop.dsh-modal-mask-in{animation:dsh-modal-mask-in 240ms ease}
+.dsh-vault-backdrop.dsh-modal-mask-out{animation:dsh-modal-mask-out 240ms ease forwards}
+/* 原地展开的详情：向上收起（入场是从下方 8px 升上来，出场沿同一轴继续走）。 */
+.dsh-vault-expand[data-closing="true"]{animation:dsh-vault-rise-out 240ms cubic-bezier(0.4,0,0.2,1) forwards}
+/* 大图：纯淡出，短时长（小浮层 160ms 就够，240ms 会显得拖）。 */
+.dsh-vault-lightbox[data-closing="true"]{animation:dsh-vault-fade-out 160ms ease forwards}
 @media (prefers-reduced-motion:reduce){
   .dsh-vault-group,.dsh-vault-backdrop,.dsh-vault-modal,.dsh-vault-expand,
-  .dsh-vault-lightbox{animation:none!important}
+  .dsh-vault-lightbox,
+  .dsh-vault-modal[data-closing="true"],.dsh-vault-expand[data-closing="true"],
+  .dsh-vault-lightbox[data-closing="true"],
+  .dsh-vault-backdrop.dsh-modal-mask-in,.dsh-vault-backdrop.dsh-modal-mask-out{animation:none!important}
   .dsh-vault-skeleton-row{animation:none!important}
   .dsh-vault-row,.dsh-vault-row-arrow,.dsh-vault-ghost-btn,.dsh-vault-group-add,
   .dsh-vault-photo-upload,.dsh-vault-btn,.dsh-vault-field-eye,.dsh-vault-photo-del,

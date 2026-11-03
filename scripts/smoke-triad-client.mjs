@@ -862,14 +862,34 @@ if (typeof toPlainStep !== 'function' || typeof buildPlainTimeline !== 'function
     pass('供应商页按子服务名读取 wire 面（remote.llm / remote.settings / remote.credentials）')
   }
 
-  // 6) 动效：工作台换 Tab 与两个新页面都有入场动画，且尊重 reduced-motion
+  // 6) 动效：页面转场统一走全局 PAGE_MOTION_IN（2026-11 收敛）
+  //    历史：工作台原先自己有一份 @keyframes wb-page-in + .wb-body > * 规则。
+  //    它与全局 [data-page-motion='in'] 同特异性，而本表注入晚于 apply 期的
+  //    全局表 —— 留着它会把新挂的属性规则静默压掉，所以整条删除，改为钉
+  //    「每个页面级容器都挂了 {...PAGE_MOTION_IN}」。
   const hubStyles = stripSrc(readSrcOf('src/client/triad/hub/styles.ts'))
-  if (!/@keyframes wb-page-in/.test(hubStyles) || !/\.wb-body > \*/.test(hubStyles)) {
-    fail('工作台换 Tab 缺少入场动效（wb-page-in）')
-  } else if (!/prefers-reduced-motion/.test(hubStyles)) {
-    fail('工作台动效必须尊重 prefers-reduced-motion')
+  const motionSrc = stripSrc(readSrcOf('src/client/motion/overlay-motion.ts'))
+  const pageContainers = [
+    ['工作台空态页', 'src/client/triad/hub/WorkbenchPanel.tsx'],
+    ['记忆主区', 'src/client/triad/memory/Panel.tsx'],
+    ['画廊列表', 'src/client/triad/gallery/GalleryPanel.tsx'],
+    ['SKILL 页', 'src/client/triad/skills/SkillsPanel.tsx'],
+    ['档案页', 'src/client/triad/vault/Panel.tsx'],
+    ['系统提示词页', 'src/client/triad/system-prompt/Panel.tsx'],
+    ['同步设置页', 'src/client/triad/workbench-sync/SyncSettingsPanel.tsx'],
+  ]
+  if (!/export const PAGE_MOTION_IN/.test(motionSrc) || !/\[data-page-motion='in'\]/.test(motionSrc)) {
+    fail('页面转场必须由 motion/overlay-motion.ts 的 PAGE_MOTION_IN 统一提供')
+  } else if (!/prefers-reduced-motion/.test(motionSrc)) {
+    fail('页面转场必须尊重 prefers-reduced-motion')
+  } else if (/@keyframes wb-page-in/.test(hubStyles)) {
+    fail('工作台不该再有自己的 wb-page-in（页面转场只留全局一份，否则会压掉属性规则）')
   } else {
-    pass('工作台换 Tab / 新页面入场动效在位（含 reduced-motion 兜底）')
+    const missing = pageContainers
+      .filter(([, rel]) => !/\{\.\.\.PAGE_MOTION_IN\}/.test(stripSrc(readSrcOf(rel))))
+      .map(([name]) => name)
+    if (missing.length > 0) fail('这些页面级容器没挂页面转场：' + missing.join(' / '))
+    else pass('页面转场统一走 PAGE_MOTION_IN（7 个页面级容器都在位，含 reduced-motion 兜底）')
   }
 }
 

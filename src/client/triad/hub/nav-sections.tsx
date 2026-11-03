@@ -3,16 +3,19 @@
  *
  * ── 用户要的东西（2026-10-25）────────────────────────────────────────
  * 「更多」下面是一行**操作间**菜单；点它 → 工作区（会话浏览区）隐藏、
- * 这一行文字变成**工作区**、下方列出记忆 / SKILL / 连接器 / 画廊 / 档案 /
- * 系统提示词 / 同步设置；点这一行
- * → 工作区回来、那些条目收起。以后加新菜单要方便。
+ * 这一行文字变成**工作区**、下方列出记忆 / SKILL / 画廊 / 档案 / 系统提示词 /
+ * 同步设置；点这一行 → 工作区回来、那些条目收起。以后加新菜单要方便。
+ *
+ * 注：**连接器不在操作间里**（2026-11-03 用户要求）——它的入口是侧栏最下面
+ * 账号行右侧的「MCP服务器」胶囊，见 ../connectors/sidebar-pill.tsx。
  *
  * ── 实现方式：一张注册表 + 一个切换行 ─────────────────────────────────
  * 侧栏不再有「横滑分类条」这种一次性写死的入口，全部收敛成
  * `./nav-registry.js` 里的两级数据：
  *
  *   区域 section（工作区 / 操作间 / 以后更多）
- *     └ 条目 entry（记忆 / SKILL / 连接器 / 画廊 / 档案 / 系统提示词 / 同步设置 / 以后更多）
+ *     └ 条目 entry（记忆 / SKILL / 画廊 / 档案 / 系统提示词 / 同步设置 / 以后更多）
+ *       （连接器不在条目里：入口是侧栏底部胶囊，见上）
  *
  * 本文件只做三件事：
  *   1. 在官方 `sidebar.workspaces` 之前插一个 host（= 「更多」下面）；
@@ -526,14 +529,22 @@ function branchFields(tab: (typeof WORKBENCH_TABS)[number]['id']): BranchFields 
  * 会自动让侧栏重渲染（见 `./nav-registry.ts` 的 `navMenuItem`）。
  */
 function registerDefaultEntries(): Array<() => void> {
-  return WORKBENCH_TABS.map((tab, index) => navMenuItem({
-    id: `workbench-${tab.id}`,
-    label: tab.label,
-    icon: tabIcon(tab.id),
-    order: 10 + index * 10,
-    workbenchTab: tab.id,
-    ...branchFields(tab.id),
-  }))
+  return WORKBENCH_TABS.flatMap((tab, index) => {
+    // 连接器（2026-11-03 用户要求）：入口已收成侧栏最下面那行右侧的「MCP服务器」
+    // 胶囊（见 ../connectors/sidebar-pill.tsx），操作间不再保留同名菜单行——
+    // 否则同一个页面会有两个入口，而且胶囊是用户点名的唯一形态。
+    // 注意只是不注册**菜单行**：WORKBENCH_TABS 里的 categories 仍在，
+    // WorkbenchPanel / rail 浮层 / 快捷键照旧能打开这一页。
+    if (tab.id === 'connectors') return []
+    return [navMenuItem({
+      id: `workbench-${tab.id}`,
+      label: tab.label,
+      icon: tabIcon(tab.id),
+      order: 10 + index * 10,
+      workbenchTab: tab.id,
+      ...branchFields(tab.id),
+    })]
+  })
 }
 
 /**
@@ -630,7 +641,7 @@ button[${ROW_HIDDEN_ATTR}='true']{display:none !important}
    3. 垂直导轨在最后一行分支处精准收口（bottom: 15px），不拖尾。
    4. 子项行字号 12.5px，紧凑精致；激活项时分支线与图标均亮起主题高亮色。 */
 .dsn-sub{display:flex;flex-direction:column;flex:none;min-height:0;margin:1px 0 4px;
-  animation:dsn-sub-in 160ms cubic-bezier(.32,.72,0,1)}
+  animation:dsn-sub-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1)}
 /* 三级分组（档案场景：账号与登录 / 支付与联系方式 / 证件与文件） */
 .dsn-sub-group{display:flex;flex-direction:column;flex:none}
 .dsn-sub-group-row{font-weight:500}
@@ -692,11 +703,11 @@ button[${ROW_HIDDEN_ATTR}='true']{display:none !important}
 .dsn-sync-tag{display:inline-flex;align-items:center;margin-left:7px;padding:1px 6px;border-radius:999px;
   font-size:11px;line-height:16px;font-weight:550;letter-spacing:0;
   color:#10b981;background:rgba(16,185,129,.12);border:1px solid rgba(16,185,129,.25);
-  animation:dsn-tag-in 160ms cubic-bezier(.32,.72,0,1);vertical-align:middle}
+  animation:dsn-tag-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1);vertical-align:middle}
 @keyframes dsn-tag-in{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:scale(1)}}
 
 /* 条目入场：整组淡入上移，避免切换瞬间「啪」地换屏 */
-.dsn-entries{display:flex;flex-direction:column;animation:dsn-in 180ms cubic-bezier(.32,.72,0,1)}
+.dsn-entries{display:flex;flex-direction:column;animation:dsn-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1)}
 @keyframes dsn-in{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion:reduce){
   .dsn-row,.dsn-switch .dsn-chevron,.dsn-caret,.dsn-caret>svg,.dsn-sub-row{transition:none}

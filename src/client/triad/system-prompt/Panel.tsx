@@ -39,6 +39,7 @@ import {
   type SectionGroup,
 } from './api.js'
 import { css, ensureSystemPromptStyles } from './styles.js'
+import { PAGE_MOTION_IN } from '../../motion/overlay-motion.js'
 
 /** 面板 props（与记忆 / 技能 / 档案面板同形，便于接进统一工作台）。 */
 export interface SystemPromptPanelProps {
@@ -433,7 +434,12 @@ export function SystemPromptPanel({ embedded = false }: SystemPromptPanelProps):
         </div>
       ) : null}
 
-      <div className={css.scroll}>
+      {/* 内容滚动区 = 这一页的「页面级视图容器」：切「全文 / 详细」换的是整块正文，
+          所以 key 跟着 view 走 —— 换视图时整块重挂、重播 {...PAGE_MOTION_IN}；
+          同一视图内的刷新 / 换会话（view 不变）不重挂，不会每刷一次就再浮一次。
+          只有这一层挂动画：页头与 tab 条常驻，若它们也挂，首次进入会出现两层
+          位移叠加（整页 +10px 之外正文再 +10px）。 */}
+      <div className={css.scroll} key={view} {...PAGE_MOTION_IN}>
         {phase === 'loading' ? (
           <div className={css.skeleton} aria-label="加载中">
             <span style={{ width: '38%' }} />

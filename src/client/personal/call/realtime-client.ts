@@ -212,7 +212,7 @@ export interface RealtimeCallHandlers {
   onError?(error: RealtimeCallError): void
   /** 链路彻底结束（宿主主动关闭 / 重连也失败）。 */
   onClosed?(reason: string): void
-  /** 麦克风不可用（权限拒绝 / 没有设备）。会话仍在，用户可以打字提问。 */
+  /** 麦克风不可用（权限拒绝 / 没有设备）。会话仍在，但通话界面只提示重试 / 挂断。 */
   onMicUnavailable?(message: string): void
   /** 麦克风就绪。 */
   onMicReady?(): void
@@ -447,7 +447,7 @@ export class RealtimeCall {
     return this.mic?.level() ?? 0
   }
 
-  /** 麦克风是否可用（不可用时 UI 应引导用户打字）。 */
+  /** 麦克风是否可用（不可用时 UI 提示重试 / 挂断；`sendText` 通道仍在，但界面没有入口）。 */
   get microphoneAvailable(): boolean {
     return this.mic !== null
   }

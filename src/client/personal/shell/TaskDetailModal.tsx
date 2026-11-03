@@ -21,10 +21,11 @@
  * createTaskRecord / upsertTaskToolStep / finishTaskRecord），本组件只做展示，
  * 不发任何请求。
  *
- * 关闭方式：右上角按钮、Esc、点遮罩空白处，三者都调 actions.openTaskDetail(null)。
+ * 关闭方式：右上角按钮、Esc、点遮罩空白处，三者都走 requestClose —— 先播
+ * 240ms 退场再真正 actions.openTaskDetail(null)，不再是硬消失。
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   IconBook,
   IconFile,
@@ -254,15 +255,41 @@ export function TaskDetailModal(): JSX.Element | null {
     if (bodyRef.current !== null) bodyRef.current.scrollTop = 0
   }, [ui.taskDetailId])
 
+  /*
+   * 退场状态：关闭时先播 240ms 退场（遮罩淡出 + 大卡下沉缩小），再真正关。
+   *
+   * 原来三条关闭入口都直接 actions.openTaskDetail(null)，卡片在下一帧就被摘掉，
+   * 入场那 160ms 淡入 + 200ms 上浮完全没有对应的出场。时长与曲线对齐
+   * modal-animation.ts 的 MODAL_ANIM_MS。
+   */
+  const [closing, setClosing] = useState(false)
+  const closeTimerRef = useRef<number | null>(null)
+
+  /** 关闭：先播 240ms 退场，再真正卸载（直接置 null 会硬消失）。 */
+  const requestClose = useCallback((): void => {
+    if (closeTimerRef.current !== null) return
+    setClosing(true)
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null
+      setClosing(false)
+      actions.openTaskDetail(null)
+    }, 240)
+  }, [actions])
+
+  /* 卸载时清定时器：卡片可能随任务被删而整个消失，别让回调打在已卸载的组件上。 */
+  useEffect(() => () => {
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
+  }, [])
+
   /** Esc 关闭（监听挂在 window：焦点在卡内任何位置都能响应）。 */
   useEffect(() => {
     if (!open) return undefined
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') actions.openTaskDetail(null)
+      if (event.key === 'Escape') requestClose()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [open, actions])
+  }, [open, requestClose])
 
   if (task === undefined) return null
 
@@ -292,9 +319,10 @@ export function TaskDetailModal(): JSX.Element | null {
     <div
       className="pa-taskdetail-overlay"
       role="presentation"
+      data-closing={closing ? '1' : undefined}
       onMouseDown={(event) => {
         // 只有点在遮罩本身（不是卡片内部）才关闭
-        if (event.target === event.currentTarget) actions.openTaskDetail(null)
+        if (event.target === event.currentTarget) requestClose()
       }}
     >
       <div
@@ -333,7 +361,7 @@ export function TaskDetailModal(): JSX.Element | null {
             type="button"
             title="关闭"
             aria-label="关闭任务详情"
-            onClick={() => actions.openTaskDetail(null)}
+            onClick={requestClose}
           >
             <IconX size={16} />
           </button>

@@ -13,12 +13,13 @@
  * 挂载 shell.overlay#dsh-done-pill-rec-picker（order 93）；配色走 --dpl-*，
  * 入场/行 stagger 走 PILL_CSS 的 dpMount / dpRowIn（用户偏好动效）。
  */
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { fetchRecWindows, pickerStore, regionStore, type RecWindow } from './rec-picker'
 import { recorder } from './recorder'
 import { windowSubtitle } from './rec-core'
 import { fontScaleCss, getFontRatio, subscribeFontRatio } from './font-axis'
+import { MODAL_ANIM_MS } from '../modal-animation.ts'
 
 /** 面板宽度。 */
 const PANEL_W = 480
@@ -42,7 +43,7 @@ const maskStyle = (ratio: number): CSSProperties => ({
   justifyContent: 'center',
   background: 'color-mix(in srgb, var(--dpl-fg) 18%, transparent)',
   backdropFilter: 'blur(2px)',
-  animation: 'dpFadeIn .18s ease backwards',
+  animation: 'dpFadeIn .24s cubic-bezier(.2,.8,.2,1) backwards',
   '--dpt': String(ratio),
 } as CSSProperties)
 
@@ -59,7 +60,7 @@ const cardStyle: CSSProperties = {
   background: 'var(--dpl-panel-bg)',
   color: 'var(--dpl-fg)',
   boxShadow: 'var(--dpl-panel-shadow)',
-  animation: 'dpMount .26s cubic-bezier(.32,.72,0,1) backwards',
+  animation: 'dpMount .24s cubic-bezier(.2,.8,.2,1) backwards',
 }
 
 const headStyle: CSSProperties = {
@@ -112,7 +113,7 @@ const rowStyle: CSSProperties = {
   lineHeight: fontScaleCss(20),
   textAlign: 'left',
   cursor: 'pointer',
-  animation: 'dpRowIn .26s cubic-bezier(.32,.72,0,1) backwards',
+  animation: 'dpRowIn .24s cubic-bezier(.2,.8,.2,1) backwards',
 }
 
 const rowTitleStyle: CSSProperties = {
@@ -220,7 +221,51 @@ export function RecPickerPanel(): JSX.Element | null {
     return () => { alive = false }
   }, [open])
 
-  const close = useCallback((): void => { pickerStore.close() }, [])
+  /**
+   * 退场动画态（240ms，见 modal-animation.ts 的 MODAL_ANIM_MS）：根节点挂
+   * `data-closing` 触发 pill.tsx 里的 dplPickerMaskOut / dplPickerCardOut，
+   * 播完才真正关面板。
+   */
+  const [closing, setClosing] = useState(false)
+  const animTimer = useRef<number | null>(null)
+  const closingRef = useRef(false)
+
+  /**
+   * 关闭入口统一走这里：先播退场，再关面板。
+   *
+   * `after` 是给「选完就关」用的（整屏 / 窗口 / 框选）：等退场播完再开录或
+   * 进框选，否则会出现「面板还在、录制已经开始了」的错帧。
+   */
+  const requestClose = useCallback((after?: () => void): void => {
+    if (closingRef.current) return
+    closingRef.current = true
+    setClosing(true)
+    animTimer.current = window.setTimeout(() => {
+      animTimer.current = null
+      closingRef.current = false
+      setClosing(false)
+      pickerStore.close()
+      after?.()
+    }, MODAL_ANIM_MS)
+  }, [])
+
+  const close = useCallback((): void => { requestClose() }, [requestClose])
+
+  // 重新打开（含退场途中被外部重新拉起）：撤销未播完的退场，否则计时器到点
+  // 会把刚打开的面板关掉。
+  useEffect(() => {
+    if (!open) return
+    if (animTimer.current !== null) {
+      window.clearTimeout(animTimer.current)
+      animTimer.current = null
+    }
+    closingRef.current = false
+    setClosing(false)
+  }, [open])
+
+  useEffect(() => () => {
+    if (animTimer.current !== null) window.clearTimeout(animTimer.current)
+  }, [])
 
   // Escape 关闭。
   useEffect(() => {
@@ -238,24 +283,25 @@ export function RecPickerPanel(): JSX.Element | null {
   if (!open) return null
 
   const pick = (target: Parameters<typeof recorder.startWith>[0]): void => {
-    pickerStore.close()
-    recorder.startWith(target)
+    // 面板退场播完再开录：先关后录会有「面板残影 + 已在录屏」的错帧。
+    requestClose(() => { recorder.startWith(target) })
   }
 
-  /** 框选：关面板、开 overlay（overlay 里确认后才真正开录）。 */
+  /** 框选：面板退场后关面板、开 overlay（overlay 里确认后才真正开录）。 */
   const pickRegion = (): void => {
-    pickerStore.close()
-    regionStore.open()
+    requestClose(() => { regionStore.open() })
   }
 
   return createPortal(
     <div
+      className="dpl-rec-picker-mask"
+      data-closing={closing ? '1' : undefined}
       style={maskStyle(fontRatio)}
       role="dialog"
       aria-label="选择录屏目标"
       onPointerDown={(event) => { if (event.target === event.currentTarget) close() }}
     >
-      <div className="dsh-done-pill" style={cardStyle}>
+      <div className="dsh-done-pill dpl-rec-picker-card" data-closing={closing ? '1' : undefined} style={cardStyle}>
         <div style={headStyle}>
           <span style={titleStyle}>选择录屏目标</span>
           <button type="button" style={closeStyle} aria-label="关闭" onClick={close}>✕</button>

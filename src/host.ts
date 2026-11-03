@@ -342,9 +342,9 @@ export function apply(ctx: Record<string, any>, config?: { toolsGate?: Record<st
     if (hostFeatureEnabled('host.open-path')) applyOpenPathRoutes(webCtx)
     // 「用默认应用打开文件」修复（2026-10-21）：见 src/open-file/index.ts。
     if (hostFeatureEnabled('host.open-file')) applyOpenFileRoutes(webCtx)
-    // 界面字体资产（/api/chat-flow/fonts/*）：把随包的霞鹜新致宋 woff2 与许可
-    // 原文吐给浏览器。字体不内联进 client 产物——5.0MB 的资产若内联，从不切字体
-    // 的用户也要白下载一次。
+    // 界面字体资产（/api/chat-flow/fonts/*）：把随包的霞鹜文楷 / 霞鹜新致宋
+    // woff2、HarmonyOS Sans TTF 与各许可原文吐给浏览器。字体不内联进 client 产物——
+    // 5–10MB 的资产若内联，从不切字体的用户也要白下载一次。
     //
     // 2026-10-14 曾随「界面字体」整块下线，2026-10-25 按用户要求装回来。
     if (hostFeatureEnabled('host.fonts')) applyFontRoutes(webCtx)

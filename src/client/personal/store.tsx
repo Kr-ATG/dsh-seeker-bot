@@ -32,6 +32,8 @@ import {
   proactiveMessage,
   randomBotAppearance,
 } from './engine.ts'
+import { resolveRoomTrigger } from './room-trigger.ts'
+import { shouldStartNext } from './room-queue.ts'
 import {
   createInitialState,
   createMainBot,
@@ -50,6 +52,7 @@ import {
   shortId,
   type AppState,
   type ArtifactRef,
+  type Avatar,
   type Bot,
   type BotModel,
   type BotMessageKind,
@@ -641,15 +644,31 @@ interface RunningReplyTurn {
 }
 
 /**
- * 已排期但还没启动的回复（群聊成员是错峰启动的）。
+ * 群聊里等上一位发言结束时，最多等多久。
  *
- * 停止键只能 abort「已经开始」的轮次；还躺在 later 定时器里的成员如果不拦，
+ * 到点就放行下一位：某一位卡住（宿主没回、工具跑飞）不能把后面所有人一起冻住。
+ * 宁可让下一位看不到完整的前文，也不能让群里半天没有动静。
+ */
+const SERIAL_WAIT_TIMEOUT_MS = 180_000
+
+/**
+ * 已排期但还没启动的回复（群聊成员是排队串行启动的）。
+ *
+ * 停止键只能 abort「已经开始」的轮次；还在等前一位收口的成员如果不拦，
  * 用户点完停止过几百毫秒又会冒出一条新回复，看起来像没停掉。
  */
 interface ScheduledReply {
   botId: string
   roomId?: string
   cancelled: boolean
+  /**
+   * 是否已经真正启动过。
+   *
+   * 排队时不能用「它现在不在 runningReplyTurnsRef 里」判断「它已经说完了」——
+   * 排在第三位的成员第一次检查时，第二位可能还在等第一位，压根没启动过，
+   * 这时判成「已结束」会让第三位和第二位同时开口。
+   */
+  started: boolean
 }
 
 type AnswerValue = string | string[] | Record<string, string>
@@ -683,6 +702,12 @@ export interface PersonalActions {
    * 主 Bot 头像时顺带展开）。纯视图动作：只写 `ui.sidebarCollapsed`。
    */
   toggleSidebar(open?: boolean): void
+  /**
+   * 收起 / 展开侧栏里的一个分区（Bot 分组用 group.id，群聊区块用 'rooms'）。
+   *
+   * 纯视图动作：只写 `ui.collapsedSections`，不动分组数据与选中的会话。
+   */
+  toggleSection(sectionId: string): void
   openNewBot(open: boolean): void
   /** 打开某个 Bot 的设置卡（null = 关闭）。 */
   openBotSettings(botId: string | null): void
@@ -709,12 +734,19 @@ export interface PersonalActions {
   updateBot(id: string, patch: Partial<Bot>): void
   deleteBot(id: string): void
   setBotEnabled(id: string, enabled: boolean): void
+  /**
+   * 置顶 / 取消置顶一个子 Bot：只影响它在所属分组里的排序（置顶的排最前），
+   * 不动 groupId 与创建顺序，取消后回到原位。
+   */
+  setBotPinned(id: string, pinned: boolean): void
   moveBot(id: string, groupId: string): void
   createGroup(name: string): void
   renameGroup(id: string, name: string): void
   deleteGroup(id: string): void
-  createRoom(name: string, memberIds: string[]): string
-  updateRoom(id: string, patch: Partial<{ name: string; memberIds: string[]; modelMode: 'inherit' | 'unified'; unifiedModel: BotModel }>): void
+  createRoom(name: string, memberIds: string[], avatar?: Avatar): string
+  updateRoom(id: string, patch: Partial<{ name: string; memberIds: string[]; avatar: Avatar; modelMode: 'inherit' | 'unified'; unifiedModel: BotModel }>): void
+  /** 置顶 / 取消置顶一个群聊：侧栏「群聊」区块里置顶的排最前。 */
+  setRoomPinned(id: string, pinned: boolean): void
   deleteRoom(id: string): void
   answerInteractive(messageId: string, value: AnswerValue): void
   /**
@@ -743,13 +775,17 @@ export interface PersonalActions {
   startCall(botId: string): void
   endCall(): void
   /**
-   * 通话里发一条文字（麦克风不可用 / 不方便说话时的兜底）。
-   * 全双工链路下它走 `text` 帧，宿主会把它当成一轮用户消息并触发回复。
+   * 通话里发一条文字：全双工链路下它走 `text` 帧，宿主会把它当成一轮用户消息
+   * 并触发回复。
+   *
+   * **界面上已经没有入口了**——通话弹层底部的输入框与发送按钮已按用户反馈整块
+   * 移除（横跨整宽、和居中成组的胶囊控件不协调）。action 与宿主 text 帧能力保留，
+   * 将来若有别的入口（快捷回复、通知回执）可以直接接上。
    */
   callUserTurn(text: string): void
   /** 用户主动打断 Bot（清本地播放 + 让宿主取消上游响应）。 */
   interruptCall(): void
-  /** 麦克风权限被拒后重试一次（会话仍在，失败也不影响打字）。 */
+  /** 麦克风权限被拒后重试一次（会话仍在，失败可以直接挂断）。 */
   retryCallMicrophone(): void
   /**
    * 当前麦克风音量（0..1），供通话弹层画波形。
@@ -821,11 +857,13 @@ function normalizeState(parsed: AppState): AppState {
 
   let bots = (Array.isArray(raw.bots) ? raw.bots : [])
     .filter((bot: any) => bot && typeof bot.id === 'string' && !legacyBots.has(bot.id))
-    // 旧数据没有 permission 字段：补成完全权限（与「bot 是 agent」的默认预期一致）
+    // 旧数据没有 permission 字段：补成完全权限（与「bot 是 agent」的默认预期一致）；
+    // autoSpeak 同理——旧数据缺省即「不自动朗读」，只认显式 true。
     .map((bot: any) => ({
       ...bot,
       unread: 0,
       permission: bot.permission === 'approval' ? 'approval' : 'full',
+      autoSpeak: bot.autoSpeak === true,
     }))
   if (!bots.some((bot: Bot) => bot.isMain)) bots = [createMainBot(), ...bots]
   /*
@@ -1013,12 +1051,27 @@ function settleStaleTask(task: TaskRecord): TaskRecord {
   }
 }
 
+/**
+ * 洗一遍 `readAt`：旧版本没有这个字段，坏数据（非数字 / NaN）也要挡掉。
+ * 只认有限数字，其余丢弃——丢掉一条已读记录最多让某个会话多亮一次提示。
+ */
+function normalizeReadAt(raw: unknown): Record<string, number> {
+  if (raw === null || typeof raw !== 'object') return {}
+  const out: Record<string, number> = {}
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === 'number' && Number.isFinite(value)) out[key] = value
+  }
+  return out
+}
+
 function loadUi(state: AppState): PersonalUi {
   const fallback: PersonalUi = {
     selectedBotId: state.bots.find((bot) => bot.isMain)?.id ?? state.bots[0].id,
     selectedRoomId: null,
     view: 'chat',
     sidebarCollapsed: false,
+    collapsedSections: [],
+    readAt: {},
     rightPanelOpen: true,
     rightPanelWidth: DEFAULT_RIGHT_WIDTH,
     chatWidth: 0,
@@ -1049,6 +1102,10 @@ function loadUi(state: AppState): PersonalUi {
         ...fallback,
         selectedBotId: parsed.selectedBotId && state.bots.some((bot) => bot.id === parsed.selectedBotId) ? parsed.selectedBotId : fallback.selectedBotId,
         sidebarCollapsed: parsed.sidebarCollapsed ?? false,
+        collapsedSections: Array.isArray(parsed.collapsedSections)
+          ? parsed.collapsedSections.filter((id): id is string => typeof id === 'string')
+          : [],
+        readAt: normalizeReadAt(parsed.readAt),
         rightPanelOpen: parsed.rightPanelOpen ?? true,
         rightPanelWidth: clampRightWidth(parsed.rightPanelWidth),
         chatWidth: clampChatWidth(parsed.chatWidth),
@@ -1069,7 +1126,13 @@ function truncate(text: string, max = 32): string {
   return flat.length > max ? `${flat.slice(0, max)}…` : flat
 }
 
-function blocksToText(blocks: MessageBlock[]): string {
+/**
+ * 把消息块压成一行纯文本（侧栏摘要 / 任务标题 / 记忆抽取共用）。
+ *
+ * 导出给侧栏用：那里要按消息流实时算「最后一句」，不能只读 bot.lastMessage
+ * ——后者只在消息首次 append 时写一次，流式更新不会刷新它。
+ */
+export function blocksToText(blocks: MessageBlock[]): string {
   return blocks
     .map((block) => {
       if (block.type === 'text') return block.text
@@ -1397,6 +1460,30 @@ export function applyStreamEventToBlocks(blocks: MessageBlock[], event: Personal
   return blocks
 }
 
+/** 组装请求体时与本轮「场地」相关的可选参数。 */
+export interface ReplyRequestOptions {
+  /**
+   * 这一轮所属的群聊 id（私聊缺省）。
+   *
+   * 宿主靠它把**这一轮里冒出来的卡片**（审批卡 / 问答卡）送回发起它的群：
+   * 卡片本身不带场地信息，不传的话它会落进该 Bot 的私聊，群里那条回复就一直转圈。
+   */
+  roomId?: string
+  /**
+   * 覆盖这一轮实际使用的模型（群设置「全组统一模型」）。
+   *
+   * 缺省 = 用 Bot 自己的模型。
+   */
+  unifiedModel?: BotModel
+  /**
+   * 本轮那条用户消息的 id。
+   *
+   * 构造群历史时要把它排除：它在 `landUserMessage` 里已经落进消息流了，
+   * 但又会作为 `text` 单独发给宿主一次——不排除的话模型会看到同一句话两遍。
+   */
+  userMessageId?: string
+}
+
 /**
  * 组装 `/reply` 与 `/reply/stream` 共用的请求体。
  *
@@ -1404,7 +1491,22 @@ export function applyStreamEventToBlocks(blocks: MessageBlock[], event: Personal
  * memories），抽出来是为了保证「流式与非流式的上下文完全一致」——各写一份迟早
  * 会漂移，表现成「同一个 bot 换个入口就换了记忆」。
  */
-function replyRequestBody(bot: Bot, text: string, state: AppState, images: ChatImage[] = []): string {
+function replyRequestBody(
+  bot: Bot,
+  text: string,
+  state: AppState,
+  images: ChatImage[] = [],
+  opts: ReplyRequestOptions = {},
+): string {
+  /*
+   * 群聊「全组统一模型」：把这一轮实际要用的模型**覆盖进 bot.model**。
+   *
+   * 群设置里的 modelMode / unifiedModel 原来只写进了 localStorage，宿主侧
+   * `toBotSpec` 读的仍然是 `bot.model`，于是这个开关在界面上能选、能保存、
+   * README 也写了「全组统一模型」，但一轮回复都不会按它走。真正决定模型的是
+   * 这一个字段，所以在这里换掉，而不是再往宿主加一条并行通道。
+   */
+  const model = opts.unifiedModel ?? bot.model
   return JSON.stringify({
     bot: {
       id: bot.id,
@@ -1412,7 +1514,7 @@ function replyRequestBody(bot: Bot, text: string, state: AppState, images: ChatI
       role: bot.role,
       description: bot.description,
       instructions: bot.instructions,
-      model: bot.model,
+      model,
       /*
        * 主 Bot 标记：宿主据此决定给谁挂 `bot_create`（只有主 Bot 能建子 Bot）。
        *
@@ -1422,6 +1524,7 @@ function replyRequestBody(bot: Bot, text: string, state: AppState, images: ChatI
        */
       isMain: bot.isMain === true,
     },
+    ...(opts.roomId !== undefined ? { roomId: opts.roomId } : {}),
     permission: bot.permission ?? 'full',
     text,
     /*
@@ -1443,15 +1546,41 @@ function replyRequestBody(bot: Bot, text: string, state: AppState, images: ChatI
     })),
     // 只带相对路径：图片已经在 /upload 落盘，宿主据此在 user 消息里提示 read_image。
     ...(images.length > 0 ? { images: images.map((item) => ({ path: item.path, name: item.name })) } : {}),
-    history: state.messages
+    /*
+     * 历史按**场地**取，不按 Bot 取。
+     *
+     * 原来是一句 `msg.botId === bot.id && !msg.roomId`——把群消息全部滤掉。后果是
+     * 群里的成员互相看不见：被 @ 的 Bot 只知道自己会话里发生过什么，「三个成员
+     * 各说一版方案」实际是三个互不知情的单聊。群聊回合现在只带**本群**的消息，
+     * 私聊回合维持原样（只带这个 Bot 的私聊）。
+     *
+     * 不带别的群的消息是刻意的：那是另一种场地的事，混进来就是串场地。
+     */
+    history: (opts.roomId !== undefined
+      ? state.messages.filter((msg) => msg.roomId === opts.roomId
+        && !msg.pending
+        && msg.source !== 'compaction'
+        && msg.id !== opts.userMessageId)
+      : state.messages.filter((msg) => msg.botId === bot.id
+        && !msg.roomId
+        && !msg.pending
+        && msg.source !== 'compaction'))
       /*
-       * 压缩标记（source='compaction'）不进 history：它没有正文（blocksToText 返回
-       * 空串），带过去只会变成一条空 system 消息；它的语义是「给用户看的提示」，
-       * 不是上下文的一部分。
+       * 群聊给 20 条：一次群回合里可能已经有好几个人说过话，12 条会把本轮的开头
+       * 挤掉；私聊维持 12 条不变（宿主那边还有自己的长期会话，前端这段只是补充）。
        */
-      .filter((msg) => msg.botId === bot.id && !msg.roomId && !msg.pending && msg.source !== 'compaction')
-      .slice(-12)
-      .map((msg) => ({ role: msg.role, text: blocksToText(msg.blocks) })),
+      .slice(opts.roomId !== undefined ? -20 : -12)
+      /*
+       * name 只在群聊里带：私聊的 history 每条都是「我 vs 这个 Bot」，说了名字反而
+       * 多一层噪音。群里必须带——不然模型分不清哪句是自己说的、哪句是别人说的。
+       */
+      .map((msg) => ({
+        role: msg.role,
+        text: blocksToText(msg.blocks),
+        ...(opts.roomId !== undefined
+          ? { name: msg.role === 'user' ? '用户' : (msg.senderName ?? bot.name) }
+          : {}),
+      })),
     /*
      * 不再带 memories：记忆已统一由宿主记忆引擎注入（schema v6 起按 owner 隔离，
      * 见 src/triad/memory/engine/visibility.ts）。继续带会形成第二套注入源——
@@ -1460,7 +1589,7 @@ function replyRequestBody(bot: Bot, text: string, state: AppState, images: ChatI
   })
 }
 
-async function hostReply(bot: Bot, text: string, state: AppState, images: ChatImage[] = []): Promise<MessageBlock[] | null> {
+async function hostReply(bot: Bot, text: string, state: AppState, images: ChatImage[] = [], opts: ReplyRequestOptions = {}): Promise<MessageBlock[] | null> {
   if (typeof location !== 'undefined' && location.protocol === 'file:') return null
   try {
     const controller = new AbortController()
@@ -1472,7 +1601,7 @@ async function hostReply(bot: Bot, text: string, state: AppState, images: ChatIm
     const res = await fetch('/api/personal-agent/reply', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: replyRequestBody(bot, text, state, images),
+      body: replyRequestBody(bot, text, state, images, opts),
       signal: controller.signal,
     })
     clearTimeout(timer)
@@ -1516,6 +1645,7 @@ async function hostReplyStream(
   onEvent: (event: PersonalStreamEvent, blocks: MessageBlock[]) => void,
   images: ChatImage[] = [],
   signal?: AbortSignal,
+  opts: ReplyRequestOptions = {},
 ): Promise<MessageBlock[] | null> {
   if (typeof location !== 'undefined' && location.protocol === 'file:') return null
   let received = 0
@@ -1536,7 +1666,7 @@ async function hostReplyStream(
       const res = await fetch('/api/personal-agent/reply/stream', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: replyRequestBody(bot, text, state, images),
+        body: replyRequestBody(bot, text, state, images, opts),
         signal: controller.signal,
       })
       if (!res.ok) return null
@@ -2246,6 +2376,8 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       localStorage.setItem(UI_KEY, JSON.stringify({
         selectedBotId: ui.selectedBotId,
         sidebarCollapsed: ui.sidebarCollapsed,
+        collapsedSections: ui.collapsedSections,
+        readAt: ui.readAt,
         rightPanelOpen: ui.rightPanelOpen,
         rightPanelWidth: ui.rightPanelWidth,
         chatWidth: ui.chatWidth,
@@ -2254,7 +2386,30 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     } catch {
       /* ignore */
     }
-  }, [ui.selectedBotId, ui.sidebarCollapsed, ui.rightPanelOpen, ui.rightPanelWidth, ui.chatWidth, ui.rightTab])
+  }, [ui.selectedBotId, ui.sidebarCollapsed, ui.collapsedSections, ui.readAt, ui.rightPanelOpen, ui.rightPanelWidth, ui.chatWidth, ui.rightTab])
+
+  /*
+   * 正在看的会话收到新回复时直接算已读。
+   *
+   * 否则用户盯着对话流看回复，侧栏那边却一直亮着「未读」——提示一旦和眼睛看到的
+   * 事实矛盾，就变成了噪音。这里只把**当前选中会话**的 readAt 推到最新消息时刻，
+   * 其他会话照旧保持未读。
+   */
+  useEffect(() => {
+    const current = stateRef.current
+    const selectedRoomId = uiRef.current.selectedRoomId
+    const selectedBotId = uiRef.current.selectedBotId
+    const key = selectedRoomId !== null ? `room:${selectedRoomId}` : `bot:${selectedBotId}`
+    let latest = 0
+    for (const message of current.messages) {
+      const match = selectedRoomId !== null
+        ? message.roomId === selectedRoomId
+        : message.botId === selectedBotId && message.roomId === undefined
+      if (match && message.at > latest) latest = message.at
+    }
+    if (latest <= (uiRef.current.readAt[key] ?? 0)) return
+    setUi((prev) => ({ ...prev, readAt: { ...prev.readAt, [key]: latest } }))
+  }, [state.messages])
 
   /*
    * 启动对账：刷新时被收口的僵尸任务，宿主那边也要停。
@@ -2375,7 +2530,14 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
           ...room,
           lastMessage: room.lastAt === undefined || message.at >= room.lastAt ? truncate(blocksToText(message.blocks)) : room.lastMessage,
           lastAt: room.lastAt === undefined || message.at >= room.lastAt ? message.at : room.lastAt,
-          unread: message.role === 'bot' ? room.unread + 1 : room.unread,
+          /*
+           * 正在看这个群时不加未读：用户在群里发消息，成员依次接话，侧栏冒出一个
+           * 红色角标说他「有 3 条未读」——而他正盯着这几条。只有会话不在前台
+           * （切到别的群 / 别的 Bot / 期刊页）才累计。
+           */
+          unread: message.role === 'bot' && !message.pending && uiRef.current.selectedRoomId !== room.id
+            ? room.unread + 1
+            : room.unread,
         }
         : room))
       const messages = insert === undefined
@@ -2823,10 +2985,21 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
         const turnId = typeof payload.message.turnId === 'string' && payload.message.turnId !== ''
           ? payload.message.turnId
           : undefined
+        /*
+         * 这一轮所属的群（私聊缺省）。
+         *
+         * 审批卡 / 问答卡是**宿主侧发起**的：它们不带场地信息，就只会落进该 Bot 的
+         * 私聊。群里那次回复因此永远等不到用户点卡片——聊天内审批没有超时
+         * （CHAT_TIMEOUT_MS = 0），于是那条气泡一直转圈，用户还得自己翻到私聊
+         * 才看得见卡片。宿主现在把 roomId 带回来，这里必须原样落进消息里。
+         */
+        const eventRoomId = typeof payload.roomId === 'string' && payload.roomId !== ''
+          ? payload.roomId
+          : undefined
         // 已经落地过（多半是本窗口的流式请求先到）：原地更新，不再新建气泡
         const known = hostMessageIds.current.get(hostId)
         if (known !== undefined) {
-          updateMessageBlocks(known, blocks, kind, hostId, replyTo, turnId)
+          updateMessageBlocks(known, blocks, kind, hostId, replyTo, turnId, undefined, eventRoomId)
           return
         }
         const id = shortId('msg')
@@ -2846,6 +3019,14 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
           at: typeof payload.message.at === 'number' ? payload.message.at : Date.now(),
           blocks,
           source: sourceKind,
+          ...(eventRoomId !== undefined
+            ? {
+              roomId: eventRoomId,
+              // 群聊里必须带发言者身份，否则气泡上不知道是谁说的
+              senderId: String(payload.botId ?? MAIN_BOT_ID),
+              senderName: stateRef.current.bots.find((item) => item.id === String(payload.botId ?? ''))?.name ?? 'Bot',
+            }
+            : {}),
           ...(kind !== undefined ? { kind } : {}),
           ...(replyTo !== undefined ? { replyTo } : {}),
           ...(turnId !== undefined ? { turnId } : {}),
@@ -2921,9 +3102,11 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     replyTo?: { id: string; preview: string },
     turnId?: string,
     relocate?: { at?: number; toEnd?: boolean },
+    /** 宿主带回的群 id：只对「本来没有场地」的消息生效（见下方说明）。 */
+    patchedRoomId?: string,
   ): void => {
     setState((prev) => {
-      const messages = prev.messages.map((message) => {
+      const messages: Message[] = prev.messages.map((message): Message => {
         if (message.id !== id) return message
         /*
          * 认领占位时要一并校正时间戳：占位的 `at` 是「用户发消息那一刻」，而它
@@ -2950,6 +3133,16 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
             ...stamp,
           }
         }
+        /*
+         * 补场地：消息先由宿主推过来时可能没带 roomId（老版本宿主 / 多窗口时序），
+         * 之后同一条消息的更新带了 roomId，就地补上——否则它会永远留在私聊里，
+         * 群里那条气泡却一直是空的。
+         *
+         * 只在**原来没有** roomId 时补：已经有场地的消息不能被后来的事件改到别的群。
+         */
+        const roomPatch = patchedRoomId !== undefined && message.roomId === undefined
+          ? { roomId: patchedRoomId }
+          : {}
         // kind / hostId / replyTo / turnId 只在明确传入时改：`message-update` 可能只更新 blocks
         return {
           ...message,
@@ -2958,6 +3151,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
           ...(hostId !== undefined ? { hostId } : {}),
           ...(replyTo !== undefined ? { replyTo } : {}),
           ...(turnId !== undefined ? { turnId } : {}),
+          ...roomPatch,
           ...stamp,
         }
       })
@@ -2978,7 +3172,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
        * 而不是死守用户发消息时的位置。规则本身在 `relocateToEnd`（纯函数、可测）。
        */
       const ordered = relocateToEnd(messages, id)
-      return ordered === messages ? { ...prev, messages } : { ...prev, messages: ordered }
+      return ordered === messages ? { ...prev, messages } : { ...prev, messages: [...ordered] }
     })
   }, [])
 
@@ -3021,6 +3215,24 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
 
   const replyAsBot = useCallback((bot: Bot, text: string, target: { roomId?: string; source?: Message['source'] } = {}, images: ChatImage[] = [], userMessageId?: string): void => {
     const pendingId = shortId('msg')
+    /*
+     * 本轮请求的「场地」参数：群 id，以及群设置要求的统一模型。
+     *
+     * 统一模型要在**这一轮开始时**定下并带进请求体：群设置随时可能被改，如果
+     * 让它跑到一半改设置就换成别的模型，同一条回复的前后两段会由两个模型写。
+     */
+    const requestOpts: ReplyRequestOptions = {
+      ...(target.roomId !== undefined ? { roomId: target.roomId } : {}),
+      // 构造群历史时要把本轮这条排除，否则模型会看到同一句话两遍
+      ...(userMessageId !== undefined ? { userMessageId } : {}),
+      ...((): { unifiedModel?: BotModel } => {
+        if (target.roomId === undefined) return {}
+        const room = stateRef.current.rooms.find((item) => item.id === target.roomId)
+        if (room === undefined || room.modelMode !== 'unified') return {}
+        // 选过统一模型就用它；没选（undefined）说明用户切了开关但还没选模型，回落各自模型
+        return room.unifiedModel !== undefined ? { unifiedModel: room.unifiedModel } : {}
+      })(),
+    }
     appendMessage({
       id: pendingId,
       botId: bot.id,
@@ -3321,7 +3533,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
            */
           if (sawMessageEvent) return
           updateMessageBlocks(pendingId, blocks)
-        }, images, stopController.signal)
+        }, images, stopController.signal, requestOpts)
 
         /*
          * 流式过程中点了停止：不再看 streamed、不再降级，直接按停止收口。
@@ -3372,7 +3584,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
          * 让每轮都静默降级，Bot 满口答应「我这就建」却一个文件都产不出来）。
          * 失败就必须看得见。
          */
-        const remote = await hostReply(bot, text, stateRef.current, images)
+        const remote = await hostReply(bot, text, stateRef.current, images, requestOpts)
         // 停止发生在降级请求期间：结果直接丢弃，这一轮已经不该继续了
         if (stopped) {
           finalizeStopped()
@@ -3498,10 +3710,29 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     }))
   }, [])
 
+  /**
+   * 把某个会话标记为已读：`readAt` 取「当前时间」与该会话最新消息 at 的较大者。
+   *
+   * 为什么要跟消息 at 比：消息时间来自宿主（可能比本机钟略快），只写 Date.now()
+   * 会留下一两条「刚读过的还是未读」的幽灵提示。取较大值后，切进会话即彻底清零。
+   */
+  const markRead = useCallback((kind: 'bot' | 'room', id: string): void => {
+    let latest = 0
+    for (const message of stateRef.current.messages) {
+      const match = kind === 'bot'
+        ? message.botId === id && message.roomId === undefined
+        : message.roomId === id
+      if (match && message.at > latest) latest = message.at
+    }
+    const at = Math.max(Date.now(), latest)
+    setUi((prev) => ({ ...prev, readAt: { ...prev.readAt, [`${kind}:${id}`]: at } }))
+  }, [])
+
   const selectBot = useCallback((id: string): void => {
     setUi((prev) => ({ ...prev, selectedBotId: id, selectedRoomId: null, view: 'chat', rightTab: 'detail' }))
     clearUnread(id, 'bot')
-  }, [clearUnread])
+    markRead('bot', id)
+  }, [clearUnread, markRead])
 
   const selectRoom = useCallback((id: string): void => {
     const room = stateRef.current.rooms.find((item) => item.id === id)
@@ -3513,7 +3744,8 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       view: 'chat',
     }))
     clearUnread(id, 'room')
-  }, [clearUnread])
+    markRead('room', id)
+  }, [clearUnread, markRead])
 
   const setTheme = useCallback((theme: 'auto' | 'dark' | 'light'): void => {
     setState((prev) => ({ ...prev, settings: { ...prev.settings, theme } }))
@@ -3596,31 +3828,119 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     landUserMessage()
 
     if (room) {
-      const mentioned = room.memberIds
+      /*
+       * 谁该接话：交给纯函数判定（规则与理由见 room-trigger.ts）。
+       *
+       * 这里原来是一句 `value.includes(bot.name)`——正文里**任何位置**提到成员名都
+       * 算点名（「我记得小墨说过」会把小墨叫出来），成员名互为子串时一次还会叫错
+       * 两个人。判定逻辑抽出去之后才有测试可写。
+       */
+      const members: Bot[] = room.memberIds
         .map((id) => current.bots.find((item) => item.id === id))
-        .filter((item): item is Bot => item !== undefined && (value.includes(item.name) || value.includes(`@${item.name}`)))
-      const responders = mentioned.length > 0 ? mentioned.slice(0, 2) : [current.bots.find((item) => item.id === room.memberIds[0]) ?? bot]
-      responders.forEach((responder, index) => {
-        /*
-         * 登记已排期的成员：停止键要能把还没启动的这几轮一起取消，否则用户
-         * 点完停止后第二个成员还会在 700ms 后开始回复。
-         */
-        const scheduled: ScheduledReply = {
-          botId: responder.id,
-          ...(roomId !== undefined ? { roomId } : {}),
-          cancelled: false,
-        }
-        scheduledRepliesRef.current.add(scheduled)
-        later(300 + index * 700, () => {
+        .filter((item): item is Bot => item !== undefined)
+      /*
+       * 引用了某条 Bot 消息 → 只叫那个成员。
+       *
+       * 「点回复」是界面上最明确的一次「这条是问你」：比正文里推断委托词可靠，
+       * 也比兜底给群主更符合直觉。被引用的消息不在本群（或已删除）时按没引用处理。
+       */
+      const quoted = replyTo !== undefined
+        ? current.messages.find((item) => item.id === replyTo.id)
+        : undefined
+      const quotedBotId = quoted !== undefined && quoted.role === 'bot' && quoted.roomId === roomId
+        ? (quoted.senderId ?? quoted.botId)
+        : undefined
+      const trigger = resolveRoomTrigger({
+        text: value,
+        members,
+        adminId: room.memberIds[0],
+        ...(quotedBotId !== undefined ? { quotedBotId } : {}),
+      })
+      /*
+       * 被上限挤掉的成员必须说出来。原实现是 `mentioned.slice(0, 2)` 静默丢弃：
+       * 第 3 个被 @ 的成员永远不回复，用户只会以为它坏了。
+       */
+      if (trigger.overflow.length > 0) {
+        const skipped = trigger.overflow.map((item) => item.name).join('、')
+        toast(`一次最多编排 ${trigger.responders.length} 位成员，${skipped} 这次没接：可以分开 @，或让群主转派`)
+      }
+      /*
+       * 群里一个可用成员都没有：消息已经落在对话流里（用户看得见），但不会有
+       * 任何回复。必须给一句可见的说明——静默在这里等于「消息发丢了」。
+       */
+      if (trigger.responders.length === 0) {
+        toast('这个群里没有可回复的成员：先在群设置里加一个 Bot')
+        return
+      }
+      /*
+       * 先把所有排期项一次建好，再各自启动。
+       *
+       * 必须一次建好：排在后面的成员要看「上一位启动了没有」，而这个判断依赖
+       * 上一位那条排期项的 started 标记——边建边启动会让它读到 undefined。
+       */
+      const scheduledList: ScheduledReply[] = trigger.responders.map((responder) => ({
+        botId: responder.id,
+        ...(roomId !== undefined ? { roomId } : {}),
+        cancelled: false,
+        started: false,
+      }))
+      for (const scheduled of scheduledList) scheduledRepliesRef.current.add(scheduled)
+
+      scheduledList.forEach((scheduled, index) => {
+        const responder = trigger.responders[index]
+        const start = (): void => {
+          scheduled.started = true
           scheduledRepliesRef.current.delete(scheduled)
           if (scheduled.cancelled) return
           replyAsBot(responder, value, { roomId, source: 'chat' }, images, userMessageId)
-        })
+        }
+
+        if (index === 0) {
+          later(300, start)
+          return
+        }
+
+        /*
+         * 成员之间**等上一位把这一轮说完**再开始，不是固定错峰。
+         *
+         * 原来三个人各自 300 / 1000 / 1700ms 后启动，而一轮回复要几十秒：第二个
+         * 成员开口时第一个的正文还在流式生成（消息仍是 pending），它既看不到前面
+         * 说了什么，「多视角评审」也就退化成三个人各自回答同一段背景。
+         *
+         * 判据用 runningReplyTurnsRef 而不是某个 promise：那一组 ref 记录的就是
+         * 「现在谁在跑」，和停止键共用同一个真相，不会出现「点了停止还在等一个
+         * 永远不结束的 promise」。
+         */
+        const previous = scheduledList[index - 1]
+        const previousBotId = trigger.responders[index - 1].id
+        const queuedAt = Date.now()
+        const waitPrevious = (): void => {
+          // 停止键已经取消了这一轮：不必再等（start 里还会再检查一次）
+          if (scheduled.cancelled) {
+            scheduledRepliesRef.current.delete(scheduled)
+            return
+          }
+          const decision = shouldStartNext({
+            previousStarted: previous.started,
+            previousCancelled: previous.cancelled,
+            previousRunning: previous.started
+              && [...runningReplyTurnsRef.current].some((turn) => turn.botId === previousBotId && turn.roomId === roomId),
+            elapsedMs: Date.now() - queuedAt,
+            timeoutMs: SERIAL_WAIT_TIMEOUT_MS,
+          })
+          if (decision === 'start') {
+            start()
+            return
+          }
+          later(400, waitPrevious)
+        }
+        // 先等 700ms：上一位是 300ms 后启动的，要给它时间把轮次挂进 Set
+        later(700, waitPrevious)
       })
       return
     }
     replyAsBot(bot, value, {}, images, userMessageId)
-  }, [appendMessage, later, replyAsBot])
+  }, [appendMessage, later, replyAsBot, toast])
 
   /**
    * 停止当前会话正在进行的回复（输入框的停止键）。
@@ -3633,7 +3953,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
    *    必须停下来：用户点了停止，看到的就是停。
    *
    * 作用范围按**当前会话**算：私聊是该 Bot 的一条流，群聊是该群里所有正在回复
-   * 的成员（sendMessage 会为每个被 @ 的成员各起一轮，还有几个在错峰等待）。
+   * 的成员（sendMessage 会为每个被 @ 的成员各起一轮，还有几个在排队等前一位说完）。
    */
   const stopReply = useCallback((): void => {
     const current = stateRef.current
@@ -3643,9 +3963,18 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       ? target.roomId === roomId
       : target.botId === nowUi.selectedBotId && target.roomId === undefined)
 
-    // 还在定时器里的群聊成员：直接取消，不再启动
+    /*
+     * 还在定时器里的群聊成员：直接取消，不再启动。
+     *
+     * 这些成员**还没落气泡**（pending 消息是在 replyAsBot 里才建的），所以取消之后
+     * 界面上一点痕迹都没有——用户看到自己的消息发出去了、然后什么都没发生，
+     * 只能以为群坏了。这里把数量记下来，下面无论走哪条分支都要说出来。
+     */
+    let cancelledScheduled = 0
     for (const scheduled of scheduledRepliesRef.current) {
-      if (inScope(scheduled)) scheduled.cancelled = true
+      if (!inScope(scheduled)) continue
+      scheduled.cancelled = true
+      cancelledScheduled += 1
     }
 
     const turns: RunningReplyTurn[] = []
@@ -3687,7 +4016,11 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     /* 孤儿任务说明宿主那一轮可能还在跑：也给它所在的 bot 发停止请求。 */
     for (const task of orphanTasks) botIds.add(task.botId)
 
-    if (botIds.size === 0) return
+    if (botIds.size === 0) {
+      // 只取消了「还没开始」的成员（群里可能就一个发言人，此时没有任何在跑的轮次）
+      if (cancelledScheduled > 0) toast(`已取消 ${cancelledScheduled} 位还没开始接话的成员`)
+      return
+    }
 
     for (const turn of turns) turn.abort()
 
@@ -3723,7 +4056,8 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       }
     })).then((results) => {
       const failed = results.filter((ok) => !ok).length
-      toast(failed === 0 ? '已停止' : '已停止显示；宿主侧可能还在跑（停止请求没送达）')
+      const cancelNote = cancelledScheduled > 0 ? `，另有 ${cancelledScheduled} 位还没开始接话的成员已取消` : ''
+      toast(failed === 0 ? `已停止${cancelNote}` : `已停止显示${cancelNote}；宿主侧可能还在跑（停止请求没送达）`)
     })
   }, [finishTaskRecord, toast])
 
@@ -3746,7 +4080,8 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       role,
       description,
       instructions: input.instructions ?? `你是「${input.name ?? role}」，${description} 说话直接、具体，先给结论再解释。`,
-      avatar: { shape: input.shape ?? appearance.shape, color: input.color ?? appearance.color, tint: appearance.tint },
+      // 完整头像优先（新建弹窗里选了形状 / 颜色 / 本地图片）；否则按 color+shape 或随机外观
+      avatar: input.avatar ?? { shape: input.shape ?? appearance.shape, color: input.color ?? appearance.color, tint: appearance.tint },
       groupId: input.groupId ?? DEFAULT_GROUP_ID,
       isMain: false,
       status: 'online',
@@ -3842,6 +4177,10 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     setState((prev) => ({ ...prev, bots: prev.bots.map((bot) => (bot.id === id ? { ...bot, enabled, status: enabled ? 'online' : 'idle' } : bot)) }))
   }, [])
 
+  const setBotPinned = useCallback((id: string, pinned: boolean): void => {
+    setState((prev) => ({ ...prev, bots: prev.bots.map((bot) => (bot.id === id ? { ...bot, pinned } : bot)) }))
+  }, [])
+
   const moveBot = useCallback((id: string, groupId: string): void => {
     setState((prev) => ({ ...prev, bots: prev.bots.map((bot) => (bot.id === id ? { ...bot, groupId } : bot)) }))
   }, [])
@@ -3865,7 +4204,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     }))
   }, [])
 
-  const createRoom = useCallback((name: string, memberIds: string[]): string => {
+  const createRoom = useCallback((name: string, memberIds: string[], avatar?: Avatar): string => {
     const id = shortId('room')
     const members = memberIds.length > 0 ? memberIds : [MAIN_BOT_ID]
     setState((prev) => ({
@@ -3875,6 +4214,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
         name: name.trim() || '新群聊',
         memberIds: members,
         unread: 0,
+        ...(avatar !== undefined ? { avatar } : {}),
         modelMode: 'inherit',
         createdAt: Date.now(),
       }],
@@ -3897,8 +4237,12 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     return id
   }, [])
 
-  const updateRoom = useCallback((id: string, patch: Partial<{ name: string; memberIds: string[]; modelMode: 'inherit' | 'unified'; unifiedModel: BotModel }>): void => {
+  const updateRoom = useCallback((id: string, patch: Partial<{ name: string; memberIds: string[]; avatar: Avatar; modelMode: 'inherit' | 'unified'; unifiedModel: BotModel }>): void => {
     setState((prev) => ({ ...prev, rooms: prev.rooms.map((room) => (room.id === id ? { ...room, ...patch } : room)) }))
+  }, [])
+
+  const setRoomPinned = useCallback((id: string, pinned: boolean): void => {
+    setState((prev) => ({ ...prev, rooms: prev.rooms.map((room) => (room.id === id ? { ...room, pinned } : room)) }))
   }, [])
 
   const deleteRoom = useCallback((id: string): void => {
@@ -4207,12 +4551,16 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
   }, [appendMessage, toast])
 
   /**
-   * 清空某个 bot 的全部对话。
+   * 清空某个 bot 的**私聊**。
    *
    * 两处都要清，少一处就会出现割裂：
-   *  · 前端：删掉这个 bot 的消息（含它在群聊里发的那些）
+   *  · 前端：删掉这个 bot 的私聊消息
    *  · 宿主：dispose 活着的 agent + 删会话文件——只清界面的话，bot 下一轮
    *    还会引用旧历史，说出「我们刚才聊的…」这种让人困惑的话
+   *
+   * 群聊消息**不动**。原来这里按 `botId` / `senderId` 一刀切，清一次私聊会把
+   * 这个 Bot 在所有群里说过的话一起抹掉：群里的上下文对别人还在，对他已经断了，
+   * 接着回复就是一副「刚才什么都没发生」的样子。私聊是私聊，群聊记录属于群。
    */
   const clearConversation = useCallback(async (botId: string): Promise<void> => {
     const bot = stateRef.current.bots.find((item) => item.id === botId)
@@ -4226,11 +4574,13 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     setState((prev) => {
       const next = {
         ...prev,
-        messages: prev.messages.filter((message) => message.botId !== botId && message.senderId !== botId),
+        messages: prev.messages.filter((message) => message.roomId !== undefined
+          || (message.botId !== botId && message.senderId !== botId)),
         bots: prev.bots.map((item) => (item.id === botId
           ? { ...item, lastMessage: '', lastAt: undefined, unread: 0 }
           : item)),
-        tasks: prev.tasks.filter((task) => task.botId !== botId),
+        // 任务记录同口径：群里的任务属于群，清私聊不该把它从右栏抹掉
+        tasks: prev.tasks.filter((task) => task.roomId !== undefined || task.botId !== botId),
       }
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
@@ -5283,6 +5633,15 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     setRightPanelWidth: (width) => setUi((prev) => ({ ...prev, rightPanelWidth: clampRightWidth(width) })),
     setChatWidth: (width) => setUi((prev) => ({ ...prev, chatWidth: clampChatWidth(width) })),
     toggleSidebar: (open) => setUi((prev) => ({ ...prev, sidebarCollapsed: open === undefined ? !prev.sidebarCollapsed : !open })),
+    toggleSection: (sectionId) => setUi((prev) => {
+      const current = prev.collapsedSections ?? []
+      return {
+        ...prev,
+        collapsedSections: current.includes(sectionId)
+          ? current.filter((id) => id !== sectionId)
+          : [...current, sectionId],
+      }
+    }),
     openNewBot: (newBotOpen) => setUi((prev) => ({ ...prev, newBotOpen })),
     openBotSettings: (botSettingsOpen) => setUi((prev) => ({ ...prev, botSettingsOpen })),
     openGroupSettings: (groupSettingsOpen) => setUi((prev) => ({ ...prev, groupSettingsOpen })),
@@ -5295,12 +5654,14 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     updateBot,
     deleteBot,
     setBotEnabled,
+    setBotPinned,
     moveBot,
     createGroup,
     renameGroup,
     deleteGroup,
     createRoom,
     updateRoom,
+    setRoomPinned,
     deleteRoom,
     answerInteractive,
     recallMessage,
@@ -5333,8 +5694,8 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     toast,
     clearUnread,
   }), [
-    selectBot, selectRoom, setTheme, sendMessage, stopReply, createBot, updateBot, deleteBot, setBotEnabled, moveBot,
-    createGroup, renameGroup, deleteGroup, createRoom, updateRoom, deleteRoom, answerInteractive,
+    selectBot, selectRoom, setTheme, sendMessage, stopReply, createBot, updateBot, deleteBot, setBotEnabled, setBotPinned, moveBot,
+    createGroup, renameGroup, deleteGroup, createRoom, updateRoom, setRoomPinned, deleteRoom, answerInteractive,
     recallMessage,
     addMemory, deleteMemory, createRoutine, toggleRoutine, runRoutine, deleteRoutine, proactiveNow, clearConversation,
     refreshPages,

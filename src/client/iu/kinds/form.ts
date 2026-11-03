@@ -280,7 +280,7 @@ const CSS = [
   '  color: var(--dsw-alias-state-error-primary, #e8503a); opacity: 1; }',
   '.dtt-iu__form-err { font-size: calc(11px * var(--iu-text-scale, 1));',
   '  color: var(--dsw-alias-state-error-primary, #e8503a);',
-  '  animation: dtt-iu-err-in .22s ease both; }',
+  '  animation: dtt-iu-err-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }',
   '@keyframes dtt-iu-err-in { from { opacity: .45; transform: translateY(-2px) } to { opacity: 1; transform: none } }',
   /* checkbox 可点行（参照 checklist 手感；.dtt-iu__box 基础样式复用基座 IU_CSS） */
   '.dtt-iu__checkbox { display: inline-flex; align-items: center; gap: 8px;',

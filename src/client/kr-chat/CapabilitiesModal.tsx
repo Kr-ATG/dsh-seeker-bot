@@ -11,8 +11,9 @@
  * @module
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent as ReactMouseEvent, ReactElement } from 'react'
+import { MODAL_ANIM_MS } from '../modal-animation.ts'
 import { getCapabilitiesStore, useCapabilitiesSnapshot } from './capabilities-store.ts'
 import type { CapabilityItem } from './capabilities-store.ts'
 
@@ -100,6 +101,28 @@ export function CapabilitiesModal(): ReactElement | null {
     store.setOpen(false)
   }, [store])
 
+  /*
+   * 退场动画状态机（与 GitRosterModal 同一套）：置 closing 让样式表播 240ms 收回
+   * 动画，播完才执行真正的 onClose。两个弹窗共用 kr-git-roster-overlay /
+   * kr-git-roster-modal 两个 class，所以退场 keyframes 也共用一份，样式只改一处。
+   */
+  const [closing, setClosing] = useState(false)
+  const closeTimerRef = useRef<number | null>(null)
+  const requestClose = useCallback((): void => {
+    if (closeTimerRef.current !== null) return
+    setClosing(true)
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null
+      setClosing(false)
+      onClose()
+    }, MODAL_ANIM_MS)
+  }, [onClose])
+
+  // 卸载时清掉未完成的定时器，避免回调打到已卸载的组件上。
+  useEffect(() => () => {
+    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
+  }, [])
+
   const onRefresh = useCallback(() => {
     void store.refresh()
   }, [store])
@@ -111,17 +134,17 @@ export function CapabilitiesModal(): ReactElement | null {
     }))
   }, [])
 
-  // 支持 Escape 键关闭
+  // 支持 Escape 键关闭（走 requestClose，退场动画播完才真正关）
   useEffect(() => {
     if (!open) return undefined
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') requestClose()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => {
       window.removeEventListener('keydown', onKeyDown)
     }
-  }, [open, onClose])
+  }, [open, requestClose])
 
   // 按 MCP 服务（server）进行分组聚合
   const mcpGroups = useMemo(() => {
@@ -173,7 +196,8 @@ export function CapabilitiesModal(): ReactElement | null {
   return (
     <div
       className="kr-git-roster-overlay kr-capabilities-overlay"
-      onClick={onClose}
+      data-closing={closing ? '1' : undefined}
+      onClick={requestClose}
       role="dialog"
       aria-modal="true"
       aria-labelledby="kr-capabilities-title"
@@ -250,7 +274,7 @@ export function CapabilitiesModal(): ReactElement | null {
             <button
               type="button"
               className="kr-git-roster-modal__tool-btn"
-              onClick={onClose}
+              onClick={requestClose}
               title="关闭 (Esc)"
               aria-label="关闭窗口"
             >

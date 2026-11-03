@@ -17,6 +17,8 @@
  * 逐条调 navMenuItem（id = workbench-<tab>、order = 10 + index * 10）生成
  * 「操作间」里的菜单行。所以**加一个分类 = 在这张表里加一行**，侧栏那一行会
  * 自动出现、滚轮顺序与 ⌘N 直切自动跟上。
+ * 连接器（connectors）不在表里：2026-11-03 起它是侧栏底部「MCP服务器」胶囊
+ * 弹出的居中弹窗卡片（../connectors/ConnectorModal.tsx），不占工作台分类。
  * ⚠ 千万不要为了加菜单另外手动 navMenuItem 一次 —— 那会出现两行同名菜单。
  *
  * 实现取舍：
@@ -61,9 +63,11 @@ export interface WorkbenchTabMeta {
 
 export const WORKBENCH_TABS: readonly WorkbenchTabMeta[] = [
   // order 由本表下标推导（10 + index * 10），顺序即侧栏顺序。
+  // 注意：连接器（connectors）**不在工作台分类里**——2026-11-03 用户要求
+  // 「MCP页面变成弹窗卡片」，它由侧栏底部「MCP服务器」胶囊直接弹出
+  // （见 ../connectors/ConnectorModal.tsx），不再占工作台页与侧栏条目。
   { id: 'memory', label: '记忆', desc: '条目 · 变更 · 修订' },
   { id: 'skills', label: 'SKILL', desc: '技能包与技能开关' },
-  { id: 'connectors', label: '连接器', desc: 'MCP 市场与已装连接' },
   { id: 'gallery', label: '画廊', desc: '图片 · 网页 · 文档产出' },
   { id: 'vault', label: '档案', desc: '账号 · 支付 · 证件' },
   { id: 'prompt', label: '系统提示词', desc: '发送时带上的那段提示' },
@@ -168,9 +172,15 @@ const SHEET = `
 /* 浮层底色走 static token 的实底（与 popover-shell solid 模式同法）：
    半透明 menu token 依赖 backdrop-filter，而无头/降级环境不保证模糊生效，
    实底在任何环境都不会透出底下页面文字。 */
-.wbf-fly{position:fixed;z-index:1100;width:216px;box-sizing:border-box;padding:6px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));border-radius:12px;background:var(--dsw-static-neutral-bluish-00,#fff);box-shadow:var(--dsw-shadow-lv3,0 10px 34px rgba(0,0,0,.34));transform-origin:left center;animation:wbf-in 150ms cubic-bezier(.2,.8,.2,1)}
+.wbf-fly{position:fixed;z-index:1100;width:216px;box-sizing:border-box;padding:6px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));border-radius:12px;background:var(--dsw-static-neutral-bluish-00,#fff);box-shadow:var(--dsw-shadow-lv3,0 10px 34px rgba(0,0,0,.34));transform-origin:left center;animation:wbf-in 240ms cubic-bezier(.2,.8,.2,1)}
 body[data-ds-dark-theme] .wbf-fly{background:var(--dsw-static-neutral-bluish-850,#2c2c2e)}
 @keyframes wbf-in{from{opacity:0;transform:translateX(-6px) scale(.97)}to{opacity:1;transform:none}}
+/* 退场与入场对称：淡出 + 左收 6px + 缩到 .97，150ms。
+   曲线换成加速语义（cubic-bezier(.4,0,.2,1)）——出场元素正在离开视线，
+   不需要入场那种减速收尾，越快脱手越不拖沓。forwards 保住末帧，
+   等 150ms 定时器到点再真正卸载，中间不会闪回原样。 */
+@keyframes wbf-out{from{opacity:1;transform:none}to{opacity:0;transform:translateX(-6px) scale(.97)}}
+.wbf-fly.wbf-out{animation:wbf-out 150ms cubic-bezier(.4,0,.2,1) forwards}
 .wbf-title{padding:4px 8px 6px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#888);user-select:none}
 .wbf-item{display:flex;align-items:center;gap:9px;width:100%;box-sizing:border-box;padding:7px 8px;border:none;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary,#aaa);font-family:inherit;font-size:13px;line-height:19px;text-align:left;cursor:pointer;transition:background 130ms ease,color 130ms ease}
 .wbf-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));color:var(--dsw-alias-label-primary,#eee)}
@@ -181,7 +191,7 @@ body[data-ds-dark-theme] .wbf-fly{background:var(--dsw-static-neutral-bluish-850
 .wbf-item-desc{font-size:11px;line-height:15px;font-weight:400;color:var(--dsw-alias-label-tertiary,#888);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wbf-item[data-active] .wbf-item-desc{color:var(--dsw-alias-label-secondary,#aaa)}
 .wbf-hint{margin-top:4px;padding:5px 8px 3px;border-top:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.14));font-size:10.5px;line-height:15px;color:var(--dsw-alias-label-tertiary,#777);user-select:none}
-@media (prefers-reduced-motion:reduce){.wbf-fly{animation:none}}
+@media (prefers-reduced-motion:reduce){.wbf-fly,.wbf-fly.wbf-out{animation:none}}
 `
 
 function ensureFlyStyles(): void {
@@ -231,6 +241,9 @@ interface FlyoutState {
   left: number
 }
 
+/** 退场时长（ms），必须与样式表 .wbf-fly.wbf-out 的 150ms 一致。 */
+const FLY_OUT_MS = 150
+
 /**
  * 侧栏行行为挂载：hover 浮层 + 滚轮切分类。
  *
@@ -251,6 +264,10 @@ export function attachWorkbenchRowFlyout(): () => void {
   let hoverRow: HTMLElement | null = null
   let hoverFly = false
   let closeTimer = 0
+  /** 浮层是否正在播退场（wbf-out）；true 期间 DOM 还在，只是加了退场 class。 */
+  let flyClosing = false
+  /** 退场播完后的卸载定时器（与 140ms hover 宽限的 closeTimer 是两件事）。 */
+  let closeAnimTimer = 0
   let lastWheelAt = 0
 
   /** 浮层渲染进 holder 本体（fixed 定位）：holder 已在 body 上，无需再 portal。 */
@@ -263,6 +280,7 @@ export function attachWorkbenchRowFlyout(): () => void {
         top={flyState.top}
         left={flyState.left}
         current={current}
+        closing={flyClosing}
         onEnter={() => { hoverFly = true; cancelClose() }}
         onLeave={() => { hoverFly = false; scheduleClose() }}
       />,
@@ -270,18 +288,50 @@ export function attachWorkbenchRowFlyout(): () => void {
   }
 
   const openFly = (row: HTMLElement): void => {
+    // 退场途中又 hover 回来：撤销退场、按新位置原地弹回。
+    // 少了这一步，浮层会先把那 150ms 退场播完、再整个重新挂载闪一下。
+    if (closeAnimTimer !== 0) { window.clearTimeout(closeAnimTimer); closeAnimTimer = 0 }
+    flyClosing = false
     const rect = row.getBoundingClientRect()
     flyState = { top: Math.max(8, rect.top - 6), left: rect.right + 8 }
     renderFly()
   }
 
+  /**
+   * 收起浮层：先挂 wbf-out 播 150ms，播完才 render(null)。
+   *
+   * 为什么不直接 render(null)：那样浮层是「啪」地消失，与 150ms 的入场动画
+   * 完全不对等；用户要求插件里所有这类浮层都有划入 + 划出。
+   * 为什么保留 flyState：退场期间 cancelClose 还要靠它把浮层原地弹回，
+   * 提前置 null 会让 renderFly 直接早退，撤销就失效了。
+   */
   const closeFly = (): void => {
-    flyState = null
-    if (flyRoot !== null) flyRoot.render(null)
+    if (flyState === null || flyClosing) return
+    flyClosing = true
+    renderFly()
+    closeAnimTimer = window.setTimeout(() => {
+      closeAnimTimer = 0
+      flyClosing = false
+      flyState = null
+      if (flyRoot !== null) flyRoot.render(null)
+    }, FLY_OUT_MS)
   }
 
+  /**
+   * 撤销关闭：清掉两个定时器（140ms hover 宽限 + 150ms 退场卸载）。
+   *
+   * 只清 closeTimer 是不够的——鼠标从浮层边缘划回浮层时，浮层可能已经进了
+   * 退场阶段，那时若不把 flyClosing 撤回并重渲染，浮层仍会在 150ms 后消失，
+   * 用户看到的就是「明明移回去了还是关了」。
+   */
   const cancelClose = (): void => {
     if (closeTimer !== 0) { window.clearTimeout(closeTimer); closeTimer = 0 }
+    if (closeAnimTimer !== 0) {
+      window.clearTimeout(closeAnimTimer)
+      closeAnimTimer = 0
+      flyClosing = false
+      renderFly()
+    }
   }
 
   const scheduleClose = (): void => {
@@ -352,6 +402,8 @@ export function attachWorkbenchRowFlyout(): () => void {
     document.removeEventListener('mouseenter', onEnter, true)
     document.removeEventListener('mouseleave', onLeave, true)
     document.removeEventListener('wheel', onWheel, { capture: true } as EventListenerOptions)
+    // 先静默收掉退场定时器（不重渲染），再走常规撤销：卸载路径上没必要再 render 一次。
+    if (closeAnimTimer !== 0) { window.clearTimeout(closeAnimTimer); closeAnimTimer = 0 }
     cancelClose()
     if (flyRoot !== null) flyRoot.unmount()
     holder.remove()
@@ -359,10 +411,12 @@ export function attachWorkbenchRowFlyout(): () => void {
 }
 
 /** 浮层本体：分类行 + 一句滚轮提示。 */
-function Flyout({ top, left, current, onEnter, onLeave }: {
+function Flyout({ top, left, current, closing, onEnter, onLeave }: {
   top: number
   left: number
   current: WorkbenchTab
+  /** 正在播退场：换成 wbf-out class，由外部定时器在动画结束后卸载。 */
+  closing: boolean
   onEnter: () => void
   onLeave: () => void
 }): JSX.Element {
@@ -383,7 +437,7 @@ function Flyout({ top, left, current, onEnter, onLeave }: {
   return (
     <div
       ref={ref}
-      className="wbf-fly"
+      className={closing ? 'wbf-fly wbf-out' : 'wbf-fly'}
       style={{ top: top - clamp, left }}
       role="menu"
       aria-label="工作台分类"

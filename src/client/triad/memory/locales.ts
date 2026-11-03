@@ -81,8 +81,8 @@ export const zh = {
   replyChromeHint: '关掉后 Seeker 对话流的总结卡不留边框与阴影，退回纯正文。只改外观；全局所有会话生效，随本机浏览器持久保存（刷新 / 重启 DSH 后仍在）。',
   toolCallsLabel: '工具调用卡',
   toolCallsHint: '关掉后 Seeker 右栏不再显示技术向的「工具调用」台账（默认 5 行滚动窗口那张）；人话行动流不受影响。只改外观；全局所有会话生效，随本机浏览器持久保存（刷新 / 重启 DSH 后仍在）。',
-  plainTimelineLabel: '操作面板',
-  plainTimelineHint: '关掉后 Seeker 右栏不再显示那张中文人话行动流（把工具调用翻译成「打开携程 · 机票」的卡）；工具调用台账与其余卡片不受影响。只改外观；全局所有会话生效，随本机浏览器持久保存（刷新 / 重启 DSH 后仍在）。',
+  // 历史注记：plainTimelineLabel / plainTimelineHint 随「操作面板不允许关闭」
+  // （2026-11-03 用户要求）整条删除 —— 那枚开关已不存在，右栏常显人话行动流。
   diffOld: '旧',
   diffNew: '新',
   clearProject: '清空该项目全部记忆',
@@ -370,8 +370,8 @@ export const en = {
   replyChromeHint: 'When off, the Seeker summary card drops its border and shadow, leaving plain text. Appearance only; applies to every session and persists in this browser across reloads and DSH restarts.',
   toolCallsLabel: 'Tool calls card',
   toolCallsHint: 'When off, the Seeker right panel hides the technical tool-call ledger (the 5-row scrolling card); the plain-language timeline is unaffected. Appearance only; applies to every session and persists in this browser across reloads and DSH restarts.',
-  plainTimelineLabel: 'Action panel',
-  plainTimelineHint: 'When off, the Seeker right panel hides the plain-language action timeline (the card that translates tool calls into human steps). The technical tool-call ledger and the other cards are unaffected. Appearance only; applies to every session and persists in this browser across reloads and DSH restarts.',
+  // Removed 2026-11-03 with the "action panel cannot be closed" requirement:
+  // plainTimelineLabel / plainTimelineHint no longer have a consumer.
   diffOld: 'Old',
   diffNew: 'New',
   clearProject: 'Clear all memories in this project',

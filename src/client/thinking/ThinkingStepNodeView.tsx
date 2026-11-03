@@ -437,8 +437,17 @@ export const ThinkingStepNodeView = memo(function ThinkingStepNodeView(
     if (tail?.closing?.finalNode.seq !== data.finalNode.seq) return undefined
     return { turn: locationTurn, seq: data.finalNode.seq, openFile }
   }, [data.finalNode, openFile, tail, locationTurn])
+  /*
+   * fileMentions 是官方 inject 提供的可选 prop（StoredEntry.inject）。
+   *
+   * 必须按「可能不存在」处理：DSH 0.2.1 的 slots.entries() 把 inject 挂在条目
+   * 顶层，旧代码从 options.inject 复制时静默拿到 undefined —— 一旦这里直接调用
+   * 就抛 TypeError，整条 assistant-step 会被 slot 判为崩溃并退回官方纯正文，
+   * 总结卡（.dtt__card--reply）连同边框/阴影一起消失。缺官方解析时，
+   * 下面自建的 selfMentions 仍然兜底路径识别与预览打开。
+   */
   const mentions = useMemo(
-    () => owner === undefined ? undefined : fileMentions(owner),
+    () => owner === undefined || typeof fileMentions !== 'function' ? undefined : fileMentions(owner),
     [fileMentions, owner],
   )
   /**

@@ -312,7 +312,7 @@ else pass('deferred webServer callback executed')
 // 图片文件，好让官方右侧 Sidebar 像打开普通文件一样打开（它的文档预览只认真
 // 实文件，data URL 不是文件）。注册成 exact 而不是把读图路由改成 prefix ——
 // 改成 prefix 会动到 /generated-images 这条既有契约的路由形状。
-// fonts 是「界面字体」的资产路由（霞鹜新致宋 woff2 不内联进 client 产物）。
+// fonts 是「界面字体」的资产路由（霞鹜文楷 / 霞鹜新致宋 woff2、HarmonyOS Sans TTF 都不内联进 client 产物）。
 // 2026-10-14 曾随「界面字体」整块下线，2026-10-25 按用户要求装回来 —— 计数 +1。
 // （motion「任务动画」资产路由 2026-10-31 已删：卡头人物动画整条移除，两处卡头
 // 都改用内联的插件头像，不再有 /api/chat-flow/motion。）
@@ -337,11 +337,21 @@ else pass('deferred webServer callback executed')
 // 2026-11：会话管理（真正删除会话）新增 prefix /api/session-admin（list + delete），
 // 26 → 27。这条漏注册的表现是「右键菜单点删除毫无反应」（前端探测不到就静默
 // 失败），只能靠计数与路径断言钉住。
-// 这些路由漏注册的表现全是静默的：胶囊不出现、通知不弹、录屏面板只剩整屏 ——
-// 只有计数与路径断言能钉住它们。
-if (registered.length !== 27) {
-  fail(`expected exactly 27 route registrations, got ${registered.length}: ${JSON.stringify(registered)}`)
+// 2026-11-03：每日情报卡新增三条 exact 路由（brief/today、brief/generate、
+// brief/list），27 → 30。漏注册的表现是胶囊上方那张斜插卡永远停在「今日情报
+// 整理中」——同样是静默失败，必须钉住。
+// 这些路由漏注册的表现全是静默的：胶囊不出现、通知不弹、录屏面板只剩整屏、
+// 情报卡永远转圈 —— 只有计数与路径断言能钉住它们。
+if (registered.length !== 30) {
+  fail(`expected exactly 30 route registrations, got ${registered.length}: ${JSON.stringify(registered)}`)
 } else {
+  if (!registered.some(spec => spec?.path === '/api/dsh-done-pill/brief/today')) {
+    fail('missing daily-brief today route (exact /api/dsh-done-pill/brief/today)')
+  } else if (!registered.some(spec => spec?.path === '/api/dsh-done-pill/brief/generate')) {
+    fail('missing daily-brief generate route (exact /api/dsh-done-pill/brief/generate)')
+  } else if (!registered.some(spec => spec?.path === '/api/dsh-done-pill/brief/list')) {
+    fail('missing daily-brief list route (exact /api/dsh-done-pill/brief/list)')
+  }
   const exacts = registered.filter(spec => spec?.kind === 'exact')
   const prefix = registered.filter(spec => spec?.kind === 'prefix')
   if (!prefix.some(spec => spec?.path === '/api/session-admin')) {
@@ -459,28 +469,42 @@ if (registered.length !== 27) {
 
 /* ── 界面字体：资产必须真的随包存在 + 路由真的吐得出来 ────────────────────
  *
- * 这块的失效方式全是静默的：资产没进包 → 用户切到霞鹜新致宋后浏览器拿 404，
- * 页面**不会报错**，只是悄悄回退系统字体，看起来像「功能没生效」；路由把任意
- * 文件名也放行 → 变成任意文件读。所以既要断言文件在位，也要真发请求。
+ * 这块的失效方式全是静默的：资产没进包 → 用户切到霞鹜文楷 / HarmonyOS Sans /
+ * 霞鹜新致宋后浏览器拿 404，页面**不会报错**，只是悄悄回退系统字体，看起来像
+ * 「功能没生效」；路由把任意文件名也放行 → 变成任意文件读。所以既要断言文件在位，
+ * 也要真发请求。
  */
 {
   const FONT_DIR = resolve(ROOT, 'assets', 'fonts')
-  const woff2 = resolve(FONT_DIR, 'lxgw-neozhisong-screen.woff2')
-  const license = resolve(FONT_DIR, 'IPA-Font-License-1.0.md')
-  if (!existsSync(woff2)) {
-    fail(`字体资产缺失：${woff2}（切到霞鹜新致宋会静默回退系统字体）`)
-  } else {
-    const size = statSync(woff2).size
-    // 全字集约 5MB；明显偏小说明是子集或文件被截断（掉字同样不报错）。
-    if (size < 3 * 1024 * 1024) fail(`字体资产偏小（${(size / 1024 / 1024).toFixed(2)} MB），可能被截断或误换成子集`)
-    else pass(`字体资产在位（${(size / 1024 / 1024).toFixed(2)} MB 全字集 woff2）`)
+  const fonts = [
+    { file: 'lxgw-wenkai-screen.woff2', label: '霞鹜文楷', minBytes: 8 * 1024 * 1024, kind: 'woff2', contentType: 'font/woff2', magic: 'wOF2' },
+    { file: 'harmonyos-sans-sc-regular.ttf', label: 'HarmonyOS Sans', minBytes: 6 * 1024 * 1024, kind: 'ttf', contentType: 'font/ttf', magic: '\x00\x01\x00\x00' },
+    { file: 'lxgw-neozhisong-screen.woff2', label: '霞鹜新致宋', minBytes: 3 * 1024 * 1024, kind: 'woff2', contentType: 'font/woff2', magic: 'wOF2' },
+  ]
+  for (const font of fonts) {
+    const path = resolve(FONT_DIR, font.file)
+    if (!existsSync(path)) {
+      fail(`字体资产缺失：${path}（切到${font.label}会静默回退系统字体）`)
+    } else {
+      const size = statSync(path).size
+      // 全字集字体；明显偏小说明是子集或文件被截断（掉字同样不报错）。
+      if (size < font.minBytes) fail(`字体资产偏小（${(size / 1024 / 1024).toFixed(2)} MB），可能被截断或误换成子集：${font.file}`)
+      else pass(`字体资产在位：${font.label}（${(size / 1024 / 1024).toFixed(2)} MB ${font.kind}）`)
+    }
   }
-  if (!existsSync(license)) fail(`字体许可文件缺失：${license}（IPA 协议要求随字体一并分发）`)
-  else pass('字体许可原文随包分发（IPA Font License 1.0）')
+  for (const [license, label] of [
+    ['OFL-1.1.md', 'SIL OFL 1.1'],
+    ['IPA-Font-License-1.0.md', 'IPA Font License 1.0'],
+    ['HarmonyOS-Sans-Fonts-License.txt', 'HarmonyOS Sans Fonts License Agreement'],
+  ]) {
+    const path = resolve(FONT_DIR, license)
+    if (!existsSync(path)) fail(`字体许可文件缺失：${path}（${label} 要求随字体一并分发）`)
+    else pass(`字体许可原文随包分发（${label}）`)
+  }
 
-  // 产物必须**不**内联字体：5.0MB 的 base64 会让所有用户白下载 6.6MB。
+  // 产物必须**不**内联字体：10MB 级的 base64 会让所有用户白下载。
   const clientBundle = readFileSync(resolve(ROOT, 'lib/client.js'), 'utf8')
-  if (clientBundle.includes('data:font/woff2;base64,')) {
+  if (clientBundle.includes('data:font/woff2;base64,') || clientBundle.includes('data:font/ttf;base64,')) {
     fail('client 产物内联了字体 base64（每个用户都要白下载，必须走 host 路由）')
   } else {
     pass('client 产物未内联字体（默认档零下载，按需拉取）')
@@ -512,24 +536,28 @@ if (registered.length !== 27) {
       req.end()
     })
     try {
-      const hit = await request('GET', '/api/chat-flow/fonts/lxgw-neozhisong-screen.woff2')
-      // woff2 的魔数：'wOF2'。断言真实字体字节而不是只看 200 —— 200 空体同样
-      // 会让浏览器静默回退，是最难发现的那种坏法。
-      const magic = hit.body.subarray(0, 4).toString('latin1')
-      if (hit.status !== 200) fail(`字体路由应 200，实得 ${hit.status}`)
-      else if (hit.headers['content-type'] !== 'font/woff2') fail(`字体 content-type 应为 font/woff2，实得 ${hit.headers['content-type']}`)
-      else if (magic !== 'wOF2') fail(`字体响应不是 woff2（魔数 ${JSON.stringify(magic)}）`)
-      else if (Number(hit.headers['content-length']) !== hit.body.length) fail('字体 content-length 与实际字节数不符')
-      else if (!/immutable/.test(String(hit.headers['cache-control']))) fail(`字体应带 immutable 缓存头，实得 ${hit.headers['cache-control']}`)
-      else pass(`字体路由端到端可用（${hit.body.length} 字节 woff2 + immutable 缓存）`)
+      for (const font of fonts) {
+        const hit = await request('GET', `/api/chat-flow/fonts/${font.file}`)
+        // 字体魔数：woff2 是 'wOF2'，ttf 是 0x00010000。断言真实字体字节而不是只看
+        // 200 —— 200 空体同样会让浏览器静默回退，是最难发现的那种坏法。
+        const magic = hit.body.subarray(0, 4).toString('latin1')
+        if (hit.status !== 200) fail(`字体路由应 200，实得 ${hit.status}（${font.file}）`)
+        else if (hit.headers['content-type'] !== font.contentType) fail(`字体 content-type 应为 ${font.contentType}，实得 ${hit.headers['content-type']}`)
+        else if (magic !== font.magic) fail(`字体响应魔数不对（${font.file}：${JSON.stringify(magic)}，应为 ${JSON.stringify(font.magic)}）`)
+        else if (Number(hit.headers['content-length']) !== hit.body.length) fail('字体 content-length 与实际字节数不符')
+        else if (!/immutable/.test(String(hit.headers['cache-control']))) fail(`字体应带 immutable 缓存头，实得 ${hit.headers['cache-control']}`)
+        else pass(`字体路由端到端可用：${font.label}（${hit.body.length} 字节 ${font.kind} + immutable 缓存）`)
 
-      const licenseHit = await request('GET', '/api/chat-flow/fonts/IPA-Font-License-1.0.md')
-      if (licenseHit.status !== 200) fail(`许可文件应 200，实得 ${licenseHit.status}`)
-      else pass('许可文件可经路由取到（前端可链接）')
+        const head = await request('HEAD', `/api/chat-flow/fonts/${font.file}`)
+        if (head.status !== 200 || head.body.length !== 0) fail(`HEAD 应 200 且无体，实得 ${head.status}/${head.body.length}`)
+        else pass(`HEAD 请求回 200 无体（浏览器探测不白传字体：${font.label}）`)
+      }
 
-      const head = await request('HEAD', '/api/chat-flow/fonts/lxgw-neozhisong-screen.woff2')
-      if (head.status !== 200 || head.body.length !== 0) fail(`HEAD 应 200 且无体，实得 ${head.status}/${head.body.length}`)
-      else pass('HEAD 请求回 200 无体（浏览器探测不白传 5MB）')
+      for (const license of ['OFL-1.1.md', 'IPA-Font-License-1.0.md', 'HarmonyOS-Sans-Fonts-License.txt']) {
+        const licenseHit = await request('GET', `/api/chat-flow/fonts/${license}`)
+        if (licenseHit.status !== 200) fail(`许可文件应 200，实得 ${licenseHit.status}（${license}）`)
+        else pass(`许可文件可经路由取到（${license}）`)
+      }
 
       // 未知文件名必须 404 —— 这条路由族**不能**变成任意文件读。
       for (const bad of ['/api/chat-flow/fonts/../../../etc/passwd', '/api/chat-flow/fonts/secret.txt', '/api/chat-flow/fonts/']) {

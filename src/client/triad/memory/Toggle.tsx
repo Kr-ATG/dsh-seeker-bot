@@ -32,7 +32,7 @@ import type { InjectStateView } from './api.js'
  * 拨了没用的开关 —— 拨不动的开关是骗人。
  */
 export const FALLBACK_INJECT_STATE: InjectStateView = {
-  enabled: true, defaultEnabled: true, explicit: false, zhEnabled: true, htmlEnabled: true, teamEnabled: false, todoClosureEnabled: true, todoRuleEnabled: true,
+  enabled: true, defaultEnabled: true, explicit: false, zhEnabled: true, htmlEnabled: true, teamEnabled: false, todoClosureEnabled: true, todoRuleEnabled: true, motionEnabled: false,
   projectHash: null, projectPath: null, projectMemoryEnabled: null,
 }
 
@@ -65,6 +65,10 @@ export function normalizeInjectState(res: InjectStateView): InjectStateView {
     // 的话，client 已更新、host 还没重启的那段窗口里开关会显示成关，host 一重启
     // 又跳成开——同一个用户什么都没做，看到开关自己跳了一下。
     todoRuleEnabled: res.todoRuleEnabled !== false,
+    // 动效技能通道与 html / team 同口径（**默认关**的通道）：缺字段按关。
+    // 它是用户主动打开的偏好，旧 host 没这条通道时显示「开」等于凭空长出一个
+    // 拨不动的开关——正是本仓反复强调的「拨不动的开关是骗人」。
+    motionEnabled: res.motionEnabled === true,
     /*
      * 工作区三字段与上面所有通道**刻意不同口径**：这里 null 是一个有意义的值
      * （「不知道 / 不适用」），不是缺失兜底。

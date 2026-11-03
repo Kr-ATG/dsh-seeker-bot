@@ -24,12 +24,25 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  ensureModalAnimStyles,
+  modalDrawerAnimClass,
+  modalMaskAnimClass,
+  useModalClose,
+} from '../triad-modal-animation.js'
 import { css, ensureConnectorsStyles } from './styles.js'
 
 /** 面板 props（与记忆 / 技能 / 档案面板同形）。 */
 export interface ConnectorsPanelProps {
   onClose: () => void
   embedded?: boolean
+  /**
+   * 嵌在弹窗卡片里（2026-11-03 用户要求「MCP页面变成弹窗卡片」）。
+   * 卡片外壳已经给了标题栏（MCP 服务器 + 关闭钮），这里把页内的大标题块
+   * （eyebrow / h1 / 副句）让位，只保留计数、搜索与分类条——否则一张弹窗里
+   * 会出现两层「连接器」标题。
+   */
+  inCard?: boolean
 }
 
 /** 目录条目（与宿主 catalog 字段对齐）。 */
@@ -227,8 +240,41 @@ const SEGMENTS: ReadonlyArray<{ key: 'all' | 'installed' | 'uninstalled'; label:
   { key: 'installed', label: '已安装' },
 ]
 
-export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX.Element {
+/**
+ * 目录的细分类 → 弹窗展示用的大组。
+ *
+ * 用户 2026-11-03 反馈「把分类精简下，现在过多分类了」：目录文件里按 18 个运营
+ * 细分类维护（系统能力 / 浏览器 / 文档知识 / 数据库 / 云服务 / 设计创作…），
+ * 直接铺成筛选胶囊会溢出、也难扫。这里在**展示层**合并成 6 个大组：
+ * 数据里的 entry.category 保持原值不动（搜索和安装写 patch 的逻辑不变），
+ * 只影响筛选与「全部」视图的分组标题。
+ */
+const CATEGORY_GROUPS: ReadonlyArray<{ id: string; label: string; categories: readonly string[] }> = [
+  { id: 'system', label: '系统能力', categories: ['系统能力', '浏览器'] },
+  { id: 'office', label: '办公协作', categories: ['办公协作', '文档知识', '项目管理', '客户支持'] },
+  { id: 'dev', label: '开发工具', categories: ['开发工具', '数据库', '云服务'] },
+  { id: 'media', label: '内容设计', categories: ['内容媒体', '设计创作', '电商购物'] },
+  { id: 'data', label: '搜索与数据', categories: ['搜索研究', '数据表格', '文件处理'] },
+  { id: 'life', label: '生活出行', categories: ['地图出行', '支付金融', '生活服务'] },
+]
+/** 细分类 → 大组标签（找不到的自定义分类落到「其它」）。 */
+const CATEGORY_LABEL_OF = new Map<string, string>()
+for (const group of CATEGORY_GROUPS) {
+  for (const category of group.categories) CATEGORY_LABEL_OF.set(category, group.label)
+}
+/** 大组标签在「全部」视图里的展示顺序。 */
+const CATEGORY_GROUP_ORDER = new Map<string, number>(CATEGORY_GROUPS.map((group, index) => [group.label, index]))
+
+/** 细分类 → 展示大组（未收录的归「其它」）。 */
+function categoryGroupLabel(category: string | undefined): string {
+  if (category === undefined || category === '') return '其它'
+  return CATEGORY_LABEL_OF.get(category) ?? '其它'
+}
+
+export function ConnectorsPanel({ embedded = false, inCard = false }: ConnectorsPanelProps): JSX.Element {
   ensureConnectorsStyles()
+  // 详情抽屉的入场退场用的是 triad 的共享 keyframes，这里保证它已注入（幂等）。
+  ensureModalAnimStyles()
 
   const [phase, setPhase] = useState<Phase>('loading')
   const [catalog, setCatalog] = useState<CatalogFile | null>(null)
@@ -248,6 +294,23 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
   /** 内容区滚动容器（页头滚轮要转发给它）。 */
   const scrollRef = useRef<HTMLDivElement | null>(null)
 
+  /**
+   * 详情抽屉的退场状态机。
+   *
+   * 抽屉由 detail 条件渲染，setDetail(null) 一执行整棵子树当场卸载，动画没有
+   * 机会播。共享的 useModalClose 把顺序倒过来：requestDetailClose 先播 240ms
+   * 滑出 + 遮罩淡出，播完才真正 setDetail(null)（退场期间 detail 仍非 null，
+   * 下面的条件渲染一行不用改）。
+   */
+  const {
+    closing: detailClosing,
+    requestClose: requestDetailClose,
+    cancelClose: cancelDetailClose,
+  } = useModalClose(detail !== null, useCallback(() => {
+    setDetail(null)
+    setInstallMsg('')
+  }, []))
+
   const load = useCallback(() => {
     setPhase('loading')
     setError('')
@@ -265,12 +328,14 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
 
   useEffect(() => { load() }, [load])
 
-  /** 分类胶囊：固定四项 + 目录里真实有货的分类。 */
+  /** 分类胶囊：固定四项 + 精简后的 6 个大组（只列真实有货的组）。 */
   const chips = useMemo(() => {
     if (catalog === null) return ['全部']
     const list = ['全部', '精选', '国内', '国外']
-    for (const cat of catalog.categories) {
-      if (cat.count > 0) list.push(cat.label)
+    const counts = new Map(catalog.categories.map((cat) => [cat.label, cat.count]))
+    for (const group of CATEGORY_GROUPS) {
+      const total = group.categories.reduce((sum, category) => sum + (counts.get(category) ?? 0), 0)
+      if (total > 0) list.push(group.label)
     }
     return list
   }, [catalog])
@@ -286,38 +351,39 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
       if (chip === '精选' && entry.featured !== true) return false
       if (chip === '国内' && entry.region !== 'cn') return false
       if (chip === '国外' && entry.region !== 'global') return false
-      if (chip !== '全部' && chip !== '精选' && chip !== '国内' && chip !== '国外' && entry.category !== chip) return false
+      const group = CATEGORY_GROUPS.find((item) => item.label === chip)
+      if (group !== undefined && !group.categories.includes(entry.category ?? '')) return false
       if (q === '') return true
       const hay = (entry.name + ' ' + (entry.nameEn ?? '') + ' ' + (entry.tagline ?? '') + ' ' + (entry.category ?? '')).toLowerCase()
       return hay.includes(q)
     })
   }, [catalog, chip, query, installFilter, installedState])
 
-  /** 按分类分组（「全部」时分组显示，其余平铺）。 */
+  /** 按大组分组（「全部」时分组显示；选了某个筛选后平铺）。 */
   const groups = useMemo(() => {
     if (chip !== '全部') return [{ label: '', items: filtered }]
     const map = new Map<string, CatalogEntry[]>()
     for (const entry of filtered) {
-      const key = entry.category ?? '其它'
+      const key = categoryGroupLabel(entry.category)
       const list = map.get(key) ?? []
       list.push(entry)
       map.set(key, list)
     }
-    return [...map.entries()].map(([label, items]) => ({ label, items }))
+    return [...map.entries()]
+      .map(([label, items]) => ({ label, items }))
+      .sort((a, b) => (CATEGORY_GROUP_ORDER.get(a.label) ?? 99) - (CATEGORY_GROUP_ORDER.get(b.label) ?? 99))
   }, [filtered, chip])
 
   const openDetail = useCallback((entry: CatalogEntry) => {
+    // 抽屉正在退场时又点了另一张卡：撤销退场，否则 240ms 后的定时器会把刚
+    // 打开的新抽屉一起关掉（open 一直是 true，状态机不会自己复位）。
+    cancelDetailClose()
     setDetail(entry)
     // 已装过就把 patch 里的当前值回填进输入框 —— 否则用户装完就再也改不了密钥
     setEnvDraft({ ...(installedState[entry.id]?.env ?? {}) })
     setInstallMsg('')
     setAuthResult(null)
-  }, [installedState])
-
-  const closeDetail = useCallback(() => {
-    setDetail(null)
-    setInstallMsg('')
-  }, [])
+  }, [installedState, cancelDetailClose])
 
   const doInstall = useCallback(async () => {
     if (detail === null) return
@@ -405,14 +471,16 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
   }, [detail, envDraft])
 
   return (
-    <div className={css.root} onWheel={onRootWheel}>
+    <div className={css.root + (inCard ? ' ' + css.root + '--card' : '')} onWheel={onRootWheel}>
       <div className={css.head}>
         <div className={css.headTop}>
-          <div>
-            <span className={css.eyebrow}><i />Connectors</span>
-            <h1 className={css.title}>连接器 <em>/ 能接什么</em></h1>
-            <p className={css.sub}>精选 MCP 连接器，装一个就能让模型用上它。国内国外都有。</p>
-          </div>
+          {inCard ? null : (
+            <div>
+              <span className={css.eyebrow}><i />Connectors</span>
+              <h1 className={css.title}>连接器 <em>/ 能接什么</em></h1>
+              <p className={css.sub}>精选 MCP 连接器，装一个就能让模型用上它。国内国外都有。</p>
+            </div>
+          )}
           <div className={css.headRight}>
             <span className={css.count}>
               {catalog === null ? '' : String(filtered.length) + ' / ' + String(catalog.counts.total)}
@@ -436,6 +504,9 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
           <SearchIcon />
           <input
             className={css.searchInput}
+            // 弹窗打开时焦点落在搜索框（PopoverShell 会优先找 [data-autofocus]），
+            // 而不是落在关闭按钮上闪一圈焦点环——这是「找连接器」最自然的起点。
+            {...(inCard ? { 'data-autofocus': true } : {})}
             value={query}
             placeholder="搜索连接器（高德、飞书、GitHub、Notion…）"
             onChange={(event) => { setQuery(event.target.value) }}
@@ -503,8 +574,17 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
       </div>
 
       {detail !== null && (
-        <div className={css.drawerMask} onClick={closeDetail} role="presentation">
-          <div className={css.drawer} onClick={(event) => { event.stopPropagation() }} role="dialog" aria-label={detail.name}>
+        <div
+          className={css.drawerMask + ' ' + modalMaskAnimClass(detailClosing)}
+          onClick={requestDetailClose}
+          role="presentation"
+        >
+          <div
+            className={css.drawer + ' ' + modalDrawerAnimClass(detailClosing)}
+            onClick={(event) => { event.stopPropagation() }}
+            role="dialog"
+            aria-label={detail.name}
+          >
             <div className={css.drawerHead}>
               <CardIcon entry={detail} size={48} />
               <div className={css.drawerTitles}>
@@ -513,7 +593,7 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
                   {(detail.author ?? '') + (detail.category === undefined ? '' : ' · ' + detail.category)}
                 </div>
               </div>
-              <button type="button" className={css.closeBtn} onClick={closeDetail} aria-label="关闭">×</button>
+              <button type="button" className={css.closeBtn} onClick={requestDetailClose} aria-label="关闭">×</button>
             </div>
 
             <div className={css.drawerBody}>
@@ -636,7 +716,7 @@ export function ConnectorsPanel({ embedded = false }: ConnectorsPanelProps): JSX
                   卸载
                 </button>
               )}
-              <button type="button" className={css.ghostBtn} onClick={closeDetail}>取消</button>
+              <button type="button" className={css.ghostBtn} onClick={requestDetailClose}>取消</button>
             </div>
           </div>
         </div>

@@ -86,6 +86,7 @@ export const FEATURES: ReadonlyArray<FeatureDef> = [
   { id: 'view.git-status', group: 'view', label: '卡头 Git 状态', desc: '操作面板卡头的 Git 徽章与 Git 大盘入口。', default: true, apply: 'live' },
   { id: 'view.browser-flag', group: 'view', label: '浏览器操作标志', desc: '该会话正在操作浏览器时亮起的呼吸小图标（可点击拉窗口到前台）。', default: true, apply: 'live' },
   { id: 'view.done-pill', group: 'view', label: '对话完成胶囊', desc: '回合完成提醒小横条 / 顶部悬浮胶囊（含录屏与待机机器人）。', default: true, apply: 'live' },
+  { id: 'view.daily-brief', group: 'view', label: '每日情报卡', desc: '胶囊上方斜插的半截日报卡：每天联网搜索 + 模型整理 AI / 世界 / 国内要闻。', default: true, apply: 'live' },
   { id: 'view.stats-ttft', group: 'view', label: '首 token 平铺', desc: '输入框下状态栏显示首 token 平均耗时；关掉后只在官方统计卡里看。', default: true, apply: 'live' },
 
   // ── 正文卡片 ──────────────────────────────────────────────────────────
@@ -106,7 +107,7 @@ export const FEATURES: ReadonlyArray<FeatureDef> = [
   { id: 'input.tools-gate', group: 'input', label: '工具闸门', desc: '输入框左侧的 computer-use / browser-use 按需开关胶囊。', default: true, apply: 'live' },
   { id: 'input.running-apps', group: 'input', label: '@ 运行中的程序', desc: '输入 @ 时在候选最上面列出此刻真开着的窗口。', default: true, apply: 'live' },
   { id: 'input.at-guard', group: 'input', label: '@ 非路径守卫', desc: '防止「@的时候」这类普通中文被误渲染成不存在的文件芯片。', default: true, apply: 'live' },
-  { id: 'input.ui-font', group: 'input', label: '界面字体', desc: '整站字体两档切换（微软雅黑 / 霞鹜新致宋）。', default: true, apply: 'live' },
+  { id: 'input.ui-font', group: 'input', label: '界面字体', desc: '整站字体四档切换（微软雅黑 / 霞鹜文楷 / 霞鹜新致宋 / HarmonyOS Sans）。', default: true, apply: 'live' },
   { id: 'input.download-tool', group: 'input', label: 'download 工具', desc: '让模型可以把文件下载给你的内置工具。', default: true, apply: 'host' },
   { id: 'input.validate-card-tool', group: 'input', label: 'validate_html_card 工具', desc: '发卡前自检 HTML 卡片规则（外链 / 100vh / 整页底色等）。', default: true, apply: 'host' },
 
@@ -125,6 +126,7 @@ export const FEATURES: ReadonlyArray<FeatureDef> = [
   { id: 'prompt.team', group: 'prompt', label: '团队协作', desc: '每会话首步注入：什么时候该派子智能体、多代理怎么分工。', default: true, apply: 'live' },
   { id: 'prompt.todo-rule', group: 'prompt', label: '任务清单纪律', desc: '每会话首步注入：清单怎么列、怎么推进、怎么收尾。', default: true, apply: 'live' },
   { id: 'prompt.auto-close', group: 'prompt', label: '回合结束自动收口', desc: '回合收口时把残留的「进行中」清单项降级为「待办」（不进提示词）。', default: true, apply: 'live' },
+  { id: 'prompt.motion', group: 'prompt', label: '动效技能强制加载', desc: '涉及 UI 动效时先加载 harmonyos-motion 技能，不靠模型自己想起来。', default: false, apply: 'live' },
 
   // ── 宿主支撑能力（需重启 DSH）────────────────────────────────────────
   { id: 'host.generated-images', group: 'host', label: '生图读取 / 落盘', desc: '把 spill 里的生图结果读出来并落成真实文件，供画廊与侧栏使用。', default: true, apply: 'host' },
@@ -132,7 +134,7 @@ export const FEATURES: ReadonlyArray<FeatureDef> = [
   { id: 'host.download', group: 'host', label: '下载进度路由', desc: 'download 工具的实时进度查询路由。', default: true, apply: 'host' },
   { id: 'host.open-path', group: 'host', label: '资源管理器打开修复', desc: '修官方在 Windows 上被 windowsHide 吞掉窗口的问题。', default: true, apply: 'host' },
   { id: 'host.open-file', group: 'host', label: '系统默认应用打开', desc: '产出物 / 画廊 / 弹窗里点一下用系统默认应用打开。', default: true, apply: 'host' },
-  { id: 'host.fonts', group: 'host', label: '字体资产', desc: '/api/chat-flow/fonts/*：霞鹜新致宋 woff2 与许可原文。', default: true, apply: 'host' },
+  { id: 'host.fonts', group: 'host', label: '字体资产', desc: '/api/chat-flow/fonts/*：霞鹜文楷 / 霞鹜新致宋 woff2、HarmonyOS Sans TTF 与许可原文。', default: true, apply: 'host' },
   { id: 'host.done-pill-media', group: 'host', label: '胶囊录屏 / 音效', desc: '录屏窗口枚举、逐帧抓取与提示音静态资源。', default: true, apply: 'host' },
   { id: 'host.office-preview', group: 'host', label: 'Office / PDF 预览', desc: 'ppt/word/pdf 的页图渲染与侧栏接管。', default: true, apply: 'host' },
   { id: 'host.running-apps', group: 'host', label: '运行中程序采集器', desc: '常驻 PowerShell 子进程，枚举可见窗口（@ 菜单与浏览器窗口激活共用）。', default: true, apply: 'host' },

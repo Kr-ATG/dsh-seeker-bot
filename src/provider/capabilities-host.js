@@ -29,9 +29,13 @@
 //   POST /api/model-capabilities/settings   { videoPath, proxyUrl }
 import z from '../vendor/schemastery/index.mjs'
 import { defineTool } from '../vendor/dsh-tools/schema.ts'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+// 落盘根与 magic 判据直接复用 spill 侧的实现：两处口径一旦漂移，前端就是
+// 「图在磁盘上但打不开」（/api/personal-agent/file 的准入只认 materializeRoot()）。
+import { looksLikeImage, materializeRoot } from '../spill/materialize.ts'
 
 function dshHome() {
   const env = process.env.DSH_HOME
@@ -739,12 +743,505 @@ export function apply(ctx) {
     return { ok: true, model: `${active.provider}/${active.model}`, endpoint: url, data: parsed }
   }
 
+  // ── 6.5 生成结果落盘（2026-11-03）────────────────────────────────────────
+  //
+  // 为什么工具不能把网关原始 JSON 直接回给模型：1024×1792 的 PNG 走 b64_json
+  // 约 3.8MB。模型在 run_code(ptc) 里 `console.log(JSON.stringify(r).slice(0,2000))`
+  // 只看到 b64 的开头，于是判断「图没拿到」→ 用同一个 prompt 再调一次
+  // generate_image → 用户要一张、对话流里出现两张（2026-11-03 用户实测，根因见
+  // Bot 会话 turn 6 的 reasoning）。工具自己把图落成真实文件、只回一条精简
+  // JSON，模型拿到的是「已完成」的事实：既没有理由重复生成，也不必自己解码保存。
+  //
+  // 落盘目录选 `<DSH_HOME>/storages/dsh-seeker-bot-generated/generated`：它正好在
+  // `materializeRoot()` 之内 —— `/api/personal-agent/file` 的准入白名单只认
+  // 「bot 工作区 / 期刊目录 / materializeRoot / 工具结果根」四个根，落在别处的图
+  // 前端根本打不开（403），表现和「图丢了」一模一样。
+
+  /** 落盘子目录名（相对 materializeRoot()，别挪到别处，理由见上面那段）。 */
+  const GENERATED_SUBDIR = 'generated'
+
+  /** 单张图片上限：与 `/api/personal-agent/file` 的图片上限同口径（24MB）。 */
+  const MAX_IMAGE_BYTES = 24 * 1024 * 1024
+
+  /** 单个视频上限：与 `/file` 的媒体上限同口径（256MB）。 */
+  const MAX_VIDEO_BYTES = 256 * 1024 * 1024
+
+  /** 网关只给 url 时的下载超时：图片几 MB、视频上百 MB，30s 是两者的折中值。 */
+  const MEDIA_FETCH_TIMEOUT_MS = 30_000
+
+  /** 一条结果里最多落几张图 / 几段视频（再多卡片也放不下）。 */
+  const MAX_GENERATED_IMAGES = 8
+  const MAX_GENERATED_VIDEOS = 4
+
+  /** data URL 前缀（MIME 允许为空：`data:;base64,...` 也合法）。 */
+  const DATA_URL_RE = /^data:([^;,]*)(;base64)?,/i
+
+  /** 视频地址后缀判据（与 host/personal/agent.ts 的 VIDEO_URL_EXT_RE 同口径）。 */
+  const VIDEO_URL_EXT_RE = /\.(?:mp4|webm|mov|m4v)(?:[?#].*)?$/i
+
+  /** 键名是「视频地址」的提示集：这些键下的 http(s) URL 即使没有后缀也收。 */
+  const VIDEO_URL_KEYS = new Set(['url', 'video_url', 'videoUrl', 'videoUrls', 'video_urls', 'download_url', 'downloadUrl', 'output_url', 'outputUrl'])
+  /** 键名是「视频 base64」的提示集（不同网关写法都收）。 */
+  const VIDEO_B64_KEYS = new Set(['b64_json', 'b64Json', 'video_b64', 'videoB64', 'videoBase64', 'video_base64', 'b64'])
+  /** 异步任务的 id / 状态 / 轮询地址键名。 */
+  const TASK_ID_KEYS = ['id', 'task_id', 'taskId', 'taskID', 'job_id', 'jobId']
+  const TASK_STATUS_KEYS = ['status', 'state', 'task_status', 'taskStatus', 'job_status']
+  const TASK_URL_KEYS = ['poll_url', 'pollUrl', 'polling_url', 'pollingUrl', 'task_url', 'taskUrl', 'url']
+
+  /** 落盘根目录（每次现算：DSH_HOME 在测试里会被改写）。 */
+  function generatedRootDir() {
+    return join(materializeRoot(), GENERATED_SUBDIR)
+  }
+
+  /** sha1 前 16 位：同一份内容恒等 → 同一文件名（幂等，重放历史也不重复写盘）。 */
+  function contentKey(text) {
+    return createHash('sha1').update(text).digest('hex').slice(0, 16)
+  }
+
+  /** 目标文件是否可复用：存在且非空（排除「上次写到一半进程被杀」留下的空壳）。 */
+  function reusableFile(target) {
+    try {
+      return existsSync(target) && statSync(target).size > 0
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * 原子写盘：先写同目录临时文件，成功再 rename。
+   *
+   * 为什么不直接写目标名：前端可能正好来打开这个文件，半截 PNG 会被浏览器图片
+   * 缓存记成坏图，之后即使补全也一直显示裂图。临时名带 pid + 随机段，同一张图
+   * 并发落两次也不会互相截断（与 src/spill/materialize.ts 的 writeAtomic 同款）。
+   */
+  function writeGeneratedFile(name, bytes) {
+    const dir = generatedRootDir()
+    const target = join(dir, name)
+    if (reusableFile(target)) return target
+    mkdirSync(dir, { recursive: true })
+    const tmp = `${target}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+    writeFileSync(tmp, bytes)
+    try {
+      renameSync(tmp, target)
+    } catch (error) {
+      // rename 失败时临时文件必须删掉：留着会被用户（和侧栏列表）当成一个正经
+      // 产物看见，而它多半是半截或空文件。删不掉也不能掩盖原始错误。
+      try { rmSync(tmp, { force: true }) } catch { /* 尽力而为 */ }
+      throw error
+    }
+    return target
+  }
+
+  /** base64 → 字节；空串 / 解码失败返回 null。 */
+  function decodeBase64(text) {
+    const payload = typeof text === 'string' ? text.replace(/\s+/g, '') : ''
+    if (payload === '') return null
+    try {
+      const bytes = Buffer.from(payload, 'base64')
+      return bytes.byteLength > 0 ? bytes : null
+    } catch {
+      return null
+    }
+  }
+
+  /** PNG IHDR 里的宽高（8 字节签名之后是 IHDR：长度 4 + 类型 4 + 宽 4 + 高 4）。 */
+  function pngSizeOf(bytes) {
+    if (bytes.byteLength < 24) return null
+    if (bytes[12] !== 0x49 || bytes[13] !== 0x48 || bytes[14] !== 0x44 || bytes[15] !== 0x52) return null
+    return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) }
+  }
+
+  /** GIF 逻辑屏幕宽高（小端 16 位）。 */
+  function gifSizeOf(bytes) {
+    if (bytes.byteLength < 10) return null
+    return { width: bytes.readUInt16LE(6), height: bytes.readUInt16LE(8) }
+  }
+
+  /** JPEG 尺寸：扫到 SOF0/1/2… 标记后读宽高（其余段按长度跳过）。 */
+  function jpegSizeOf(bytes) {
+    let offset = 2
+    while (offset + 9 <= bytes.byteLength) {
+      if (bytes[offset] !== 0xff) { offset += 1; continue }
+      const marker = bytes[offset + 1]
+      // SOF0..SOF15，排除 DHT(C4) / JPG(C8) / DAC(CC) 这三个非 SOF 标记。
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        return { width: bytes.readUInt16BE(offset + 7), height: bytes.readUInt16BE(offset + 5) }
+      }
+      const length = bytes.readUInt16BE(offset + 2)
+      if (length < 2) return null
+      offset += 2 + length
+    }
+    return null
+  }
+
+  /** WebP 尺寸：VP8X / VP8（有损）/ VP8L（无损）三种 chunk 各自的位域。 */
+  function webpSizeOf(bytes) {
+    if (bytes.byteLength < 30) return null
+    const chunk = bytes.toString('ascii', 12, 16)
+    if (chunk === 'VP8X') {
+      return {
+        width: 1 + (bytes[24] | (bytes[25] << 8) | (bytes[26] << 16)),
+        height: 1 + (bytes[27] | (bytes[28] << 8) | (bytes[29] << 16)),
+      }
+    }
+    if (chunk === 'VP8 ') {
+      // 帧头：3 字节关键帧标签后是起始码 9D 01 2A，再往后是 14 位宽 / 14 位高。
+      if (bytes[23] !== 0x9d || bytes[24] !== 0x01 || bytes[25] !== 0x2a) return null
+      return { width: (bytes[26] | (bytes[27] << 8)) & 0x3fff, height: (bytes[28] | (bytes[29] << 8)) & 0x3fff }
+    }
+    if (chunk === 'VP8L') {
+      if (bytes[20] !== 0x2f) return null
+      const b0 = bytes[21]; const b1 = bytes[22]; const b2 = bytes[23]; const b3 = bytes[24]
+      return {
+        width: 1 + (((b1 & 0x3f) << 8) | b0),
+        height: 1 + (((b3 & 0x0f) << 10) | (b2 << 2) | ((b1 & 0xc0) >> 6)),
+      }
+    }
+    return null
+  }
+
+  /**
+   * 图片字节 → { ext, mime, width, height }；不认识的字节返回 null。
+   *
+   * 第一关复用 `looksLikeImage`（与 src/spill/materialize.ts 同一份 magic 判据）：
+   * base64 解码对**任何**字符串都不抛错，被截断 / 污染的 payload 会解出一坨垃圾，
+   * 落成 png 后前端就是裂图 —— 而日志里一切正常。宁可少落一张，也不落一张坏图。
+   * 尺寸拿不到不算失败（width/height 回 null）：扩展名与 mime 才是硬需求。
+   */
+  function sniffImage(bytes) {
+    if (!looksLikeImage(bytes)) return null
+    if (bytes[0] === 0x89) {
+      const size = pngSizeOf(bytes)
+      return { ext: 'png', mime: 'image/png', width: size?.width ?? null, height: size?.height ?? null }
+    }
+    if (bytes[0] === 0xff) {
+      const size = jpegSizeOf(bytes)
+      return { ext: 'jpg', mime: 'image/jpeg', width: size?.width ?? null, height: size?.height ?? null }
+    }
+    if (bytes[0] === 0x47) {
+      const size = gifSizeOf(bytes)
+      return { ext: 'gif', mime: 'image/gif', width: size?.width ?? null, height: size?.height ?? null }
+    }
+    const size = webpSizeOf(bytes)
+    return { ext: 'webp', mime: 'image/webp', width: size?.width ?? null, height: size?.height ?? null }
+  }
+
+  /** 视频字节的 magic 判据（与 agent.ts 的 looksLikeVideo 同口径）。 */
+  function looksLikeVideo(bytes) {
+    if (bytes.byteLength < 12) return false
+    if (bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) return true
+    if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) return true
+    return false
+  }
+
+  /** 视频字节 → 扩展名与 mime（默认 mp4；EBML 头是 webm/mkv 家族）。 */
+  function videoFormatOf(bytes) {
+    if (bytes[0] === 0x1a && bytes[1] === 0x45) return { ext: 'webm', mime: 'video/webm' }
+    return { ext: 'mp4', mime: 'video/mp4' }
+  }
+
+  /**
+   * 一条媒体地址（data URL / http(s)）→ 字节；失败返回 null。
+   *
+   * 下载走与 callGeneration 同一条出网通道：网关给的 CDN 地址在国内常常只有
+   * 代理能到，直接用 globalThis.fetch 直连会静默失败，然后被当成「网关没给图」。
+   */
+  async function fetchMediaBytes(url, maxBytes) {
+    const dataMatch = DATA_URL_RE.exec(url)
+    if (dataMatch !== null) {
+      const bytes = decodeBase64(url.slice(dataMatch[0].length))
+      return bytes !== null && bytes.byteLength <= maxBytes ? bytes : null
+    }
+    if (!/^https?:\/\//i.test(url)) return null
+    const transport = await transportFor(ownConfig().proxyUrl)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), MEDIA_FETCH_TIMEOUT_MS)
+    try {
+      const response = await transport.fetch(url, {
+        signal: controller.signal,
+        redirect: 'follow',
+        ...transport.init,
+      })
+      if (!response.ok) return null
+      // 先看 content-length：超限的媒体根本不下载（省带宽，也避免拉满才丢）。
+      const declared = response.headers.get('content-length')
+      if (declared !== null && declared !== '' && Number(declared) > maxBytes) return null
+      const bytes = Buffer.from(await response.arrayBuffer())
+      if (bytes.byteLength === 0 || bytes.byteLength > maxBytes) return null
+      return bytes
+    } catch {
+      return null
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
+   * 一张图 → 落盘记录。
+   *
+   * b64_json 优先（网关最常见的形态），其次 url（可能是 data URL 或 http）。
+   * 两条路都失败时**保留原 url**：信息不能丢 —— 模型可以转告用户，前端也能直接
+   * 用 http 图；只有「给了 b64 却解不出图」才算这一张彻底没了。
+   */
+  async function persistImageItem(item) {
+    const record = isPlainObject(item) ? item : {}
+    const b64 = typeof record.b64_json === 'string' ? record.b64_json
+      : typeof record.b64 === 'string' ? record.b64 : ''
+    if (b64 !== '') {
+      const bytes = decodeBase64(b64)
+      if (bytes !== null && bytes.byteLength <= MAX_IMAGE_BYTES) {
+        const format = sniffImage(bytes)
+        if (format !== null) {
+          try {
+            const path = writeGeneratedFile(`${contentKey(b64)}.${format.ext}`, bytes)
+            return { path, mime: format.mime, bytes: bytes.byteLength, width: format.width, height: format.height }
+          } catch { /* 写盘失败：继续走 url 分支 */ }
+        }
+      }
+    }
+    const url = typeof record.url === 'string' ? record.url.trim() : ''
+    if (url === '') return null
+    const bytes = await fetchMediaBytes(url, MAX_IMAGE_BYTES)
+    if (bytes !== null) {
+      const format = sniffImage(bytes)
+      if (format !== null) {
+        try {
+          const path = writeGeneratedFile(`${contentKey(url)}.${format.ext}`, bytes)
+          return { path, mime: format.mime, bytes: bytes.byteLength, width: format.width, height: format.height }
+        } catch { /* 写盘失败：退回原 url */ }
+      }
+    }
+    return { url }
+  }
+
+  /** 递归收集「像一张图」的对象（有 b64_json/b64，或有 data:image/ http(s) 的 url）。 */
+  function collectImageItems(node, sink, depth = 0) {
+    if (depth > 6 || sink.length >= MAX_GENERATED_IMAGES) return
+    if (Array.isArray(node)) {
+      for (const item of node) collectImageItems(item, sink, depth + 1)
+      return
+    }
+    if (!isPlainObject(node)) return
+    const hasB64 = typeof node.b64_json === 'string' || typeof node.b64 === 'string'
+    const url = typeof node.url === 'string' ? node.url.trim() : ''
+    if (hasB64 || url.startsWith('data:image/') || /^https?:\/\//i.test(url)) {
+      sink.push(node)
+      // 已经拿到 b64 的项下面没有别的图，不必再往里钻。
+      if (hasB64) return
+    }
+    for (const value of Object.values(node)) collectImageItems(value, sink, depth + 1)
+  }
+
+  /**
+   * 从生图响应里挑候选：主通道是 OpenAI 兼容的 `data.data[]`；网关形状并不统一
+   * （`data.images[]` / `data.output[]` 都见过），所以再给一条递归兜底 —— 只有
+   * 主通道一张都没挑到时才用，避免把响应里别处的 url 误当成图片。
+   */
+  function imageItemsOf(data) {
+    if (isPlainObject(data)) {
+      for (const key of ['data', 'images', 'output']) {
+        const value = data[key]
+        if (Array.isArray(value) && value.length > 0) return value
+      }
+    }
+    const sink = []
+    collectImageItems(data, sink)
+    return sink
+  }
+
+  /**
+   * 生图结果瘦身：图落盘 + 只回小字段。
+   *
+   * 返回体**绝不包含 b64_json** —— 那正是「模型以为没拿到图、又调一次」的根因。
+   * note 是写给模型看的一句行为约束：拿到 path 就该去 present / 回话，而不是
+   * 怀疑工具没成功。
+   */
+  async function slimImageResult(result) {
+    const data = isPlainObject(result.data) ? result.data : {}
+    const images = []
+    for (const item of imageItemsOf(data).slice(0, MAX_GENERATED_IMAGES)) {
+      const persisted = await persistImageItem(item)
+      if (persisted === null) continue
+      const key = persisted.path ?? persisted.url
+      if (images.some(existing => (existing.path ?? existing.url) === key)) continue
+      images.push(persisted)
+    }
+    return {
+      ok: true,
+      model: result.model,
+      endpoint: result.endpoint,
+      images,
+      note: images.length > 0
+        ? '图片已落盘为真实文件（images[].path 是绝对路径），无需再解码保存：可直接 present，或把路径告知用户；不要用同一提示词重复生成。'
+        : '网关没有返回可落盘的图片（响应里没有 b64_json，也没有可下载的 url）：把 endpoint 告知用户并说明失败原因，不要用同一提示词重复调用。',
+    }
+  }
+
+  /** 按候选键名取第一个可字符串化的标量值。 */
+  function firstScalarOf(record, keys) {
+    for (const key of keys) {
+      const value = record[key]
+      if (typeof value === 'string' && value.trim() !== '') return value.trim()
+      if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+    }
+    return null
+  }
+
+  /**
+   * 在结果对象里找「异步任务」形态：同一个对象里同时有 id 与 status。
+   *
+   * 生视频走异步任务很常见（网关先回 `{ data: { id, status: 'queued' } }`），
+   * 此时没有可播放文件 —— 但任务 id 必须原样留给模型，否则它完全不知道该等什么，
+   * 只会换个说法再提交一次生成。
+   */
+  function readVideoTask(node, depth = 0) {
+    if (depth > 6 || node === null || typeof node !== 'object') return null
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const found = readVideoTask(item, depth + 1)
+        if (found !== null) return found
+      }
+      return null
+    }
+    const id = firstScalarOf(node, TASK_ID_KEYS)
+    const status = firstScalarOf(node, TASK_STATUS_KEYS)
+    if (id !== null && status !== null) {
+      const url = firstScalarOf(node, TASK_URL_KEYS)
+      return { id, status, ...(url !== null ? { url } : {}) }
+    }
+    for (const value of Object.values(node)) {
+      const found = readVideoTask(value, depth + 1)
+      if (found !== null) return found
+    }
+    return null
+  }
+
+  /** 去重后追加（到上限就停）。 */
+  function pushUnique(list, value) {
+    if (list.length >= MAX_GENERATED_VIDEOS || list.includes(value)) return
+    list.push(value)
+  }
+
+  /** 一条字符串是否像视频地址（按所在键名放宽判据）。 */
+  function isVideoAddress(value, key) {
+    if (/^data:video\//i.test(value)) return true
+    if (!/^https?:\/\//i.test(value)) return false
+    if (key !== null && VIDEO_URL_KEYS.has(key)) return true
+    return VIDEO_URL_EXT_RE.test(value.split(/[?#]/)[0] ?? value)
+  }
+
+  /**
+   * 递归收集视频候选（url / b64 两条），与 host/personal/agent.ts 的
+   * collectVideoCandidates 同口径：响应形状没有统一契约，按「字符串内容 + 所在
+   * 键名」判比按固定路径猜更耐改。
+   */
+  function collectVideoCandidates(node, sink, key = null, depth = 0) {
+    if (depth > 8) return
+    if (typeof node === 'string') {
+      const text = node.trim()
+      if (text === '') return
+      if (key !== null && VIDEO_B64_KEYS.has(key)) {
+        // b64 字段：可能是完整 data URL，也可能是裸 base64（两种网关写法都见过）。
+        if (text.startsWith('data:')) {
+          if (/^data:video\//i.test(text)) pushUnique(sink.urls, text)
+          return
+        }
+        if (text.length > 64) pushUnique(sink.b64, text)
+        return
+      }
+      if (isVideoAddress(text, key)) pushUnique(sink.urls, text)
+      return
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) collectVideoCandidates(item, sink, key, depth + 1)
+      return
+    }
+    if (!isPlainObject(node)) return
+    for (const [childKey, child] of Object.entries(node)) collectVideoCandidates(child, sink, childKey, depth + 1)
+  }
+
+  /**
+   * 把任意响应裁成「可读的小 JSON」：长字符串（base64 / data URL）换成占位符。
+   *
+   * 只在「既没落盘也没任务」这种异常分支用：那时模型需要知道网关到底回了什么，
+   * 但把 3.8MB 的 base64 再回给它是同一个错误。
+   */
+  function compactJson(node, depth = 0) {
+    if (depth > 4) return '[omitted: nested too deep]'
+    if (typeof node === 'string') return node.length > 300 ? `[omitted ${node.length} chars]` : node
+    if (typeof node === 'number' || typeof node === 'boolean' || node === null) return node
+    if (Array.isArray(node)) {
+      const items = node.slice(0, 8).map(item => compactJson(item, depth + 1))
+      if (node.length > 8) items.push(`[omitted ${node.length - 8} items]`)
+      return items
+    }
+    if (isPlainObject(node)) {
+      const out = {}
+      const keys = Object.keys(node)
+      for (const [index, key] of keys.entries()) {
+        if (index >= 20) { out['...'] = `[omitted ${keys.length - 20} keys]`; break }
+        out[key] = compactJson(node[key], depth + 1)
+      }
+      return out
+    }
+    return String(node)
+  }
+
+  /**
+   * 生视频结果瘦身：视频落盘 + 只留 url / 任务 id / 状态这些小字段。
+   *
+   * 与生图同一个理由：网关原始 JSON 里可能塞着几十 MB 的 base64，模型读到的是
+   * 截断后的残片，于是重复提交生成。视频还多一层：异步任务制下「没有文件」是
+   * 正常态，任务 id / 状态必须原样留给模型去转告与轮询。
+   */
+  async function slimVideoResult(result) {
+    const data = isPlainObject(result.data) ? result.data : {}
+    const sink = { urls: [], b64: [] }
+    collectVideoCandidates(data, sink)
+    const videos = []
+    for (const url of sink.urls) {
+      const bytes = await fetchMediaBytes(url, MAX_VIDEO_BYTES)
+      if (bytes === null || !looksLikeVideo(bytes)) { videos.push({ url }); continue }
+      const format = videoFormatOf(bytes)
+      try {
+        const path = writeGeneratedFile(`${contentKey(url)}.${format.ext}`, bytes)
+        videos.push({ path, mime: format.mime, bytes: bytes.byteLength })
+      } catch { videos.push({ url }) }
+    }
+    for (const b64 of sink.b64) {
+      if (videos.length >= MAX_GENERATED_VIDEOS) break
+      const bytes = decodeBase64(b64)
+      if (bytes === null || bytes.byteLength > MAX_VIDEO_BYTES || !looksLikeVideo(bytes)) continue
+      const format = videoFormatOf(bytes)
+      try {
+        const path = writeGeneratedFile(`${contentKey(b64)}.${format.ext}`, bytes)
+        videos.push({ path, mime: format.mime, bytes: bytes.byteLength })
+      } catch { /* 落盘失败：这一条没有可播放地址，跳过 */ }
+    }
+    // 没有可播放文件时才看异步任务：网关先回 task_id 是常见形态。
+    const task = videos.length === 0 ? readVideoTask(data) : null
+    const slim = { ok: true, model: result.model, endpoint: result.endpoint, videos, task }
+    if (videos.length > 0) {
+      slim.note = '视频已落盘为真实文件（videos[].path 是绝对路径），无需再解码保存：可直接 present，或把路径告知用户；不要用同一提示词重复生成。'
+    } else if (task !== null) {
+      slim.note = '网关返回的是异步任务（还没有可播放文件）：把 task.id / task.status 转告用户，按需轮询，不要重复提交生成。'
+    } else {
+      // 既没有视频也没有任务：把响应的小字段原样带上，别让模型只能瞎猜。
+      slim.data = compactJson(data)
+      slim.note = '响应里既没有视频地址也没有任务 id：把 data 里的小字段转告用户，不要用同一提示词重复生成。'
+    }
+    return slim
+  }
+
   // ── 7. 工具注册 ─────────────────────────────────────────────────────────
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'generate_image',
     description: '调用用户已开启「生图」能力并设为当前的模型生成图片（OpenAI 兼容 images/generations 接口）。'
-      + '用户要求生成/绘制/画一张图时使用；提示词越具体越好。若返回 ok=false，把 error 原文转告用户。',
+      + '用户要求生成/绘制/画一张图时使用；提示词越具体越好。'
+      + '成功时返回精简 JSON：images[].path 是已落盘的绝对路径（图片本体不再以 base64 返回），'
+      + '拿到 path 就说明图已经生成好了，直接 present 或告知用户即可，**不要**因为看不到 base64 而重复生成。'
+      + '若返回 ok=false，把 error 原文转告用户。',
     parameters: {
       prompt: { type: 'string', required: true, description: '详细的图片生成提示词：主体、风格、场景、构图、光线等。' },
       size: { type: 'string', description: '可选尺寸，如 1024x1024；不确定时省略。' },
@@ -758,14 +1255,20 @@ export function apply(ctx) {
       const extra = {}
       if (typeof args.size === 'string' && args.size.length > 0) extra.size = args.size
       extra.n = typeof args.n === 'number' && args.n > 0 ? args.n : 1
-      return callGeneration('image', String(args.prompt), extra, exec.signal)
+      const result = await callGeneration('image', String(args.prompt), extra, exec.signal)
+      // 错误分支原样返回（ok:false + error 文案不变），成功分支必须瘦身：
+      // 原始 JSON 里那张 3.8MB 的 base64 就是「模型以为没拿到图、重复生成」的根因。
+      if (result.ok !== true) return result
+      return slimImageResult(result)
     },
   })), 'model-capabilities: generate_image')
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'generate_video',
     description: '调用用户已开启「视频」能力并设为当前的模型生成视频。'
-      + '多数网关此接口为异步任务制，返回体里通常带任务 id 或轮询地址——原样转告用户即可，不要臆造结果。'
+      + '成功时返回精简 JSON：videos[].path 是已落盘的绝对路径（视频本体不再以 base64 返回）；'
+      + '若 videos 为空，说明网关给的是异步任务，task.id / task.status 原样转告用户即可，不要臆造结果。'
+      + '拿到 path 或 task 就说明这次调用已经生效，**不要**重复提交生成。'
       + '若返回 ok=false，把 error 原文转告用户。',
     parameters: {
       prompt: { type: 'string', required: true, description: '详细的视频生成提示词：主体、动作、镜头运动、风格、时长意向。' },
@@ -778,7 +1281,9 @@ export function apply(ctx) {
     async execute(args, exec) {
       const extra = {}
       if (typeof args.duration === 'number' && args.duration > 0) extra.duration = args.duration
-      return callGeneration('video', String(args.prompt), extra, exec.signal)
+      const result = await callGeneration('video', String(args.prompt), extra, exec.signal)
+      if (result.ok !== true) return result
+      return slimVideoResult(result)
     },
   })), 'model-capabilities: generate_video')
 

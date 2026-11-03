@@ -148,6 +148,9 @@ function pendingStage(bytes: number): JSX.Element {
 /** 持久化写入的节流窗口（拖动滑块会高频 setState，逐次写会拖慢主线程）。 */
 const PERSIST_DEBOUNCE = 400
 
+/** 全屏灯箱退场时长（ms），必须与样式表 dtt-iu-fs-out 的 .26s 一致。 */
+const FS_EXIT_MS = 260
+
 /**
  * iu 原生交互卡片外壳。
  *
@@ -251,6 +254,32 @@ function IuCardLive({ spec, onFill }: {
   const exitFullscreen = useCallback((): void => { setFullscreen(false) }, [])
 
   /*
+   * 灯箱退场状态机：先播 260ms 淡出 + 缩回，再真正卸掉全屏层。
+   *
+   * 入场是 .26s 的 dtt-iu-fs-in（淡入 + scale .99 → 1），但退场原先是直接
+   * setFullscreen(false) —— 全屏层瞬间从 DOM 消失，和入场不对等，读起来像被
+   * 掐断。这里补一条同长的 dtt-iu-fs-out（淡出 + scale 1 → .97），播完再卸载。
+   * 期间 body 滚动锁仍由 fullscreen 的 effect 持有，到点才释放，不会中途闪一下。
+   */
+  const [fsClosing, setFsClosing] = useState(false)
+  const fsCloseTimerRef = useRef<number | null>(null)
+  const requestExitFullscreen = useCallback((): void => {
+    // 已在退场中：忽略重复请求（连点关闭 / Esc 连按）。
+    if (fsCloseTimerRef.current !== null) return
+    setFsClosing(true)
+    fsCloseTimerRef.current = window.setTimeout(() => {
+      fsCloseTimerRef.current = null
+      setFsClosing(false)
+      exitFullscreen()
+    }, FS_EXIT_MS)
+  }, [exitFullscreen])
+
+  // 卸载时掐掉未完成的定时器，否则回调会打到已卸载的组件上。
+  useEffect(() => () => {
+    if (fsCloseTimerRef.current !== null) window.clearTimeout(fsCloseTimerRef.current)
+  }, [])
+
+  /*
    * 全屏时锁背景滚动，Esc 退出。
    *
    * 用共用的引用计数锁（shared/scroll-lock.ts）：多张卡片同时开全屏时，
@@ -260,7 +289,8 @@ function IuCardLive({ spec, onFill }: {
   useEffect(() => {
     if (!fullscreen) return
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') exitFullscreen()
+      // Esc 与关闭按钮走同一条退场链路，保证两条入口的动画一致。
+      if (event.key === 'Escape') requestExitFullscreen()
     }
     const release = lockBodyScroll()
     document.addEventListener('keydown', onKey)
@@ -268,7 +298,7 @@ function IuCardLive({ spec, onFill }: {
       release()
       document.removeEventListener('keydown', onKey)
     }
-  }, [fullscreen, exitFullscreen])
+  }, [fullscreen, requestExitFullscreen])
 
   if (mod === undefined || bodyMod === undefined) return null
   const Body = bodyMod.Body
@@ -285,7 +315,13 @@ function IuCardLive({ spec, onFill }: {
         {bodyNode}
       </figure>
       {fullscreen && typeof document !== 'undefined' && createPortal(
-        <div className="dtt-iu-fs" role="dialog" aria-modal="true" aria-label={spec.title}>
+        <div
+          className="dtt-iu-fs"
+          data-closing={fsClosing ? '1' : undefined}
+          role="dialog"
+          aria-modal="true"
+          aria-label={spec.title}
+        >
           <div className="dtt-iu-fs__bar">
             <span className="dtt-iu-fs__title">{spec.title}</span>
             <span className="dtt-iu-fs__acts">
@@ -293,7 +329,7 @@ function IuCardLive({ spec, onFill }: {
                 type="button"
                 className="dtt-iu-fs__btn"
                 title="关闭（Esc）"
-                onClick={exitFullscreen}
+                onClick={requestExitFullscreen}
               >
                 关闭
               </button>

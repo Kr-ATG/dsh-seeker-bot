@@ -21,6 +21,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { applyBriefHost } from './brief.ts'
 
 const ROUTE = '/api/dsh-done-pill'
 /** 热区状态上报路由（client POST → host 经壳子 CDP 注入壳页面）。 */
@@ -932,4 +933,17 @@ export function applyDonePillHost(ctx: Record<string, any>): void {
 
     console.log(`[dsh-seeker-bot] done-pill mounted: ${ROUTE} + ${HOT_ROUTE} + ${NOTIFY_ROUTE} + ${NOTIFY_CLICK_PATH} (global session/event listener active)`)
   })
+
+  /*
+   * 每日情报卡（/api/dsh-done-pill/brief/*）：独立模块自己 ctx.inject(['webServer'])
+   * 挂路由与每日调度，自带功能开关（view.daily-brief）。这里单独兜底：情报卡起不来
+   * 最多是「胶囊上方少一张卡」，不该连累胶囊本身。
+   */
+  try {
+    applyBriefHost(ctx)
+  } catch (error) {
+    ctx.logger?.warn?.(
+      `[dsh-seeker-bot] daily-brief host failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+    )
+  }
 }
