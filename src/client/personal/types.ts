@@ -639,6 +639,58 @@ export interface TaskRecord {
   error?: string
 }
 
+/* -------------------------------------------------------------------------- */
+/* 任务与委派（第 5 步：任务进度条 + 委派面板）                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 一条委派的状态（与宿主 runtime 的 Status 逐字对齐）。
+ *
+ * 前五个是**非终态**（还在排队 / 在跑 / 等人 / 等子活 / 欠一轮）；
+ * 后三个是终态，轮询与进度条都以它们为停止条件。
+ */
+export type AssignmentStatus =
+  | 'queued'
+  | 'running'
+  | 'needs_input'
+  | 'waiting'
+  | 'resume'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+/**
+ * 宿主 `GET /api/personal-agent/assignments?botId=` 返回的一条委派摘要。
+ *
+ * 这是 runtime `Assignment` 的**扁平视图**：前端只需要双方 botId / 名字、状态、
+ * 请求正文与结果；完整 runtime 记录（预算、guard、evidence 等）留在宿主。
+ * `result` 可能很长，展示时由面板截断到 200 字。
+ */
+export interface AssignmentView {
+  id: string
+  /** 这条委派所在树的根 id（root 自己指向自己）。 */
+  rootId: string
+  parentId?: string
+  /** 离根几层，root 是 0。 */
+  depth: number
+  requesterBotId: string
+  requesterName: string
+  assigneeBotId: string
+  assigneeName: string
+  /** 派活意图：work / consult / notify。 */
+  mode: 'work' | 'consult' | 'notify'
+  /** 请求正文（宿主已截断到可展示的长度）。 */
+  brief: string
+  doneWhen?: string
+  status: AssignmentStatus
+  outcome?: string
+  createdAt: number
+  startedAt?: number
+  lastActivityAt?: number
+  finishedAt?: number
+  result?: string
+}
+
 /**
  * 用户发来的一张图片。
  *
@@ -1048,6 +1100,13 @@ export interface AppState {
    * normalizeState / normalizeArchivedSessions。
    */
   archivedSessions?: ArchivedSession[]
+  /**
+   * 每个 Bot 的任务与委派摘要（第 5 步；`GET /assignments?botId=` 的缓存）。
+   *
+   * **只是运行时缓存，不落盘**（保存 effect 会像 pagesByBot 一样剥掉）：宿主才是
+   * 权威，切回某个 Bot 时立即重拉。旧 localStorage 没有这个字段 = 空对象。
+   */
+  assignmentsByBot?: Record<string, AssignmentView[]>
   /**
    * 每个 Bot 的 Pages 列表（3.1）。
    *

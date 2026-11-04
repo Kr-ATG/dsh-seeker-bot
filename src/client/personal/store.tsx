@@ -55,6 +55,7 @@ import {
   type AppState,
   type ArchivedSession,
   type ArtifactRef,
+  type AssignmentView,
   type Avatar,
   type Bot,
   type BotModel,
@@ -370,6 +371,14 @@ const ARCHIVED_SESSION_MESSAGES_MAX = 500
 
 /** 归档标题最大字数（首条 user 消息正文截断）。 */
 const ARCHIVED_SESSION_TITLE_MAX = 30
+
+/* ---------- 任务与委派（第 5 步） ---------- */
+
+/** 有非终态委派时的轮询间隔（毫秒）。 */
+const ASSIGNMENT_POLL_MS = 3_000
+
+/** 每个 Bot 最多缓存多少条委派摘要（与宿主返回的最近 50 条对齐）。 */
+const ASSIGNMENT_LIST_MAX = 50
 
 /** 追加一步并做条数裁剪：保留第一条（start），超出时丢最早的工具步骤。 */
 function pushTaskStep(steps: TaskRecordStep[], step: TaskRecordStep): TaskRecordStep[] {
@@ -813,6 +822,12 @@ export interface PersonalActions {
    * 结果——右栏不出现「页面」卡。不 toast、不记错误，也不阻塞其它渲染。
    */
   refreshPages(botId: string): Promise<void>
+  /**
+   * 拉取某个 Bot 的任务与委派摘要（第 5 步；面板与进度条用）。
+   *
+   * 只做前端缓存、失败静默；宿主没升级时面板保持空态，不影响聊天。
+   */
+  refreshAssignments(botId: string): Promise<void>
   generateJournal(botId: string, opts?: { auto?: boolean; date?: Date }): Promise<Journal>
   runJournalCheck(nowOverride?: number): { ok: boolean; reason: string; journalId?: string }
   startCall(botId: string): void
@@ -968,6 +983,78 @@ function buildArchivedSession(
     messages: kept,
     ...(relay !== undefined ? { relay } : {}),
     archivedAt: now,
+  }
+}
+
+/* ---------- 任务与委派：状态与数据清洗 ---------- */
+
+/** 委派的非终态（仍在进行中的状态）；其余三个 completed / failed / cancelled 是终态。 */
+const OPEN_ASSIGNMENT_STATUSES: ReadonlySet<AssignmentView['status']> = new Set([
+  'queued',
+  'running',
+  'needs_input',
+  'waiting',
+  'resume',
+])
+
+/** 一条委派是否仍在进行中（任务进度条与 3 秒轮询共用同一口径）。 */
+export function isOpenAssignment(status: AssignmentView['status']): boolean {
+  return OPEN_ASSIGNMENT_STATUSES.has(status)
+}
+
+/** 宿主可能返回的委派状态全集（洗数据时拒绝未知值）。 */
+const ALL_ASSIGNMENT_STATUSES: ReadonlySet<string> = new Set([
+  'queued',
+  'running',
+  'needs_input',
+  'waiting',
+  'resume',
+  'completed',
+  'failed',
+  'cancelled',
+])
+
+/**
+ * 洗一条宿主返回的委派摘要。
+ *
+ * 缺 id、且双方 botId 都为空的条目丢弃（既定位不到对话也画不出方向）；
+ * 可选字段按类型兜底——host 版本比前端新 / 旧时，面板不能因为一个字段缺失崩掉。
+ */
+function normalizeAssignmentView(raw: unknown): AssignmentView | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const record = raw as Record<string, any>
+  const id = typeof record.id === 'string' ? record.id : ''
+  if (id === '') return null
+  const requesterBotId = typeof record.requesterBotId === 'string' ? record.requesterBotId : ''
+  const assigneeBotId = typeof record.assigneeBotId === 'string' ? record.assigneeBotId : ''
+  if (requesterBotId === '' && assigneeBotId === '') return null
+  const numberOr = (value: unknown): number | undefined => (
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined
+  )
+  const startedAt = numberOr(record.startedAt)
+  const lastActivityAt = numberOr(record.lastActivityAt)
+  const finishedAt = numberOr(record.finishedAt)
+  return {
+    id,
+    rootId: typeof record.rootId === 'string' && record.rootId !== '' ? record.rootId : id,
+    ...(typeof record.parentId === 'string' && record.parentId !== '' ? { parentId: record.parentId } : {}),
+    depth: typeof record.depth === 'number' && Number.isFinite(record.depth) ? record.depth : 0,
+    requesterBotId,
+    requesterName: typeof record.requesterName === 'string' && record.requesterName !== '' ? record.requesterName : requesterBotId,
+    assigneeBotId,
+    assigneeName: typeof record.assigneeName === 'string' && record.assigneeName !== '' ? record.assigneeName : assigneeBotId,
+    mode: record.mode === 'consult' || record.mode === 'notify' ? record.mode : 'work',
+    brief: typeof record.brief === 'string' ? record.brief : '',
+    ...(typeof record.doneWhen === 'string' && record.doneWhen !== '' ? { doneWhen: record.doneWhen } : {}),
+    status: typeof record.status === 'string' && ALL_ASSIGNMENT_STATUSES.has(record.status)
+      ? record.status as AssignmentView['status']
+      : 'queued',
+    ...(typeof record.outcome === 'string' && record.outcome !== '' ? { outcome: record.outcome } : {}),
+    createdAt: typeof record.createdAt === 'number' && Number.isFinite(record.createdAt) ? record.createdAt : 0,
+    ...(startedAt !== undefined ? { startedAt } : {}),
+    ...(lastActivityAt !== undefined ? { lastActivityAt } : {}),
+    ...(finishedAt !== undefined ? { finishedAt } : {}),
+    ...(typeof record.result === 'string' && record.result !== '' ? { result: record.result } : {}),
   }
 }
 
@@ -1138,6 +1225,8 @@ function normalizeState(parsed: AppState): AppState {
     journalLogs: normalizeJournalLogs(raw.journalLogs),
     tasks,
     archivedSessions,
+    // 运行时缓存：每次加载都从空对象开始，等 activeBot 的 assignments 拉回来再填
+    assignmentsByBot: {},
     settings,
     lastUserMessageAt,
   }
@@ -2606,14 +2695,16 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     const handle = window.setTimeout(() => {
       try {
         /*
-         * 落盘前剥掉两样东西：
+         * 落盘前剥掉三样东西：
          *  · mergedSegments —— 只在流式期间有用（刷新后不会再有 message-update），
          *    存下来等于把同一份 blocks 写两遍，长会话里会把 localStorage 配额翻倍；
          *  · pagesByBot —— Pages 的权威源是宿主（每次打开右栏重新拉），前端这份只是
-         *    运行时缓存，存了也不会被 normalizeState 恢复，白白占空间。
+         *    运行时缓存，存了也不会被 normalizeState 恢复，白白占空间；
+         *  · assignmentsByBot —— 任务与委派的权威源同样是宿主（切 Bot 立即重拉），
+         *    存旧快照只会让刷新后短暂显示过期任务。
          */
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state, (key, value) => (
-          key === 'mergedSegments' || key === 'pagesByBot' ? undefined : value
+          key === 'mergedSegments' || key === 'pagesByBot' || key === 'assignmentsByBot' ? undefined : value
         )))
         /*
          * 名册变了要通知侧栏（2026-11）：操作间 → 记忆的二级菜单里有一组
@@ -4031,6 +4122,84 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     return () => { window.removeEventListener('pa:outputs-refresh', onRefresh) }
   }, [refreshPages])
 
+  /**
+   * 拉取某个 Bot 的任务与委派摘要（第 5 步，`GET /assignments?botId=`）。
+   *
+   * 只做缓存：宿主是权威，成功后整批替换该 Bot 的列表（按 createdAt 倒序，取前 50）。
+   * 失败一律静默——任务面板是增强信息，宿主没升级 / 网络抖动都不该 toast。
+   */
+  const refreshAssignments = useCallback(async (botId: string): Promise<void> => {
+    if (isDemoMode() || botId === '') return
+    try {
+      const response = await fetch(`/api/personal-agent/assignments?botId=${encodeURIComponent(botId)}`, { cache: 'no-store' })
+      if (!response.ok) return
+      const payload = (await response.json()) as { ok?: boolean; assignments?: unknown }
+      if (payload.ok === false || !Array.isArray(payload.assignments)) return
+      const assignments: AssignmentView[] = []
+      for (const raw of payload.assignments as unknown[]) {
+        const view = normalizeAssignmentView(raw)
+        if (view !== null) assignments.push(view)
+      }
+      assignments.sort((a, b) => b.createdAt - a.createdAt)
+      setState((prev) => ({
+        ...prev,
+        assignmentsByBot: {
+          ...(prev.assignmentsByBot ?? {}),
+          [botId]: assignments.slice(0, ASSIGNMENT_LIST_MAX),
+        },
+      }))
+    } catch {
+      /* 宿主未就绪 / 网络失败：静默，面板保留旧数据 */
+    }
+  }, [])
+
+  /** 当前选中的 Bot 是否有未结束的委派（决定是否开启 3 秒轮询）。 */
+  const hasOpenAssignments = (state.assignmentsByBot?.[ui.selectedBotId] ?? [])
+    .some((item) => isOpenAssignment(item.status))
+
+  /*
+   * 任务与委派轮询（第 5 步）：
+   *  · activeBot 变化立即拉一次；
+   *  · 该 Bot 有非终态委派时每 3 秒刷新一次；
+   *  · 全部终态自动停；
+   *  · document.hidden 时暂停（后台标签页不重复打扰宿主），回到前台立即补一次。
+   */
+  useEffect(() => {
+    void refreshAssignments(ui.selectedBotId)
+  }, [refreshAssignments, ui.selectedBotId])
+
+  useEffect(() => {
+    if (isDemoMode() || !hasOpenAssignments) return undefined
+    const botId = ui.selectedBotId
+    let timer: number | null = null
+    const start = (): void => {
+      if (timer !== null || document.hidden) return
+      timer = window.setInterval(() => {
+        void refreshAssignments(botId)
+      }, ASSIGNMENT_POLL_MS)
+    }
+    const stop = (): void => {
+      if (timer === null) return
+      window.clearInterval(timer)
+      timer = null
+    }
+    start()
+    const onVisibility = (): void => {
+      if (document.hidden) {
+        stop()
+        return
+      }
+      // 回到前台先补拉一次（后台期间可能已经结算），再恢复 3 秒节奏
+      void refreshAssignments(botId)
+      start()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      stop()
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [hasOpenAssignments, refreshAssignments, ui.selectedBotId])
+
   const clearUnread = useCallback((id: string, kind: 'bot' | 'room' = 'bot'): void => {
     setState((prev) => ({
       ...prev,
@@ -5045,7 +5214,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
           // 与防抖保存 effect 同一口径：归档里可能带大量 mergedSegments，写盘前剥掉，
           // 否则 500 条归档消息很容易顶破 localStorage 配额，导致「清空没生效」。
           localStorage.setItem(STORAGE_KEY, JSON.stringify(next, (key, value) => (
-            key === 'mergedSegments' || key === 'pagesByBot' ? undefined : value
+            key === 'mergedSegments' || key === 'pagesByBot' || key === 'assignmentsByBot' ? undefined : value
           )))
         } catch {
           /* 配额满：只影响持久化，界面已经清了 */
@@ -6195,6 +6364,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     clearConversation,
     deleteArchivedSession,
     refreshPages,
+    refreshAssignments,
     addMemory,
     deleteMemory,
     createRoutine,
@@ -6222,7 +6392,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     createGroup, renameGroup, deleteGroup, createRoom, updateRoom, setRoomPinned, deleteRoom, answerInteractive,
     recallMessage,
     addMemory, deleteMemory, createRoutine, toggleRoutine, runRoutine, deleteRoutine, proactiveNow, prepareRelay, clearConversation, deleteArchivedSession,
-    refreshPages,
+    refreshPages, refreshAssignments,
     generateJournal, runJournalCheck, startCall, endCall, callUserTurn, interruptCall, retryCallMicrophone,
     callLevel, setCallMuted, setCallSpeaker, setCallVolume,
     minimizeCall, toggleCallSegment, toast, clearUnread,

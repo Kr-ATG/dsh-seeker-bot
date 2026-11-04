@@ -11,8 +11,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
 import { IconBook, IconChevronRight, IconMore, IconPhone, IconSettings, IconTrash, IconUsers, IconX } from '../icons.tsx'
-import { blocksToText, usePersonal } from '../store.tsx'
-import type { Bot, Message } from '../types.ts'
+import { blocksToText, isOpenAssignment, usePersonal } from '../store.tsx'
+import type { AssignmentView, Bot, Message, TaskRecordStep } from '../types.ts'
 import type { RelayBrief } from '../../../shared/relay.ts'
 import { Composer } from './Composer.tsx'
 import { MessageList, jumpToMessage } from './MessageList.tsx'
@@ -26,6 +26,41 @@ const RELAY_PROBE_DEBOUNCE_MS = 800
 /** 两次探测至少隔 3 分钟：占用变化是慢变量，不必每轮都问宿主。 */
 const RELAY_PROBE_THROTTLE_MS = 3 * 60_000
 
+/** 任务与委派面板：最多展示多少条记录。 */
+const ASSIGNMENT_PANEL_LIMIT = 20
+/** 扫多少条最近任务来找「派出去」的步骤。 */
+const ASSIGNMENT_TASK_SCAN_LIMIT = 20
+/** 「派出去」类工具名（subagent / coordinate_bots 等）。 */
+const DISPATCH_TOOL_PATTERN = /^(subagent|subagent_fork|task|coordinate_bots|bot_create)$/i
+/** 工具名 → 中文动作（进度条与时间线共用；未收录的原样显示）。 */
+const TOOL_ACTION_LABELS: Record<string, string> = {
+  subagent: '派子任务',
+  subagent_fork: '派子任务',
+  task: '派子任务',
+  web_search: '搜索网页',
+  read: '读取文件',
+  run_code: '执行命令',
+  pwsh: '执行命令',
+  write: '修改文件',
+  edit: '修改文件',
+  generate_image: '生成图片',
+  generate_video: '生成视频',
+  bot_create: '创建 Bot',
+  coordinate_bots: '派活给其他 Bot',
+}
+
+/** 从任务步骤里筛出来的一条「派出去」记录（面板用）。 */
+interface DispatchItem {
+  key: string
+  tool: string
+  taskTitle: string
+  description: string
+  result: string
+  status?: 'running' | 'ok' | 'error'
+  at: number
+  botId?: string
+}
+
 export function ChatPanel(): JSX.Element {
   const { state, ui, actions, activeBot, activeRoom, activeMessages } = usePersonal()
   const [moreOpen, setMoreOpen] = useState(false)
@@ -36,6 +71,8 @@ export function ChatPanel(): JSX.Element {
   const [historyOpen, setHistoryOpen] = useState(false)
   /** 当前展开预览的归档 id（null = 全部收起）。 */
   const [expandedArchiveId, setExpandedArchiveId] = useState<string | null>(null)
+  /** 「任务与委派」面板是否打开（进度条点击进入）。 */
+  const [assignmentsOpen, setAssignmentsOpen] = useState(false)
   /**
    * 「整理并开新会话」的摘要状态。
    *
@@ -81,6 +118,8 @@ export function ChatPanel(): JSX.Element {
   const confirmTimerRef = useRef<number | null>(null)
   const [historyClosing, setHistoryClosing] = useState(false)
   const historyTimerRef = useRef<number | null>(null)
+  const [assignmentsClosing, setAssignmentsClosing] = useState(false)
+  const assignmentsTimerRef = useRef<number | null>(null)
 
   /*
    * 退场结束后要执行的动作（打开设置 / 群设置等）。
@@ -141,6 +180,17 @@ export function ChatPanel(): JSX.Element {
     }, 240)
   }, [])
 
+  /** 关闭「任务与委派」面板：先播退场，再真正卸载。 */
+  const closeAssignments = useCallback((): void => {
+    if (assignmentsTimerRef.current !== null) return
+    setAssignmentsClosing(true)
+    assignmentsTimerRef.current = window.setTimeout(() => {
+      assignmentsTimerRef.current = null
+      setAssignmentsClosing(false)
+      setAssignmentsOpen(false)
+    }, 240)
+  }, [])
+
   /**
    * 点「整理并开新会话」：调 store 生成接力摘要，成功后卡片内展示预览。
    *
@@ -175,6 +225,7 @@ export function ChatPanel(): JSX.Element {
     if (menuTimerRef.current !== null) window.clearTimeout(menuTimerRef.current)
     if (confirmTimerRef.current !== null) window.clearTimeout(confirmTimerRef.current)
     if (historyTimerRef.current !== null) window.clearTimeout(historyTimerRef.current)
+    if (assignmentsTimerRef.current !== null) window.clearTimeout(assignmentsTimerRef.current)
   }, [])
 
   /**
@@ -239,6 +290,89 @@ export function ChatPanel(): JSX.Element {
       .sort((a, b) => b.archivedAt - a.archivedAt)
   }, [state.archivedSessions, activeBot.id])
 
+  /** 当前会话的任务记录（新→旧）。任务进度条与委派面板的主数据源。 */
+  const botTasks = useMemo(() => {
+    return state.tasks
+      .filter((task) => task.botId === activeBot.id
+        && (activeRoom === null ? task.roomId === undefined : task.roomId === activeRoom.id))
+      .sort((a, b) => b.startedAt - a.startedAt)
+  }, [state.tasks, activeBot.id, activeRoom?.id])
+
+  /** 当前正在跑的一轮任务；没有就是 undefined。 */
+  const runningTask = botTasks.find((task) => task.status === 'running')
+  /** 面板展示的任务：优先正在跑的，否则最近一条。 */
+  const panelTask = runningTask ?? botTasks[0]
+
+  /** 当前动作：优先最后一条 running 的步骤，其次最后一步。 */
+  let currentStepIndex = -1
+  if (runningTask !== undefined && runningTask.steps.length > 0) {
+    currentStepIndex = runningTask.steps.length - 1
+    for (let index = runningTask.steps.length - 1; index >= 0; index -= 1) {
+      if (runningTask.steps[index].status === 'running') {
+        currentStepIndex = index
+        break
+      }
+    }
+  }
+  const currentStep: TaskRecordStep | undefined = currentStepIndex >= 0 && runningTask !== undefined
+    ? runningTask.steps[currentStepIndex]
+    : undefined
+
+  /** 进度条耗时每秒刷新（只在这一轮还在跑时开定时器）。 */
+  const [, setTaskbarClock] = useState(0)
+  useEffect(() => {
+    if (runningTask === undefined) return undefined
+    const timer = window.setInterval(() => setTaskbarClock((value) => value + 1), 1_000)
+    return () => window.clearInterval(timer)
+  }, [runningTask?.id])
+
+  /**
+   * 从最近 20 条任务的工具步骤里筛出「派出去」的记录。
+   *
+   * 主数据源是 TaskRecord.steps——DSH 的 subagent / coordinate_bots / bot_create
+   * 都只是工具调用，没有独立的委派表；这里把工具步骤还原成用户能看懂的任务列表。
+   */
+  const dispatchItems = useMemo(() => {
+    const items: DispatchItem[] = []
+    for (const task of botTasks.slice(0, ASSIGNMENT_TASK_SCAN_LIMIT)) {
+      for (const step of task.steps) {
+        if (step.kind !== 'tool' || !DISPATCH_TOOL_PATTERN.test(step.title)) continue
+        const parsed = parseDispatchDetail(step)
+        items.push({
+          key: `${task.id}:${step.id ?? String(step.at)}`,
+          tool: step.title,
+          taskTitle: task.title,
+          description: parsed.description,
+          result: parsed.result,
+          status: step.status,
+          at: step.at,
+          ...(parsed.botId !== '' ? { botId: parsed.botId } : {}),
+        })
+      }
+    }
+    return items.sort((a, b) => b.at - a.at).slice(0, ASSIGNMENT_PANEL_LIMIT)
+  }, [botTasks])
+
+  /** assignments 端点返回的该 Bot 相关委派（新→旧；面板与进度条补充数据源）。 */
+  const relatedAssignments = useMemo(() => {
+    return (state.assignmentsByBot?.[activeBot.id] ?? [])
+      .slice()
+      .sort((a, b) => b.createdAt - a.createdAt)
+  }, [state.assignmentsByBot, activeBot.id])
+
+  /** 其他 Bot 派给当前 Bot 的活（面板补充区）。 */
+  const incomingAssignments = useMemo(() => {
+    return relatedAssignments.filter((item) => item.assigneeBotId === activeBot.id)
+  }, [relatedAssignments])
+
+  /** 当前 Bot 派出、尚未结束的委派（补充进度条）。 */
+  const delegatedOpenAssignments = useMemo(() => {
+    return relatedAssignments.filter((item) => item.requesterBotId === activeBot.id && isOpenAssignment(item.status))
+  }, [relatedAssignments])
+
+  const incomingOpenAssignment = incomingAssignments.find((item) => isOpenAssignment(item.status))
+  const taskbarVisible = runningTask !== undefined || incomingOpenAssignment !== undefined || delegatedOpenAssignments.length > 0
+
   useEffect(() => {
     if (!moreOpen) return undefined
     const close = (event: MouseEvent): void => {
@@ -249,19 +383,20 @@ export function ChatPanel(): JSX.Element {
     return () => document.removeEventListener('mousedown', close)
   }, [moreOpen, closeMenu])
 
-  /* Esc 逐层关闭：历史面板 / 确认卡优先，其次收起「更多」菜单；都走同一个退场。 */
+  /* Esc 逐层关闭：任务/历史面板、确认卡优先，其次收起「更多」菜单；都走同一个退场。 */
   useEffect(() => {
-    if (!moreOpen && clearTarget === null && !historyOpen) return undefined
+    if (!moreOpen && clearTarget === null && !historyOpen && !assignmentsOpen) return undefined
     const onKeyDown = (event: KeyboardEvent): void => {
       // 被下层控件（例如 PaSelect 的 Esc）先处理过的事件不再重复响应。
       if (event.key !== 'Escape' || event.defaultPrevented) return
-      if (historyOpen) closeHistory()
+      if (assignmentsOpen) closeAssignments()
+      else if (historyOpen) closeHistory()
       else if (clearTarget !== null) closeConfirm()
       else closeMenu()
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [moreOpen, clearTarget, historyOpen, closeMenu, closeConfirm, closeHistory])
+  }, [moreOpen, clearTarget, historyOpen, assignmentsOpen, closeMenu, closeConfirm, closeHistory, closeAssignments])
 
   /*
    * 上下文接力提示的探测时机：**每轮结束**（最后一条是 bot 消息、没有 pending 占位、
@@ -508,6 +643,51 @@ export function ChatPanel(): JSX.Element {
         />
         <MessageList messages={activeMessages} bot={activeBot} room={activeRoom} />
         <PendingBar messages={activeMessages} />
+        {taskbarVisible ? (
+          <button
+            className="pa-taskbar"
+            type="button"
+            onClick={() => {
+              // 打开前补拉一次委派摘要，面板里看到的是最新状态（轮询只在有非终态时跑）
+              void actions.refreshAssignments(activeBot.id)
+              setAssignmentsOpen(true)
+            }}
+            title="查看任务与委派"
+          >
+            <span
+              className="pa-taskbar__dot"
+              data-status={runningTask !== undefined
+                ? 'running'
+                : (incomingOpenAssignment?.status ?? delegatedOpenAssignments[0]?.status ?? 'running')}
+              aria-hidden="true"
+            />
+            <span className="pa-taskbar__body">
+              {runningTask !== undefined ? (
+                <span className="pa-taskbar__line pa-taskbar__line--main">
+                  任务进行中 · {currentStep !== undefined
+                    ? `第 ${String(currentStepIndex + 1)} 步 · ${stepActionLabel(currentStep)}`
+                    : '正在准备'} · {formatTaskElapsed(runningTask.startedAt)}
+                </span>
+              ) : null}
+              {incomingOpenAssignment !== undefined ? (
+                <span className="pa-taskbar__line">
+                  任务进行中 · {assignmentStatusLabel(incomingOpenAssignment.status)} · {truncateText(incomingOpenAssignment.brief, 40) || '（无说明）'}
+                </span>
+              ) : null}
+              {delegatedOpenAssignments.length > 0 ? (
+                <span className="pa-taskbar__line">
+                  已派出 {delegatedOpenAssignments.length} 个任务：
+                  {delegatedOpenAssignments.slice(0, 2).map((item) => `${item.assigneeName}（${assignmentStatusLabel(item.status)}）`).join('、')}
+                  {delegatedOpenAssignments.length > 2 ? '…' : ''}
+                </span>
+              ) : null}
+            </span>
+            <span className="pa-taskbar__jump">
+              查看
+              <IconChevronRight size={12} />
+            </span>
+          </button>
+        ) : null}
         {relayHint !== null ? (
           <div className="pa-relay-hint" role="status" data-kind={relayHint.kind}>
             <span className="pa-relay-hint__dot" aria-hidden="true" />
@@ -710,6 +890,122 @@ export function ChatPanel(): JSX.Element {
           </div>
         </div>
       ) : null}
+
+      {assignmentsOpen ? (
+        <div
+          className="pa-overlay"
+          data-closing={assignmentsClosing ? '1' : undefined}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeAssignments()
+          }}
+        >
+          <div className="pa-modal pa-assign" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="pa-modal__head">
+              <div className="pa-modal__title">任务与委派 · {activeBot.name}</div>
+              <button className="pa-modal__close" type="button" onClick={() => closeAssignments()} aria-label="关闭">
+                <IconX size={16} />
+              </button>
+            </div>
+            <div className="pa-modal__body">
+              {panelTask === undefined && dispatchItems.length === 0 && relatedAssignments.length === 0 ? (
+                <p className="pa-assign__empty">还没有任务与委派记录。Bot 执行任务或派出子任务时，会在这里显示。</p>
+              ) : (
+                <>
+                  {panelTask !== undefined ? (
+                    <section className="pa-assign__section">
+                      <div className="pa-assign__section-title">
+                        {panelTask.status === 'running' ? '当前任务' : '最近任务'} · {panelTask.title}
+                      </div>
+                      <div className="pa-assign__timeline">
+                        {panelTask.steps.slice(-20).map((step, index) => (
+                          <div className="pa-assign__step" key={step.id ?? `${step.kind}-${String(index)}`}>
+                            <span className="pa-assign__dot" data-status={step.status ?? 'neutral'} aria-hidden="true" />
+                            <span className="pa-assign__step-title">{stepActionLabel(step)}</span>
+                            {step.status !== undefined ? (
+                              <span className="pa-assign__step-status">{stepStatusLabel(step.status)}</span>
+                            ) : null}
+                            <span className="pa-assign__step-time">{formatStepClock(step.at)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  ) : null}
+                  {dispatchItems.length > 0 ? (
+                    <section className="pa-assign__section">
+                      <div className="pa-assign__section-title">派出的任务</div>
+                      <div className="pa-assign__list">
+                        {dispatchItems.map((item) => {
+                          const targetBotId = item.botId
+                          return (
+                            <div className="pa-assign__item" key={item.key}>
+                              <div className="pa-assign__row">
+                                <span className="pa-assign__tool">{toolActionLabel(item.tool)}</span>
+                                <span className="pa-assign__status" data-status={item.status ?? 'neutral'}>
+                                  {stepStatusLabel(item.status) || '—'}
+                                </span>
+                              </div>
+                              <div className="pa-assign__brief">
+                                {item.description !== '' ? `派给：${truncateText(item.description, 60)}` : `派给：${toolActionLabel(item.tool)}`}
+                              </div>
+                              {item.result !== '' ? <div className="pa-assign__result">{truncateText(item.result, 200)}</div> : null}
+                              {targetBotId !== undefined && targetBotId !== '' && targetBotId !== activeBot.id ? (
+                                <button
+                                  className="pa-assign__open"
+                                  type="button"
+                                  onClick={() => {
+                                    actions.selectBot(targetBotId)
+                                    closeAssignments()
+                                  }}
+                                >
+                                  打开会话
+                                </button>
+                              ) : null}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </section>
+                  ) : null}
+                  {incomingAssignments.length > 0 ? (
+                    <section className="pa-assign__section">
+                      <div className="pa-assign__section-title">其他 Bot 派来的活</div>
+                      <div className="pa-assign__list">
+                        {incomingAssignments.slice(0, ASSIGNMENT_PANEL_LIMIT).map((item) => (
+                          <div className="pa-assign__item" key={item.id}>
+                            <div className="pa-assign__row">
+                              <span className="pa-assign__direction">来自 {item.requesterName !== '' ? item.requesterName : item.requesterBotId}</span>
+                              <span className="pa-assign__status" data-status={item.status}>{assignmentStatusLabel(item.status)}</span>
+                            </div>
+                            <div className="pa-assign__brief">
+                              {item.brief !== '' ? truncateText(item.brief, 60) : '（无说明）'}
+                            </div>
+                            <div className="pa-assign__meta">{formatAssignmentMeta(item)}</div>
+                            {item.result !== undefined && item.result !== '' ? (
+                              <div className="pa-assign__result">{truncateText(item.result, 200)}</div>
+                            ) : null}
+                            {item.requesterBotId !== '' && item.requesterBotId !== activeBot.id ? (
+                              <button
+                                className="pa-assign__open"
+                                type="button"
+                                onClick={() => {
+                                  actions.selectBot(item.requesterBotId)
+                                  closeAssignments()
+                                }}
+                              >
+                                打开会话
+                              </button>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  ) : null}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
       </div>
     </>
   )
@@ -830,4 +1126,108 @@ function formatArchiveTime(at: number): string {
   if (Number.isNaN(date.getTime())) return ''
   const pad = (value: number): string => String(value).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+/* ───────────────────────── 任务与委派辅助 ───────────────────────── */
+
+/** 工具名 → 中文动作（未收录的原样返回）。 */
+function toolActionLabel(name: string): string {
+  return TOOL_ACTION_LABELS[name.toLowerCase()] ?? name
+}
+
+/** 任务步骤 → 人类可读的动作标题（工具名做中文映射，过程文字原样）。 */
+function stepActionLabel(step: TaskRecordStep): string {
+  return step.kind === 'tool' ? toolActionLabel(step.title) : step.title
+}
+
+/** 步骤状态 → 中文（无状态 = 空串，时间线上不显示状态 pill）。 */
+function stepStatusLabel(status?: 'running' | 'ok' | 'error'): string {
+  if (status === 'running') return '进行中'
+  if (status === 'error') return '失败'
+  if (status === 'ok') return '完成'
+  return ''
+}
+
+/** 委派状态 → 中文（与状态徽标的配色档位一一对应）。 */
+function assignmentStatusLabel(status: AssignmentView['status']): string {
+  switch (status) {
+    case 'queued': return '排队'
+    case 'running': return '进行中'
+    case 'needs_input': return '等输入'
+    case 'waiting': return '等待子活'
+    case 'resume': return '待继续'
+    case 'completed': return '完成'
+    case 'failed': return '失败'
+    case 'cancelled': return '已取消'
+    default: return status
+  }
+}
+
+/** 截断一段展示文本（压平空白、保留可读前缀）。 */
+function truncateText(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat
+}
+
+/** 把秒数写成「N 秒 / N 分 M 秒」。 */
+function formatElapsedSeconds(seconds: number): string {
+  if (seconds < 60) return `${String(seconds)} 秒`
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  return rest === 0 ? `${String(minutes)} 分` : `${String(minutes)} 分 ${String(rest)} 秒`
+}
+
+/** 任务从 startedAt 到现在跑了多久（进度条每秒刷新时调用）。 */
+function formatTaskElapsed(startedAt: number): string {
+  return formatElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)))
+}
+
+/** 步骤时间（本地时区，精确到秒）。 */
+function formatStepClock(at: number): string {
+  const date = new Date(at)
+  if (Number.isNaN(date.getTime())) return ''
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+/** 委派面板里的耗时或创建时间。 */
+function formatAssignmentMeta(item: AssignmentView): string {
+  if (item.finishedAt !== undefined && item.createdAt > 0) {
+    const seconds = Math.max(0, Math.round((item.finishedAt - item.createdAt) / 1000))
+    return `耗时 ${formatElapsedSeconds(seconds)}`
+  }
+  return formatArchiveTime(item.createdAt)
+}
+
+/**
+ * 从 TaskRecordStep.detail 里尽量解析派活参数。
+ *
+ * detail 是宿主截断到 220 字的 args / result：可能是 JSON（subagent 的 prompt /
+ * description、coordinate_bots 的 bot_id），也可能已经是纯文本结果。能解析就取
+ * 人读字段，解析不了就把原文当结果摘要。
+ */
+function parseDispatchDetail(step: TaskRecordStep): { description: string; result: string; botId: string } {
+  const raw = step.detail?.trim() ?? ''
+  if (raw === '') return { description: '', result: '', botId: '' }
+  let parsed: Record<string, unknown> | null = null
+  try {
+    const value = JSON.parse(raw) as unknown
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) parsed = value as Record<string, unknown>
+  } catch {
+    /* detail 被截断 / 不是 JSON：退回原文展示 */
+  }
+  const pickString = (...keys: string[]): string => {
+    if (parsed === null) return ''
+    for (const key of keys) {
+      const value = parsed[key]
+      if (typeof value === 'string' && value.trim() !== '') return value.trim()
+    }
+    return ''
+  }
+  const description = pickString('description', 'prompt', 'message')
+  const botId = pickString('bot_id', 'botId', 'assignee_bot_id', 'assigneeBotId')
+  const explicitResult = pickString('result', 'output', 'summary')
+  // 解析成功但没 result 字段时，不把 args JSON 当结果展示（那是参数不是结果）
+  const result = explicitResult !== '' ? explicitResult : (parsed === null && step.status !== 'running' ? raw : '')
+  return { description, result, botId }
 }

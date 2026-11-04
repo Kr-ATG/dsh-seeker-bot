@@ -69,7 +69,7 @@ import { decodeDataUrl, extensionFor, looksLikeImage, materializeRoot } from '..
 import { __test as officeInternals, officeEngineAvailable, renderOfficePages, renderOfficePdf } from '../../office/index.ts'
 import { applyPersonalAgentRealtime, type PersonalRealtimeConfig } from './realtime/mount.ts'
 import { rememberBotSpec, startPersonalRuntime } from './runtime/host.ts'
-import { personalRuntime } from './runtime/registry.ts'
+import { knownBots, personalRuntime } from './runtime/registry.ts'
 
 const ROUTE = '/api/personal-agent'
 const MAX_BODY = 32 * 1024 * 1024
@@ -224,6 +224,97 @@ function crossSite(req: any): boolean {
   } catch {
     return true
   }
+}
+
+/* ───────────────────── 作业运行时：assignments 查询 ───────────────────── */
+
+/**
+ * 作业列表的一行摘要（`GET /assignments` 的返回项）。
+ *
+ * 字段与任务卡前端约定逐字对齐：brief / result 各截 300 字——列表只负责
+ * 「有哪些活、进行到哪」，全文需要时再查。名称优先用花名册，查不到就回退
+ * botId；前端有自己的一份 Bot 名册时也可以只读 botId 自行映射。
+ */
+export interface AssignmentSummary {
+  id: string
+  rootId: string
+  parentId: string | null
+  depth: number
+  requesterBotId: string | null
+  requesterName: string
+  assigneeBotId: string
+  assigneeName: string
+  mode: string
+  brief: string
+  doneWhen: string | null
+  status: string
+  outcome: string | null
+  createdAt: number
+  startedAt: number | null
+  lastActivityAt: number | null
+  finishedAt: number | null
+  result: string
+}
+
+/** 摘要里的文本截断：超长保留前 N 字并加省略号。 */
+function clipAssignmentText(value: unknown, max: number): string {
+  const text = typeof value === 'string' ? value.trim() : ''
+  return text.length <= max ? text : `${text.slice(0, max)}…`
+}
+
+/**
+ * 把 runtime 的全部作业记录收敛成某个 Bot 的摘要列表。
+ *
+ * 过滤口径：请求者或执行者是该 Bot 都算「与它相关」——既覆盖它派出去的活，
+ * 也覆盖派给它自己的活。按创建时间倒序取最近 50 条，给前端轮询画任务卡。
+ *
+ * @param assignments runtime 的 `list()` 快照
+ * @param botId 当前 Bot
+ * @param roster Bot 花名册（名称映射；缺省读运行时注入的那份）
+ */
+export function summarizeAssignments(
+  assignments: readonly any[],
+  botId: string,
+  roster: ReadonlyArray<{ id: string; name: string }> = knownBots(),
+): AssignmentSummary[] {
+  if (botId === '' || !Array.isArray(assignments)) return []
+  const nameOf = (id: string | undefined): string | undefined =>
+    roster.find((item) => item.id === id)?.name ?? id
+  return assignments
+    .filter((item) => {
+      if (item === null || typeof item !== 'object') return false
+      return item.requester?.botId === botId || item.assignee?.botId === botId
+    })
+    .slice()
+    .sort((a, b) => (Number(b?.createdAt) || 0) - (Number(a?.createdAt) || 0))
+    .slice(0, 50)
+    .map((item) => {
+      const requesterBotId = typeof item.requester?.botId === 'string' ? item.requester.botId : undefined
+      const assigneeBotId = String(item.assignee?.botId ?? '')
+      const requesterName = requesterBotId !== undefined
+        ? nameOf(requesterBotId) ?? requesterBotId
+        : item.requester?.kind === 'routine_run' ? '例行任务' : '用户'
+      return {
+        id: String(item.id ?? ''),
+        rootId: String(item.rootId ?? ''),
+        parentId: item.parentId === undefined || item.parentId === null ? null : String(item.parentId),
+        depth: Number.isFinite(item.depth) ? item.depth : 0,
+        requesterBotId: requesterBotId ?? null,
+        requesterName,
+        assigneeBotId,
+        assigneeName: nameOf(assigneeBotId) ?? assigneeBotId,
+        mode: String(item.mode ?? ''),
+        brief: clipAssignmentText(item.brief, 300),
+        doneWhen: item.doneWhen === undefined || item.doneWhen === null ? null : String(item.doneWhen),
+        status: String(item.status ?? ''),
+        outcome: item.outcome === undefined || item.outcome === null ? null : String(item.outcome),
+        createdAt: Number.isFinite(item.createdAt) ? item.createdAt : 0,
+        startedAt: Number.isFinite(item.startedAt) ? item.startedAt : null,
+        lastActivityAt: Number.isFinite(item.lastActivityAt) ? item.lastActivityAt : null,
+        finishedAt: Number.isFinite(item.finishedAt) ? item.finishedAt : null,
+        result: clipAssignmentText(item.result, 300),
+      }
+    })
 }
 
 /* ───────────────────── 文件 / 媒体路由的准入与工具 ───────────────────── */
@@ -1131,7 +1222,7 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
               'history/index', 'history/search', 'history/cross-search',
               'approval/rules',
               'pages',
-              'events', 'routines', 'messages', 'bots/created', 'bots',
+              'events', 'routines', 'messages', 'bots/created', 'bots', 'assignments',
             ],
           })
         }
@@ -1925,6 +2016,26 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
           if (botId === '') return sendJson(res, 400, { ok: false, error: 'empty botId' })
           const result = cancelBotTurn(webCtx, botId)
           return sendJson(res, result.ok ? 200 : 409, result)
+        }
+
+        /*
+         * 作业运行时：与当前 Bot 相关的派活 / 执行进展列表。
+         *
+         * 前端按轮询读取（MVP 不要求 SSE 推送），用来画任务卡。只读
+         * runtime 的快照，不触发推进；运行时没起来时返回空列表——看不到
+         * 任务卡比报错更不打扰对话。
+         */
+        if ((tail === '/assignments' || tail === '/assignments/') && method === 'GET') {
+          const botId = (url.searchParams.get('botId') ?? '').trim()
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          let assignments: AssignmentSummary[] = []
+          try {
+            assignments = summarizeAssignments(personalRuntime()?.list?.() ?? [], botId)
+          } catch {
+            /* 记录损坏 / 运行时不可用：按空列表处理 */
+            assignments = []
+          }
+          return sendJson(res, 200, { ok: true, assignments })
         }
 
         /*

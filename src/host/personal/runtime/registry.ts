@@ -31,6 +31,13 @@ export interface RuntimeHandle {
   /** 读一条记录（给 UI / 诊断用）。 */
   get: (id: string) => Assignment | undefined
   /**
+   * 读全部作业记录（给 UI / 诊断用；只读快照，不会触发运行时推进）。
+   *
+   * 与 `get` 同源，但给列表页一次拿全量——过滤 / 排序在调用方做，
+   * 避免每个界面各写一套查法。
+   */
+  list: () => readonly Assignment[]
+  /**
    * 记下这一轮已经完成的对外动作。
    *
    * 必须在工具**结算的当下**调用（不是等 turn 结束）：进程中途崩溃时，

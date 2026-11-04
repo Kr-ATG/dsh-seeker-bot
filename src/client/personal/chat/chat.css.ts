@@ -2757,6 +2757,128 @@ button.dgi__save-button:disabled { opacity: 0.6; cursor: default; }
 .pa-pending__jump { flex: none; display: inline-flex; align-items: center; gap: 1px; color: var(--pa-text-3); }
 .pa-pending:hover .pa-pending__jump { color: var(--pa-text); }
 
+/* ---------- 任务进度条（第 5 步） ----------
+ * 输入框上方的一条细条：与待处理上浮条同档，但显示的是「当前这轮做到哪一步」。
+ * 点整条打开任务与委派面板。 */
+.pa-taskbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 26px 8px;
+  padding: 7px 12px;
+  border-radius: 10px;
+  background: var(--pa-chat-glass);
+  border: 1px solid var(--pa-line);
+  color: var(--pa-text-2);
+  font-size: calc(11.5px + var(--pa-font-delta));
+  line-height: calc(16px + var(--pa-font-delta));
+  text-align: left;
+  cursor: pointer;
+  transition: background 130ms ease, border-color 130ms ease;
+}
+.pa-taskbar:hover { background: var(--pa-chat-glass-2); border-color: var(--pa-line-2); }
+.pa-taskbar:focus-visible { outline: 2px solid var(--pa-accent); outline-offset: 1px; }
+.pa-taskbar__dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--pa-accent); }
+.pa-taskbar__dot[data-status='queued'],
+.pa-taskbar__dot[data-status='waiting'],
+.pa-taskbar__dot[data-status='needs_input'],
+.pa-taskbar__dot[data-status='resume'] { background: #ff9f0a; }
+.pa-taskbar__dot[data-status='completed'] { background: var(--pa-green); }
+.pa-taskbar__dot[data-status='failed'] { background: var(--pa-red); }
+.pa-taskbar__dot[data-status='cancelled'] { background: var(--pa-text-3); }
+.pa-taskbar__body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.pa-taskbar__line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pa-text-2); }
+.pa-taskbar__line--main { color: var(--pa-text); font-weight: 500; }
+.pa-taskbar__jump { flex: none; display: inline-flex; align-items: center; gap: 1px; color: var(--pa-text-3); }
+.pa-taskbar:hover .pa-taskbar__jump { color: var(--pa-text); }
+
+/* ---------- 任务与委派面板（第 5 步） ----------
+ * 只读面板：当前任务时间线 + 派出的任务（来自 TaskRecord.steps）+ assignments
+ * 端点补充。颜色全部走 --pa-* 变量，状态徽标按 running/waiting… 分档。 */
+.pa-assign { width: 640px; max-width: calc(100vw - 48px); }
+.pa-assign .pa-modal__body { padding-bottom: 18px; }
+.pa-assign__empty {
+  margin: 6px 0 4px;
+  padding: 26px 16px;
+  border: 1px dashed var(--pa-line);
+  border-radius: 10px;
+  text-align: center;
+  font-size: calc(12px + var(--pa-font-delta));
+  line-height: 1.6;
+  color: var(--pa-text-3);
+}
+.pa-assign__section { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+.pa-assign__section:last-child { margin-bottom: 0; }
+.pa-assign__section-title { font-size: calc(11.5px + var(--pa-font-delta)); font-weight: 600; color: var(--pa-text-2); }
+.pa-assign__timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--pa-line);
+  border-radius: 10px;
+  background: var(--pa-chat-glass);
+}
+.pa-assign__step { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: calc(11.5px + var(--pa-font-delta)); }
+.pa-assign__dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--pa-text-3); }
+.pa-assign__dot[data-status='running'] { background: var(--pa-accent); }
+.pa-assign__dot[data-status='ok'] { background: var(--pa-green); }
+.pa-assign__dot[data-status='error'] { background: var(--pa-red); }
+.pa-assign__step-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pa-text-2); }
+.pa-assign__step-status { flex: none; font-size: calc(10px + var(--pa-font-delta)); color: var(--pa-text-3); }
+.pa-assign__step-time { flex: none; color: var(--pa-text-3); font-variant-numeric: tabular-nums; }
+.pa-assign__list { display: flex; flex-direction: column; gap: 8px; }
+.pa-assign__item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--pa-line);
+  border-radius: 10px;
+  background: var(--pa-chat-glass);
+}
+.pa-assign__row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pa-assign__tool,
+.pa-assign__direction { flex: none; font-size: calc(11px + var(--pa-font-delta)); font-weight: 500; color: var(--pa-text-2); }
+.pa-assign__status {
+  flex: none;
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: calc(10px + var(--pa-font-delta));
+  line-height: calc(16px + var(--pa-font-delta));
+  color: var(--pa-text-3);
+  background: var(--pa-chat-glass-2);
+}
+.pa-assign__status[data-status='running'] { color: var(--pa-accent); background: color-mix(in srgb, var(--pa-accent) 15%, transparent); }
+.pa-assign__status[data-status='queued'],
+.pa-assign__status[data-status='waiting'],
+.pa-assign__status[data-status='needs_input'],
+.pa-assign__status[data-status='resume'] { color: #ff9f0a; background: rgba(255, 159, 10, 0.14); }
+.pa-assign__status[data-status='completed'] { color: var(--pa-green); background: color-mix(in srgb, var(--pa-green) 15%, transparent); }
+.pa-assign__status[data-status='failed'] { color: var(--pa-red); background: rgba(255, 69, 58, 0.12); }
+.pa-assign__status[data-status='cancelled'] { color: var(--pa-text-3); background: var(--pa-chat-glass-2); }
+.pa-assign__brief { font-size: calc(12px + var(--pa-font-delta)); line-height: 1.5; color: var(--pa-text); overflow-wrap: anywhere; }
+.pa-assign__meta { font-size: calc(10.5px + var(--pa-font-delta)); color: var(--pa-text-3); }
+.pa-assign__result { font-size: calc(11px + var(--pa-font-delta)); line-height: 1.5; color: var(--pa-text-2); max-height: 72px; overflow: hidden; }
+.pa-assign__open {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: calc(10.5px + var(--pa-font-delta));
+  color: var(--pa-accent);
+  background: color-mix(in srgb, var(--pa-accent) 12%, transparent);
+}
+.pa-assign__open:hover { background: color-mix(in srgb, var(--pa-accent) 20%, transparent); }
+@media (max-width: 680px) {
+  .pa-assign { width: 100%; max-width: calc(100vw - 24px); }
+  .pa-assign__timeline { max-height: 32vh; }
+}
+
 /* ---------- 上下文接力提示条（第 2 步） ----------
  * 与待处理上浮条同一档：输入框上方的细条，不抢消息的注意力。
  * 颜色全部走 --pa-* 变量，深浅主题自动适配；点「去整理」才打开确认卡，

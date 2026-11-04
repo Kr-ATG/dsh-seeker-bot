@@ -366,6 +366,7 @@ export function startPersonalRuntime(ctx: any): { runtime: JobRuntime; runner: P
       assignmentOf: (botId) => runner.assignmentOf(botId),
       enqueue: (request) => runtime.enqueue(request),
       get: (id) => store.get(id),
+      list: () => store.all(),
       recordOutward: (id, labels) => runtime.recordOutward(id, labels),
     })
     setRosterProvider((excludeBotId) => specCache.roster(excludeBotId))
