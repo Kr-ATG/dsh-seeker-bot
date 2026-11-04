@@ -26,6 +26,7 @@ import { formatClock, type Bot, type Message, type MessageBlock } from '../types
 import { usePersonal } from '../store.tsx'
 import { getSpeechState, speakText, speechTextOf, stopSpeech, useSpeechState } from '../speech.ts'
 import { MessageBlockView } from './MessageBlockView.tsx'
+import { hasRenderableContent } from './message-visibility.ts'
 import { pendingTasksOf } from './pending.ts'
 
 export interface MessageListProps {
@@ -76,23 +77,6 @@ function sourceLabel(message: Message): string | null {
   if (message.source === 'call') return '来自通话'
   if (message.source === 'control') return '系统'
   return null
-}
-
-/**
- * 这条消息渲染出来会不会有东西。
- *
- * 多消息上线后，host 会为「一次纯工具调用」单独开一条消息（生图卡要有自己的气泡）。
- * 工具块现在**总是**可见：渲染层会把连续的工具调用聚成一行「N 个动作 · 展开」
- * （1.4 可审计流水）。之前这里要逐项判断「有没有媒体 / 产出物」，是因为没内容的
- * 工具块会被渲染成空气泡；现在它们至少有一行折叠条，所以只剩「空文本」要排除。
- */
-function hasVisibleContent(message: Message): boolean {
-  return message.blocks.some((block) => {
-    if (block.type === 'text') return block.text.trim() !== ''
-    // task / interactive / call / call-segment / journal / image / voice / tool /
-    // execution：都是显式可见的块
-    return true
-  })
 }
 
 /**
@@ -486,10 +470,19 @@ export function MessageList({ messages, bot, room }: MessageListProps): JSX.Elem
    *
    * 过滤放在分组之前，是因为时间分隔与动画延迟都按「可见序列」算：拿原始 messages
    * 的下标去取 previous，遇到被跳过的消息（收起的通话段 / 空消息）就会算错分隔位置。
+   *
+   * 「有没有内容」统一交给 message-visibility.ts 的 hasRenderableContent：它和
+   * MessageBlockView 的渲染规则同源——普通工具块（run_code / pwsh …）不渲染，所以
+   * 纯工具进度消息（host 会给一次纯工具调用单开一条 kind=progress 消息）既不该进
+   * 消息流，也不该被 turnStatsOf 算进「N 条消息」。旧判据把任何 tool 块都当可见，
+   * 用户因此看到「2 条消息」却只有 1 条正文（真实报障）。
+   *
+   * pending 消息不走这个判据：它还没定稿，哪怕暂时只有被过滤掉的工具块，也要留在
+   * 流里显示「正在输入」的三点占位（见 MessageBlockView 的空态兜底）。
    */
   const visible = useMemo(() => messages.filter((message) => {
     if (message.callSegment !== undefined && collapsedSegments.has(message.callSegment)) return false
-    if (message.role === 'bot' && message.pending !== true && !hasVisibleContent(message)) return false
+    if (message.role === 'bot' && message.pending !== true && !hasRenderableContent(message)) return false
     return true
   }), [messages, collapsedSegments])
 

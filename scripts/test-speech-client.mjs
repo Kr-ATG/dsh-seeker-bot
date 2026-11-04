@@ -180,6 +180,8 @@ const {
   cleanSpeechText,
   primeSpeech,
   SPEECH_MAX_CHARS,
+  SPEECH_CHUNK_CHARS,
+  splitSpeechChunks,
 } = await import(pathToFileURL(outfile).href)
 
 /** 造一段 PCM16 字节（小端），长度 = samples 个采样。 */
@@ -218,7 +220,9 @@ const streamResponse = (chunks, extraHeaders = {}) => {
 const initial = getSpeechState()
 check('初始状态是空闲', initial.speaking === false && initial.loading === false && initial.messageId === null)
 
-await speakText('你好呀', { messageId: 'm-1', botId: 'bot-1', voice: 'linjiajiejie', vendor: 'stepfun' })
+// playBuffer 现在要等 onended 才 resolve：先拿住播放句柄，断言播放中态后再手动收尾
+const firstRun = speakText('你好呀', { messageId: 'm-1', botId: 'bot-1', voice: 'linjiajiejie', vendor: 'stepfun' })
+await tick(20)
 const first = mock.fetches.at(-1)
 check('请求走契约里的 TTS 端点', first?.url === '/api/personal-agent/tts', String(first?.url))
 check('请求方法是 POST', first?.init.method === 'POST', String(first?.init.method))
@@ -236,6 +240,7 @@ const playing = getSpeechState()
 check('播放中状态：speaking + messageId', playing.speaking === true && playing.loading === false && playing.messageId === 'm-1', JSON.stringify(playing))
 
 mock.sources.at(-1).onended()
+await firstRun
 const afterEnd = getSpeechState()
 check('播完回到空闲', afterEnd.speaking === false && afterEnd.messageId === null, JSON.stringify(afterEnd))
 
@@ -243,22 +248,31 @@ check('播完回到空闲', afterEnd.speaking === false && afterEnd.messageId ==
 /* 2. 同一时刻只播一条：新播放打断旧播放                                 */
 /* ------------------------------------------------------------------ */
 
-await speakText('第一句', { messageId: 'm-2' })
+const firstPlay = speakText('第一句', { messageId: 'm-2' })
+await tick(20)
 const oldSource = mock.sources.at(-1)
-await speakText('第二句', { messageId: 'm-3' })
+const secondPlay = speakText('第二句', { messageId: 'm-3' })
+await tick(20)
 check('新播放停掉旧的 source', oldSource.stopped === true)
 check('被打断的旧节点摘掉 onended', oldSource.onended === null)
 check('状态指向新的一条', getSpeechState().messageId === 'm-3', String(getSpeechState().messageId))
+mock.sources.at(-1).onended()
+await secondPlay
+await firstPlay
 
 /* ------------------------------------------------------------------ */
 /* 3. stopSpeech                                                       */
 /* ------------------------------------------------------------------ */
 
+// playBuffer 要等 onended 才返回：重新起一条，让 stopSpeech 打断它并验证不会悬挂
+const stopRun = speakText('第三句', { messageId: 'm-stop' })
+await tick(20)
 const stopping = mock.sources.at(-1)
 stopSpeech()
 check('stopSpeech 停掉 source', stopping.stopped === true)
 const stopped = getSpeechState()
 check('stopSpeech 回到空闲', stopped.speaking === false && stopped.loading === false && stopped.messageId === null)
+await stopRun
 stopSpeech()
 check('stopSpeech 幂等（重复调用不炸）', getSpeechState().speaking === false)
 
@@ -474,12 +488,74 @@ check('代码块内容不念', !cleanedFence.includes('hidden'), cleanedFence)
 check('代码块围栏不念', !cleanedFence.includes('js'), cleanedFence)
 check('代码块之外的文字保留', cleanedFence.includes('看这个') && cleanedFence.includes('然后继续'), cleanedFence)
 
-const long = cleanSpeechText('啊'.repeat(500))
-check('超长截断到上限并加省略号', long.length === SPEECH_MAX_CHARS + 1 && long.endsWith('…'), String(long.length))
-check('前端上限是 240 字', SPEECH_MAX_CHARS === 240, String(SPEECH_MAX_CHARS))
+// 整条消息的兜底上限变成 2000 字；超长时按句边界截断，不能停在半句中间
+check('整条消息上限是 2000 字', SPEECH_MAX_CHARS === 2000, String(SPEECH_MAX_CHARS))
+const longNoPunctuation = cleanSpeechText('啊'.repeat(2500))
+check('无句号超长文本硬切到总上限并加省略号', longNoPunctuation.length === SPEECH_MAX_CHARS + 1 && longNoPunctuation.endsWith('…'), String(longNoPunctuation.length))
+const longSentence = cleanSpeechText('第一句。' + '啊'.repeat(2100))
+check('超长文本优先按句边界截断', longSentence === '第一句。…', longSentence.slice(0, 20))
+
+// splitSpeechChunks 纯函数：句边界 / 逗号二次切 / 无标点硬切都要保证每段 <= max
+check('单段上限是 380 字', SPEECH_CHUNK_CHARS === 380, String(SPEECH_CHUNK_CHARS))
+const sentenceChunks = splitSpeechChunks('第一句。第二句。', 6)
+check('splitSpeechChunks 按句号切句', sentenceChunks.length === 2 && sentenceChunks[0] === '第一句。' && sentenceChunks[1] === '第二句。', JSON.stringify(sentenceChunks))
+const newlineChunks = splitSpeechChunks('上半句\n下半句', 4)
+check('splitSpeechChunks 按换行切句', newlineChunks.length === 2 && newlineChunks[0] === '上半句' && newlineChunks[1] === '下半句', JSON.stringify(newlineChunks))
+const commaChunks = splitSpeechChunks('甲'.repeat(200) + '，' + '乙'.repeat(200) + '。', 250)
+check('splitSpeechChunks 超长句按逗号二次切', commaChunks.length === 2 && commaChunks.every((chunk) => chunk.length <= 250), JSON.stringify(commaChunks.map((chunk) => chunk.length)))
+const punctuationFree = '丙'.repeat(1000)
+const hardChunks = splitSpeechChunks(punctuationFree, 380)
+check('splitSpeechChunks 无标点硬切且每段不超上限', hardChunks.length === 3 && hardChunks.every((chunk) => chunk.length <= 380), JSON.stringify(hardChunks.map((chunk) => chunk.length)))
+check('splitSpeechChunks 硬切不丢字', hardChunks.join('') === punctuationFree, String(hardChunks.join('').length))
+const mergedChunks = splitSpeechChunks('短句一。短句二。', 380)
+check('splitSpeechChunks 短句合并成一段', mergedChunks.length === 1 && mergedChunks[0] === '短句一。短句二。', JSON.stringify(mergedChunks))
 
 /* ------------------------------------------------------------------ */
-/* 15. speechTextOf                                                    */
+/* 15. 长文本：分段请求、每段 <= 380、全部播完才回 idle                  */
+/* ------------------------------------------------------------------ */
+
+mock.handler = defaultHandler
+// 三句各 300 字 + 句号：按句切成 3 段（每段 301 字，<= 380）
+const longSpeechText = '甲'.repeat(300) + '。' + '乙'.repeat(300) + '。' + '丙'.repeat(300) + '。'
+// 等到「第 N 段请求已发出 + 第 N 个 WAV source 已创建」，避免拿到上一段的旧节点
+const waitForPlayback = async (fetchCount, sourceCount) => {
+  const deadline = Date.now() + 2000
+  while ((mock.fetches.length < fetchCount || mock.sources.length < sourceCount) && Date.now() < deadline) await tick(5)
+}
+const fetchesBeforeLong = mock.fetches.length
+const sourcesBeforeLong = mock.sources.length
+const longPlayback = speakText(longSpeechText, { messageId: 'm-long' })
+
+await waitForPlayback(fetchesBeforeLong + 1, sourcesBeforeLong + 1)
+check('长文本：第一段请求已发出', mock.fetches.length === fetchesBeforeLong + 1, String(mock.fetches.length - fetchesBeforeLong))
+const firstLongText = JSON.parse(mock.fetches[fetchesBeforeLong].init.body).text
+check('长文本：每段不超过单段上限', firstLongText.length <= SPEECH_CHUNK_CHARS, String(firstLongText.length))
+
+// 第一段播完 → 才应该请求第二段
+mock.sources.at(-1).onended()
+await waitForPlayback(fetchesBeforeLong + 2, sourcesBeforeLong + 2)
+check('长文本：第一段播完才请求第二段', mock.fetches.length === fetchesBeforeLong + 2, String(mock.fetches.length - fetchesBeforeLong))
+check('长文本：段间保持 speaking', getSpeechState().speaking === true && getSpeechState().messageId === 'm-long', JSON.stringify(getSpeechState()))
+const secondLongText = JSON.parse(mock.fetches[fetchesBeforeLong + 1].init.body).text
+check('长文本：第二段也不超上限', secondLongText.length <= SPEECH_CHUNK_CHARS, String(secondLongText.length))
+
+// 第二段播完 → 第三段
+mock.sources.at(-1).onended()
+await waitForPlayback(fetchesBeforeLong + 3, sourcesBeforeLong + 3)
+check('长文本：第二段播完才请求第三段', mock.fetches.length === fetchesBeforeLong + 3, String(mock.fetches.length - fetchesBeforeLong))
+const thirdLongText = JSON.parse(mock.fetches[fetchesBeforeLong + 2].init.body).text
+check('长文本：第三段也不超上限', thirdLongText.length <= SPEECH_CHUNK_CHARS, String(thirdLongText.length))
+check('长文本：三段拼起来就是原文', firstLongText + secondLongText + thirdLongText === longSpeechText, String((firstLongText + secondLongText + thirdLongText).length))
+
+// 最后一段还没播完：不能提前回 idle
+check('长文本：最后一段播完前保持 speaking', getSpeechState().speaking === true, JSON.stringify(getSpeechState()))
+mock.sources.at(-1).onended()
+await longPlayback
+const afterLong = getSpeechState()
+check('长文本：全部播完才回 idle', afterLong.speaking === false && afterLong.loading === false && afterLong.messageId === null, JSON.stringify(afterLong))
+
+/* ------------------------------------------------------------------ */
+/* 16. speechTextOf                                                    */
 /* ------------------------------------------------------------------ */
 
 const botMessage = {
@@ -501,7 +577,7 @@ check('多段 text 块拼接', speechTextOf({
 }) === '第一段 第二段')
 
 /* ------------------------------------------------------------------ */
-/* 16. 源码接线断言（防止后续改动把界面入口 / 流式契约悄悄拆掉）          */
+/* 17. 源码接线断言（防止后续改动把界面入口 / 流式契约悄悄拆掉）          */
 /* ------------------------------------------------------------------ */
 
 const read = (rel) => readFileSync(resolve(ROOT, rel), 'utf8')
@@ -519,6 +595,15 @@ check('speech.ts 停止时打断播放队列', speechSrc.includes('stopPlayer()'
 check('speech.ts 保留 primeSpeech 预热', speechSrc.includes('export function primeSpeech'))
 check('speech.ts 按 content-type 分流', speechSrc.includes('responseKind') && speechSrc.includes('REALTIME_TTS_STREAM_MIME'))
 check('speech.ts 用契约里的字符上限兜底', speechSrc.includes('REALTIME_TTS_MAX_CHARS'))
+check('speech.ts 整条消息上限改为 2000', /SPEECH_MAX_CHARS = 2000/.test(speechSrc))
+check('speech.ts 单段上限是 380', speechSrc.includes('SPEECH_CHUNK_CHARS = 380'))
+check('speech.ts 导出 splitSpeechChunks', speechSrc.includes('export function splitSpeechChunks'))
+check('speech.ts 截断走句边界', speechSrc.includes('truncateSpeechText'))
+check('speech.ts speakText 按 chunks 循环', speechSrc.includes('for (const chunk of chunks)'))
+const playStreamSrc = speechSrc.slice(speechSrc.indexOf('async function playSpeechStream'), speechSrc.indexOf('export async function speakText'))
+check('speech.ts playSpeechStream 不再自行回 idle', !/^[ \t]*patchState\(idleState\(\)\)/m.test(playStreamSrc))
+check('speech.ts playBuffer 等 onended', speechSrc.includes('finishPlayback') && speechSrc.includes('await finished'))
+check('speech.ts stopPlayback 兑现等待中的 Promise', speechSrc.includes('resolvePlayback()'))
 
 const messageListSrc = read('src/client/personal/chat/MessageList.tsx')
 check('MessageList 引入喇叭图标', messageListSrc.includes('IconVolume'))

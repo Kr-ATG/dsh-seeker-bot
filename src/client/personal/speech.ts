@@ -38,13 +38,25 @@ import { AUDIO_SAMPLE_RATE, PcmPlayer } from './call/realtime-audio.ts'
 import type { Message } from './types.ts'
 
 /**
- * 前端截断上限（字符）。
+ * 整条消息的朗读总上限（字符）。
  *
- * 比宿主的 REALTIME_TTS_MAX_CHARS（400）更短：用户要听的是「这条回复说了什么」，
- * 不是整篇长文；一条 400 字的回复要念两分多钟，念到一半用户早就去点停止了。
- * 宿主那份上限是给旧页面兜底的，两边都做。
+ * 早先这里是 240，而且**只截一次**：455 字的回复念到第 240 字就停，用户听到
+ * 「实践上我给你两个数」戛然而止，还以为 Bot 卡死了。240 这个数字本身没有错——
+ * 它想避免「一条消息念两分钟」——错的是拿它当硬截断。现在它只作为整条消息的
+ * 兜底上限（2000 字，正常人也不会连续听八分钟），真正解决「念不完」的是下面的
+ * SPEECH_CHUNK_CHARS 分段：把整条消息切成小段逐段合成、逐段播完。
  */
-export const SPEECH_MAX_CHARS = 240
+export const SPEECH_MAX_CHARS = 2000
+
+/**
+ * 单段朗读上限（字符）。
+ *
+ * 宿主端点自己有 REALTIME_TTS_MAX_CHARS（400）的硬截断：一次请求超过 400 字，
+ * 宿主管线只会合成前 400 字。前端把整条消息切成 <= 380 字的小段逐段请求，
+ * 每段都完整落在宿主上限内，于是整条消息可以完整念完，而不是在某个数字处
+ * 戛然而止。取 380 而不是 400 是给中文标点 / 编码边界留余量。
+ */
+export const SPEECH_CHUNK_CHARS = 380
 
 /**
  * 等待播放队列排空的轮询间隔（毫秒）。
@@ -175,6 +187,15 @@ let gain: GainNode | null = null
 let source: AudioBufferSourceNode | null = null
 
 /**
+ * 正在等「这一条 WAV 播完」的兑现函数（null = 没有人在等）。
+ *
+ * playBuffer 现在返回 Promise（speakText 要等这一段真的播完才请求下一段），
+ * 而停止 / 打断时 onended 可能永远不会触发：必须由 stopPlayback 主动兑现，
+ * 否则等待方会永久悬挂，整条朗读流程（以及它的 catch/finally）都收不了尾。
+ */
+let finishPlayback: (() => void) | null = null
+
+/**
  * 播放代次。
  *
  * 每次 speakText / stopSpeech 都自增；异步流程（fetch → 解码 / 读流 → 播放）每一步
@@ -232,12 +253,25 @@ function ensureGain(audioContext: AudioContext): GainNode {
   return node
 }
 
+/** 兑现「当前 WAV 播完」的等待者（没有等待者时是空操作；多次调用安全）。 */
+function resolvePlayback(): void {
+  const finish = finishPlayback
+  finishPlayback = null
+  if (finish === null) return
+  finish()
+}
+
 /** 停掉当前正在播的 WAV 那一条（不清状态、不自增代次，调用方负责）。 */
 function stopPlayback(): void {
   const current = source
   source = null
+  /*
+   * 先兑现等待者：playBuffer 的 Promise 只有在 onended 时才 resolve，而被停止的
+   * 节点接不到 onended（下面把回调摘掉了），不主动兑现就会永久悬挂。
+   */
+  resolvePlayback()
   if (current === null) return
-  // 先摘 onended：被新播放打断的旧节点不该把状态改回空闲（那时新的一条正在播）
+  // 摘 onended：被新播放打断的旧节点不该把状态改回空闲（那时新的一条正在播）
   try {
     current.onended = null
   } catch {
@@ -382,11 +416,126 @@ function decodeAudio(audioContext: AudioContext, data: ArrayBuffer): Promise<Aud
   })
 }
 
-/** 朗读前的二次压缩 + 截断（调用方可能直接传原始 Markdown）。 */
+/** 句子边界：句末标点与换行（换行在清洗后通常已压成空格，纯函数仍要支持）。 */
+const SENTENCE_BREAK_CHARS = new Set(['。', '！', '？', '；', '\n', '!', '?', ';'])
+
+/** 次级断句：句内停顿（逗号 / 顿号），超长句靠它二次切分。 */
+const CLAUSE_BREAK_CHARS = new Set(['，', '、', ','])
+
+/**
+ * 按句边界截断（找不到句末标点才硬切）。
+ *
+ * 用于整条消息的兜底上限：宁可少念最后半句，也不要念到一半突然停——
+ * 用户听到的「半句话」和「停在句号后」是完全不同的体验。
+ */
+function truncateSpeechText(text: string, limit: number): string {
+  if (text.length <= limit) return text
+  const window = text.slice(0, limit)
+  for (let index = window.length - 1; index >= 0; index -= 1) {
+    if (SENTENCE_BREAK_CHARS.has(window.charAt(index))) {
+      return `${window.slice(0, index + 1)}…`
+    }
+  }
+  return `${window.slice(0, limit)}…`
+}
+
+/** 把一个超长句按逗号 / 顿号切成若干 <= limit 的小段（单个分句仍超长时硬切）。 */
+function splitLongSentence(sentence: string, limit: number): string[] {
+  const clauses: string[] = []
+  let start = 0
+  for (let index = 0; index < sentence.length; index += 1) {
+    if (CLAUSE_BREAK_CHARS.has(sentence.charAt(index))) {
+      clauses.push(sentence.slice(start, index + 1))
+      start = index + 1
+    }
+  }
+  if (start < sentence.length) clauses.push(sentence.slice(start))
+
+  const pieces: string[] = []
+  let current = ''
+  const flush = (): void => {
+    const text = current.trim()
+    if (text !== '') pieces.push(text)
+    current = ''
+  }
+  for (const clause of clauses) {
+    if (current.length + clause.length <= limit) {
+      current += clause
+      continue
+    }
+    flush()
+    if (clause.length <= limit) {
+      current = clause
+      continue
+    }
+    // 极端情况：整段没有标点（或单个分句就超长）——只能硬切，保证每段不超上限
+    for (let offset = 0; offset < clause.length; offset += limit) {
+      const slice = clause.slice(offset, offset + limit)
+      if (slice.trim() !== '') pieces.push(slice.trim())
+    }
+  }
+  flush()
+  return pieces
+}
+
+/**
+ * 把朗读文本切成若干不超过 max 字的片段（导出给测试与以后的预览逻辑用）。
+ *
+ * 为什么要分段：宿主的 TTS 端点有 REALTIME_TTS_MAX_CHARS（400）硬截断，
+ * 前端早先又在 240 字处截一次，于是长回复永远念不完。把整条消息按语义切成
+ * 小段、逐段请求逐段播放，既绕开两处上限，也保证每段都能完整念出来。
+ *
+ * 切分顺序（尽量保住语义完整）：
+ *  1. 先按句末标点（。！？；换行）切句，相邻短句合并到不超过 max；
+ *  2. 单句仍超长时按逗号 / 顿号二次切；
+ *  3. 连分句都超长（极端无标点）才硬切。
+ *
+ * 保证：每段长度 <= max；除首尾空白外不丢字（切分只做 trim）。
+ */
+export function splitSpeechChunks(text: string, max: number = SPEECH_CHUNK_CHARS): string[] {
+  const source = text.replace(/\r\n?/g, '\n').trim()
+  if (source === '') return []
+  // max 非法时按 1 处理，避免死循环 / 无限切分
+  const limit = Number.isFinite(max) && max >= 1 ? Math.floor(max) : 1
+
+  const sentences: string[] = []
+  let start = 0
+  for (let index = 0; index < source.length; index += 1) {
+    if (!SENTENCE_BREAK_CHARS.has(source.charAt(index))) continue
+    const sentence = source.slice(start, index + 1)
+    if (sentence.trim() !== '') sentences.push(sentence)
+    start = index + 1
+  }
+  const tail = source.slice(start)
+  if (tail.trim() !== '') sentences.push(tail)
+
+  const chunks: string[] = []
+  let current = ''
+  const flush = (): void => {
+    const piece = current.trim()
+    if (piece !== '') chunks.push(piece)
+    current = ''
+  }
+  for (const sentence of sentences) {
+    if (current.length + sentence.length <= limit) {
+      current += sentence
+      continue
+    }
+    flush()
+    if (sentence.trim().length <= limit) {
+      current = sentence
+      continue
+    }
+    for (const piece of splitLongSentence(sentence, limit)) chunks.push(piece)
+  }
+  flush()
+  return chunks
+}
+
+/** 朗读前的二次压缩 + 句边界截断（调用方可能直接传原始 Markdown）。 */
 function limitSpeechText(text: string): string {
-  const limit = Math.min(SPEECH_MAX_CHARS, REALTIME_TTS_MAX_CHARS)
   const collapsed = text.replace(/\s+/g, ' ').trim()
-  return collapsed.length > limit ? `${collapsed.slice(0, limit)}…` : collapsed
+  return truncateSpeechText(collapsed, SPEECH_MAX_CHARS)
 }
 
 /** 响应体形态：流式 PCM / 整段 WAV / JSON（失败体）。 */
@@ -441,25 +590,39 @@ async function waitPlayerIdle(pcmPlayer: PcmPlayer, token: number, samples: numb
   }
 }
 
-/** 旧宿主路径：整段 WAV 解码后一次播完。 */
+/**
+ * 旧宿主路径：整段 WAV 解码后一次播完。
+ *
+ * 返回的 Promise 在 onended 时 resolve（被 stopPlayback 打断时也由它兑现），
+ * speakText 靠它实现「这一段播完再请求下一段」；状态收尾统一由 speakText 做，
+ * 这里不再自己 patchState(idleState())——否则分段朗读时第一段播完就会闪回空闲。
+ */
 async function playBuffer(audioContext: AudioContext, buffer: AudioBuffer, token: number): Promise<void> {
   const node = audioContext.createBufferSource()
   node.buffer = buffer
   node.connect(ensureGain(audioContext))
-  node.onended = (): void => {
-    // 只有「当前这一条」播完才回到空闲；被打断的旧节点状态早已由新播放接管
-    if (token !== generation) return
-    source = null
-    patchState(idleState())
-  }
+  const finished = new Promise<void>((resolve) => {
+    const settle = (): void => {
+      if (finishPlayback === settle) finishPlayback = null
+      resolve()
+    }
+    finishPlayback = settle
+    node.onended = (): void => {
+      // 只有「当前这一条」播完才清引用；被打断的旧节点由新播放接管
+      if (token === generation) source = null
+      settle()
+    }
+  })
   source = node
   try {
     node.start()
   } catch (error) {
     source = null
+    resolvePlayback()
     throw error instanceof Error ? error : new Error('朗读播放失败')
   }
   patchState({ speaking: true, loading: false, error: null })
+  await finished
 }
 
 /**
@@ -516,19 +679,29 @@ async function playSpeechStream(response: Response, token: number): Promise<void
   if (token !== generation) return
   if (!started) throw new Error('朗读服务没有返回音频')
   await waitPlayerIdle(pcmPlayer, token, samples, sampleRate)
-  if (token !== generation) return
-  patchState(idleState())
+  /*
+   * 这里不再 patchState(idleState())：分段朗读时这只是整条消息中的一段，
+   * 播完要保持在 speaking，等 speakText 循环把全部段都播完再统一回空闲。
+   * （旧实现是单段一次请求，所以才会在这里收尾；现在收尾职责上移。）
+   */
 }
 
 /**
  * 朗读一段文字（同一时刻只播一条，新播放自动停掉旧的）。
  *
- * @param text 要念的文字（会再压缩空白并截断到 SPEECH_MAX_CHARS）。
+ * 长文本会按 splitSpeechChunks 切成多段：逐段请求、**等这一段真的播完**再请求
+ * 下一段，段与段之间保持 speaking 状态，全部播完才统一回到空闲。
+ * 每个异步步骤前后都检查 generation token：用户停止 / 点了另一条时立刻中断。
+ *
+ * @param text 要念的文字（会再压缩空白、按句边界截断到 SPEECH_MAX_CHARS）。
  * @param options 供应商 / 音色 / 消息 id；全部可选。
  */
 export async function speakText(text: string, options: SpeakOptions = {}): Promise<void> {
   const spoken = limitSpeechText(text)
   if (spoken === '') return
+  // 单段上限再和宿主契约取小：不管宿主上限怎么变，都不会发一个会被它截断的请求
+  const chunks = splitSpeechChunks(spoken, Math.min(SPEECH_CHUNK_CHARS, REALTIME_TTS_MAX_CHARS))
+  if (chunks.length === 0) return
 
   const token = (generation += 1)
   /*
@@ -569,41 +742,55 @@ export async function speakText(text: string, options: SpeakOptions = {}): Promi
   const controller = new AbortController()
   requestAbort = controller
   try {
-    const body: RealtimeTtsRequest = {
-      text: spoken,
-      // 新前端总是要流式：首包即出声，这是「播放延迟太高」的修复本体
-      stream: true,
-      ...(options.botId !== undefined && options.botId !== '' ? { botId: options.botId } : {}),
-      ...(options.vendor !== undefined && options.vendor !== '' ? { vendor: options.vendor } : {}),
-      ...(options.voice !== undefined && options.voice !== '' ? { voice: options.voice } : {}),
-      ...(options.speed !== undefined ? { speed: options.speed } : {}),
-    }
-    const response = await fetch(REALTIME_TTS_PATH, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    })
-    // 等待期间用户可能已经点了别的消息 / 点了停止：迟到的响应直接丢弃
-    if (token !== generation) return
-    if (!response.ok) throw new Error(await failureReason(response))
+    for (const chunk of chunks) {
+      // 每一段开始前都看一眼：上一段播放期间用户可能已经点了停止 / 另一条
+      if (token !== generation) return
 
-    const kind = responseKind(response)
-    if (kind === 'json') {
-      // 200 却是 JSON：宿主把错误塞进了正常响应（新宿主的失败体也可能这么回）
-      throw new Error(await failureReason(response))
+      const body: RealtimeTtsRequest = {
+        text: chunk,
+        // 新前端总是要流式：首包即出声，这是「播放延迟太高」的修复本体
+        stream: true,
+        ...(options.botId !== undefined && options.botId !== '' ? { botId: options.botId } : {}),
+        ...(options.vendor !== undefined && options.vendor !== '' ? { vendor: options.vendor } : {}),
+        ...(options.voice !== undefined && options.voice !== '' ? { voice: options.voice } : {}),
+        ...(options.speed !== undefined ? { speed: options.speed } : {}),
+      }
+      const response = await fetch(REALTIME_TTS_PATH, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      })
+      // 等待期间用户可能已经点了别的消息 / 点了停止：迟到的响应直接丢弃
+      if (token !== generation) return
+      if (!response.ok) throw new Error(await failureReason(response))
+
+      const kind = responseKind(response)
+      if (kind === 'json') {
+        // 200 却是 JSON：宿主把错误塞进了正常响应（新宿主的失败体也可能这么回）
+        throw new Error(await failureReason(response))
+      }
+      if (kind === 'stream') {
+        await playSpeechStream(response, token)
+      } else {
+        // 旧宿主：整段 WAV（或没带 content-type 的二进制）
+        const data = await response.arrayBuffer()
+        if (token !== generation) return
+        if (data.byteLength === 0) throw new Error('朗读服务没有返回音频')
+        const buffer = await decodeAudio(audioContext, data)
+        if (token !== generation) return
+        await playBuffer(audioContext, buffer, token)
+      }
+      /*
+       * 这一段播完了。段间保持 speaking：下一段的请求 / 解码期间用户仍该看到
+       * 「正在朗读」，否则按钮会闪回喇叭、状态也会来回跳。
+       */
+      if (token !== generation) return
+      patchState({ speaking: true, loading: false, error: null, messageId: options.messageId ?? null })
     }
-    if (kind === 'stream') {
-      await playSpeechStream(response, token)
-      return
-    }
-    // 旧宿主：整段 WAV（或没带 content-type 的二进制）
-    const data = await response.arrayBuffer()
+    // 所有段都播完才统一收尾（中途停止的路径由 stopSpeech 自己收状态）
     if (token !== generation) return
-    if (data.byteLength === 0) throw new Error('朗读服务没有返回音频')
-    const buffer = await decodeAudio(audioContext, data)
-    if (token !== generation) return
-    await playBuffer(audioContext, buffer, token)
+    patchState(idleState())
   } catch (error) {
     if (token !== generation) return
     // 流式路径可能已经出过声：出错时把队列也收掉，避免半句卡在播放队列里
@@ -629,7 +816,7 @@ export async function speakText(text: string, options: SpeakOptions = {}): Promi
  *  · 行内代码只去反引号、保留文字（命令是用户真的要听的内容）；
  *  · 链接只留链接文字、图片整段去掉；
  *  · 标题 / 列表 / 引用 / 表格的 Markdown 符号去掉；
- *  · 最后压缩空白并截断。
+ *  · 最后压缩空白，超过整条消息上限时按句边界截断（不切在半句中间）。
  *
  * 导出它而不是只导出 speechTextOf：测试要能直接喂字符串，别的地方（比如以后的
  * 朗读预览）也用得上。
@@ -656,7 +843,8 @@ export function cleanSpeechText(raw: string): string {
   text = text.replace(/[*_~]{1,3}/g, '')
   // 压缩空白：TTS 不在乎换行，连续空白只会变成奇怪的停顿
   text = text.replace(/\s+/g, ' ').trim()
-  if (text.length > SPEECH_MAX_CHARS) return `${text.slice(0, SPEECH_MAX_CHARS)}…`
+  // 超过整条消息上限时按句边界收尾：念到句号停，比念到一半突然断掉自然得多
+  if (text.length > SPEECH_MAX_CHARS) return truncateSpeechText(text, SPEECH_MAX_CHARS)
   return text
 }
 

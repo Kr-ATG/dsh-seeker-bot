@@ -55,6 +55,7 @@ import {
   pathKeyOf,
   pathOfFileUrl,
 } from './media.ts'
+import { isExecutionToolName, isStandaloneToolRun } from './message-visibility.ts'
 import { ImageGenerationCard, DotMatrix } from '../../generated-images/ImageGenerationCard.tsx'
 import { textHasMarkdownImage } from '../../generated-images/layout.ts'
 /*
@@ -541,18 +542,6 @@ function ImageGenerationBlock({ block }: { block: Extract<MessageBlock, { type: 
 
 /* ───────────────────────── 执行态块（2.7） ───────────────────────── */
 
-/**
- * 工具名 → 是否属于「在屏幕上操作」这一类。
- *
- * 只有工具名本身就是 computer / browser 一族时才转成执行态卡。ego-browser 在本
- * 项目里是通过 pwsh 跑脚本用的，工具名仍是 pwsh —— 那种留在可审计流水里（展开
- * 能看到具体命令），不在这里按参数猜：猜错会让一次普通命令执行变成一张「电脑在
- * 操作」的假卡，而真正的审计信息反而被藏起来了。
- */
-function isExecutionTool(name: string): boolean {
-  return /^(?:computer|browser|screenshot|playwright|puppeteer|chrome|devtools|cdp)/i.test(name.trim())
-}
-
 /** 执行态卡的动作描述（中文人话，不把工具名当标题）。 */
 function executionActionOf(name: string): string {
   const key = name.toLowerCase()
@@ -812,17 +801,6 @@ function toolElapsed(run: ToolRun): number {
   if (typeof run.durationMs === 'number') return Math.max(0, run.durationMs)
   if (typeof run.endedAt === 'number') return Math.max(0, run.endedAt - run.startedAt)
   return 0
-}
-
-/**
- * 这一组里是不是有「独立卡片」工具：生图 / 生视频 / 正在生成文档。
- *
- * 这几类有自己的展示形态（点阵占位、播放器、产出物卡），不能混进审计流水 ——
- * 塞进去会被折叠起来，用户就看不见正在生成的图片了。
- */
-function isStandaloneTool(run: ToolRun): boolean {
-  if (run.name === 'generate_image' || run.name === 'generate_video') return true
-  return run.docPending === true && run.status === 'running'
 }
 
 /** 折叠行摘要：主要工具名（最多三个）。 */
@@ -1123,7 +1101,7 @@ export function MessageBlockView({ message }: MessageBlockViewProps): JSX.Elemen
      * 下面那段工具过滤就与它们无关了（execution 不是 tool 块）。
      */
     const converted = mergeTextBlocks(dedupeToolRuns(message.blocks)).map((block) => (
-      block.type === 'tool' && isExecutionTool(block.run.name) ? toolRunToExecution(block.run) : block
+      block.type === 'tool' && isExecutionToolName(block.run.name) ? toolRunToExecution(block.run) : block
     ))
     return converted.filter((block) => {
       if (block.type !== 'tool') return true
@@ -1188,12 +1166,12 @@ export function MessageBlockView({ message }: MessageBlockViewProps): JSX.Elemen
    * 普通工具调用一律不渲染，**包括**那行「N 个动作 · 展开」的折叠流水。可审计性
    * 不再放在消息里：computer / browser 类会先转成 execution 块（那是「正在做什么」
    * 的执行态，不是工具卡），其余工具的审计交给右栏与宿主日志。
-   * 生图 / 生视频 / 文档占位属于**产物**，不是工具卡，仍然保留（见 isStandaloneTool）。
+   * 生图 / 生视频 / 文档占位属于**产物**，不是工具卡，仍然保留（见 isStandaloneToolRun）。
    */
   const units = useMemo(() => {
     const out: MessageBlock[] = []
     for (const block of blocks) {
-      if (block.type === 'tool' && !isStandaloneTool(block.run)) continue
+      if (block.type === 'tool' && !isStandaloneToolRun(block.run)) continue
       out.push(block)
     }
     return out
