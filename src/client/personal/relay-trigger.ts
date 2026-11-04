@@ -44,9 +44,14 @@ export interface RelayMessageLike {
   blocks?: ReadonlyArray<{ type?: string; text?: string }>
 }
 
-/** 默认设置：占用到 30% 且像换话题时提示，60% 强制提示，空闲 8 小时也算。 */
+/**
+ * 默认设置：占用到 30% 且像换话题、60% 硬阈值、或空闲 8 小时——命中后**自动**
+ * 生成接力摘要并切换模型上下文（聊天记录保留在对话流里，不删）。
+ *
+ * mode='off' 才关闭；'prompt' 是旧版本的「仅提示」，已统一升级为自动整理。
+ */
 export const DEFAULT_RELAY_AUTO: RelayAuto = {
-  mode: 'prompt',
+  mode: 'auto',
   softRatio: 0.3,
   hardRatio: 0.6,
   idleHours: 8,
@@ -62,7 +67,9 @@ export const RELAY_MAX_IDLE_HOURS = 72
 /**
  * 容错归一化：localStorage 里可能是旧数据、手改数据或空值。
  *
- * mode 非法回落到 prompt（「仅提示」是安全默认：不会自动动用户的会话）；
+ * mode 只有两档：'off'（关闭）与 'auto'（自动整理）。旧版本存过的 'prompt'
+ * 与其他非法值一律升级为 'auto'——「整理并开新会话」是系统自动行为，不再需要
+ * 用户手动确认；想完全关闭就选「关闭」。
  * 比例钳到 0.05–0.95，空闲小时钳到 1–72。数字字符串也接受，方便设置卡
  * 直接把 input 的值丢进来。
  */
@@ -70,9 +77,7 @@ export function normalizeRelayAuto(value: unknown): RelayAuto {
   const raw = value !== null && typeof value === 'object'
     ? value as Record<string, unknown>
     : {}
-  const mode = raw.mode === 'off' || raw.mode === 'prompt' || raw.mode === 'auto'
-    ? raw.mode
-    : DEFAULT_RELAY_AUTO.mode
+  const mode = raw.mode === 'off' ? 'off' : 'auto'
   return {
     mode,
     softRatio: clampNumber(raw.softRatio, RELAY_MIN_RATIO, RELAY_MAX_RATIO, DEFAULT_RELAY_AUTO.softRatio),

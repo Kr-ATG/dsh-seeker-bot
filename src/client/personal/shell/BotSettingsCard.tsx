@@ -87,17 +87,14 @@ const VOICE_OPTIONS: PaSelectOption[] = [
   ...REALTIME_VOICES.map((item) => ({ value: item.id, label: item.label, hint: item.hint })),
 ]
 
-/** 上下文接力提示方式（默认「仅提示」）。 */
+/** 上下文接力方式（默认「自动整理」）。 */
 const RELAY_MODE_OPTIONS: PaSelectOption[] = [
   { value: 'off', label: '关闭' },
-  { value: 'prompt', label: '仅提示', hint: '默认' },
-  { value: 'auto', label: '自动提示', hint: '目前只提示' },
+  { value: 'auto', label: '自动整理', hint: '默认' },
 ]
 
 function relayModeLabel(mode: RelayAuto['mode']): string {
-  if (mode === 'off') return '已关闭'
-  if (mode === 'auto') return '自动提示'
-  return '仅提示'
+  return mode === 'off' ? '已关闭' : '自动整理'
 }
 
 /**
@@ -225,8 +222,8 @@ function SheetSection(props: {
  * 失焦 / 回车才提交，避免「删空重打」的中间态写进配置；越界值按
  * normalizeRelayAuto 的规则钳制（5%–95% / 1–72 小时）。
  *
- * 文案里明确说明「自动提示目前只提示，不自动清空」：这个模式先保留给后续版本，
- * 现在与「仅提示」行为完全一致，不能让人以为选了它就会自动动会话。
+ * 「自动整理」是系统行为：命中阈值时自动生成接力摘要并切换模型上下文，聊天记录
+ * 继续留在对话流里；用户不需要点任何确认按钮。只有选「关闭」才完全停用。
  */
 function RelayAutoSettings({ bot }: { bot: Bot }): JSX.Element {
   const { actions } = usePersonal()
@@ -281,8 +278,8 @@ function RelayAutoSettings({ bot }: { bot: Bot }): JSX.Element {
     <SheetSection icon={<IconRefresh size={13} />} title="上下文接力" extra={relayModeLabel(current.mode)}>
       <div className="pa-bset-row">
         <div className="pa-bset-row__main">
-          <b>提示方式</b>
-          <span>上下文占用偏高、隔太久或像换了话题时，在输入框上方提醒整理并开新会话</span>
+          <b>接力方式</b>
+          <span>上下文占用偏高、隔太久或像换了话题时，自动整理上一段并切换新会话（聊天记录保留）</span>
         </div>
         <PaSelect
           className="pa-select--compact"
@@ -290,14 +287,14 @@ function RelayAutoSettings({ bot }: { bot: Bot }): JSX.Element {
           options={RELAY_MODE_OPTIONS}
           ariaLabel="上下文接力提示方式"
           onChange={(next) => {
-            if (next === 'off' || next === 'prompt' || next === 'auto') apply({ mode: next })
+            if (next === 'off' || next === 'auto') apply({ mode: next })
           }}
         />
       </div>
       <div className="pa-bset-row">
         <div className="pa-bset-row__main">
           <b>软阈值</b>
-          <span>占用达到该比例且看起来换了话题时提示</span>
+          <span>占用达到该比例且看起来换了话题时自动整理</span>
         </div>
         <label className="pa-bset-num">
           <input
@@ -323,7 +320,7 @@ function RelayAutoSettings({ bot }: { bot: Bot }): JSX.Element {
       <div className="pa-bset-row">
         <div className="pa-bset-row__main">
           <b>硬阈值</b>
-          <span>占用达到该比例就直接提示，不再判断话题</span>
+          <span>占用达到该比例就直接自动整理，不再判断话题</span>
         </div>
         <label className="pa-bset-num">
           <input
@@ -349,7 +346,7 @@ function RelayAutoSettings({ bot }: { bot: Bot }): JSX.Element {
       <div className="pa-bset-row">
         <div className="pa-bset-row__main">
           <b>空闲小时数</b>
-          <span>隔这么久没说话且上下文仍有占用时提示</span>
+          <span>隔这么久没说话且上下文仍有占用时自动整理</span>
         </div>
         <label className="pa-bset-num">
           <input
@@ -373,7 +370,7 @@ function RelayAutoSettings({ bot }: { bot: Bot }): JSX.Element {
         </label>
       </div>
       <p className="pa-sheet-hint">
-        「自动提示」目前只做提示，不会自动清空对话；整理动作始终需要点提示条上的「去整理」再确认。
+        自动整理由系统在命中阈值时执行：生成接力摘要并切换模型上下文，聊天记录继续留在对话流里，不需要手动确认；只有自动整理失败时才会出现提示条让你手动处理。
       </p>
     </SheetSection>
   )

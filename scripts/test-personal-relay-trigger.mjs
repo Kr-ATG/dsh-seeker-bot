@@ -68,8 +68,8 @@ try {
   } = relay
 
   /* ── normalizeRelayAuto ─────────────────────────────────────────────── */
-  assert.deepEqual(DEFAULT_RELAY_AUTO, { mode: 'prompt', softRatio: 0.3, hardRatio: 0.6, idleHours: 8 })
-  ok('DEFAULT_RELAY_AUTO 为 prompt / 0.3 / 0.6 / 8')
+  assert.deepEqual(DEFAULT_RELAY_AUTO, { mode: 'auto', softRatio: 0.3, hardRatio: 0.6, idleHours: 8 })
+  ok('DEFAULT_RELAY_AUTO 为 auto / 0.3 / 0.6 / 8')
   assert.deepEqual(normalizeRelayAuto(undefined), DEFAULT_RELAY_AUTO)
   assert.deepEqual(normalizeRelayAuto(null), DEFAULT_RELAY_AUTO)
   assert.deepEqual(normalizeRelayAuto({}), DEFAULT_RELAY_AUTO)
@@ -77,11 +77,11 @@ try {
   ok('缺失 / 非对象设置回落到默认值')
 
   const badMode = normalizeRelayAuto({ mode: 'bogus', softRatio: -1, hardRatio: 9, idleHours: 0 })
-  assert.equal(badMode.mode, 'prompt')
+  assert.equal(badMode.mode, 'auto')
   assert.equal(badMode.softRatio, 0.05)
   assert.equal(badMode.hardRatio, 0.95)
   assert.equal(badMode.idleHours, 1)
-  ok('mode 非法回 prompt，比例 / 小时数钳到下限')
+  ok('mode 非法回 auto，比例 / 小时数钳到下限')
 
   const high = normalizeRelayAuto({ mode: 'auto', softRatio: 0.999, hardRatio: 0.001, idleHours: 999 })
   assert.equal(high.mode, 'auto')
@@ -199,9 +199,11 @@ try {
 
   assert.equal(evaluateRelayTrigger({
     usage: usage(70), lastUserAt: recent, now, messages: [],
-    settings: { ...DEFAULT_RELAY_AUTO, mode: 'auto' },
+    settings: DEFAULT_RELAY_AUTO,
   }).kind, 'hard')
-  ok('mode=auto 目前与 prompt 一样（只判定，不自动清空）')
+  ok('mode=auto 命中 hard（自动整理由 ChatPanel 执行）')
+  assert.equal(normalizeRelayAuto({ mode: 'prompt' }).mode, 'auto')
+  ok('旧值 prompt 自动迁移为 auto')
 
   const fallbackRatio = evaluateRelayTrigger({
     usage: { usedTokens: 65000, contextWindow: 100000 }, lastUserAt: recent, now,
@@ -253,6 +255,11 @@ expectContains(chatPanelSource, 'setClearTarget(activeBot)', '「去整理」复
 expectContains(chatPanelSource, 'relayHintDismissedRef', '关闭后记住档位，本次会话不再弹')
 expectContains(chatPanelSource, "last.role !== 'bot'", '只在每轮结束（最后一条是 bot）时探测')
 expectContains(chatPanelSource, 'message.pending === true', '有 pending 占位时不探测')
+expectContains(chatPanelSource, 'autoRelayRunningRef', '自动整理有防重入标记')
+expectContains(chatPanelSource, 'actionsRef.current.prepareRelay', '命中后自动生成接力摘要')
+expectContains(chatPanelSource, 'clearConversation(bot.id, {', '命中后自动切换模型上下文')
+expectContains(chatPanelSource, 'keepMessages: true', '自动整理保留聊天记录（keepMessages）')
+expectContains(chatPanelSource, "mode !== 'off'", '只有关闭模式不自动执行')
 
 console.log('[relay-trigger] 静态断言：BotSettingsCard.tsx')
 
@@ -260,11 +267,12 @@ const botSettingsSource = await readFile(botSettingsPath, 'utf8')
 expectContains(botSettingsSource, '上下文接力', '设置卡有「上下文接力」区块')
 expectContains(botSettingsSource, 'relayAuto:', '保存进 bot.relayAuto')
 expectContains(botSettingsSource, 'normalizeRelayAuto(bot.relayAuto)', '设置卡复用 normalizeRelayAuto')
-expectContains(botSettingsSource, 'RELAY_MODE_OPTIONS', '有模式下拉（关闭 / 仅提示 / 自动提示）')
+expectContains(botSettingsSource, 'RELAY_MODE_OPTIONS', '有模式下拉（关闭 / 自动整理）')
+expectContains(botSettingsSource, "label: '自动整理'", '模式下拉有「自动整理」')
 expectContains(botSettingsSource, '软阈值', '有软阈值输入')
 expectContains(botSettingsSource, '硬阈值', '有硬阈值输入')
 expectContains(botSettingsSource, '空闲小时数', '有空闲小时数输入')
-expectContains(botSettingsSource, '不会自动清空对话', '文案说明自动提示目前只提示不自动清空')
+expectContains(botSettingsSource, '自动整理由系统在命中阈值时执行', '文案说明自动整理由系统执行')
 
 console.log('[relay-trigger] 静态断言：chat.css.ts')
 

@@ -101,6 +101,11 @@ export function ChatPanel(): JSX.Element {
   const relayProbeRef = useRef<{ botId: string; at: number }>({ botId: '', at: 0 })
   /** 探测请求序号：切 Bot / 发起新请求后，迟到的旧结果直接丢弃。 */
   const relayProbeTokenRef = useRef(0)
+  /** 自动整理是否正在执行（防止同一时刻重复生成摘要 / 重复切会话）。 */
+  const autoRelayRunningRef = useRef(false)
+  /** 最新 actions：异步回调里用，避免闭包过期；不放进 effect 依赖（防止每帧重跑探测）。 */
+  const actionsRef = useRef(actions)
+  actionsRef.current = actions
   /** 当前会话 Bot id，异步回调里用它确认还停在同一个聊天里。 */
   const activeBotIdRef = useRef(activeBot.id)
   activeBotIdRef.current = activeBot.id
@@ -404,7 +409,9 @@ export function ChatPanel(): JSX.Element {
    * 打一次接口。请求失败静默——提示条是锦上添花，不能因此打断聊天。
    *
    * 判定本身在 relay-trigger.ts（纯逻辑）：hard / soft / idle 三档，mode='off' 不探测。
-   * mode='auto' 目前与 prompt 完全一致：只提示，绝不自动清空。
+   * mode='auto'（默认）命中后**自动执行**「整理并开新会话」：生成摘要 → 切换模型
+   * 上下文（keepMessages，聊天记录一条不删）→ 继续聊，用户不需要点任何按钮。
+   * 只有自动整理失败时才退化成输入框上方的提示条，让用户手动处理。
    */
   useEffect(() => {
     if (activeRoom !== null) {
@@ -459,6 +466,30 @@ export function ChatPanel(): JSX.Element {
           if (trigger === null) {
             setRelayHint(null)
             return
+          }
+          /*
+           * 自动整理并开新会话（默认行为，用户不手动点）：
+           *  1. 生成结构化接力摘要（模型调用，可能十几秒）；
+           *  2. clearConversation(keepMessages: true)：只重置宿主模型上下文，
+           *     前端聊天记录一条不删，追加系统提示后继续聊。
+           * 失败（模型不可用 / 宿主未连接）才退化成提示条，让用户手动决定。
+           */
+          if (normalizeRelayAuto(bot.relayAuto).mode !== 'off') {
+            if (autoRelayRunningRef.current) return
+            autoRelayRunningRef.current = true
+            try {
+              const result = await actionsRef.current.prepareRelay(bot.id)
+              if (result !== null) {
+                await actionsRef.current.clearConversation(bot.id, {
+                  relay: result.brief,
+                  keepMessages: true,
+                })
+                setRelayHint(null)
+                return
+              }
+            } finally {
+              autoRelayRunningRef.current = false
+            }
           }
           if (relayHintDismissedRef.current.has(`${bot.id}:${relayHintKey(trigger)}`)) return
           setRelayHint(trigger)
