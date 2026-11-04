@@ -163,6 +163,24 @@ export interface Room {
 export type MessageRole = 'user' | 'bot' | 'system'
 export type MessageSource = 'chat' | 'call' | 'routine' | 'proactive' | 'system' | 'control' | 'compaction'
 
+/**
+ * 一条「引用回复」的载荷。
+ *
+ * 界面上只需要 preview（引用条那一行小字），但模型需要被引用消息的完整内容：
+ * 用户引用一条问答卡再回一句「1」，靠 preview 是看不到选项的。所以发请求时
+ * 由 buildQuoteRef 把 text / role 一起补上，宿主据此把引用拼进本轮提示。
+ */
+export interface QuoteRef {
+  /** 被引用消息 id（界面跳转用）。 */
+  id: string
+  /** 引用条上那行摘要（界面用，最多 80 字）。 */
+  preview: string
+  /** 被引用消息的完整可读文本（投给模型的那一份；老数据没有）。 */
+  text?: string
+  /** 被引用消息的发送方（模型据此区分「你自己说的」与「用户说的」）。 */
+  role?: MessageRole
+}
+
 export interface UiOption {
   id: string
   label: string
@@ -868,8 +886,13 @@ export interface Message {
    *
    * 多条消息的流里，用户想针对第 3 条回复时，只靠上下文猜会指代漂移；
    * 记下被引用消息的 id 与一小段摘要，界面上渲染成引用条。
+   *
+   * preview 只够界面认人（80 字、交互卡的选项会被整个吞掉）。发请求时由
+   * buildQuoteRef 补全 text / role，把被引用消息的完整内容投给模型；只把
+   * preview 投过去等于让模型猜「1 指的是哪个选项」。老数据没有这两个字段，
+   * 按只有 preview 处理。
    */
-  replyTo?: { id: string; preview: string }
+  replyTo?: QuoteRef
   /**
    * 合并后的 progress 消息里，各条 host 消息各自贡献的 blocks。
    *

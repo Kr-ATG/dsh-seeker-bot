@@ -33,6 +33,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { homedir } from 'node:os'
 import { extname, isAbsolute, join, resolve, sep } from 'node:path'
 import { botWorkspaceDir, cancelBotTurn, ensureBotAgent, getBotContextPressure, getLastTurnDebug, resetBotConversation, runBotTurn, toUserFacingError, type BotAgentSpec, type PersonalStreamEvent } from './agent.ts'
+import { withQuoteHints } from './quote-hints.ts'
 import { scanBotOutputs } from './outputs.ts'
 import { recallBotTurn } from './recall.ts'
 import { botRoomOf, buildRoomContextBlock, setBotRoom } from './room-context.ts'
@@ -480,6 +481,14 @@ interface ReplyBody {
     isMain?: boolean
   }
   text?: string
+  /**
+   * 本轮用户引用了哪条消息（前端点气泡上的「引用」才带，可选）。
+   *
+   * 为什么要走请求体而不是前端拼进 text：引用条要显示摘要、正文要保持原文，
+   * 两件事由两个字段各自负责才不会互相打架。宿主这边把它拼成一段前缀，模型
+   * 才知道「1」「这个」指的是哪一条——只靠 text 里的「1」是无解的。
+   */
+  quote?: { id?: string; preview?: string; text?: string; role?: string }
   history?: Array<{ role?: string; text?: string; name?: string }>
   memories?: string[]
   /**
@@ -2134,7 +2143,7 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
 
         if (tail === '/reply' && method === 'POST') {
           const body = await readJsonBody(req) as ReplyBody
-          const text = withImageHints(String(body.text ?? '').trim(), body.images)
+          const text = withQuoteHints(withImageHints(String(body.text ?? '').trim(), body.images), body.quote)
           if (text === '') return sendJson(res, 400, { ok: false, error: 'empty message' })
           const spec = toBotSpec(body)
           /*
@@ -2201,7 +2210,10 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
 
         if (tail === '/reply/stream' && method === 'POST') {
           const body = await readJsonBody(req) as ReplyBody
-          const text = withImageHints(String(body.text ?? '').trim(), body.images)
+          // 用户原文：任务记录（brief / quote）用它，不带引用与图片提示前缀
+          const userText = String(body.text ?? '').trim()
+          // 模型看到的那一份：引用在前、图片提示在中间、用户正文在最后
+          const text = withQuoteHints(withImageHints(userText, body.images), body.quote)
           if (text === '') return sendJson(res, 400, { ok: false, error: 'empty message' })
           const spec = toBotSpec(body)
           // 与 /reply 同一口径：登记本回合的所属群，私聊回合即清除（见 room-context.ts）
@@ -2264,11 +2276,17 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
            * 运行时没起来时 `rootAssignment` 是 undefined，对话照常，只是不能派活。
            */
           const runtimeHandle = personalRuntime()
+          /*
+           * 任务记录用「用户原文」而不是拼好引用前缀的 text：
+           * 任务卡上要的是用户说了什么，前缀是给模型看的。只发图时原文为空，
+           * 退回 text（含图片落盘路径，任务记录里仍能看出这轮带了图）。
+           */
+          const briefText = userText !== '' ? userText : text
           const rootAssignment = runtimeHandle?.runtime.begin({
-            origin: { kind: 'person', source: 'chat', quote: text.slice(0, 400) },
+            origin: { kind: 'person', source: 'chat', quote: briefText.slice(0, 400) },
             requester: { kind: 'person' },
             assignee: { botId: spec.botId },
-            brief: text,
+            brief: briefText,
             level: spec.permission === 'approval' ? 'ask' : 'full',
           })
 

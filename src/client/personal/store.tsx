@@ -32,6 +32,7 @@ import {
   proactiveMessage,
   randomBotAppearance,
 } from './engine.ts'
+import { buildQuoteRef, historyTextOf } from './model-text.ts'
 import { resolveRoomTrigger } from './room-trigger.ts'
 import { shouldStartNext } from './room-queue.ts'
 import { normalizeRelayAuto } from './relay-trigger.ts'
@@ -71,6 +72,7 @@ import {
   type PagesResponse,
   type PersonalCallUi,
   type PersonalUi,
+  type QuoteRef,
   type RealtimeVendorsResponse,
   type Routine,
   type TaskOverviewStep,
@@ -1828,6 +1830,14 @@ export interface ReplyRequestOptions {
    * 但又会作为 `text` 单独发给宿主一次——不排除的话模型会看到同一句话两遍。
    */
   userMessageId?: string
+  /**
+   * 本轮引用了哪条消息（用户点了气泡上的「引用」才带）。
+   *
+   * 与 `userMessageId` 不是一回事：那是「本轮这条用户消息」，这是「它在回哪一条」。
+   * 宿主把被引用消息的完整内容拼进本轮提示；不带的话界面上的引用条就只是装饰，
+   * 模型看到的仍然只有一句「1」——这正是「引用了却答非所问」的成因。
+   */
+  quote?: QuoteRef
 }
 
 /**
@@ -1873,6 +1883,14 @@ function replyRequestBody(
     ...(opts.roomId !== undefined ? { roomId: opts.roomId } : {}),
     permission: bot.permission ?? 'full',
     text,
+    /*
+     * 引用回复：把「用户回的是哪条消息」一起投过去。
+     *
+     * 界面上的引用条只存了 80 字摘要（preview），交互卡的选项根本不在里面；
+     * 宿主要的是完整内容，所以这里带 buildQuoteRef 补全后的 quote（含 role）。
+     * 没引用时整个字段不出现，老宿主 / 老前端互不影响。
+     */
+    ...(opts.quote !== undefined ? { quote: opts.quote } : {}),
     /*
      * 全量 Bot 花名册：宿主派活时需要知道「子 Bot 是谁」。
      *
@@ -1922,7 +1940,12 @@ function replyRequestBody(
        */
       .map((msg) => ({
         role: msg.role,
-        text: blocksToText(msg.blocks),
+        /*
+         * 用 historyTextOf 而不是 blocksToText：前者展开交互卡的选项、并带上
+         * 「这条在引用哪条」的前缀。用户回一句「1」时，模型要靠这段历史才认得出
+         * 1 指的是上一轮哪个选项——这正是 bot 回「没看到前文的选项」的根因。
+         */
+        text: historyTextOf(msg),
         ...(opts.roomId !== undefined
           ? { name: msg.role === 'user' ? '用户' : (msg.senderName ?? bot.name) }
           : {}),
@@ -3648,7 +3671,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
 
   const botById = useCallback((id: string): Bot | undefined => stateRef.current.bots.find((bot) => bot.id === id), [])
 
-  const replyAsBot = useCallback((bot: Bot, text: string, target: { roomId?: string; source?: Message['source'] } = {}, images: ChatImage[] = [], userMessageId?: string): void => {
+  const replyAsBot = useCallback((bot: Bot, text: string, target: { roomId?: string; source?: Message['source']; quote?: QuoteRef } = {}, images: ChatImage[] = [], userMessageId?: string): void => {
     const pendingId = shortId('msg')
     /*
      * 本轮请求的「场地」参数：群 id，以及群设置要求的统一模型。
@@ -3660,6 +3683,8 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       ...(target.roomId !== undefined ? { roomId: target.roomId } : {}),
       // 构造群历史时要把本轮这条排除，否则模型会看到同一句话两遍
       ...(userMessageId !== undefined ? { userMessageId } : {}),
+      // 引用回复：被引用消息的完整内容随请求投给宿主（界面展示仍用 preview）
+      ...(target.quote !== undefined ? { quote: target.quote } : {}),
       ...((): { unifiedModel?: BotModel } => {
         if (target.roomId === undefined) return {}
         const room = stateRef.current.rooms.find((item) => item.id === target.roomId)
@@ -4279,8 +4304,12 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
      * 引用回复（2.3）：优先用调用方显式传的，其次读输入框当前挂着的引用。
      * 消息上记下被引用消息的 id 与一小段摘要——只存 id 的话，被引用的消息删掉后
      * 引用条就只剩一行空白；摘要让引用条在任何时候都能自己说清在引用什么。
+     *
+     * 真正**投给模型**的是补全后的 quote（含完整正文与 role）。只用 interface 层的
+     * preview 会丢掉交互卡的选项：用户引用一条问答卡再回「1」，模型既看不到选项、
+     * 也不知道 1 对应哪一项，只能回「没看到前文的选项」——这条链路以前就断在这里。
      */
-    const replyTo = opts.replyTo ?? uiRef.current.replyTo ?? undefined
+    const quote = buildQuoteRef(current.messages, opts.replyTo ?? uiRef.current.replyTo)
     const at = Date.now()
     const userMessageId = shortId('msg')
     const blocks: MessageBlock[] = []
@@ -4297,7 +4326,8 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
         at,
         blocks,
         source: 'chat',
-        ...(replyTo !== undefined ? { replyTo } : {}),
+        // replyTo 里带 preview（界面渲染引用条）与 text/role（下一轮 history 用）
+        ...(quote !== undefined ? { replyTo: quote } : {}),
       })
       // 引用只对下一条消息生效：发出去就清掉，否则后面每条都会带着同一条引用
       if (uiRef.current.replyTo !== null) setUi((prev) => ({ ...prev, replyTo: null }))
@@ -4357,8 +4387,8 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
        * 「点回复」是界面上最明确的一次「这条是问你」：比正文里推断委托词可靠，
        * 也比兜底给群主更符合直觉。被引用的消息不在本群（或已删除）时按没引用处理。
        */
-      const quoted = replyTo !== undefined
-        ? current.messages.find((item) => item.id === replyTo.id)
+      const quoted = quote !== undefined
+        ? current.messages.find((item) => item.id === quote.id)
         : undefined
       const quotedBotId = quoted !== undefined && quoted.role === 'bot' && quoted.roomId === roomId
         ? (quoted.senderId ?? quoted.botId)
@@ -4405,7 +4435,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
           scheduled.started = true
           scheduledRepliesRef.current.delete(scheduled)
           if (scheduled.cancelled) return
-          replyAsBot(responder, value, { roomId, source: 'chat' }, images, userMessageId)
+          replyAsBot(responder, value, { roomId, source: 'chat', ...(quote !== undefined ? { quote } : {}) }, images, userMessageId)
         }
 
         if (index === 0) {
@@ -4452,7 +4482,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       })
       return
     }
-    replyAsBot(bot, value, {}, images, userMessageId)
+    replyAsBot(bot, value, { ...(quote !== undefined ? { quote } : {}) }, images, userMessageId)
   }, [appendMessage, later, replyAsBot, toast])
 
   /**

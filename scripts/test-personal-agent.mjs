@@ -311,7 +311,7 @@ ctx.agents = {
   create: async () => imageAgent,
 }
 
-async function askImageBot(text, images = []) {
+async function askImageBot(text, images = [], quote = undefined) {
   const response = await request('/api/personal-agent/reply', 'POST', {
     bot: {
       id: IMAGE_BOT_ID,
@@ -321,6 +321,7 @@ async function askImageBot(text, images = []) {
     },
     text,
     ...(images.length > 0 ? { images } : {}),
+    ...(quote !== undefined ? { quote } : {}),
     history: [],
   })
   const parsed = JSON.parse(response.text)
@@ -918,6 +919,32 @@ await askImageBot('这张图里是什么', [{ path: uploadJson.path, name: '截�
     throw new Error(`图片提示没进 agent 的 user 消息（hasHint=${hasHint} hasPath=${hasPath} name=${String(uploadedName)}）：${lastFollowupText.slice(0, 300)}`)
   }
   console.log('✓ 图片路径写进 agent 的 user 消息提示（模型可据此 read_image）')
+}
+
+/*
+ * ── 引用回复进 agent 的 user 消息 ──────────────────────────────────────
+ *
+ * 用户引用一条问答卡再回「1」，模型必须能看见「1」指的是哪个选项。前端把被引用
+ * 消息的完整内容随请求体带上来（quote），宿主把它拼在本轮正文之前——断言点同样在
+ * fake agent 的 followup() 入参上。
+ */
+imageSteps.push((emitEvent) => {
+  emitEvent('assistant/message', { message: { content: [{ type: 'text', text: '好，从第一项开始。' }] } })
+})
+await askImageBot('1', [], {
+  id: 'm1',
+  role: 'bot',
+  preview: '先让我把哪块接过来做实？',
+  text: '先让我把哪块接过来做实？\n选项：（1）盯服务器和代理；（2）打理 Magpie 网关',
+})
+{
+  const hasHeader = lastFollowupText.includes('用户引用了下面这条历史消息')
+  const hasSpeaker = lastFollowupText.includes('你自己（助手）之前说的')
+  const hasOption = lastFollowupText.includes('（1）盯服务器和代理')
+  if (!hasHeader || !hasSpeaker || !hasOption) {
+    throw new Error(`引用没进 agent 的 user 消息（header=${hasHeader} speaker=${hasSpeaker} option=${hasOption}）：${lastFollowupText.slice(0, 300)}`)
+  }
+  console.log('✓ 引用的完整内容（含交互卡选项）拼进 agent 的 user 消息')
 }
 
 /*
