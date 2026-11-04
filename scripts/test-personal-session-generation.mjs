@@ -96,6 +96,11 @@ try {
     assert.ok(!resetBlock.includes('sessionDirsFor(sessionId)'), '仍在按 sessionId 删除会话目录')
     assert.ok(!resetBlock.includes('rmSync(dir'), '仍在 rmSync 会话目录')
   })
+  check('resume 空壳会话自愈（isEmptySessionFile + discardEmptySession）', () => {
+    assert.ok(agentSource.includes('function isEmptySessionFile('), '缺少 isEmptySessionFile')
+    assert.ok(agentSource.includes('restored && isEmptySessionFile(sessionId)'), 'resume 成功后没有空壳检查')
+    assert.ok(agentSource.includes('await discardEmptySession(sessionId)'), '空壳没有删除重建')
+  })
 
   const botDeleteSource = readFileSync(join(HERE, 'src/host/personal/bot-delete.ts'), 'utf8')
   check('bot-delete 按前缀清理所有代的会话目录', () => {

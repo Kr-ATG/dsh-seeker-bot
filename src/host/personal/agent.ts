@@ -1794,6 +1794,28 @@ export async function ensureBotAgent(ctx: any, spec: BotAgentSpec): Promise<any>
       agent = handle?.agent ?? handle
       restored = agent !== undefined && agent !== null
       if (!restored) resumeError = 'resume 返回了空 agent'
+      /*
+       * 空壳自愈：resume 可能「成功」返回一个只有 header、零事件的会话（实测 235B）。
+       * 这种会话在下一步的 pre-step 会被宿主拒绝（turn/end reason=blocked），
+       * 但 create 又因 id 已存在失败——用户看到的就是「会话状态异常，建议重启
+       * DSH 或重建该 Bot 会话」。
+       *
+       * 这里先只读判断（不删），确认是空壳后 dispose 掉刚 resume 的 agent，
+       * 再调用 discardEmptySession 删除文件（此时文件已释放），最后走 create 重建。
+       * 有事件的会话一律不动。
+       */
+      if (restored && isEmptySessionFile(sessionId)) {
+        try {
+          await handle?.dispose?.()
+        } catch {
+          /* 已经释放 */
+        }
+        await discardEmptySession(sessionId)
+        agent = undefined
+        handle = undefined
+        restored = false
+        console.warn(`[personal-agent] 会话 ${sessionId} 是空壳（零事件），已删除并重建`)
+      }
     } catch (error: any) {
       /*
        * 原来这里是空 catch，于是「resume 为什么失败」永远查不到。
@@ -2057,6 +2079,30 @@ function sessionDirsFor(sessionId: string): string[] {
     /* sessions 目录不存在：没有可删的 */
   }
   return found
+}
+
+/**
+ * 只读判断一个会话是不是「空壳」（只有 header、零事件）。
+ *
+ * 与 discardEmptySession 拆开：resume 可能已经把写句柄打开，先读判断、dispose
+ * 释放句柄之后才能安全删除。读不出来 / 没有 zstd 能力一律按「不是空壳」处理，
+ * 宁可报错也不误删有历史的会话。
+ */
+function isEmptySessionFile(sessionId: string): boolean {
+  const decompress = (zlib as any).zstdDecompressSync
+  if (typeof decompress !== 'function') return false
+  for (const dir of sessionDirsFor(sessionId)) {
+    const file = join(dir, 'session.v4.jsonl.zstd')
+    if (!existsSync(file)) continue
+    try {
+      const out = decompress(readFileSync(file))
+      const lines = String(out).split('\n').filter((line: string) => line.trim() !== '')
+      if (lines.length <= 1) return true
+    } catch {
+      return false
+    }
+  }
+  return false
 }
 
 /**
