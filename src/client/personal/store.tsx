@@ -53,6 +53,7 @@ import {
   formatDurationSeconds,
   shortId,
   type AppState,
+  type ArchivedSession,
   type ArtifactRef,
   type Avatar,
   type Bot,
@@ -97,6 +98,7 @@ import {
 } from '../../shared/realtime-protocol.ts'
 import {
   RELAY_MESSAGES_MAX,
+  normalizeRelayBrief,
   type RelayBrief,
   type RelayMessage,
 } from '../../shared/relay.ts'
@@ -352,6 +354,22 @@ const MAX_TASK_RECORDS = 300
  * 更早的中间步骤本来也不是用户关心的。
  */
 const MAX_TASK_STEPS = 60
+
+/* ---------- 历史对话归档（开新会话保留聊天记录） ---------- */
+
+/**
+ * 最多保留多少个历史对话归档。
+ *
+ * 归档是「冷数据」：用户要能回看，但不该让 localStorage 无限膨胀。30 个归档
+ * 已经远超真实回看需求，再多只保留最近的。
+ */
+const MAX_ARCHIVED_SESSIONS = 30
+
+/** 每个归档最多保留的消息条数（更早的消息没有回看价值，优先保最新上下文）。 */
+const ARCHIVED_SESSION_MESSAGES_MAX = 500
+
+/** 归档标题最大字数（首条 user 消息正文截断）。 */
+const ARCHIVED_SESSION_TITLE_MAX = 30
 
 /** 追加一步并做条数裁剪：保留第一条（start），超出时丢最早的工具步骤。 */
 function pushTaskStep(steps: TaskRecordStep[], step: TaskRecordStep): TaskRecordStep[] {
@@ -783,6 +801,12 @@ export interface PersonalActions {
    */
   clearConversation(botId: string, options?: { relay?: RelayBrief }): Promise<void>
   /**
+   * 删除一条历史对话归档。
+   *
+   * 只删前端本地记录（不动宿主会话文件）；历史面板是低频只读场景，不做二次确认。
+   */
+  deleteArchivedSession(id: string): void
+  /**
    * 拉取某个 Bot 的 Pages（3.1）。
    *
    * 失败静默：host 路由还没就绪、或这个 Bot 一个页面都没交付过，在界面上是同一个
@@ -857,6 +881,94 @@ function loadState(): AppState {
     /* 损坏的本地状态一次性丢弃 */
   }
   return createInitialState()
+}
+
+/**
+ * 清洗 localStorage 里的历史对话归档。
+ *
+ * 历史面板是只读回看场景，坏数据不能把整个 store 拖垮：
+ *  · 非数组 → 空数组（旧 localStorage 没这个字段）；
+ *  · 缺 id / botId / messages 的条目直接丢弃；
+ *  · messages 只认有 id 与 at 的消息，并按 at 升序；
+ *  · title 缺失 / 空白 → 「未命名对话」；
+ *  · 每个归档只留最近 ARCHIVED_SESSION_MESSAGES_MAX 条，整体按 archivedAt 倒序
+ *    留最近 MAX_ARCHIVED_SESSIONS 个。
+ */
+function normalizeArchivedSessions(raw: unknown): ArchivedSession[] {
+  if (!Array.isArray(raw)) return []
+  const out: ArchivedSession[] = []
+  for (const item of raw) {
+    if (item === null || typeof item !== 'object') continue
+    const record = item as Record<string, any>
+    const id = typeof record.id === 'string' ? record.id : ''
+    const botId = typeof record.botId === 'string' ? record.botId : ''
+    if (id === '' || botId === '' || !Array.isArray(record.messages)) continue
+    const messages = (record.messages as any[])
+      .filter((message) => message !== null
+        && typeof message === 'object'
+        && typeof message.id === 'string'
+        && message.id !== ''
+        && typeof message.at === 'number'
+        && Number.isFinite(message.at))
+      .sort((a: any, b: any) => a.at - b.at)
+      .slice(-ARCHIVED_SESSION_MESSAGES_MAX)
+    if (messages.length === 0) continue
+    const firstAt = messages[0].at
+    const lastAt = messages[messages.length - 1].at
+    const startedAt = typeof record.startedAt === 'number' && Number.isFinite(record.startedAt) ? record.startedAt : firstAt
+    const endedAt = typeof record.endedAt === 'number' && Number.isFinite(record.endedAt) ? record.endedAt : lastAt
+    const archivedAt = typeof record.archivedAt === 'number' && Number.isFinite(record.archivedAt) ? record.archivedAt : endedAt
+    const rawTitle = typeof record.title === 'string' ? record.title.trim() : ''
+    const relay = record.relay === undefined ? null : normalizeRelayBrief(record.relay)
+    out.push({
+      id,
+      botId,
+      title: rawTitle !== '' ? truncate(rawTitle, ARCHIVED_SESSION_TITLE_MAX) : '未命名对话',
+      startedAt,
+      endedAt,
+      messageCount: messages.length,
+      messages,
+      ...(relay !== null ? { relay } : {}),
+      archivedAt,
+    })
+  }
+  return out
+    .sort((a, b) => b.archivedAt - a.archivedAt)
+    .slice(0, MAX_ARCHIVED_SESSIONS)
+}
+
+/**
+ * 构造一条历史对话归档（不写 state；写盘由调用方决定）。
+ *
+ * 归档范围与 clearConversation 的清理范围严格一致：只收该 bot 的私聊消息
+ * （roomId === undefined），按 at 升序；空对话不产生归档。title 取首条 user
+ * 消息正文前 ARCHIVED_SESSION_TITLE_MAX 字（没有 user 消息则「未命名对话」）。
+ */
+function buildArchivedSession(
+  botId: string,
+  messages: Message[],
+  relay?: RelayBrief,
+  now = Date.now(),
+): ArchivedSession | null {
+  const own = messages
+    .filter((message) => message.roomId === undefined
+      && (message.botId === botId || message.senderId === botId))
+    .sort((a, b) => a.at - b.at)
+  if (own.length === 0) return null
+  const kept = own.slice(-ARCHIVED_SESSION_MESSAGES_MAX)
+  const firstUser = kept.find((message) => message.role === 'user')
+  const title = firstUser !== undefined ? truncate(blocksToText(firstUser.blocks), ARCHIVED_SESSION_TITLE_MAX) : ''
+  return {
+    id: shortId('arc'),
+    botId,
+    title: title !== '' ? title : '未命名对话',
+    startedAt: kept[0].at,
+    endedAt: kept[kept.length - 1].at,
+    messageCount: kept.length,
+    messages: kept,
+    ...(relay !== undefined ? { relay } : {}),
+    archivedAt: now,
+  }
 }
 
 /**
@@ -1002,6 +1114,13 @@ function normalizeState(parsed: AppState): AppState {
      */
     .map((task: TaskRecord) => settleStaleTask(task))
 
+  /*
+   * 历史对话归档：旧 localStorage 没有这个字段 → 空数组；清洗与上限见
+   * normalizeArchivedSessions。旧演示 Bot 的归档一并清掉（与消息 / 任务同一口径）。
+   */
+  const archivedSessions = normalizeArchivedSessions(raw.archivedSessions)
+    .filter((session: ArchivedSession) => !legacyBots.has(session.botId))
+
   return {
     version: 2,
     bots,
@@ -1018,6 +1137,7 @@ function normalizeState(parsed: AppState): AppState {
      */
     journalLogs: normalizeJournalLogs(raw.journalLogs),
     tasks,
+    archivedSessions,
     settings,
     lastUserMessageAt,
   }
@@ -4860,10 +4980,28 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
   }, [toast])
 
   /**
+   * 把某个 bot 的当前私聊归档成一段「历史对话」（开新会话前的关键一步）。
+   *
+   * 「清模型上下文 ≠ 清聊天记录」：清空当前会话前先把消息整体存进
+   * state.archivedSessions，聊天记录随时能在「历史对话」面板回看。
+   * 返回归档 id；空会话没有可归档的内容，返回 null。
+   */
+  const archiveConversation = useCallback((botId: string, relay?: RelayBrief): string | null => {
+    const record = buildArchivedSession(botId, stateRef.current.messages, relay)
+    if (record === null) return null
+    setState((prev) => ({
+      ...prev,
+      archivedSessions: [record, ...(prev.archivedSessions ?? [])].slice(0, MAX_ARCHIVED_SESSIONS),
+    }))
+    return record.id
+  }, [])
+
+  /**
    * 清空某个 bot 的**私聊**。
    *
-   * 两处都要清，少一处就会出现割裂：
-   *  · 前端：删掉这个 bot 的私聊消息
+   * 三件事，少一处就会出现割裂：
+   *  · 归档：先把这段私聊存进历史对话（archivedSessions），聊天记录不丢；
+   *  · 前端：删掉这个 bot 的**当前**私聊消息（归档保留，可在「历史对话」回看）
    *  · 宿主：dispose 活着的 agent + 删会话文件——只清界面的话，bot 下一轮
    *    还会引用旧历史，说出「我们刚才聊的…」这种让人困惑的话
    *
@@ -4874,6 +5012,15 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
   const clearConversation = useCallback(async (botId: string, options?: { relay?: RelayBrief }): Promise<void> => {
     const bot = stateRef.current.bots.find((item) => item.id === botId)
     const label = bot?.name ?? '这个 Bot'
+
+    /*
+     * 先归档、再清空——「清模型上下文 ≠ 清聊天记录」。
+     *
+     * archiveConversation 自己 setState 写入归档；下面的清空 setState updater
+     * 会排在它后面执行，所以写 localStorage 时拿到的 next 已经包含这条归档。
+     * 宿主 commit / reset 逻辑保持原样：它只清模型上下文，不影响前端历史。
+     */
+    archiveConversation(botId, options?.relay)
 
     /*
      * 清空时**立刻写 localStorage**，不等防抖持久化。
@@ -4892,7 +5039,11 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
         tasks: prev.tasks.filter((task) => task.roomId !== undefined || task.botId !== botId),
       }
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
+        // 与防抖保存 effect 同一口径：归档里可能带大量 mergedSegments，写盘前剥掉，
+        // 否则 500 条归档消息很容易顶破 localStorage 配额，导致「清空没生效」。
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(next, (key, value) => (
+          key === 'mergedSegments' || key === 'pagesByBot' ? undefined : value
+        )))
       } catch {
         /* 配额满：只影响持久化，界面已经清了 */
       }
@@ -4954,7 +5105,20 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
         /* 独立演示页里可能不允许 reload：忽略 */
       }
     }, 260)
-  }, [toast])
+  }, [toast, archiveConversation])
+
+  /**
+   * 删除一条历史对话归档。
+   *
+   * 只删前端本地记录（宿主侧会话文件不受影响）；历史面板是低频只读场景，
+   * 删除不做二次确认，界面 toast 由调用方给。
+   */
+  const deleteArchivedSession = useCallback((id: string): void => {
+    setState((prev) => ({
+      ...prev,
+      archivedSessions: (prev.archivedSessions ?? []).filter((session) => session.id !== id),
+    }))
+  }, [])
 
   /**
    * 生成一期期刊（**宿主模型优先，本地模板兜底**）。
@@ -6004,6 +6168,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
      */
     prepareRelay,
     clearConversation,
+    deleteArchivedSession,
     refreshPages,
     addMemory,
     deleteMemory,
@@ -6031,7 +6196,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     selectBot, selectRoom, setTheme, sendMessage, stopReply, createBot, updateBot, deleteBot, setBotEnabled, setBotPinned, moveBot,
     createGroup, renameGroup, deleteGroup, createRoom, updateRoom, setRoomPinned, deleteRoom, answerInteractive,
     recallMessage,
-    addMemory, deleteMemory, createRoutine, toggleRoutine, runRoutine, deleteRoutine, proactiveNow, prepareRelay, clearConversation,
+    addMemory, deleteMemory, createRoutine, toggleRoutine, runRoutine, deleteRoutine, proactiveNow, prepareRelay, clearConversation, deleteArchivedSession,
     refreshPages,
     generateJournal, runJournalCheck, startCall, endCall, callUserTurn, interruptCall, retryCallMicrophone,
     callLevel, setCallMuted, setCallSpeaker, setCallVolume,

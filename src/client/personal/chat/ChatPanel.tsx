@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
 import { IconBook, IconChevronRight, IconMore, IconPhone, IconSettings, IconTrash, IconUsers, IconX } from '../icons.tsx'
-import { usePersonal } from '../store.tsx'
+import { blocksToText, usePersonal } from '../store.tsx'
 import type { Bot, Message } from '../types.ts'
 import type { RelayBrief } from '../../../shared/relay.ts'
 import { Composer } from './Composer.tsx'
@@ -32,6 +32,10 @@ export function ChatPanel(): JSX.Element {
   const moreRef = useRef<HTMLDivElement>(null)
   /** 待清空对话的目标 bot（非 null 时显示确认卡片）。 */
   const [clearTarget, setClearTarget] = useState<Bot | null>(null)
+  /** 历史对话面板是否打开（只读回看归档）。 */
+  const [historyOpen, setHistoryOpen] = useState(false)
+  /** 当前展开预览的归档 id（null = 全部收起）。 */
+  const [expandedArchiveId, setExpandedArchiveId] = useState<string | null>(null)
   /**
    * 「整理并开新会话」的摘要状态。
    *
@@ -75,6 +79,8 @@ export function ChatPanel(): JSX.Element {
   const menuTimerRef = useRef<number | null>(null)
   const [confirmClosing, setConfirmClosing] = useState(false)
   const confirmTimerRef = useRef<number | null>(null)
+  const [historyClosing, setHistoryClosing] = useState(false)
+  const historyTimerRef = useRef<number | null>(null)
 
   /*
    * 退场结束后要执行的动作（打开设置 / 群设置等）。
@@ -122,6 +128,19 @@ export function ChatPanel(): JSX.Element {
     }, 240)
   }, [])
 
+  /** 关闭「历史对话」面板：先播退场，再真正卸载。 */
+  const closeHistory = useCallback((after?: () => void): void => {
+    if (historyTimerRef.current !== null) return
+    setHistoryClosing(true)
+    historyTimerRef.current = window.setTimeout(() => {
+      historyTimerRef.current = null
+      setHistoryClosing(false)
+      setHistoryOpen(false)
+      setExpandedArchiveId(null)
+      after?.()
+    }, 240)
+  }, [])
+
   /**
    * 点「整理并开新会话」：调 store 生成接力摘要，成功后卡片内展示预览。
    *
@@ -155,6 +174,7 @@ export function ChatPanel(): JSX.Element {
   useEffect(() => () => {
     if (menuTimerRef.current !== null) window.clearTimeout(menuTimerRef.current)
     if (confirmTimerRef.current !== null) window.clearTimeout(confirmTimerRef.current)
+    if (historyTimerRef.current !== null) window.clearTimeout(historyTimerRef.current)
   }, [])
 
   /**
@@ -212,6 +232,12 @@ export function ChatPanel(): JSX.Element {
   const subtitle = activeRoom !== null ? `${roomBots.length} 个 Bot · 群聊` : activeBot.role
   const callBotId = activeRoom !== null ? (roomBots.find((bot) => bot.isMain) ?? roomBots[0] ?? activeBot).id : activeBot.id
   const callBot = state.bots.find((bot) => bot.id === callBotId) ?? activeBot
+  /** 当前私聊 Bot 的历史对话归档（新→旧；右栏面板只读回看）。 */
+  const archivedSessions = useMemo(() => {
+    return (state.archivedSessions ?? [])
+      .filter((session) => session.botId === activeBot.id)
+      .sort((a, b) => b.archivedAt - a.archivedAt)
+  }, [state.archivedSessions, activeBot.id])
 
   useEffect(() => {
     if (!moreOpen) return undefined
@@ -223,18 +249,19 @@ export function ChatPanel(): JSX.Element {
     return () => document.removeEventListener('mousedown', close)
   }, [moreOpen, closeMenu])
 
-  /* Esc 逐层关闭：确认卡优先，其次收起「更多」菜单；两条路径都走同一个退场。 */
+  /* Esc 逐层关闭：历史面板 / 确认卡优先，其次收起「更多」菜单；都走同一个退场。 */
   useEffect(() => {
-    if (!moreOpen && clearTarget === null) return undefined
+    if (!moreOpen && clearTarget === null && !historyOpen) return undefined
     const onKeyDown = (event: KeyboardEvent): void => {
       // 被下层控件（例如 PaSelect 的 Esc）先处理过的事件不再重复响应。
       if (event.key !== 'Escape' || event.defaultPrevented) return
-      if (clearTarget !== null) closeConfirm()
+      if (historyOpen) closeHistory()
+      else if (clearTarget !== null) closeConfirm()
       else closeMenu()
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [moreOpen, clearTarget, closeMenu, closeConfirm])
+  }, [moreOpen, clearTarget, historyOpen, closeMenu, closeConfirm, closeHistory])
 
   /*
    * 上下文接力提示的探测时机：**每轮结束**（最后一条是 bot 消息、没有 pending 占位、
@@ -405,6 +432,24 @@ export function ChatPanel(): JSX.Element {
                   </button>
                 ) : null}
                 {/*
+                 * 历史对话：开新会话时旧消息会归档到 state.archivedSessions，
+                 * 这里提供只读回看入口（群聊没有归档概念，只在私聊显示）。
+                 */}
+                {activeRoom === null ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => runMenuAction(() => {
+                      // 每次重新打开都从全部收起开始，避免展开态跨会话残留
+                      setExpandedArchiveId(null)
+                      setHistoryOpen(true)
+                    })}
+                  >
+                    <IconBook size={14} />
+                    历史对话
+                  </button>
+                ) : null}
+                {/*
                  * 「任务记录」不放进菜单：它本来就是右栏里常驻的一张卡
                  * （RightPanel 的 TaskRecordCard），菜单里再给一条入口只会
                  * 让人以为要「打开」它——点了其实只是把右栏拉开。
@@ -520,7 +565,7 @@ export function ChatPanel(): JSX.Element {
                 把与「{clearTarget.name}」的对话整理成接力摘要，然后开启新会话？
               </p>
               <p className="pa-confirm__hint">
-                摘要会带进新会话，{clearTarget.name} 能接着上次的进度继续做。原对话记录会在确认后清空，此操作不可撤销。
+                摘要会带进新会话，{clearTarget.name} 能接着上次的进度继续做。原对话会归档到「历史对话」，可随时回看；选「直接清空」也会先归档，不会丢记录。
               </p>
               {relay.status === 'preparing' ? (
                 <p className="pa-relay-preview__status">正在整理…（模型生成可能需要十几秒）</p>
@@ -549,10 +594,11 @@ export function ChatPanel(): JSX.Element {
               <button
                 className="pa-btn pa-btn--danger"
                 type="button"
+                title="清空当前会话，旧对话会归档到历史对话"
                 onClick={() => {
                   const target = clearTarget
-                  // 「直接清空」保留原行为：不带 relay，走宿主 /reset。
-                  // 清空动作等退场播完再执行：卡片滑出时背景消息同步刷新，不会先闪一下空流。
+                  // 「直接清空」不带 relay，走宿主 /reset；但前端 clearConversation 同样先归档，
+                  // 历史记录不会丢。清空动作等退场播完再执行：卡片滑出时背景消息同步刷新，不会先闪一下空流。
                   closeConfirm(() => {
                     void actions.clearConversation(target.id)
                   })
@@ -583,6 +629,81 @@ export function ChatPanel(): JSX.Element {
                 >
                   {relay.status === 'preparing' ? '正在整理…' : '整理并开新会话'}
                 </button>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {historyOpen ? (
+        <div
+          className="pa-overlay"
+          data-closing={historyClosing ? '1' : undefined}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeHistory()
+          }}
+        >
+          <div className="pa-modal pa-archive" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="pa-modal__head">
+              <div className="pa-modal__title">历史对话 · {activeBot.name}</div>
+              <button className="pa-modal__close" type="button" onClick={() => closeHistory()} aria-label="关闭">
+                <IconX size={16} />
+              </button>
+            </div>
+            <div className="pa-modal__body">
+              {archivedSessions.length === 0 ? (
+                <p className="pa-archive__empty">还没有历史对话。开新会话时，旧对话会自动归档在这里。</p>
+              ) : (
+                <ul className="pa-archive__list">
+                  {archivedSessions.map((session) => {
+                    const expanded = expandedArchiveId === session.id
+                    return (
+                      <li key={session.id} className="pa-archive__item" data-open={expanded ? '1' : undefined}>
+                        <div className="pa-archive__row">
+                          <button
+                            className="pa-archive__summary"
+                            type="button"
+                            aria-expanded={expanded}
+                            onClick={() => setExpandedArchiveId(expanded ? null : session.id)}
+                          >
+                            <span className="pa-archive__title">{session.title}</span>
+                            <span className="pa-archive__meta">
+                              {formatArchiveTime(session.archivedAt)} · {session.messageCount} 条消息
+                              {session.relay !== undefined ? <span className="pa-archive__badge">含接力摘要</span> : null}
+                            </span>
+                          </button>
+                          <button
+                            className="pa-archive__delete"
+                            type="button"
+                            title="删除这条历史对话"
+                            aria-label="删除这条历史对话"
+                            onClick={() => {
+                              actions.deleteArchivedSession(session.id)
+                              actions.toast('已删除历史对话')
+                              if (expanded) setExpandedArchiveId(null)
+                            }}
+                          >
+                            <IconTrash size={14} />
+                          </button>
+                        </div>
+                        {expanded ? (
+                          <div className="pa-archive__preview">
+                            {session.relay !== undefined ? (
+                              <div className="pa-archive__relay">
+                                <RelayPreview brief={session.relay} />
+                              </div>
+                            ) : null}
+                            <div className="pa-archive__messages">
+                              {session.messages.map((message) => (
+                                <ArchiveMessage key={message.id} message={message} />
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                      </li>
+                    )
+                  })}
+                </ul>
               )}
             </div>
           </div>
@@ -676,4 +797,36 @@ function RelayPreview({ brief }: { brief: RelayBrief }): JSX.Element | null {
       ))}
     </>
   )
+}
+
+/* ───────────────────────── 历史对话只读预览 ───────────────────────── */
+
+/**
+ * 历史对话面板里的一条只读消息。
+ *
+ * 只复用聊天气泡的左右布局与配色（user 右 / bot 左 / system 居中），不挂
+ * 撤回、引用、待办等交互——归档是回看场景，不是可以继续操作的会话。
+ */
+function ArchiveMessage({ message }: { message: Message }): JSX.Element | null {
+  const text = blocksToText(message.blocks).trim()
+  if (text === '') return null
+  if (message.role === 'system') return <div className="pa-archive__system">{text}</div>
+  const side = message.role === 'user' ? 'user' : 'bot'
+  return (
+    <div className={`pa-msg pa-msg--${side} pa-archive__msg`}>
+      <div className="pa-msg__content">
+        <div className="pa-msg__body pa-msg__body--tight">
+          <div className={`pa-bubble pa-bubble--${side}`}>{text}</div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** 历史对话列表里的归档时间（本地时区，精确到分钟）。 */
+function formatArchiveTime(at: number): string {
+  const date = new Date(at)
+  if (Number.isNaN(date.getTime())) return ''
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }

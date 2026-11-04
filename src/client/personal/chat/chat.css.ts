@@ -302,6 +302,106 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
   color: var(--pa-accent);
 }
 
+/* ---------- 历史对话（归档回看） ----------
+ * 只读面板：列表 + 展开预览。宽度比清空确认卡大（要能看聊天记录），
+ * 窄屏收到视口内；颜色全走 --pa-* 变量，深浅主题自动适配。 */
+.pa-archive { width: 620px; max-width: calc(100vw - 48px); }
+.pa-archive .pa-modal__body { padding-bottom: 18px; }
+.pa-archive__empty {
+  margin: 6px 0 4px;
+  padding: 26px 16px;
+  border: 1px dashed var(--pa-line);
+  border-radius: 10px;
+  text-align: center;
+  font-size: calc(12px + var(--pa-font-delta));
+  line-height: 1.6;
+  color: var(--pa-text-3);
+}
+.pa-archive__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pa-archive__item {
+  border: 1px solid var(--pa-line);
+  border-radius: 10px;
+  background: var(--pa-chat-glass);
+  overflow: hidden;
+}
+.pa-archive__row { display: flex; align-items: stretch; }
+.pa-archive__summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  text-align: left;
+  color: var(--pa-text);
+  transition: background 110ms ease;
+}
+.pa-archive__summary:hover { background: var(--pa-chat-hover); }
+.pa-archive__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(12.5px + var(--pa-font-delta));
+  font-weight: 500;
+}
+.pa-archive__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: calc(10.5px + var(--pa-font-delta));
+  color: var(--pa-text-3);
+}
+.pa-archive__badge {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: calc(9.5px + var(--pa-font-delta));
+  color: var(--pa-accent);
+  background: color-mix(in srgb, var(--pa-accent) 14%, transparent);
+}
+.pa-archive__delete {
+  flex: none;
+  width: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--pa-text-3);
+  border-left: 1px solid var(--pa-line);
+  transition: background 110ms ease, color 110ms ease;
+}
+.pa-archive__delete:hover { background: rgba(255, 69, 58, 0.12); color: var(--pa-red); }
+.pa-archive__preview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--pa-line);
+}
+.pa-archive__relay .pa-relay-preview { margin-top: 0; }
+.pa-archive__messages { display: flex; flex-direction: column; gap: 8px; }
+.pa-archive__msg { animation: none; }
+.pa-archive__system {
+  align-self: center;
+  padding: 2px 0;
+  text-align: center;
+  font-size: calc(10.5px + var(--pa-font-delta));
+  color: var(--pa-text-3);
+}
+@media (max-width: 680px) {
+  .pa-archive { width: 100%; max-width: calc(100vw - 24px); }
+  .pa-archive__preview { max-height: 50vh; }
+}
+
 /* ---------- 撤回原地确认（不弹窗，贴在消息下方的一排两枚按钮） ----------
  * 父级 .pa-msg__content 是 flex column 且用户消息 align-items:flex-end，
  * 这一行自然靠右、宽度收成内容宽，间距交给父级的 gap 统一给。 */

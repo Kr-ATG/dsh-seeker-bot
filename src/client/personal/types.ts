@@ -5,6 +5,7 @@
  * 通话 / 期刊。store 与各组件只依赖本文件，不各自发明字段。
  */
 import { REALTIME_VOICES, type RealtimeVendorRecord } from '../../shared/realtime-protocol.ts'
+import type { RelayBrief } from '../../shared/relay.ts'
 // 这里必须拿到**本地绑定**：下面那段 `export type { … } from` 只做再导出，不会在当前
 // 作用域建名，AppState 里直接写 Journal / JournalTriggerLog 会报「找不到名字」。
 import type { JournalRecord as Journal, JournalRule, JournalTriggerLog } from '../../shared/journal.ts'
@@ -845,6 +846,33 @@ export interface Message {
   callSegment?: string
 }
 
+/**
+ * 一段被归档的旧对话（「清模型上下文 ≠ 清聊天记录」）。
+ *
+ * 用户点「整理并开新会话」/「直接清空」时，当前会话的消息先整体归档到这里，
+ * 再从对话流里清掉——历史随时可在 ChatPanel 的「历史对话」面板回看。
+ *
+ * 存储上限（normalizeState 与 archiveConversation 双重保证）：
+ *  · 最多保留最近 MAX_ARCHIVED_SESSIONS 个归档；
+ *  · 每个归档最多保留最近 ARCHIVED_SESSION_MESSAGES_MAX 条消息。
+ */
+export interface ArchivedSession {
+  id: string
+  botId: string
+  /** 归档时取的标题：首条 user 消息正文前 30 字（没有则「未命名对话」）。 */
+  title: string
+  /** 最早一条消息的时间（Unix ms）。 */
+  startedAt: number
+  /** 最后一条消息的时间（Unix ms）。 */
+  endedAt: number
+  messageCount: number
+  messages: Message[]
+  /** 「整理并开新会话」时生成的接力摘要（直接清空时没有）。 */
+  relay?: RelayBrief
+  /** 归档动作发生的时间（Unix ms），历史列表按它倒序。 */
+  archivedAt: number
+}
+
 export interface MemoryEntry {
   id: string
   botId: string
@@ -1013,6 +1041,13 @@ export interface AppState {
   }
   /** 每个用户回合一条的任务记录（v3 新增；旧状态缺省为空数组）。 */
   tasks: TaskRecord[]
+  /**
+   * 已归档的旧对话（开新会话时自动写入；旧 localStorage 缺省 = 空数组）。
+   *
+   * 只保留最近 30 个归档、每个最多 500 条消息，清洗逻辑见 store 的
+   * normalizeState / normalizeArchivedSessions。
+   */
+  archivedSessions?: ArchivedSession[]
   /**
    * 每个 Bot 的 Pages 列表（3.1）。
    *
