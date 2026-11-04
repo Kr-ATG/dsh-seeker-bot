@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
-import { IconBook, IconChevronRight, IconMessage, IconMore, IconPhone, IconSettings, IconTrash, IconUsers, IconX } from '../icons.tsx'
+import { IconBook, IconChevronRight, IconMore, IconPhone, IconSettings, IconTrash, IconUsers, IconX } from '../icons.tsx'
 import { usePersonal } from '../store.tsx'
 import type { Bot, Message } from '../types.ts'
 import { Composer } from './Composer.tsx'
@@ -270,18 +270,6 @@ export function ChatPanel(): JSX.Element {
                  * （RightPanel 的 TaskRecordCard），菜单里再给一条入口只会
                  * 让人以为要「打开」它——点了其实只是把右栏拉开。
                  */}
-                {/*
-                 * 主动说一句只留给主 Bot：它是对「某一个 Bot」的指令，群聊里执行
-                 * 只会让 callBot 一个成员冒泡，用户会以为是在叫整个群说话；子 Bot
-                 * 本来就是被主 Bot 调度的，用户也很少直接催它开口（要催就在主 Bot
-                 * 那边派活）。所以这条入口按「私聊 + 主 Bot」两个条件一起收。
-                 */}
-                {activeRoom === null && activeBot.isMain ? (
-                  <button type="button" role="menuitem" onClick={() => runMenuAction(() => actions.proactiveNow(callBotId))}>
-                    <IconMessage size={14} />
-                    让 {callBot.name} 主动说一句
-                  </button>
-                ) : null}
                 <button type="button" role="menuitem" onClick={() => runMenuAction(() => { void actions.generateJournal(callBotId) })}>
                   <IconBook size={14} />
                   生成今日期刊

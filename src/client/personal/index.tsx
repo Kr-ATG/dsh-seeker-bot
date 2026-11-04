@@ -23,6 +23,7 @@ import { BotSettingsCard } from './shell/BotSettingsCard.tsx'
 import { TaskDetailModal } from './shell/TaskDetailModal.tsx'
 import { ChatPanel } from './chat/ChatPanel.tsx'
 import { CallOverlay } from './call/CallOverlay.tsx'
+import { useCallHotkeyToggle } from './call-hotkey.ts'
 import { JournalOverlay } from './journal/JournalOverlay.tsx'
 import { injectShellStyles } from './shell/shell.css.ts'
 import { injectOutputsStyles } from './shell/outputs.css.ts'
@@ -192,6 +193,8 @@ function ToastCard({ text }: { text: string | null }): JSX.Element | null {
 
 export function PersonalApp({ forceMode = false, onExitWork }: PersonalAppProps): JSX.Element {
   const { state, ui, actions } = usePersonal()
+  /* 常驻监听：Work 模式下这棵树只是被 CSS 隐藏，热键照样要能拨通主 Bot。 */
+  useCallHotkeyToggle()
   const detectedTheme = useDetectedTheme()
   const theme = state.settings.theme === 'auto' ? detectedTheme : state.settings.theme
 

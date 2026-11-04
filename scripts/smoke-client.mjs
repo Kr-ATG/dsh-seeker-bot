@@ -1016,6 +1016,8 @@ const cell = (key) => registeredSlots.find((s) => s?.slot === 'conversation.chat
 // 同批还加了它的确认弹窗宿主（shell.overlay / session-delete-confirm / order 95）：
 // 弹窗必须挂在常驻席位上，因为官方 Menu 关闭时会把菜单项组件连同 state 一起卸载
 // （挂在菜单项里会「弹一下就消失」）。27 → 28。
+// 2026-11-04：语音通话快捷键改为注册官方 ctx.shortcuts 命令（不再占
+// settings.general.item 座位），槽位回到 28。
 if (registeredSlots.length !== 28) {
   fail(`expected 28 slot registrations, got ${registeredSlots.length}: ${JSON.stringify(registeredSlots)}`)
 } else {

@@ -4,9 +4,9 @@
  * 日期/时间分隔胶囊 + Bot 左侧消息（32px 头像、发送者名称、深灰圆角气泡或卡片）
  * + 用户右侧灰蓝气泡 + system 居中提示。每条消息入场 pa-rise，延迟按 index*20ms。
  *
- * 用户消息带「撤回」入口：hover / 键盘聚焦时在气泡左侧浮现一枚小胶囊，点开是
- * 自绘确认卡（与「清空对话」同一套 pa-overlay + pa-modal + pa-confirm，不用原生
- * confirm —— 原生对话框会带 dsh-shell 标题、样式完全脱离界面）。确认后走
+ * 用户消息带「撤回」入口：hover / 键盘聚焦时在气泡左侧浮现一枚小胶囊，点一下
+ * 就在这条消息下方**原地**展开两枚按钮（确认撤回 / 取消），不弹窗、不遮罩、
+ * 不带标题与说明——点撤回只是要一个「再确认一次」的落点，弹窗太重。确认后走
  * actions.recallMessage：删这一轮的消息与记忆、插一条系统提示，并尽力通知宿主
  * 撤掉模型上下文。bot 消息不给撤回入口（撤回是「我说错话了」的语义）。
  *
@@ -19,9 +19,9 @@
  * 就用「通话里设置的音色与供应商」把这条念出来；Bot 设置里打开「自动朗读回复」后
  * 新回复也会自动念（只在单聊、且没有通话进行时，理由见自动播放那段注释）。
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
-import { IconChevronDown, IconQuote, IconSparkles, IconStop, IconUndo, IconVolume, IconX } from '../icons.tsx'
+import { IconChevronDown, IconQuote, IconSparkles, IconStop, IconUndo, IconVolume } from '../icons.tsx'
 import { formatClock, type Bot, type Message, type MessageBlock } from '../types.ts'
 import { usePersonal } from '../store.tsx'
 import { getSpeechState, speakText, speechTextOf, stopSpeech, useSpeechState } from '../speech.ts'
@@ -340,42 +340,19 @@ export function MessageList({ messages, bot, room }: MessageListProps): JSX.Elem
   const stickRef = useRef(true)
   /** 是否已经滚到底部附近（false 时浮出「回到最新」按钮）。 */
   const [atBottom, setAtBottom] = useState(true)
-  /** 待撤回的消息（非 null 时显示确认卡）。 */
+  /** 待撤回的消息（非 null 时在这条消息下方原地显示两枚确认按钮）。 */
   const [recallTarget, setRecallTarget] = useState<Message | null>(null)
-  /*
-   * 撤回确认卡的退场状态：关闭时先播 240ms（遮罩淡出 + 卡片下滑缩小），
-   * 再真正卸载。直接 setRecallTarget(null) 会让卡片硬消失，和入场那 200ms
-   * 的弹出不对称。时长 / 曲线与 modal-animation.ts 的 MODAL_ANIM_MS 一致。
-   */
-  const [recallClosing, setRecallClosing] = useState(false)
-  const recallTimerRef = useRef<number | null>(null)
 
-  /** 关闭确认卡：先播退场，再执行原来的关闭 / 撤回动作。 */
-  const closeRecall = useCallback((after?: () => void): void => {
-    if (recallTimerRef.current !== null) return
-    setRecallClosing(true)
-    recallTimerRef.current = window.setTimeout(() => {
-      recallTimerRef.current = null
-      setRecallClosing(false)
-      setRecallTarget(null)
-      after?.()
-    }, 240)
-  }, [])
-
-  useEffect(() => () => {
-    if (recallTimerRef.current !== null) window.clearTimeout(recallTimerRef.current)
-  }, [])
-
-  /* Esc 关闭确认卡：与关闭按钮、点遮罩走同一个退场，不再有第三条硬关路径。 */
+  /* Esc 收起原地确认：不弹窗也要留一条键盘退出路径。 */
   useEffect(() => {
     if (recallTarget === null) return undefined
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape' || event.defaultPrevented) return
-      closeRecall()
+      setRecallTarget(null)
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [recallTarget, closeRecall])
+  }, [recallTarget])
   /**
    * 已收起的轮次（turnId）。
    *
@@ -832,13 +809,38 @@ export function MessageList({ messages, bot, room }: MessageListProps): JSX.Elem
                           type="button"
                           title="撤回"
                           aria-label="撤回这条消息"
-                          onClick={() => setRecallTarget(message)}
+                          onClick={() => setRecallTarget((prev) => (prev?.id === message.id ? null : message))}
                         >
                           <IconUndo size={18} strokeWidth={2} />
                         </button>
                       ) : null}
                     </div>
                   </div>
+                  {/*
+                   * 撤回原地确认：不弹窗、不遮罩，就贴在这条消息下面给两枚按钮。
+                   * 用户要的就是「点一下确认 / 取消」，标题、说明、关闭 X 一律不要。
+                   */}
+                  {message.role === 'user' && recallTarget?.id === message.id ? (
+                    <div className="pa-recall-inline" role="group" aria-label="确认撤回这条消息">
+                      <button
+                        className="pa-btn pa-btn--ghost pa-btn--sm"
+                        type="button"
+                        onClick={() => setRecallTarget(null)}
+                      >
+                        取消
+                      </button>
+                      <button
+                        className="pa-btn pa-btn--danger pa-btn--sm"
+                        type="button"
+                        onClick={() => {
+                          setRecallTarget(null)
+                          actions.recallMessage(message.id)
+                        }}
+                      >
+                        确认撤回
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -867,54 +869,6 @@ export function MessageList({ messages, bot, room }: MessageListProps): JSX.Elem
         </button>
       </div>
 
-      {/*
-       * 撤回确认卡。与 ChatPanel 的「清空对话」同一套写法（pa-overlay + pa-modal +
-       * pa-confirm），只是把状态放在消息流里——入口就在这条消息上。
-       * 挂成 .pa-chat 的直接子节点（而不是消息滚动区里），否则 overlay 会跟着
-       * 消息流一起滚动、还会被滚动容器的 overflow 裁掉。
-       */}
-      {recallTarget !== null ? (
-        <div
-          className="pa-overlay"
-          data-closing={recallClosing ? '1' : undefined}
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) closeRecall()
-          }}
-        >
-          <div className="pa-modal pa-confirm" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="pa-modal__head">
-              <div className="pa-modal__title">撤回消息</div>
-              <button className="pa-modal__close" type="button" onClick={() => closeRecall()} aria-label="关闭">
-                <IconX size={16} />
-              </button>
-            </div>
-            <div className="pa-modal__body">
-              <p className="pa-confirm__lead">撤回这条消息？</p>
-              <p className="pa-confirm__hint">
-                这条消息和它之后、下一条消息之前的回复会一起删掉，这一轮记进它记忆里的内容也会清掉。此操作不可撤销。
-              </p>
-            </div>
-            <div className="pa-modal__foot">
-              <button className="pa-btn pa-btn--ghost" type="button" onClick={() => closeRecall()}>
-                取消
-              </button>
-              <button
-                className="pa-btn pa-btn--danger"
-                type="button"
-                onClick={() => {
-                  const target = recallTarget
-                  // 撤回动作等退场播完再执行，卡片滑出时消息流才刷新。
-                  closeRecall(() => {
-                    actions.recallMessage(target.id)
-                  })
-                }}
-              >
-                撤回
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
     </>
   )
 }

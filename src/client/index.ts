@@ -54,6 +54,7 @@ import { applyProviderClient } from './provider/index.ts'
 import { applyBrowserFlagClient } from './browser-flag/index.ts'
 import { applySidebarDocument } from './sidebar-doc/index.tsx'
 import { applyUiFont } from './ui-font/index.ts'
+import { applyCallHotkey } from './call-hotkey/index.ts'
 import { applyDonePill } from './done-pill/pill.tsx'
 import { ensureOverlayMotionStyles } from './motion/overlay-motion.ts'
 import { startShellHotReporter } from './done-pill/shell-hot.ts'
@@ -209,6 +210,11 @@ export function apply(ctx: ClientContext): void {
   // input.ui-font 不在外层做 apply 期门：ui-font 内部自带 onFeatureChange，
   // 外层门会让「上次关闭 → 本次打开」时监听装不上、必须刷新。
   guarded(ctx, 'ui font', () => { applyUiFont(ctx) })
+
+  // ── 语音通话快捷键：注册成官方 ctx.shortcuts 命令（改键由官方设置页负责）──
+  // catalog 同步到三路触发通道与桌面壳 OS 级热键；监听挂在常驻的 PersonalApp，
+  // Work / Bot 两模式都生效。见 call-hotkey/ 与 personal/call-hotkey.ts 头注释。
+  guarded(ctx, 'call hotkey', () => { applyCallHotkey(ctx) })
 
   // ── 会话右键菜单「删除会话」────────────────────────────────────────────
   // 官方把会话行的「...」菜单拆成了 `sidebar.workspaces.session.menu.item` 席位，

@@ -247,6 +247,24 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
   color: var(--pa-text-3);
 }
 
+/* ---------- 撤回原地确认（不弹窗，贴在消息下方的一排两枚按钮） ----------
+ * 父级 .pa-msg__content 是 flex column 且用户消息 align-items:flex-end，
+ * 这一行自然靠右、宽度收成内容宽，间距交给父级的 gap 统一给。 */
+.pa-recall-inline {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  animation: pa-recall-inline-in 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@keyframes pa-recall-inline-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pa-recall-inline { animation: none; }
+}
+
 /* ---------- 消息流 ---------- */
 .pa-chat__scroll {
   flex: 1;
