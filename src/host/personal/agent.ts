@@ -34,7 +34,7 @@ import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import * as zlib from 'node:zlib'
-import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import {
   decodeDataUrl,
   extensionFromBytes,
@@ -263,8 +263,82 @@ function safeId(botId: string): string {
   return cleaned === '' ? 'main' : cleaned
 }
 
+/* ── 会话代数（session generation）────────────────────────────────────
+ *
+ * 「整理并开新会话」不能再复用同一个 sessionId：宿主 agent 注册表里的旧
+ * agent 可能没有 dispose 句柄（插件重载后从 registry 恢复的缓存就只有裸 agent），
+ * 删掉会话文件后它仍占着同一个 id，下一轮 ensureBotAgent 从 registry 复用这个
+ * 旧 agent 就会 pre-step blocked（用户实测「会话状态异常」）。
+ *
+ * 所以每次轮转给该 Bot 分配**新的一代会话 id**（pa-bot-v2-<botId>-gN）：
+ *  · 旧会话文件保留，作为历史归档（历史检索仍可查）；
+ *  · 旧 agent 即使还留在 registry，也不会再被新 id 命中；
+ *  · 新会话用全新 id 创建，状态干净。
+ */
+const sessionGenerations = new Map<string, number>()
+let sessionGenerationsLoaded = false
+
+/** 代数落盘文件（插件状态目录，跟着 DSH_HOME 走）。 */
+function sessionGenerationsFile(): string {
+  return join(dshHome(), 'storages', 'dsh-seeker-bot', 'personal-agent', 'session-generations.json')
+}
+
+/** 惰性加载代数表（同步：botSessionId 是纯同步函数，调用点很多）。 */
+function loadSessionGenerations(): void {
+  if (sessionGenerationsLoaded) return
+  sessionGenerationsLoaded = true
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(sessionGenerationsFile(), 'utf8'))
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+        if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+          sessionGenerations.set(key, Math.floor(value))
+        }
+      }
+    }
+  } catch {
+    /* 没有文件 / 坏 JSON：全部从第 0 代开始 */
+  }
+}
+
+/** 代数落盘（失败只影响跨进程记忆，不影响本次运行）。 */
+function saveSessionGenerations(): void {
+  try {
+    const file = sessionGenerationsFile()
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, JSON.stringify(Object.fromEntries(sessionGenerations), null, 2), 'utf8')
+  } catch {
+    /* 写不了就只在内存里生效 */
+  }
+}
+
+/** 某个 Bot 当前代数的会话 id（0 代 = 原始 pa-bot-v2-<botId>）。 */
 export function botSessionId(botId: string): string {
-  return `${SESSION_PREFIX}${safeId(botId)}`
+  loadSessionGenerations()
+  const safe = safeId(botId)
+  const generation = sessionGenerations.get(safe) ?? 0
+  return generation <= 0 ? `${SESSION_PREFIX}${safe}` : `${SESSION_PREFIX}${safe}-g${generation}`
+}
+
+/**
+ * 切到下一代会话（整理并开新会话 / 清空对话都走它）。
+ *
+ * 只递增代数并返回新旧 id；旧会话文件**不删**（保留为历史归档）。
+ */
+export function bumpBotSessionGeneration(botId: string): { from: string; to: string } {
+  loadSessionGenerations()
+  const safe = safeId(botId)
+  const from = botSessionId(botId)
+  const next = (sessionGenerations.get(safe) ?? 0) + 1
+  sessionGenerations.set(safe, next)
+  saveSessionGenerations()
+  return { from, to: botSessionId(botId) }
+}
+
+/** 测试用：清空代数缓存，让下一次 botSessionId 重新读盘。 */
+export function resetSessionGenerationsCacheForTest(): void {
+  sessionGenerations.clear()
+  sessionGenerationsLoaded = false
 }
 
 /**
@@ -1612,6 +1686,19 @@ export async function ensureBotAgent(ctx: any, spec: BotAgentSpec): Promise<any>
 
   const live = typeof agents.get === 'function' ? agents.get(sessionId) : undefined
   if (live !== undefined && live !== null) {
+    /*
+     * 自愈：registry 里可能残留上一版 reset 留下的旧 agent——它的会话目录已经
+     * 被删除，继续复用会让下一轮 pre-step 直接 blocked（用户实测「会话状态异常，
+     * 建议重启 DSH」）。检测到「有活 agent 但磁盘上没有会话目录」时，换代到
+     * 新 id 再创建，用户不用重启也不用重建 Bot。
+     *
+     * 只在 agents.create 可用时自愈：测试里的 mock registry 没有 create，
+     * 保持原来的「复用」语义，避免把 mock 场景带进真实创建流程。
+     */
+    if (typeof agents.create === 'function' && sessionDirsFor(sessionId).length === 0) {
+      const { to } = bumpBotSessionGeneration(spec.botId)
+      if (to !== sessionId) return await ensureBotAgent(ctx, spec)
+    }
     agentCache.set(sessionId, { agent: live })
     return live
   }
@@ -2028,69 +2115,52 @@ export async function resetBotConversation(
   ctx: any,
   botId: string,
 ): Promise<{ ok: boolean; sessionId: string; removed: number; disposed: boolean; error?: string }> {
-  const sessionId = botSessionId(botId)
+  const oldSessionId = botSessionId(botId)
   let disposed = false
 
-  const cached = agentCache.get(sessionId)
+  /*
+   * 先尽量拆掉旧 agent（有 dispose 句柄才拆得掉）：
+   *  · 本插件创建 / resume 的 agent 有 handle，可以彻底 dispose；
+   *  · 插件重载后从 registry 恢复的缓存只有裸 agent，没有 handle——拆不掉也没关系：
+   *    下面会分配新的一代会话 id，旧 agent 留着也不会再被复用。
+   *
+   * 早先这里在「无 handle」时直接报错「会话仍被宿主占用」，用户只能重启 DSH；
+   * 而如果误判成可以删文件（handle 为 undefined 但 cached 存在），旧 agent 会
+   * 带着已被删除的会话继续占着同一个 id，下一轮 pre-step 直接 blocked（实测）。
+   */
+  const cached = agentCache.get(oldSessionId)
   if (cached !== undefined) {
     try {
-      await cached.handle?.dispose?.()
-      disposed = true
+      if (cached.handle !== undefined) {
+        await cached.handle.dispose()
+        disposed = true
+      }
     } catch {
       /* 已经被别处拆掉了 */
     }
-    agentCache.delete(sessionId)
-  } else {
-    // 插件重载后缓存可能是空的，但宿主注册表里还有活 agent
-    try {
-      const agents = getAgents(ctx)
-      const live = typeof agents?.get === 'function' ? agents.get(sessionId) : undefined
-      if (live !== undefined && live !== null) {
-        // 没有 handle 就拆不掉；把情况报上去，让前端提示「重启后彻底清空」
-        return {
-          ok: false,
-          sessionId,
-          removed: 0,
-          disposed: false,
-          error: '会话仍被宿主占用（没有 dispose 句柄），请重启 DSH 后再清空',
-        }
-      }
-    } catch {
-      /* 探测失败：继续删文件 */
-    }
+    agentCache.delete(oldSessionId)
   }
 
-  memoryHashBySession.delete(sessionId)
   /*
-   * 清空对话后 turn 号从 1 重新开始：撤回墓碑必须一起清掉，否则新会话的
-   * 同一 turn 会被误判成「已撤回」，表现为该 Bot 从此不再抽取记忆 / 写任务。
+   * 清掉旧会话的注入指纹与撤回墓碑：新会话的 turn 号从 1 重新开始，不清理会把
+   * 同一 turn 误判成「已撤回」，表现为该 Bot 从此不再抽取记忆 / 写任务。
    */
-  clearWorkingRecallMarks(sessionId)
+  memoryHashBySession.delete(oldSessionId)
+  clearWorkingRecallMarks(oldSessionId)
   try {
     const memory = getWebuiMemoryStore() as { clearTurnRecalls?: (sessionId: string) => void } | undefined
-    memory?.clearTurnRecalls?.(sessionId)
+    memory?.clearTurnRecalls?.(oldSessionId)
   } catch {
     /* 记忆引擎未启用：没有墓碑可清 */
   }
 
-  let removed = 0
-  let failed = false
-  for (const dir of sessionDirsFor(sessionId)) {
-    try {
-      rmSync(dir, { recursive: true, force: true })
-      removed += 1
-    } catch {
-      failed = true
-    }
-  }
+  /*
+   * 分配下一代会话：旧会话文件**保留**为历史归档（历史检索还能查），
+   * 新会话用全新 sessionId，避免与 registry 里残留的旧 agent 撞 id。
+   */
+  const { to: sessionId } = bumpBotSessionGeneration(botId)
 
-  return {
-    ok: !failed,
-    sessionId,
-    removed,
-    disposed,
-    ...(failed ? { error: '会话文件删除失败（可能被占用）' } : {}),
-  }
+  return { ok: true, sessionId, removed: 0, disposed }
 }
 
 /** 每个 bot 会话上次注入的记忆指纹（避免同一份记忆每轮都重复进历史）。 */

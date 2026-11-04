@@ -76,7 +76,12 @@ export interface BotPurgeResult {
  */
 function sessionDirsOf(botId: string): string[] {
   const root = join(dshHome(), 'sessions')
-  const target = botSessionId(botId)
+  /*
+   * 会话 id 可能带代数后缀（pa-bot-v2-<botId>-gN）：每次「整理并开新会话」都会
+   * 递增一代，旧会话文件保留为历史归档。删 Bot 时必须按**前缀**清掉所有代，
+   * 只删当前代会留下孤儿目录，重建同名 Bot 后旧历史会意外复活。
+   */
+  const base = botSessionId(botId).replace(/-g\d+$/, '')
   const out: string[] = []
   let workspaces: string[]
   try {
@@ -85,8 +90,16 @@ function sessionDirsOf(botId: string): string[] {
     return out
   }
   for (const workspace of workspaces) {
-    const candidate = join(root, workspace, target)
-    if (existsSync(candidate)) out.push(candidate)
+    let names: string[]
+    try {
+      names = readdirSync(join(root, workspace))
+    } catch {
+      continue
+    }
+    for (const name of names) {
+      if (name !== base && !name.startsWith(`${base}-g`)) continue
+      out.push(join(root, workspace, name))
+    }
   }
   return out
 }

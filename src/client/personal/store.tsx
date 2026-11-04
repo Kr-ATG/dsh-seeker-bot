@@ -5185,6 +5185,16 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     const keepMessages = options?.keepMessages === true
 
     /*
+     * 自动整理（keepMessages）前先确认没有正在跑的回复：生成摘要要十几秒，
+     * 期间用户可能已经发了下一条消息。此时切会话会杀掉那一轮（用户实测会看到
+     * 「本轮被宿主拒绝」），所以宁可跳过这次，等下一轮再整理。
+     */
+    if (keepMessages && stateRef.current.messages.some((message) => message.pending === true)) {
+      toast('有回复正在进行，稍后再自动整理')
+      return
+    }
+
+    /*
      * 只有「直接清空」才归档 + 删消息；「整理并开新会话」保留对话流，不归档。
      *
      * archiveConversation 自己 setState 写入归档；下面的清空 setState updater
