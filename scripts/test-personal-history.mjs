@@ -318,17 +318,18 @@ try {
     assert.equal(calls.length, 0)
   })
 
-  await checkAsync('命中触发词且检索到结果时注入 developer 消息', async () => {
+  await checkAsync('命中触发词且检索到结果时注入 user 消息（v4 事件类型必须与 role 一致）', async () => {
     const calls = []
     const agent = { session: { id: 'pa-bot-v2-bot-inject' }, inject(message) { calls.push(message) } }
     const injected = await history.injectHistoryIntoAgent(agent, 'bot-inject', '上次那个方案用的是什么存储？')
     assert.equal(injected, true)
     assert.equal(calls.length, 1)
-    assert.equal(calls[0].role, 'developer')
+    assert.equal(calls[0].role, 'user')
+    assert.equal(calls[0].source.kind, 'plugin:dsh-seeker-bot')
     assert.ok(Array.isArray(calls[0].content))
     assert.equal(calls[0].content[0].type, 'text')
     assert.ok(calls[0].content[0].text.includes('【历史会话检索 · 仅供参考】'))
-    assert.ok(Object.isFrozen(calls[0]), 'developer 消息应深冻结')
+    assert.ok(Object.isFrozen(calls[0]), '注入消息应深冻结')
   })
 
   await checkAsync('相同内容不重复注入；reset 后可重注', async () => {

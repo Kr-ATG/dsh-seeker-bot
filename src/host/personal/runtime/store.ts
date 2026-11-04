@@ -239,6 +239,31 @@ export class RuntimeStore {
   }
 
   /**
+   * 删掉某个 Bot 的全部作业记录与收件箱（删 Bot 时用）。
+   *
+   * 不清的话 assignments.json 会永远留着指向不存在 Bot 的任务流水：列表页
+   * 显示「已在执行」、主 Bot 的派活视图也会读到一个幽灵 Bot。
+   *
+   * @returns 被删掉的作业记录条数（收件箱清空不计入）。
+   */
+  forgetBot(botId: string): number {
+    const id = String(botId ?? '').trim()
+    if (id === '') return 0
+    const keep = this.snapshot.assignments.filter((assignment) => {
+      const assignee = (assignment as { assignee?: { botId?: string } }).assignee
+      return assignee?.botId !== id
+    })
+    const removed = this.snapshot.assignments.length - keep.length
+    const inboxBefore = this.snapshot.inbox.length
+    this.snapshot.inbox = this.snapshot.inbox.filter((item) => item.ownerBotId !== id)
+    if (removed > 0 || this.snapshot.inbox.length !== inboxBefore) {
+      this.snapshot.assignments = keep
+      this.flush()
+    }
+    return removed
+  }
+
+  /**
    * 清理终态且已上报的老记录。
    *
    * 不清理会让快照无限增长；但**只清已上报的**——没上报的终态记录还欠一次唤醒，

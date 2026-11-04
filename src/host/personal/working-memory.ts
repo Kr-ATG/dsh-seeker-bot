@@ -278,7 +278,7 @@ export async function pruneWorkingTasks(botId: string, now = Date.now()): Promis
  */
 const injectedHash = new Map<string, string>()
 
-/** 深冻结一条要进会话日志的消息（与 agent.ts 的 createDeveloperMessage 同契约）。 */
+/** 深冻结一条要进会话日志的消息（与 agent.ts 的 createContextMessage 同契约）。 */
 function freezeDeep(value: any): any {
   if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value
   for (const key of Object.keys(value)) freezeDeep(value[key])
@@ -286,19 +286,24 @@ function freezeDeep(value: any): any {
 }
 
 /**
- * 构造一条 developer 消息：面向模型的上下文，不显示给用户。
+ * 构造一条注入消息：面向模型的上下文，不显示给用户。
  *
- * 为什么不复用 agent.ts 的 `createDeveloperMessage`：它没有导出，而 agent.ts
- * 由另一个 teammate 并行修改，本任务约定不碰它。这里按**逐字相同的结构**
- * 自己构造（id / role / content / source + 深冻结），宿主对消息的不可变要求
- * 是一致的；字段漂移只可能出现在 `source.kind` 上，而它只用于审计。
+ * role 必须是 `user`：agent-loop 会把 claim 到的注入消息 append 成
+ * `user/message`，v4 校验要求事件类型与 role 一致（developer 角色配
+ * user/message 会整轮报错，用户看到「本轮没有产生任何输出」）。
+ * source.kind 也必须是 `plugin:<name>`：v4 落盘拒绝旧式 `plugin`。
  */
 export function createWorkingMemoryMessage(text: string): any {
   return freezeDeep({
     id: `pa-wm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-    role: 'developer',
+    role: 'user',
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin' },
+    source: {
+      kind: 'plugin:dsh-seeker-bot',
+      plugin: 'dsh-seeker-bot',
+      form: 'snapshot',
+      sections: [{ name: '工作记忆', text }],
+    },
   })
 }
 

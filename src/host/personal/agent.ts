@@ -335,6 +335,21 @@ export function bumpBotSessionGeneration(botId: string): { from: string; to: str
   return { from, to: botSessionId(botId) }
 }
 
+/**
+ * 彻底忘掉一个 Bot 的会话代数（删 Bot 时用）。
+ *
+ * 不清的话，同名 Bot 重建后会从旧代数继续（比如 g7），留下一个没人使用的
+ * 代数起点；更麻烦的是 session-generations.json 里永远留着已删 Bot 的条目。
+ */
+export function forgetBotSessionGeneration(botId: string): boolean {
+  loadSessionGenerations()
+  const safe = safeId(botId)
+  if (!sessionGenerations.has(safe)) return false
+  sessionGenerations.delete(safe)
+  saveSessionGenerations()
+  return true
+}
+
 /** 测试用：清空代数缓存，让下一次 botSessionId 重新读盘。 */
 export function resetSessionGenerationsCacheForTest(): void {
   sessionGenerations.clear()
@@ -455,15 +470,33 @@ function createUserMessage(text: string): any {
 }
 
 /**
- * 构造一条 developer 消息：面向模型的上下文，不会显示给用户。
- * 用来把 bot 的记忆投喂给 agent。
+ * 构造一条注入消息：面向模型的上下文，不会显示给用户。
+ *
+ * ## 为什么是 user 角色（2026-11-04 修）
+ *
+ * `agent.inject()` 只是把消息放进 inbox（next-step），真正的落盘发生在 step 的
+ * pre-step 之后：agent-loop 把 claim 到的消息统一 append 成 `user/message`
+ * 事件。v4 会话格式校验要求「事件类型与 message.role 一致」——role 写
+ * `developer` 而事件是 `user/message`，会在 append 时直接抛
+ * `developer/message and developer role must occur together`，整轮变成空轮
+ *（用户看到「本轮没有产生任何输出」/「会话状态异常」）。
+ *
+ * 真正的 `developer/message` 事件只由宿主自己写（工具增删通知 / 撤回占位），
+ * 插件注入上下文一律走 user 消息 + producer-owned source（与 dsh-memory、
+ * dsh-vault 的做法一致）。source.kind 必须是 `plugin:<name>`：v4 落盘拒绝
+ * 旧式 `{ kind: 'plugin' }`。
  */
-function createDeveloperMessage(text: string): any {
+function createContextMessage(text: string, section: string): any {
   return freezeDeep({
     id: `pa-ctx-${randomUUID()}`,
-    role: 'developer',
+    role: 'user',
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin' },
+    source: {
+      kind: 'plugin:dsh-seeker-bot',
+      plugin: 'dsh-seeker-bot',
+      form: 'snapshot',
+      sections: [{ name: section, text }],
+    },
   })
 }
 
@@ -1952,6 +1985,7 @@ async function ensureSharedWorkspace(ctx: any, agent: any): Promise<void> {
   }
 }
 
+
 /** 丢掉缓存的 agent（bot 被删除 / 改权限时用）。 */
 export function forgetBotAgent(botId: string): void {
   const sessionId = botSessionId(botId)
@@ -2245,7 +2279,7 @@ function injectMemories(agent: any, memories: string[] | undefined): void {
   if (memoryHashBySession.get(sessionId) === hash) return
 
   try {
-    agent.inject(createDeveloperMessage(text))
+    agent.inject(createContextMessage(text, '记忆'))
     memoryHashBySession.set(sessionId, hash)
   } catch {
     /* inject 不可用：这一轮先不带记忆 */

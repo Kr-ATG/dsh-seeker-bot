@@ -313,20 +313,31 @@ export async function generateRelayBrief(ctx: any, request: GenerateRelayRequest
  */
 const injectedHash = new Map<string, string>()
 
-/** 深冻结一条要进会话日志的消息（与 agent.ts 的 createDeveloperMessage 同契约）。 */
+/** 深冻结一条要进会话日志的消息（与 agent.ts 的 createContextMessage 同契约）。 */
 function freezeDeep(value: any): any {
   if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value
   for (const key of Object.keys(value)) freezeDeep(value[key])
   return Object.freeze(value)
 }
 
-/** 构造一条 developer 消息：面向模型的上下文，不显示给用户。 */
+/**
+ * 构造一条注入消息：面向模型的上下文，不显示给用户。
+ *
+ * role 必须是 `user`：agent-loop 会把 claim 到的注入消息 append 成
+ * `user/message`，v4 校验要求事件类型与 role 一致（developer 角色配
+ * user/message 会整轮报错，用户看到「本轮没有产生任何输出」）。
+ */
 export function createRelayMessage(text: string): any {
   return freezeDeep({
     id: `pa-relay-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-    role: 'developer',
+    role: 'user',
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin' },
+    source: {
+      kind: 'plugin:dsh-seeker-bot',
+      plugin: 'dsh-seeker-bot',
+      form: 'snapshot',
+      sections: [{ name: '接力摘要', text }],
+    },
   })
 }
 

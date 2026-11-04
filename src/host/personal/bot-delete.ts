@@ -35,10 +35,10 @@ import { existsSync, readdirSync, rmSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-import { botSessionId, forgetBotAgent } from './agent.ts'
+import { botSessionId, forgetBotAgent, forgetBotSessionGeneration } from './agent.ts'
 import { removeCreatedBot } from './bot-create.ts'
 import { botOutputFolderOf, botOutputsRoot, forgetBotOutputDir } from './outputs.ts'
-import { forgetBotSpec } from './runtime/registry.ts'
+import { forgetBotSpec, personalRuntime } from './runtime/registry.ts'
 import { readProactive, readRoutines, writeProactive, writeRoutines } from './scheduler.ts'
 import { workingMemoryFile } from './working-memory.ts'
 import { getWebuiMemoryStore } from '../../triad/memory-store-singleton.ts'
@@ -155,11 +155,90 @@ export async function purgeBot(botId: string, options: { purgeFiles?: boolean } 
     }
   }
 
-  // 3. 派活花名册（不摘的话主 Bot 还会往这个「已删除」的 Bot 派活）
+  // 2.5 会话代数（不清的话同名 Bot 重建会从旧代数起跑，generation 表里永远留着已删 Bot）
+  try {
+    if (forgetBotSessionGeneration(id) && !removed.includes('会话代数')) removed.push('会话代数')
+  } catch {
+    /* 代数文件坏了：不影响其它清理 */
+  }
+
+  /*
+   * 3. 会话派生缓存：接力摘要 / 历史检索索引 / gallery 会话状态 / 工具结果。
+   *
+   * 这些文件都以 botId 或 sessionId 命名，早先漏清会留下「已删 Bot 的缓存」：
+   *  · relay/<botId>.json、history/<botId>.json 在同名 Bot 重建后会把旧摘要/旧索引带回来；
+   *  · storages/triad-gallery/pa-bot-v2-<botId>*.json 是 gallery 的会话列表状态缓存；
+   *  · tool-results/<sessionId>/ 是按会话 id 分目录的超长工具结果全文。
+   *
+   * 用前缀匹配（而不是精确当前会话 id）：同一次运行里「整理并开新会话」会分配
+   * -gN 代数，只删当前代同样会留孤儿。
+   */
+  const paStateDir = join(dshHome(), 'storages', 'dsh-seeker-bot', 'personal-agent')
+  for (const [label, file] of [
+    ['接力摘要', join(paStateDir, 'relay', `${id}.json`)],
+    ['历史检索索引', join(paStateDir, 'history', `${id}.json`)],
+  ] as const) {
+    try {
+      if (existsSync(file)) {
+        unlinkSync(file)
+        if (!removed.includes(label)) removed.push(label)
+      }
+    } catch {
+      /* 被占用：下次再删 */
+    }
+  }
+  const botSessionBase = botSessionId(id).replace(/-g\d+$/, '')
+  try {
+    const galleryDir = join(dshHome(), 'storages', 'triad-gallery')
+    if (existsSync(galleryDir)) {
+      let cleared = false
+      for (const name of readdirSync(galleryDir)) {
+        // gallery 状态文件带 .json 后缀；-gN 代数文件的前缀匹配也要覆盖
+        if (name !== `${botSessionBase}.json` && !name.startsWith(`${botSessionBase}-g`)) continue
+        try {
+          unlinkSync(join(galleryDir, name))
+          cleared = true
+        } catch {
+          /* 下一项 */
+        }
+      }
+      if (cleared) removed.push('gallery 会话状态')
+    }
+  } catch {
+    /* gallery 状态读不到：不影响其它清理 */
+  }
+  try {
+    const toolResultsDir = join(paStateDir, 'tool-results')
+    if (existsSync(toolResultsDir)) {
+      let cleared = false
+      for (const name of readdirSync(toolResultsDir)) {
+        if (name !== botSessionBase && !name.startsWith(`${botSessionBase}-g`)) continue
+        try {
+          rmSync(join(toolResultsDir, name), { recursive: true, force: true })
+          cleared = true
+        } catch {
+          /* 下一项 */
+        }
+      }
+      if (cleared) removed.push('工具结果缓存')
+    }
+  } catch {
+    /* 工具结果读不到：不影响其它清理 */
+  }
+
+  // 4. 派活花名册（不摘的话主 Bot 还会往这个「已删除」的 Bot 派活）
   try {
     if (forgetBotSpec(id)) removed.push('派活花名册')
   } catch {
     /* 运行时没起来：没有花名册可摘 */
+  }
+
+  // 4.5 派活任务记录（assignments.json 里指向已删 Bot 的任务流水）
+  try {
+    const cleared = personalRuntime()?.forgetBot?.(id) ?? 0
+    if (cleared > 0) removed.push(`派活任务记录 ${cleared} 条`)
+  } catch {
+    /* 运行时没起来：下次启动的 prune 会兜底 */
   }
 
   // 4. 工作记忆

@@ -38,6 +38,13 @@ export interface RuntimeHandle {
    */
   list: () => readonly Assignment[]
   /**
+   * 删掉某个 Bot 的全部作业记录与收件箱（删 Bot 时用）。
+   *
+   * 可选：老运行时没注册这个方法时调用方按「没有可清的记录」处理。
+   * @returns 被删掉的作业记录条数。
+   */
+  forgetBot?: (botId: string) => number
+  /**
    * 记下这一轮已经完成的对外动作。
    *
    * 必须在工具**结算的当下**调用（不是等 turn 结束）：进程中途崩溃时，

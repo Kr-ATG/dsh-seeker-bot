@@ -231,7 +231,9 @@ try {
     await host.writeRelayBrief('bot-inject', base)
     assert.equal(await host.injectRelayIntoAgent(agent, 'bot-inject'), true)
     assert.equal(injected.length, 1)
-    assert.equal(injected[0].role, 'developer')
+    // v4 会话把注入消息统一落成 user/message，role 必须是 user（见 agent.ts 注释）
+    assert.equal(injected[0].role, 'user')
+    assert.equal(injected[0].source.kind, 'plugin:dsh-seeker-bot')
     assert.ok(injected[0].content[0].text.includes('第一版'))
     assert.equal(await host.injectRelayIntoAgent(agent, 'bot-inject'), false)
     assert.equal(injected.length, 1)

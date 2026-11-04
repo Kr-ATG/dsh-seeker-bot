@@ -196,13 +196,14 @@ try {
     assert.equal(calls.length, 0)
   })
 
-  await checkAsync('主 Bot 命中触发词且检索到结果时注入 developer 摘要', async () => {
+  await checkAsync('主 Bot 命中触发词且检索到结果时注入 user 摘要（v4 事件类型必须与 role 一致）', async () => {
     const calls = []
     const agent = { session: { id: 'pa-bot-v2-bot-main' }, inject(message) { calls.push(message) } }
     const injected = await cross.injectCrossBotHistoryIntoAgent(agent, { botId: 'bot-main', isMain: true }, '其他 Bot 的历史里讨论过什么')
     assert.equal(injected, true)
     assert.equal(calls.length, 1)
-    assert.equal(calls[0].role, 'developer')
+    assert.equal(calls[0].role, 'user')
+    assert.equal(calls[0].source.kind, 'plugin:dsh-seeker-bot')
     assert.ok(calls[0].content[0].text.includes('【跨 Bot 历史检索 · 仅摘要】'))
     assert.ok(calls[0].content[0].text.includes('来自其他 Bot 的历史摘要，仅供线索'))
     assert.ok(Object.isFrozen(calls[0]))

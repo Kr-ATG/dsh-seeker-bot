@@ -4640,6 +4640,11 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       routines: prev.routines.filter((item) => item.botId !== id),
       // 任务记录跟着 Bot 一起删：留下一条指向不存在 Bot 的任务只会让详情卡出空数据
       tasks: prev.tasks.filter((task) => task.botId !== id),
+      /*
+       * 历史对话归档也要跟着删：归档条目的 botId 已不存在，留在「历史对话」里
+       * 就是一条点开没有归属的孤儿记录（用户实测删完 Bot 后还看到它）。
+       */
+      archivedSessions: prev.archivedSessions.filter((session) => session.botId !== id),
     }))
     setUi((prev) => ({ ...prev, selectedBotId: prev.selectedBotId === id ? MAIN_BOT_ID : prev.selectedBotId }))
     /*
