@@ -45,6 +45,7 @@ import { applyPersonalAgentScheduler, nextProactiveAt, nextRoutineAt, normalizeN
 import { buildWorkingMemoryBlock, createWorkingMemoryMessage, injectWorkingMemoryIntoAgent, pruneWorkingTasks, readWorkingTasks, resetWorkingMemoryInjection, upsertWorkingTask, workingMemoryFile, type WorkingTask } from './working-memory.ts'
 import { clearRelayBrief, generateRelayBrief, injectRelayIntoAgent, readRelayBrief, resetRelayInjection, writeRelayBrief } from './relay.ts'
 import { injectHistoryIntoAgent, resetHistoryInjection, searchHistory, upsertHistoryMessages } from './history-search.ts'
+import { injectCrossBotHistoryIntoAgent, resetCrossBotHistoryInjection, searchAcrossBots } from './cross-search.ts'
 import { normalizeRelayBrief } from '../../shared/relay.ts'
 import { listPages, readPage, writePage } from './pages.ts'
 import {
@@ -593,7 +594,8 @@ async function rememberBotMemory(
  * 自己把「agent 建不起来」的错误报出来）。
  *
  * userText 是本轮用户原话：历史检索只在用户提到「之前 / 上次 / 以前」时
- * 才查索引注入片段（见 ./history-search.ts），普通回合完全不碰磁盘。
+ * 才查索引注入片段（见 ./history-search.ts）；跨 Bot 摘要只在主 Bot 问到
+ * 「其他 Bot / 团队 / 大家」时检索（见 ./cross-search.ts）。普通回合不碰磁盘。
  */
 async function injectWorkingMemoryForReply(ctx: any, spec: BotAgentSpec, userText: string): Promise<void> {
   try {
@@ -603,6 +605,8 @@ async function injectWorkingMemoryForReply(ctx: any, spec: BotAgentSpec, userTex
     await injectRelayIntoAgent(agent, spec.botId)
     // 历史会话检索：用户提到「之前 / 上次」时捞相关片段（见 ./history-search.ts）
     await injectHistoryIntoAgent(agent, spec.botId, userText)
+    // 跨 Bot 历史检索：主 Bot 问「其他 Bot / 团队」时汇总子 Bot 摘要（见 ./cross-search.ts）
+    await injectCrossBotHistoryIntoAgent(agent, spec, userText)
   } catch {
     /* agent 建不起来：交给 runBotTurn 报错 */
   }
@@ -1124,7 +1128,7 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
               'office/info', 'office/page', 'office/pdf',
               'memory/remember',
               'working-memory',
-              'history/index', 'history/search',
+              'history/index', 'history/search', 'history/cross-search',
               'approval/rules',
               'pages',
               'events', 'routines', 'messages', 'bots/created', 'bots',
@@ -1611,6 +1615,24 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
             return sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
           }
         }
+        /*
+         * 跨 Bot 历史检索（第 4 步）：主 Bot 问「其他 Bot / 团队 / 大家」时，
+         * 汇总各子 Bot 的历史摘要（只读、只出 ≤200 字摘要，不返回全文）。
+         * 子 Bot 列表来自 created-bots 账本，排除发起方自己。
+         */
+        if ((tail === '/history/cross-search' || tail === '/history/cross-search/') && method === 'GET') {
+          const fromBotId = (url.searchParams.get('fromBotId') ?? '').trim()
+          if (fromBotId === '') return sendJson(res, 400, { ok: false, error: 'fromBotId required' })
+          const q = (url.searchParams.get('q') ?? '').trim()
+          if (q === '') return sendJson(res, 200, { ok: true, total: 0, bots: [] })
+          const limitRaw = Number.parseInt(url.searchParams.get('limit') ?? '', 10)
+          const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(10, limitRaw)) : 2
+          try {
+            return sendJson(res, 200, await searchAcrossBots(fromBotId, q, limit))
+          } catch (error: any) {
+            return sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
+          }
+        }
 
         /*
          * 上下文占用：前端据此在快满时提示「整理并开新会话」。
@@ -1695,6 +1717,7 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
           resetWorkingMemoryInjection(botId)
           resetRelayInjection(botId)
           resetHistoryInjection(botId)
+          resetCrossBotHistoryInjection(botId)
           const result = await resetBotConversation(webCtx, botId)
           return sendJson(res, result.ok ? 200 : 502, result)
         }
@@ -1856,6 +1879,8 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
           resetRelayInjection(botId)
           // 历史检索的注入指纹：换了新会话，同样的检索结果也要能重新注入
           resetHistoryInjection(botId)
+          // 跨 Bot 摘要的注入指纹同理
+          resetCrossBotHistoryInjection(botId)
           const result = await resetBotConversation(webCtx, botId)
           return sendJson(res, result.ok ? 200 : 502, result)
         }

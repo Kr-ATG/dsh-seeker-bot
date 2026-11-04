@@ -226,10 +226,45 @@ function tokensForFile(botId: string, file: HistoryFile): Map<string, Set<string
   return tokens
 }
 
+/** 候选池大小：先按旧规则（非加权覆盖率）取前 20，再做轻量 rerank。 */
+const RERANK_POOL = 20
+/** 多样性阈值：同一 Bot 内两条结果 token 集 Jaccard 超过它视为重复。 */
+const DIVERSITY_JACCARD = 0.8
+
+/** 两个 token 集的 Jaccard 相似度（空集按 0 处理，避免除零）。 */
+function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a]
+  let intersection = 0
+  for (const token of small) {
+    if (large.has(token)) intersection += 1
+  }
+  return intersection / (a.size + b.size - intersection)
+}
+
+/** 候选（带 rerank 需要的中间量；tokens 只用于多样性判断，不返回前端）。 */
+interface RankedCandidate {
+  id: string
+  role: HistoryMessage['role']
+  text: string
+  at: number
+  tokens: Set<string>
+  baseScore: number
+  weightedCoverage: number
+  exact: number
+  recency: number
+}
+
 /**
  * 在某个 Bot 的历史索引里检索（内存打分，最多 2000 条，目标 < 500ms）。
  *
- * 分数 = query token 覆盖率 * 0.7 + 精确子串命中 * 0.2 + 时间衰减 * 0.1。
+ * 两段式打分（第 4 步增强，不引入 embedding）：
+ *  1. 候选：旧规则「覆盖率 * 0.7 + 精确子串 * 0.2 + recency * 0.1」取前 20；
+ *  2. rerank：「IDF 加权覆盖率 * 0.6 + 精确短语 * 0.25 + recency * 0.15」重排。
+ *
+ * IDF 权重 = log((N+1)/(df+1)) + 1：像「存在」「完全」这种满屏都是的 bigram
+ * 权重自动变低，命中真正少见的词（如「量子纠缠」）才容易排前面。
+ * 同一 Bot 内近似重复（token 集 Jaccard > 0.8，比如重复的进度播报）只留最高分。
  * 只返回至少命中一个 token（或整句子串）的消息——没命中的消息不该因为
  * 「时间新」被带进来。
  */
@@ -242,32 +277,91 @@ export async function searchHistory(botId: string, query: string, limit = HISTOR
   const queryTokens = tokenizeHistory(trimmed)
   const needle = trimmed.toLowerCase()
   const tokenMap = tokensForFile(botId, file)
+  const total = file.messages.length
+
+  /*
+   * IDF：df 是「命中该 token 的消息数」。查询 token 在语料里完全没出现时
+   * df=0、权重最大，但它不可能命中任何消息，只会把所有人的加权覆盖率一起
+   * 拉低——排序不受影响，属于可接受的代价。
+   */
+  const tokenWeights = new Map<string, number>()
+  let weightSum = 0
+  for (const token of queryTokens) {
+    let df = 0
+    for (const message of file.messages) {
+      const messageTokens = tokenMap.get(message.id) ?? new Set(tokenizeHistory(message.text))
+      if (messageTokens.has(token)) df += 1
+    }
+    const weight = Math.log((total + 1) / (df + 1)) + 1
+    tokenWeights.set(token, weight)
+    weightSum += weight
+  }
+
   const now = Date.now()
-  const hits: HistorySearchHit[] = []
+  const candidates: RankedCandidate[] = []
   for (const message of file.messages) {
     const messageTokens = tokenMap.get(message.id) ?? new Set(tokenizeHistory(message.text))
     let matched = 0
+    let matchedWeight = 0
     for (const token of queryTokens) {
-      if (messageTokens.has(token)) matched += 1
+      if (messageTokens.has(token)) {
+        matched += 1
+        matchedWeight += tokenWeights.get(token) ?? 0
+      }
     }
     const coverage = queryTokens.length > 0 ? matched / queryTokens.length : 0
+    const weightedCoverage = weightSum > 0 ? matchedWeight / weightSum : 0
     const exact = needle !== '' && message.text.toLowerCase().includes(needle) ? 1 : 0
     // 一个 token 都没命中、整句也不是子串：与查询无关，不进入候选
     if (matched === 0 && exact === 0) continue
     const age = Math.max(0, now - message.at)
     const recency = Math.max(0, Math.min(1, 1 - age / RECENCY_WINDOW_MS))
-    const score = Math.round((coverage * 0.7 + exact * 0.2 + recency * 0.1) * 10_000) / 10_000
-    hits.push({ score, id: message.id, role: message.role, text: message.text, at: message.at })
+    candidates.push({
+      id: message.id,
+      role: message.role,
+      text: message.text,
+      at: message.at,
+      tokens: messageTokens,
+      baseScore: coverage * 0.7 + exact * 0.2 + recency * 0.1,
+      weightedCoverage,
+      exact,
+      recency,
+    })
   }
-  hits.sort((a, b) => b.score - a.score || b.at - a.at)
+
+  // 第一段：旧规则排序，只把前 20 送进 rerank（2000 条里重排全部没必要）
+  candidates.sort((a, b) => b.baseScore - a.baseScore || b.at - a.at)
+  const reranked = candidates.slice(0, RERANK_POOL).map((candidate) => ({
+    ...candidate,
+    score: Math.round((candidate.weightedCoverage * 0.6 + candidate.exact * 0.25 + candidate.recency * 0.15) * 10_000) / 10_000,
+  }))
+  reranked.sort((a, b) => b.score - a.score || b.at - a.at)
+
+  // 第二段：同一 Bot 内的近似重复只保留分数最高的一条
+  const diverse: typeof reranked = []
+  for (const candidate of reranked) {
+    if (diverse.some((kept) => jaccardSimilarity(kept.tokens, candidate.tokens) > DIVERSITY_JACCARD)) continue
+    diverse.push(candidate)
+  }
+
   const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(20, Math.round(limit))) : HISTORY_SEARCH_LIMIT
-  return { ok: true, total: hits.length, results: hits.slice(0, safeLimit) }
+  return {
+    ok: true,
+    total: candidates.length,
+    results: diverse.slice(0, safeLimit).map((candidate) => ({
+      score: candidate.score,
+      id: candidate.id,
+      role: candidate.role,
+      text: candidate.text,
+      at: candidate.at,
+    })),
+  }
 }
 
 /* ───────────────────────────── 注入 ───────────────────────────── */
 
-/** 本地时间格式：YYYY-MM-DD HH:mm（注入文本里给人看的时间）。 */
-function formatHistoryTime(at: number): string {
+/** 本地时间格式：YYYY-MM-DD HH:mm（历史注入与跨 Bot 摘要共用）。 */
+export function formatHistoryTime(at: number): string {
   const date = new Date(at)
   if (Number.isNaN(date.getTime())) return '未知时间'
   const pad = (value: number): string => String(value).padStart(2, '0')

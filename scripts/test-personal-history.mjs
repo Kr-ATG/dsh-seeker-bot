@@ -234,8 +234,8 @@ try {
 
   await checkAsync('时间衰减：相同内容新消息分数更高', async () => {
     await history.upsertHistoryMessages('bot-recency', [
-      { id: 'old', role: 'user', text: '关键词甲乙丙', at: now - 170 * DAY },
-      { id: 'new', role: 'user', text: '关键词甲乙丙', at: now - DAY },
+      { id: 'old', role: 'user', text: '关键词甲乙丙的旧记录', at: now - 170 * DAY },
+      { id: 'new', role: 'user', text: '关键词甲乙丙的新记录', at: now - DAY },
     ])
     const result = await history.searchHistory('bot-recency', '甲乙丙', 5)
     assert.equal(result.results.length, 2)
@@ -255,7 +255,8 @@ try {
     const result = await history.searchHistory('bot-perf', '讨论过项目方案', 5)
     const cost = Date.now() - start
     assert.equal(result.ok, true)
-    assert.equal(result.results.length, 5)
+    // 2000 条文本高度相似：多样性去重会合并成少量结果，这里只关心检索耗时
+    assert.ok(result.results.length >= 1)
     console.log('       检索 2000 条耗时 ' + cost + 'ms')
     assert.ok(cost < 500, '检索耗时 ' + cost + 'ms 超过 500ms')
   })
