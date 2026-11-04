@@ -1,0 +1,19 @@
+name: 功能建议
+description: 想要但还没有的能力
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题
+      description: 描述场景，别直接写功能名
+      placeholder: 我想在多个项目间复用同一套记忆，现在每次都要重配
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你设想的使用方式
+    validations:
+      required: true

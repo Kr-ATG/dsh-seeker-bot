@@ -3006,6 +3006,14 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
    */
   const hostMessageIds = useRef<Map<string, string>>(new Map())
   /**
+   * 常驻 SSE 的 progress 合并链（`botId → 当前链头`）。
+   *
+   * 与 `/reply/stream` 的 `lastProgressId` 同一套 2.5 合并口径，但 SSE 是跨轮次的
+   * 常驻连接，不能用流式请求里的局部变量：链状态必须按 botId 存，遇到非 progress
+   * 消息、turnId 不兼容、链头消息已删除或不再是 progress 时断开。
+   */
+  const sseProgressChains = useRef<Map<string, { messageId: string; turnId?: string }>>(new Map())
+  /**
    * 每个 Bot 已经收到过的最大事件序号（`botId → seq`），重连时当 `since` 用。
    *
    * 为什么必须记：连接断了再重连时，宿主只会补发 `seq > since` 的那一段。不带
@@ -3168,11 +3176,36 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
         const eventRoomId = typeof payload.roomId === 'string' && payload.roomId !== ''
           ? payload.roomId
           : undefined
+        const botId = String(payload.botId ?? MAIN_BOT_ID)
+        // 非 progress 消息落地即断链（重复推送的 update 也算）：它们是独立气泡，后续 progress 不能并进来
+        if (kind !== 'progress') sseProgressChains.current.delete(botId)
         // 已经落地过（多半是本窗口的流式请求先到）：原地更新，不再新建气泡
         const known = hostMessageIds.current.get(hostId)
         if (known !== undefined) {
           updateMessageBlocks(known, blocks, kind, hostId, replyTo, turnId, undefined, eventRoomId)
           return
+        }
+        /*
+         * 多消息切分：host 把模型每段正文拆成一条独立 progress 消息。常驻 SSE 必须
+         * 与 `/reply/stream` 用同一套 2.5 合并口径，否则页面实时收到的就是「一句
+         * 一个气泡」（用户截图里一轮 17 条短消息）。
+         *
+         * 只处理 hostId 未见过的新消息（上面的 known 分支已排除重复推送）；
+         * 链按 botId 记：SSE 是跨轮次的常驻连接，不能像流式请求那样用局部变量，
+         * 否则上一轮的链会在下一轮还挂着、把新消息并进历史气泡。
+         */
+        if (payload.type === 'message' && kind === 'progress') {
+          const chain = sseProgressChains.current.get(botId)
+          if (chain !== undefined) {
+            // turnId 兼容：任一方缺省不阻断（老宿主可能不带 turnId），都有且不等才不能并
+            const turnCompatible = chain.turnId === undefined || turnId === undefined || chain.turnId === turnId
+            const target = stateRef.current.messages.find((message) => message.id === chain.messageId)
+            if (turnCompatible && target !== undefined && target.kind === 'progress') {
+              hostMessageIds.current.set(hostId, chain.messageId)
+              mergeMessageBlocks(chain.messageId, hostId, blocks, kind)
+              return
+            }
+          }
         }
         const id = shortId('msg')
         hostMessageIds.current.set(hostId, id)
@@ -3186,7 +3219,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
               : 'chat' as const
         appendMessage({
           id,
-          botId: String(payload.botId ?? MAIN_BOT_ID),
+          botId,
           role: 'bot',
           at: typeof payload.message.at === 'number' ? payload.message.at : Date.now(),
           blocks,
@@ -3195,8 +3228,8 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
             ? {
               roomId: eventRoomId,
               // 群聊里必须带发言者身份，否则气泡上不知道是谁说的
-              senderId: String(payload.botId ?? MAIN_BOT_ID),
-              senderName: stateRef.current.bots.find((item) => item.id === String(payload.botId ?? ''))?.name ?? 'Bot',
+              senderId: botId,
+              senderName: stateRef.current.bots.find((item) => item.id === botId)?.name ?? 'Bot',
             }
             : {}),
           ...(kind !== undefined ? { kind } : {}),
@@ -3205,6 +3238,10 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
           // 原始 host id 必须留着：审批卡 / 问答卡点击时要凭它回传
           hostId,
         })
+        // 新建的 progress 成为新的合并目标；非 progress 已在落地前断链
+        if (kind === 'progress') {
+          sseProgressChains.current.set(botId, { messageId: id, ...(turnId !== undefined ? { turnId } : {}) })
+        }
     }
     return () => source.close()
     /*

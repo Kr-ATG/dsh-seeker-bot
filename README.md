@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="icon.png" alt="dsh-seeker-bot" width="112" height="112">
+
 # dsh-seeker-bot
 
 **DeepSeek Harness 的对话体验增强套件**
@@ -9,7 +11,10 @@
 [![stars](https://img.shields.io/github/stars/Kr-ATG/dsh-seeker-bot?style=for-the-badge&color=4c8dff)](https://github.com/Kr-ATG/dsh-seeker-bot/stargazers)
 [![forks](https://img.shields.io/github/forks/Kr-ATG/dsh-seeker-bot?style=for-the-badge&color=8b7cf6)](https://github.com/Kr-ATG/dsh-seeker-bot/network/members)
 [![license](https://img.shields.io/github/license/Kr-ATG/dsh-seeker-bot?style=for-the-badge&color=2dd4bf)](LICENSE)
+[![dsh](https://img.shields.io/badge/dsh-0.2.1--rc.2%2B-blue)](https://github.com/deepseek-ai/deepseek-harness)
+[![ci](https://github.com/Kr-ATG/dsh-seeker-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/Kr-ATG/dsh-seeker-bot/actions/workflows/ci.yml)
 [![discussions](https://img.shields.io/github/discussions/Kr-ATG/dsh-seeker-bot?style=for-the-badge&color=f59e0b)](https://github.com/Kr-ATG/dsh-seeker-bot/discussions)
+[![awesome-dsh-plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 [![last commit](https://img.shields.io/github/last-commit/Kr-ATG/dsh-seeker-bot?style=for-the-badge&color=94a3b8)](https://github.com/Kr-ATG/dsh-seeker-bot/commits/master)
 
 </div>
@@ -17,6 +22,11 @@
 <img src="docs/demo.gif" alt="Seeker 双栏执行大盘 + HTML 卡片" width="100%">
 
 ## 这是什么
+
+普通 AI 对话界面只给你一个输入框和一个滚动条。**dsh-seeker-bot 把「AI 到底在干什么」摊开给你看**，
+再把记忆、档案、技能这些散落的东西收成一排工作台：
+
+
 
 普通 AI 对话界面只给你一个输入框和一个滚动条。**dsh-seeker-bot 把「AI 到底在干什么」摊开给你看**，
 再把记忆、档案、技能这些散落的东西收成一排工作台：

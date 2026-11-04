@@ -1,0 +1,51 @@
+name: Bug 报告
+description: 装了插件之后哪里坏了
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 描述你看到的现象，不要写"不能用"
+      placeholder: 点「Seeker」标签时右栏空白，但左栏正常
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DSH 版本
+      description: 设置页或关于页里的版本号
+      placeholder: 0.2.1-rc.3
+    validations:
+      required: true
+  - type: input
+    id: profile
+    attributes:
+      label: Profile 名
+      placeholder: web
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: 系统
+      options: [Windows, macOS, Linux]
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: 浏览器控制台报错或宿主日志里与本问题相关的片段
+      render: text
