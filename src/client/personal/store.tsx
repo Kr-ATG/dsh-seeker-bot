@@ -1169,6 +1169,107 @@ export function blocksToText(blocks: MessageBlock[]): string {
     .join(' ')
 }
 
+/* ------------------------------------------------------------------------- *
+ * 历史消息索引同步（第 3 步宿主侧 POST /api/personal-agent/history/index）
+ * ------------------------------------------------------------------------- */
+
+/** 历史索引同步的防抖窗口（毫秒）：一轮回复里消息会连续变化，合并成一次写入。 */
+const HISTORY_SYNC_DEBOUNCE_MS = 1_500
+
+/** 每个 Bot 每次最多同步的最近私聊消息条数。 */
+const HISTORY_SYNC_MESSAGES_MAX = 500
+
+/** 同步给宿主历史索引的一条消息（契约见第 3 步 /api/personal-agent/history/index）。 */
+interface HistoryIndexMessage {
+  id: string
+  role: 'user' | 'bot'
+  text: string
+  at: number
+}
+
+/** 一个 Bot 的一批待同步消息。 */
+interface HistoryIndexGroup {
+  botId: string
+  messages: HistoryIndexMessage[]
+}
+
+/** 消息的正文：只拼接 text 块（图片 / 工具卡 / 期刊卡没有可检索的自然语言）。 */
+function historyIndexText(message: Message): string {
+  return message.blocks
+    .map((block) => (block.type === 'text' ? block.text : ''))
+    .filter((part) => part !== '')
+    .join('\n')
+    .trim()
+}
+
+/**
+ * 从全量消息里抽取要同步给宿主历史索引的私聊消息，按 Bot 分组。
+ *
+ * 只收私聊（roomId === undefined）、非 system、非 pending、且有正文的消息；
+ * 每个 Bot 最多取最近 HISTORY_SYNC_MESSAGES_MAX 条。群聊属于群，不进任何 Bot
+ * 的私聊历史索引——否则同一句话会在每个成员的私聊历史里各出现一遍。
+ */
+function collectHistoryIndexGroups(messages: Message[]): HistoryIndexGroup[] {
+  const grouped = new Map<string, HistoryIndexMessage[]>()
+  for (const message of messages) {
+    if (message.roomId !== undefined) continue
+    if (message.role === 'system') continue
+    if (message.pending === true) continue
+    const text = historyIndexText(message)
+    if (text === '') continue
+    const batch = grouped.get(message.botId)
+    const entry: HistoryIndexMessage = {
+      id: message.id,
+      role: message.role === 'user' ? 'user' : 'bot',
+      text,
+      at: message.at,
+    }
+    if (batch === undefined) grouped.set(message.botId, [entry])
+    else batch.push(entry)
+  }
+  const groups: HistoryIndexGroup[] = []
+  for (const [botId, batch] of grouped) {
+    groups.push({ botId, messages: batch.slice(-HISTORY_SYNC_MESSAGES_MAX) })
+  }
+  return groups
+}
+
+/**
+ * 消息指纹：同一批私聊消息不发第二次。
+ *
+ * 不用 JSON.stringify(整批消息)——流式期间 state.messages 每个 delta 都会换引用，
+ * 每次序列化几百条长文本太贵；只取 id / at / 正文长度即可区分「消息集合变了」。
+ * 正文从 pending 占位定稿时长度会变，所以也不会漏掉最后一条回复。
+ */
+function historySyncFingerprint(messages: Message[]): string {
+  const parts: string[] = []
+  for (const message of messages) {
+    if (message.roomId !== undefined) continue
+    if (message.role === 'system') continue
+    if (message.pending === true) continue
+    let textLength = 0
+    for (const block of message.blocks) {
+      if (block.type === 'text') textLength += block.text.length
+    }
+    if (textLength === 0) continue
+    parts.push(`${message.botId}/${message.id}/${message.at}/${String(textLength)}`)
+  }
+  return parts.join('|')
+}
+
+/** 把一批消息推给宿主历史索引。失败静默：历史检索是增强项，不能打扰用户。 */
+async function pushHistoryIndex(botId: string, batch: HistoryIndexMessage[]): Promise<void> {
+  try {
+    await fetch('/api/personal-agent/history/index', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ botId, messages: batch }),
+    })
+  } catch {
+    /* 宿主未升级 / 网络抖动都吞掉：下一批消息变化时会重新带上最近窗口。 */
+  }
+}
+
 function uiTextForAnswer(uiBlock: InteractiveUi, value: AnswerValue): string {
   if (typeof value === 'string') {
     if (uiBlock.kind === 'form') return value
@@ -2371,6 +2472,15 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
   const stopReplyRef = useRef<() => void>(() => {})
   /** 已排期、尚未启动的群聊成员回复（见 ScheduledReply）。 */
   const scheduledRepliesRef = useRef<Set<ScheduledReply>>(new Set())
+  /**
+   * 历史索引同步的上次消息指纹（见下面的同步 effect）。
+   *
+   * 只依赖 state.messages 还不够：有些 setState 会重建 messages 数组但内容没变，
+   * 指纹相同就直接跳过，避免同一批消息反复 POST。
+   */
+  const lastHistorySyncRef = useRef<string>('')
+  /** 历史索引同步的防抖 timer（组件卸载时必须清掉，不能把请求带进已卸载的树）。 */
+  const historySyncTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
@@ -2416,6 +2526,35 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       /* ignore */
     }
   }, [ui.selectedBotId, ui.sidebarCollapsed, ui.collapsedSections, ui.readAt, ui.rightPanelOpen, ui.rightPanelWidth, ui.chatWidth, ui.rightTab])
+
+  /*
+   * 历史消息增量同步到宿主索引（第 3 步）。
+   *
+   * 宿主 POST /api/personal-agent/history/index 按消息 id 去重，所以前端可以放心
+   * 重复发送「最近窗口」而不是维护精确游标：每次消息变化后防抖 1500ms，把所有有
+   * 私聊消息的 Bot 各发一次（每个 Bot 最多最近 500 条）。
+   *
+   * 三个细节：
+   *  · 指纹在 timer 触发时才计算：流式期间 state.messages 每个 delta 都会换引用，
+   *    每次渲染都扫一遍全部消息（还要拼接长文本）会明显加重主线程；防抖后只算一次；
+   *  · 指纹相同直接跳过：其他 state 变化引起的 messages 重建不该发空请求；
+   *  · 失败静默：历史检索是增强项，宿主没升级 / 网络抖动都不弹 toast。
+   */
+  useEffect(() => {
+    if (isDemoMode()) return undefined
+    if (historySyncTimerRef.current !== null) window.clearTimeout(historySyncTimerRef.current)
+    historySyncTimerRef.current = window.setTimeout(() => {
+      historySyncTimerRef.current = null
+      const latestMessages = stateRef.current.messages
+      const fingerprint = historySyncFingerprint(latestMessages)
+      if (fingerprint === lastHistorySyncRef.current) return
+      lastHistorySyncRef.current = fingerprint
+      const groups = collectHistoryIndexGroups(latestMessages)
+      // 每个 Bot 一次请求：宿主按 botId 存索引，分开送才能各自去重。
+      for (const group of groups) void pushHistoryIndex(group.botId, group.messages)
+    }, HISTORY_SYNC_DEBOUNCE_MS)
+    return undefined
+  }, [state.messages])
 
   /*
    * 正在看的会话收到新回复时直接算已读。
@@ -2503,6 +2642,10 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
 
   useEffect(() => () => {
     for (const timer of timersRef.current) window.clearTimeout(timer)
+    if (historySyncTimerRef.current !== null) {
+      window.clearTimeout(historySyncTimerRef.current)
+      historySyncTimerRef.current = null
+    }
     // 卸载（切到 Work 模式 / 热更新）时必须把通话掐掉：否则 WebSocket、麦克风与
     // AudioContext 会留在这个已经没人渲染的组件树里继续跑，用户会听见「幽灵通话」。
     const session = callRef.current

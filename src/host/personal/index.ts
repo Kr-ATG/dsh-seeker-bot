@@ -44,6 +44,7 @@ import { purgeBot } from './bot-delete.ts'
 import { applyPersonalAgentScheduler, nextProactiveAt, nextRoutineAt, normalizeNoDataPolicy, normalizeRetryPolicy, readProactive, readRoutines, readServerMessages, runProactiveNow, writeProactive, writeRoutines, type HostProactive, type HostRoutine } from './scheduler.ts'
 import { buildWorkingMemoryBlock, createWorkingMemoryMessage, injectWorkingMemoryIntoAgent, pruneWorkingTasks, readWorkingTasks, resetWorkingMemoryInjection, upsertWorkingTask, workingMemoryFile, type WorkingTask } from './working-memory.ts'
 import { clearRelayBrief, generateRelayBrief, injectRelayIntoAgent, readRelayBrief, resetRelayInjection, writeRelayBrief } from './relay.ts'
+import { injectHistoryIntoAgent, resetHistoryInjection, searchHistory, upsertHistoryMessages } from './history-search.ts'
 import { normalizeRelayBrief } from '../../shared/relay.ts'
 import { listPages, readPage, writePage } from './pages.ts'
 import {
@@ -590,13 +591,18 @@ async function rememberBotMemory(
  *
  * 失败一律吞掉：工作记忆是增强项，它坏了不能连累对话本身（runBotTurn 会
  * 自己把「agent 建不起来」的错误报出来）。
+ *
+ * userText 是本轮用户原话：历史检索只在用户提到「之前 / 上次 / 以前」时
+ * 才查索引注入片段（见 ./history-search.ts），普通回合完全不碰磁盘。
  */
-async function injectWorkingMemoryForReply(ctx: any, spec: BotAgentSpec): Promise<void> {
+async function injectWorkingMemoryForReply(ctx: any, spec: BotAgentSpec, userText: string): Promise<void> {
   try {
     const agent = await ensureBotAgent(ctx, spec)
     await injectWorkingMemoryIntoAgent(agent, spec.botId)
     // 接力摘要：手动轮转后的新会话靠它接着上一段干（见 ./relay.ts）
     await injectRelayIntoAgent(agent, spec.botId)
+    // 历史会话检索：用户提到「之前 / 上次」时捞相关片段（见 ./history-search.ts）
+    await injectHistoryIntoAgent(agent, spec.botId, userText)
   } catch {
     /* agent 建不起来：交给 runBotTurn 报错 */
   }
@@ -1118,6 +1124,7 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
               'office/info', 'office/page', 'office/pdf',
               'memory/remember',
               'working-memory',
+              'history/index', 'history/search',
               'approval/rules',
               'pages',
               'events', 'routines', 'messages', 'bots/created', 'bots',
@@ -1569,6 +1576,43 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
         }
 
         /*
+         * 历史会话检索（第 3 步）：前端把增量消息同步到本地索引，回复前由
+         * injectHistoryIntoAgent 按「之前 / 上次」类触发词检索并注入片段。
+         *
+         * POST /history/index  { botId, messages: [{ id, role, text, at }] }
+         *   → 按 id 去重、文本截 1000 字、保留最近 2000 条；返回合并后总数。
+         * GET  /history/search?botId=&q=&limit=
+         *   → 内存打分检索；q 为空直接返回空结果（不算错），limit 收敛到 1–20。
+         *
+         * 消息正文只落在本机 personal-agent/history 目录，不上传、不发给模型；
+         * 只有命中检索词且真的有相关片段时才进上下文。
+         */
+        if ((tail === '/history/index' || tail === '/history/index/') && method === 'POST') {
+          const body = await readJsonBody(req) as Record<string, unknown>
+          const botId = typeof body.botId === 'string' ? body.botId.trim() : ''
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          try {
+            const messages = await upsertHistoryMessages(botId, Array.isArray(body.messages) ? body.messages : [])
+            return sendJson(res, 200, { ok: true, botId, messages: messages.length })
+          } catch (error: any) {
+            return sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
+          }
+        }
+        if ((tail === '/history/search' || tail === '/history/search/') && method === 'GET') {
+          const botId = (url.searchParams.get('botId') ?? '').trim()
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          const q = (url.searchParams.get('q') ?? '').trim()
+          if (q === '') return sendJson(res, 200, { ok: true, total: 0, results: [] })
+          const limitRaw = Number.parseInt(url.searchParams.get('limit') ?? '', 10)
+          const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(20, limitRaw)) : 5
+          try {
+            return sendJson(res, 200, await searchHistory(botId, q, limit))
+          } catch (error: any) {
+            return sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
+          }
+        }
+
+        /*
          * 上下文占用：前端据此在快满时提示「整理并开新会话」。
          *
          * 只读宿主 tokenMeter 的最新投影，不建会话、不触发测量。占用是提示性
@@ -1650,6 +1694,7 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
            */
           resetWorkingMemoryInjection(botId)
           resetRelayInjection(botId)
+          resetHistoryInjection(botId)
           const result = await resetBotConversation(webCtx, botId)
           return sendJson(res, result.ok ? 200 : 502, result)
         }
@@ -1809,6 +1854,8 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
            * 否则「上一段对话的交接单」永远进不了新会话。
            */
           resetRelayInjection(botId)
+          // 历史检索的注入指纹：换了新会话，同样的检索结果也要能重新注入
+          resetHistoryInjection(botId)
           const result = await resetBotConversation(webCtx, botId)
           return sendJson(res, result.ok ? 200 : 502, result)
         }
@@ -1966,7 +2013,7 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
            * 先注入、再 followup 用户消息，模型第一步就能看到任务进度，不依赖
            * 历史有没有被压缩过。
            */
-          await injectWorkingMemoryForReply(webCtx, spec)
+          await injectWorkingMemoryForReply(webCtx, spec, text)
           // 群聊回合把本群之前的对话也投进去（成员只有一条终身会话，不注入就互相看不见）；私聊回合内部直接返回
           await injectRoomContextForReply(webCtx, spec, body)
 
@@ -2031,7 +2078,7 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
           // 全量花名册（可选）：让派活能覆盖「从没聊过的 Bot」
           rememberRoster(body.roster)
           // 工作记忆注入：与 /reply 同一处理，放在开 SSE 之前（避免拖慢首字节）
-          await injectWorkingMemoryForReply(webCtx, spec)
+          await injectWorkingMemoryForReply(webCtx, spec, text)
           // 群聊历史注入：与 /reply 同一口径，同样放在开 SSE 之前
           await injectRoomContextForReply(webCtx, spec, body)
 
