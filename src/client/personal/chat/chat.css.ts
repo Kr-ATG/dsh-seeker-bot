@@ -2757,41 +2757,6 @@ button.dgi__save-button:disabled { opacity: 0.6; cursor: default; }
 .pa-pending__jump { flex: none; display: inline-flex; align-items: center; gap: 1px; color: var(--pa-text-3); }
 .pa-pending:hover .pa-pending__jump { color: var(--pa-text); }
 
-/* ---------- 任务进度条（第 5 步） ----------
- * 输入框上方的一条细条：与待处理上浮条同档，但显示的是「当前这轮做到哪一步」。
- * 点整条打开任务与委派面板。 */
-.pa-taskbar {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 26px 8px;
-  padding: 7px 12px;
-  border-radius: 10px;
-  background: var(--pa-chat-glass);
-  border: 1px solid var(--pa-line);
-  color: var(--pa-text-2);
-  font-size: calc(11.5px + var(--pa-font-delta));
-  line-height: calc(16px + var(--pa-font-delta));
-  text-align: left;
-  cursor: pointer;
-  transition: background 130ms ease, border-color 130ms ease;
-}
-.pa-taskbar:hover { background: var(--pa-chat-glass-2); border-color: var(--pa-line-2); }
-.pa-taskbar:focus-visible { outline: 2px solid var(--pa-accent); outline-offset: 1px; }
-.pa-taskbar__dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--pa-accent); }
-.pa-taskbar__dot[data-status='queued'],
-.pa-taskbar__dot[data-status='waiting'],
-.pa-taskbar__dot[data-status='needs_input'],
-.pa-taskbar__dot[data-status='resume'] { background: #ff9f0a; }
-.pa-taskbar__dot[data-status='completed'] { background: var(--pa-green); }
-.pa-taskbar__dot[data-status='failed'] { background: var(--pa-red); }
-.pa-taskbar__dot[data-status='cancelled'] { background: var(--pa-text-3); }
-.pa-taskbar__body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.pa-taskbar__line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pa-text-2); }
-.pa-taskbar__line--main { color: var(--pa-text); font-weight: 500; }
-.pa-taskbar__jump { flex: none; display: inline-flex; align-items: center; gap: 1px; color: var(--pa-text-3); }
-.pa-taskbar:hover .pa-taskbar__jump { color: var(--pa-text); }
 
 /* ---------- 任务与委派面板（第 5 步） ----------
  * 只读面板：当前任务时间线 + 派出的任务（来自 TaskRecord.steps）+ assignments

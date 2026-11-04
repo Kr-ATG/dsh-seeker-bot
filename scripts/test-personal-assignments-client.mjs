@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 /**
- * Personal Agent 任务进度条与委派面板（第 5 步·前端）自测。
+ * Personal Agent 委派面板（第 5 步·前端）自测。
+ *
+ * 2026-11-04 用户要求删除输入框上方的「任务进行中」进度条：本脚本同步删掉
+ * 进度条的存在性断言，改为反向断言（源码里不许再出现 pa-taskbar），并补上
+ * 「更多」菜单打开面板的入口断言——面板本身保留。
  *
  * 数据源主次（用户补充）：
  *  · 主：当前 Bot 的 TaskRecord（state.tasks 里 botId 匹配、status==='running' 的最新一条）；
@@ -10,9 +14,9 @@
  * 本脚本做源码断言 + esbuild TSX 语法冒烟：
  *  1. types.ts 有 AssignmentView（字段齐全）与 assignmentsByBot；
  *  2. store.tsx 有 refreshAssignments、3 秒轮询、非终态判断、document.hidden 暂停；
- *  3. ChatPanel.tsx 有 pa-taskbar、「第 N 步」、工具中文映射、任务与委派面板、
- *     派出的任务（TaskRecord.steps）、其他 Bot 派来的活、打开会话、空态；
- *  4. chat.css.ts 有 taskbar / assign 系列样式与窄屏适配；
+ *  3. ChatPanel.tsx 有工具中文映射、任务与委派面板、派出的任务（TaskRecord.steps）、
+ *     其他 Bot 派来的活、打开会话、空态，且**不再有** pa-taskbar 进度条；
+ *  4. chat.css.ts 有 assign 系列样式与窄屏适配，且**不再有** taskbar 样式；
  *  5. esbuild transform store.tsx / ChatPanel.tsx 语法冒烟。
  *
  * 运行：node scripts/test-personal-assignments-client.mjs
@@ -101,10 +105,13 @@ console.log('[personal-assignments-client] 静态断言：ChatPanel.tsx（主数
 const chatSource = await readFile(chatPanelPath, 'utf8')
 
 expectContains(chatSource, "const runningTask = botTasks.find((task) => task.status === 'running')", '主数据源：running TaskRecord')
-expectContains(chatSource, '任务进行中 ·', '任务进度条有「任务进行中」文案')
-expectContains(chatSource, '第 ${String(currentStepIndex + 1)} 步', '进度条显示第 N 步')
-expectContains(chatSource, 'formatTaskElapsed(runningTask.startedAt)', '进度条显示耗时')
-expectContains(chatSource, 'currentStepIndex', '当前动作取 steps 索引')
+assert.ok(!chatSource.includes('pa-taskbar'), '任务进度条（pa-taskbar）已移除，源码里不应再出现')
+ok('任务进度条（pa-taskbar）已移除')
+assert.ok(!chatSource.includes('任务进行中'), '不再渲染「任务进行中」进度文案')
+ok('不再渲染「任务进行中」进度文案')
+expectContains(chatSource, '任务与委派', '「更多」菜单保留任务与委派面板入口')
+expectContains(chatSource, 'void actions.refreshAssignments(activeBot.id)', '菜单入口打开前补拉委派摘要')
+expectContains(chatSource, 'setAssignmentsOpen(true)', '菜单入口可打开任务与委派面板')
 
 for (const [name, label] of [
   ['subagent', '派子任务'],
@@ -124,7 +131,6 @@ expectContains(chatSource, 'const parsed = parseDispatchDetail(step)', '从步�
 expectContains(chatSource, 'function parseDispatchDetail(step: TaskRecordStep)', '存在 parseDispatchDetail 实现')
 expectContains(chatSource, "'description', 'prompt', 'message'", '从 detail 解析 description / prompt / message')
 expectContains(chatSource, "'bot_id', 'botId', 'assignee_bot_id', 'assigneeBotId'", '从 detail 解析 bot_id')
-expectContains(chatSource, 'pa-taskbar', '存在 pa-taskbar 进度条')
 expectContains(chatSource, '任务与委派 · {activeBot.name}', '面板标题「任务与委派 · {bot.name}」')
 expectContains(chatSource, '派出的任务', '面板有「派出的任务」区块')
 expectContains(chatSource, '其他 Bot 派来的活', 'assignments 端点作为「其他 Bot 派来的活」补充')
@@ -143,8 +149,8 @@ console.log('[personal-assignments-client] 静态断言：chat.css.ts')
 
 const cssSource = await readFile(chatCssPath, 'utf8')
 
-expectContains(cssSource, '.pa-taskbar {', '存在任务进度条样式')
-expectContains(cssSource, '.pa-taskbar__dot {', '存在进度条状态点样式')
+assert.ok(!cssSource.includes('.pa-taskbar'), '进度条样式已移除，css 里不应再出现 .pa-taskbar')
+ok('任务进度条样式已移除')
 expectContains(cssSource, '.pa-assign {', '存在任务与委派面板样式')
 expectContains(cssSource, '.pa-assign__timeline {', '存在任务时间线样式')
 expectContains(cssSource, '.pa-assign__list {', '存在委派列表样式')

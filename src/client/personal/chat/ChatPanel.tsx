@@ -10,8 +10,8 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
-import { IconBook, IconChevronRight, IconMore, IconPhone, IconSettings, IconTrash, IconUsers, IconX } from '../icons.tsx'
-import { blocksToText, isOpenAssignment, usePersonal } from '../store.tsx'
+import { IconBook, IconChevronRight, IconListTodo, IconMore, IconPhone, IconSettings, IconTrash, IconUsers, IconX } from '../icons.tsx'
+import { blocksToText, usePersonal } from '../store.tsx'
 import type { AssignmentView, Bot, Message, TaskRecordStep } from '../types.ts'
 import type { RelayBrief } from '../../../shared/relay.ts'
 import { Composer } from './Composer.tsx'
@@ -71,7 +71,7 @@ export function ChatPanel(): JSX.Element {
   const [historyOpen, setHistoryOpen] = useState(false)
   /** 当前展开预览的归档 id（null = 全部收起）。 */
   const [expandedArchiveId, setExpandedArchiveId] = useState<string | null>(null)
-  /** 「任务与委派」面板是否打开（进度条点击进入）。 */
+  /** 「任务与委派」面板是否打开（从「更多」菜单进入）。 */
   const [assignmentsOpen, setAssignmentsOpen] = useState(false)
   /**
    * 「整理并开新会话」的摘要状态。
@@ -308,29 +308,6 @@ export function ChatPanel(): JSX.Element {
   /** 面板展示的任务：优先正在跑的，否则最近一条。 */
   const panelTask = runningTask ?? botTasks[0]
 
-  /** 当前动作：优先最后一条 running 的步骤，其次最后一步。 */
-  let currentStepIndex = -1
-  if (runningTask !== undefined && runningTask.steps.length > 0) {
-    currentStepIndex = runningTask.steps.length - 1
-    for (let index = runningTask.steps.length - 1; index >= 0; index -= 1) {
-      if (runningTask.steps[index].status === 'running') {
-        currentStepIndex = index
-        break
-      }
-    }
-  }
-  const currentStep: TaskRecordStep | undefined = currentStepIndex >= 0 && runningTask !== undefined
-    ? runningTask.steps[currentStepIndex]
-    : undefined
-
-  /** 进度条耗时每秒刷新（只在这一轮还在跑时开定时器）。 */
-  const [, setTaskbarClock] = useState(0)
-  useEffect(() => {
-    if (runningTask === undefined) return undefined
-    const timer = window.setInterval(() => setTaskbarClock((value) => value + 1), 1_000)
-    return () => window.clearInterval(timer)
-  }, [runningTask?.id])
-
   /**
    * 从最近 20 条任务的工具步骤里筛出「派出去」的记录。
    *
@@ -358,7 +335,7 @@ export function ChatPanel(): JSX.Element {
     return items.sort((a, b) => b.at - a.at).slice(0, ASSIGNMENT_PANEL_LIMIT)
   }, [botTasks])
 
-  /** assignments 端点返回的该 Bot 相关委派（新→旧；面板与进度条补充数据源）。 */
+  /** assignments 端点返回的该 Bot 相关委派（新→旧；任务与委派面板的数据源）。 */
   const relatedAssignments = useMemo(() => {
     return (state.assignmentsByBot?.[activeBot.id] ?? [])
       .slice()
@@ -369,14 +346,6 @@ export function ChatPanel(): JSX.Element {
   const incomingAssignments = useMemo(() => {
     return relatedAssignments.filter((item) => item.assigneeBotId === activeBot.id)
   }, [relatedAssignments])
-
-  /** 当前 Bot 派出、尚未结束的委派（补充进度条）。 */
-  const delegatedOpenAssignments = useMemo(() => {
-    return relatedAssignments.filter((item) => item.requesterBotId === activeBot.id && isOpenAssignment(item.status))
-  }, [relatedAssignments])
-
-  const incomingOpenAssignment = incomingAssignments.find((item) => isOpenAssignment(item.status))
-  const taskbarVisible = runningTask !== undefined || incomingOpenAssignment !== undefined || delegatedOpenAssignments.length > 0
 
   useEffect(() => {
     if (!moreOpen) return undefined
@@ -616,10 +585,22 @@ export function ChatPanel(): JSX.Element {
                   </button>
                 ) : null}
                 {/*
-                 * 「任务记录」不放进菜单：它本来就是右栏里常驻的一张卡
-                 * （RightPanel 的 TaskRecordCard），菜单里再给一条入口只会
-                 * 让人以为要「打开」它——点了其实只是把右栏拉开。
+                 * 任务与委派面板的入口：原先挂在输入框上方的任务进度条已移除，
+                 * 面板本身保留（当前任务时间线 / 派出的任务 / 其他 Bot 派来的活），
+                 * 改从这里打开。右栏的 TaskRecordCard 是另一张只读卡，与此面板不冲突。
                  */}
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => runMenuAction(() => {
+                    // 打开前补拉一次委派摘要，面板里看到的是最新状态（轮询只在有非终态时跑）
+                    void actions.refreshAssignments(activeBot.id)
+                    setAssignmentsOpen(true)
+                  })}
+                >
+                  <IconListTodo size={14} />
+                  任务与委派
+                </button>
                 <button type="button" role="menuitem" onClick={() => runMenuAction(() => { void actions.generateJournal(callBotId) })}>
                   <IconBook size={14} />
                   生成今日期刊
@@ -674,51 +655,6 @@ export function ChatPanel(): JSX.Element {
         />
         <MessageList messages={activeMessages} bot={activeBot} room={activeRoom} />
         <PendingBar messages={activeMessages} />
-        {taskbarVisible ? (
-          <button
-            className="pa-taskbar"
-            type="button"
-            onClick={() => {
-              // 打开前补拉一次委派摘要，面板里看到的是最新状态（轮询只在有非终态时跑）
-              void actions.refreshAssignments(activeBot.id)
-              setAssignmentsOpen(true)
-            }}
-            title="查看任务与委派"
-          >
-            <span
-              className="pa-taskbar__dot"
-              data-status={runningTask !== undefined
-                ? 'running'
-                : (incomingOpenAssignment?.status ?? delegatedOpenAssignments[0]?.status ?? 'running')}
-              aria-hidden="true"
-            />
-            <span className="pa-taskbar__body">
-              {runningTask !== undefined ? (
-                <span className="pa-taskbar__line pa-taskbar__line--main">
-                  任务进行中 · {currentStep !== undefined
-                    ? `第 ${String(currentStepIndex + 1)} 步 · ${stepActionLabel(currentStep)}`
-                    : '正在准备'} · {formatTaskElapsed(runningTask.startedAt)}
-                </span>
-              ) : null}
-              {incomingOpenAssignment !== undefined ? (
-                <span className="pa-taskbar__line">
-                  任务进行中 · {assignmentStatusLabel(incomingOpenAssignment.status)} · {truncateText(incomingOpenAssignment.brief, 40) || '（无说明）'}
-                </span>
-              ) : null}
-              {delegatedOpenAssignments.length > 0 ? (
-                <span className="pa-taskbar__line">
-                  已派出 {delegatedOpenAssignments.length} 个任务：
-                  {delegatedOpenAssignments.slice(0, 2).map((item) => `${item.assigneeName}（${assignmentStatusLabel(item.status)}）`).join('、')}
-                  {delegatedOpenAssignments.length > 2 ? '…' : ''}
-                </span>
-              ) : null}
-            </span>
-            <span className="pa-taskbar__jump">
-              查看
-              <IconChevronRight size={12} />
-            </span>
-          </button>
-        ) : null}
         {relayHint !== null ? (
           <div className="pa-relay-hint" role="status" data-kind={relayHint.kind}>
             <span className="pa-relay-hint__dot" aria-hidden="true" />
@@ -1206,11 +1142,6 @@ function formatElapsedSeconds(seconds: number): string {
   const minutes = Math.floor(seconds / 60)
   const rest = seconds % 60
   return rest === 0 ? `${String(minutes)} 分` : `${String(minutes)} 分 ${String(rest)} 秒`
-}
-
-/** 任务从 startedAt 到现在跑了多久（进度条每秒刷新时调用）。 */
-function formatTaskElapsed(startedAt: number): string {
-  return formatElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)))
 }
 
 /** 步骤时间（本地时区，精确到秒）。 */
