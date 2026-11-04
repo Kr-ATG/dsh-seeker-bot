@@ -1,5 +1,5 @@
 /**
- * 消息撤回 / 编辑（vendor 移植自 dsh-recall-plugin）装配冒烟。
+ * 消息撤回（vendor 移植自 dsh-recall-plugin）装配冒烟。
  *
  * 这里不跑快照本体（它要真 git + 真 shell + 真会话），只钉四件**错了不会抛错、
  * 只会静默失效**的事：
@@ -162,6 +162,11 @@ const markers = [
 ]
 for (const [needle, what] of markers) {
   assert(client.includes(needle), 'client: 产物含 ' + what + '（' + needle + '）')
+}
+// 2026-11-04：Work 模式的「编辑并重发」已按用户要求删除。这几条是反向断言——
+// 上游升级若把编辑卡整块带回来，这里会先响，而不是等用户又看到 ✎ 按钮。
+for (const needle of ['buildEditFlow', 'dsh-recall-composer', 'action.edit']) {
+  assert(!client.includes(needle), 'client: 产物不含编辑重发残留（' + needle + '）')
 }
 assert(client.includes('applyRecallClient'), 'client: 产物含 applyRecallClient 入口')
 assert(!client.includes("id:'dsh-recall-plugin'") && !client.includes('id: "dsh-recall-plugin"'),

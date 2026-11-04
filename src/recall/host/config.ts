@@ -72,9 +72,6 @@ export const Config = Schema.object({
   // 上游的「文件与对话一并回退」链路。
   fileRollbackEnabled: withVolatile(Schema.boolean().default(false).description('回退项目文件：打开后撤回会按快照把项目文件也恢复到该消息之前（默认关闭，只回退对话）')),
   archiveOriginal: withVolatile(Schema.boolean().default(true).description('撤回后归档原会话（关闭后原会话保留在列表中）')),
-  // issue #26：编辑提交后自动发出改后的文本。关闭则退化为「只回填输入框」，
-  // 给「只想改稿、不立刻发」的用户留一条与撤回回填一致的出口
-  editSubmitsImmediately: withVolatile(Schema.boolean().default(true).description('「编辑并重发」提交后自动发出改后的消息（关闭则只回填输入框）')),
   retentionDays: withVolatile(Schema.number().default(0).description('按天数保留快照，超期自动删除；0 表示不启用')),
   // A4：界面语言。union 三值而不是自由字符串——非法配置在加载时响亮失败
   //（合规清单 #3）；description 保持中文是 v1 明示限制：它由宿主官方设置
@@ -221,7 +218,6 @@ export const DEFAULTS: ResolvedConfig = {
   messageOnly: true,
   fileRollbackEnabled: false,
   archiveOriginal: true,
-  editSubmitsImmediately: true,
   retentionDays: 0,
   locale: 'auto',
 }
@@ -279,10 +275,6 @@ export function createConfig(raw: RawConfig): ResolvedConfig {
   // 供用户对照回退前后上下文；默认开（归档只是隐藏、可恢复）。
   const archiveOriginal = typeof cfg.archiveOriginal === 'boolean' ? cfg.archiveOriginal : true
 
-  // 编辑提交后是否自动发出（issue #26）：仅显式 false 关闭，缺失/非法回 true——
-  // 默认行为必须是「改完即发」，否则该入口相对撤回没有增量价值
-  const editSubmitsImmediately = cfg.editSubmitsImmediately !== false
-
   // 按时间保留（S2-3）：0 或负值 = 不启用（静默删历史撤回点必须显式
   // opt-in）；非数值回退 0。与 maxSnapshotsPerWorkspace（条数维度）并存，
   // 各自独立触发——见 maintenance.enforceRetention。
@@ -295,5 +287,5 @@ export function createConfig(raw: RawConfig): ResolvedConfig {
   // 值（响亮失败），这里只兜 env 覆盖与旧配置文档缺字段两条路径
   const locale: LocalePref = cfg.locale === 'zh' || cfg.locale === 'en' ? cfg.locale : 'auto'
 
-  return { gcSnaps, gcHours, maxFileBytes, maxWorkspaceBytes, scanBudgetMs, snapshotBudgetMs, maxSnapshotsPerWorkspace, baseExcludes, refillDraft, snapshotEnabled, messageOnly, fileRollbackEnabled, archiveOriginal, editSubmitsImmediately, retentionDays, locale }
+  return { gcSnaps, gcHours, maxFileBytes, maxWorkspaceBytes, scanBudgetMs, snapshotBudgetMs, maxSnapshotsPerWorkspace, baseExcludes, refillDraft, snapshotEnabled, messageOnly, fileRollbackEnabled, archiveOriginal, retentionDays, locale }
 }

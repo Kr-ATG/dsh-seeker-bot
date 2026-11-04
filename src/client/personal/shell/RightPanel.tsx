@@ -1,30 +1,35 @@
 /**
- * Personal Agent — 右侧栏（v3 精简版）。
+ * Personal Agent — 右侧栏（v5：Bot 资料区 + 动态 / 产出物分段 tab）。
  *
- * 用户口径：**右侧栏除了浏览器全部删掉，只留产出物卡与任务记录卡。**
- * 因此这里不再有「详情 / 资料库 / 电脑」三个 tab，也没有任务卡、模型、音色、
- * 权限、主动询问、例行任务、子 Bot 管理、记忆、文件树、终端、分享按钮。
- * 这些设置入口已迁到 Bot 设置滑出卡（BotSettingsCard），右栏只负责「看结果」。
+ * 用户口径（2026-11-04 澄清）：「三分之一」指的是 tab 条落在面板约 1/3 高度处，
+ * 不是 tab 条宽度。参考图的右栏自上而下是：
+ *   1. Bot 资料区 —— 圆形头像 + 右下编辑铅笔 + 居中的名称 + 绿色「已连接」；
+ *   2. 分段式 tab 条 —— 接近内容区全宽，两段「动态」「产出物」，选中段是一枚
+ *      独立滑块（左右滑动 240ms，与 Work ⇄ Bot 分段同一套手感）；
+ *   3. 分类内容 —— 动态：定时任务区 + 任务记录；产出物：页面卡 + 产出物卡。
+ *
+ * 资料区高度用 clamp(230px, 30vh, 340px)：tab 条顶部因此落在面板约 30% 高度，
+ * 小窗口有 230px 兜底，大窗口最多 340px，不会把内容区挤没。
  *
  * 最终结构（自上而下）：
  *   1. 通话收起条 —— 仅在通话最小化时出现；
- *   3. 极简顶栏 —— 左侧 Bot 名称 / 角色，右侧关闭右栏；
- *   4. PagesCard —— Bot 交付过的可回访页面（3.1；host 没就绪时自身不渲染）；
- *   5. BotOutputsCard —— 产出物文件夹扫描结果（Seeker 大盘同款）；
- *   6. TaskRecordCard —— 这个 Bot 的任务记录（队友 D 实现）。
+ *   2. Bot 资料区 —— 头像 / 编辑 / 名称 / 状态，右上角关闭右栏；
+ *   3. 分类 tab —— 「动态」（默认）/「产出物」，分段控件；
+ *   4. 分类面板 —— 动态：ActivityTab（定时任务区 + 任务记录）；
+ *      产出物：PagesCard + BotOutputsCard。
  *
- * 样式：本文件只组织结构；顶栏 / 卡间距在 outputs.css.ts，任务卡样式在
- * tasks.css.ts，两者都由 index.tsx / standalone.tsx 统一注入。
+ * 样式：本文件只组织结构；资料区 / 分段 tab / 定时任务区在 outputs.css.ts，
+ * 任务卡样式在 tasks.css.ts，两者都由 index.tsx / standalone.tsx 统一注入。
  */
-import { useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
 import { PAGE_MOTION_IN, PAGE_MOTION_STAGGER } from '../../motion/overlay-motion.ts'
-import { IconExpand, IconPhoneOff, IconX } from '../icons.tsx'
+import { IconEdit, IconExpand, IconFolder, IconListTodo, IconPhoneOff, IconX } from '../icons.tsx'
 import { usePersonal } from '../store.tsx'
-import { formatDuration } from '../types.ts'
+import { formatDuration, type Bot } from '../types.ts'
+import { ActivityTab } from './ActivityTab.tsx'
 import { BotOutputsCard } from './BotOutputsCard.tsx'
 import { PagesCard } from './PagesCard.tsx'
-import { TaskRecordCard } from './TaskRecordCard.tsx'
 
 /*
  * 右栏宽度约束：与 store.tsx 的 clampRightWidth 保持一致。
@@ -34,10 +39,51 @@ const MIN_RIGHT_WIDTH = 240
 const MAX_RIGHT_WIDTH = 640
 const DEFAULT_RIGHT_WIDTH = 300
 
+/** 右栏分类：动态（默认）在前，产出物在后。 */
+type RightTabId = 'activity' | 'outputs'
+
+/*
+ * 分类 tab 是**纯图标**（2026-11-04 用户：「我不要这个文字」，参照的分段条也是
+ * 图标段）：可见区域只放图标，分类名只留在 title / aria-label 上，悬停与读屏
+ * 仍能知道自己点的是哪一类。
+ */
+const RIGHT_TABS: ReadonlyArray<{ id: RightTabId; label: string; icon: JSX.Element }> = [
+  { id: 'activity', label: '动态', icon: <IconListTodo size={17} /> },
+  { id: 'outputs', label: '产出物', icon: <IconFolder size={17} /> },
+]
+
+/** 资料区状态：文案 + 色调（在线绿 / 忙碌橙 / 停用灰）。 */
+function profileStatusOf(bot: Bot): { label: string; tone: 'online' | 'busy' | 'off' } {
+  if (!bot.enabled) return { label: '已停用', tone: 'off' }
+  if (bot.status === 'busy') return { label: '忙碌中', tone: 'busy' }
+  /*
+   * online 与 idle 都算「已连接」：idle 只是当前没有活动，不是连接断了。
+   * 旧映射把 idle 写成「未连接」会让一个正常工作的 Bot 看起来掉线。
+   */
+  return { label: '已连接', tone: 'online' }
+}
+
 export function RightPanel(): JSX.Element {
   const { state, ui, actions, activeBot, activeRoom } = usePersonal()
+  /** 当前分类；默认「动态」，不落盘（每次拉开右栏都从动态开始）。 */
+  const [tab, setTab] = useState<RightTabId>('activity')
+  /**
+   * 面板内容用的分类：比 tab **晚一帧**生效。
+   *
+   * 滑块位移由 tab 驱动。如果在同一帧里把整块面板换掉（产出物卡要扫文件、
+   * 页面卡要渲染），主线程会先忙几十毫秒，滑块 transition 的首帧会被挤掉，
+   * 看起来就是「顿一下再滑」。晚一帧让滑块先提交给合成器，再换面板内容，
+   * 滑动就不会被内容渲染打断（与侧栏 Work ⇄ Bot 的「先钉起点再起播」同因）。
+   */
+  const [panelTab, setPanelTab] = useState<RightTabId>('activity')
   /** 通话计时：只在收起条可见且通话中时每秒刷新一次。 */
   const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    if (panelTab === tab) return undefined
+    const raf = window.requestAnimationFrame(() => { setPanelTab(tab) })
+    return () => { window.cancelAnimationFrame(raf) }
+  }, [tab, panelTab])
 
   useEffect(() => {
     if (ui.call.status === 'idle' || !ui.call.minimized) return undefined
@@ -79,6 +125,32 @@ export function RightPanel(): JSX.Element {
   const resetRightWidth = (): void => {
     actions.setRightPanelWidth(DEFAULT_RIGHT_WIDTH)
   }
+
+  /**
+   * 分类 tab 的键盘操作：左右方向键循环，Home / End 跳首尾。
+   *
+   * WAI-ARIA tablist 的惯例动作；选中后把焦点也移到新 tab，键盘用户按一次
+   * 方向键就能继续用 Tab / 回车操作，不会出现「焦点留在旧 tab」的错位。
+   */
+  const onTabsKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    const { key } = event
+    if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'Home' && key !== 'End') return
+    event.preventDefault()
+    const index = RIGHT_TABS.findIndex((item) => item.id === tab)
+    const last = RIGHT_TABS.length - 1
+    let next = index
+    if (key === 'ArrowRight') next = index >= last ? 0 : index + 1
+    else if (key === 'ArrowLeft') next = index <= 0 ? last : index - 1
+    else if (key === 'Home') next = 0
+    else next = last
+    const target = RIGHT_TABS[next]
+    if (target === undefined) return
+    setTab(target.id)
+    document.getElementById(`pa-right-tab-${target.id}`)?.focus()
+  }
+
+  /** 资料区状态只需算一次：文案与色点都由它派生。 */
+  const profileStatus = profileStatusOf(activeBot)
 
   const callBot = ui.call.botId !== null
     ? state.bots.find((bot) => bot.id === ui.call.botId)
@@ -130,14 +202,13 @@ export function RightPanel(): JSX.Element {
         </div>
       ) : null}
 
-      {/* 极简顶栏：只交代「这是谁」和「怎么关掉右栏」。 */}
-      <div className="pa-right__topbar">
-        <div className="pa-right__topbar-main">
-          <span className="pa-right__topbar-name" title={activeBot.name}>{activeBot.name}</span>
-          <span className="pa-right__topbar-role" title={activeBot.role}>{activeBot.role}</span>
-        </div>
+      {/*
+       * Bot 资料区：高度约面板 30%（tab 条顶部落在约 1/3 高度处）。
+       * 参考图：居中头像 + 右下编辑铅笔 + 名称 + 绿色「已连接」；关闭钮仍在右上。
+       */}
+      <div className="pa-right__profile">
         <button
-          className="pa-right__topbar-close"
+          className="pa-right__profile-close"
           type="button"
           title="关闭右栏"
           aria-label="关闭右栏"
@@ -145,19 +216,90 @@ export function RightPanel(): JSX.Element {
         >
           <IconX size={15} />
         </button>
+        <div className="pa-right__profile-main">
+          <div className="pa-right__avatar-wrap">
+            <BotAvatar avatar={activeBot.avatar} size={92} muted={!activeBot.enabled} />
+            <button
+              className="pa-right__edit-btn"
+              type="button"
+              title="编辑 Bot 资料"
+              aria-label="编辑 Bot 资料"
+              onClick={() => actions.openBotSettings(activeBot.id)}
+            >
+              <IconEdit size={13} />
+            </button>
+          </div>
+          <div className="pa-right__profile-name" title={`${activeBot.name} · ${activeBot.role}`}>
+            {activeBot.name}
+          </div>
+          <div className="pa-right__profile-status" data-tone={profileStatus.tone}>
+            <span className="pa-right__status-dot" aria-hidden="true" />
+            <span>{profileStatus.label}</span>
+          </div>
+        </div>
       </div>
 
       {/*
-       * 结果区：页面（可回访的持久产物）+ 产出物 + 任务记录。
-       *
-       * 错峰入场：三张卡依次上浮（每张晚 22ms），右栏拉开时先看到「面板在」、
-       * 再看到内容一块块落位。只有三张卡、都在首屏内，不存在长列表全量错峰
-       * 拖慢首帧的问题；--i 由 shell.css.ts 按渲染顺序给（PagesCard 可能不渲染）。
+       * 分段式分类 tab：接近内容区全宽（左右 16px），浅色 track 两段等分，
+       * 选中段是浅色凸起 pill。role=tablist + aria-selected，键盘左右键可切换。
        */}
-      <div className="pa-right__body" {...PAGE_MOTION_STAGGER}>
-        <PagesCard botId={activeBot.id} />
-        <BotOutputsCard botId={activeBot.id} botName={activeBot.name} />
-        <TaskRecordCard botId={activeBot.id} roomId={activeRoom?.id} />
+      <div
+        className="pa-right__tabs"
+        role="tablist"
+        aria-label="右栏分类"
+        onKeyDown={onTabsKeyDown}
+      >
+        {/*
+          高亮块是独立滑块（2026-11-04）：与侧栏 Work ⇄ Bot 分段同一套手感，
+          位移用 CSS transition（240ms / cubic-bezier(.22,1,.36,1)），切换 tab
+          时从「动态」滑到「产出物」、再滑回来，不再给按钮换背景。
+        */}
+        <span className="pa-right__tab-thumb" aria-hidden="true" data-tab={tab} />
+        {RIGHT_TABS.map((item) => {
+          const on = item.id === tab
+          return (
+            <button
+              key={item.id}
+              className="pa-right__tab"
+              type="button"
+              role="tab"
+              id={`pa-right-tab-${item.id}`}
+              aria-selected={on}
+              aria-label={item.label}
+              aria-controls="pa-right-panel"
+              title={item.label}
+              tabIndex={on ? 0 : -1}
+              onClick={() => setTab(item.id)}
+            >
+              <span className="pa-right__tab-icon" aria-hidden="true">{item.icon}</span>
+            </button>
+          )
+        })}
+      </div>
+
+      {/*
+       * 分类面板：只渲染当前分类那一份，key={tab} 让换 tab 时入场动画重播。
+       * 动态 = 定时任务区 + 任务记录（ActivityTab 内部自行按天分组）；
+       * 产出物 = 页面卡 + 产出物卡，沿用现有预览 / 折叠逻辑。
+       */}
+      <div className="pa-right__body">
+        <div
+          key={panelTab}
+          className="pa-right__panel"
+          id="pa-right-panel"
+          role="tabpanel"
+          aria-labelledby={`pa-right-tab-${panelTab}`}
+          {...PAGE_MOTION_STAGGER}
+        >
+          {panelTab === 'activity' ? (
+            <ActivityTab botId={activeBot.id} roomId={activeRoom?.id} />
+          ) : (
+            <>
+              <PagesCard botId={activeBot.id} />
+              <BotOutputsCard botId={activeBot.id} botName={activeBot.name} />
+            </>
+          )}
+        </div>
       </div>
     </aside>
   )

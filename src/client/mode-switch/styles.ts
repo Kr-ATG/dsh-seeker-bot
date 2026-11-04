@@ -116,8 +116,9 @@ body[data-skb-mode="bot"] [data-slot="sidebar"] .hHd-Xa_root {
  * 深色槽 #2a2b2e + 深色滑块 #0b0b0c，浅色槽 #dfe2e7 + 白色滑块。
  * 改这里记得同步改那边，反之亦然 —— 两个界面切来切去不能有视觉差。
  *
- * 结构沿用滑块（thumb）而不是给按钮上底色：位移有过渡动画，切换更顺；
- * 视觉结果与 .pa-mode-seg 的选中块一致。
+ * 结构沿用滑块（thumb）而不是给按钮上底色：切换更顺，视觉结果与
+ * .pa-mode-seg 的选中块一致。滑块位移由 index.ts 的 playThumbSlide 用
+ * WAAPI 播放（跨模式接力），这里只负责静态位置与合成层提示。
  */
 .skb-seg {
   position: relative;
@@ -142,20 +143,20 @@ body[data-skb-mode="bot"] [data-slot="sidebar"] .hHd-Xa_root {
   border-radius: 10px;
   background: #0b0b0c;
   box-shadow: 0 1px 2px rgba(0, 0, 0, .55), inset 0 1px 0 rgba(255, 255, 255, .07);
-  transition: transform .22s cubic-bezier(.22, .8, .24, 1);
+  transition: none;
+  will-change: transform;
+  backface-visibility: hidden;
   pointer-events: none;
 }
 .skb-seg[data-mode="bot"] .skb-seg__thumb { transform: translateX(calc(100% + 3px)); }
 /*
- * Work 模式显示期间滑块不做补间（2026-11-03）。
+ * 滑块位置只由 data-mode 静态决定（2026-11-04 改）。
  *
- * Bot 模式里这枚分段一直保持 data-mode="bot" 且被 pa-root 盖住；切回 Work
- * 时 body 与 data-mode 在同一帧变成 work，若 transition 仍生效，第一帧画面
- * 会看到高亮块还停在 Bot 端、再用 220ms 滑到 Work —— 观感就是「切回来闪了
- * 一下」。Work 模式下这个控件只会发生模式切换这一种状态变化，关掉补间不
- * 影响任何正常交互。
+ * 不再用 transition：跨 Work / Bot 时起点与终点落在两枚不同的 DOM 上，
+ * transition 接不过去；方向动效统一由 index.ts 的 playThumbSlide 用 WAAPI
+ * 播放。transition: none 也顺手避免 data-mode 变化时再起一个看不见的补间，
+ * 和真正可见的动画抢主线程。
  */
-body[data-skb-mode="work"] .skb-seg__thumb { transition: none; }
 .skb-seg__btn {
   position: relative;
   z-index: 1;

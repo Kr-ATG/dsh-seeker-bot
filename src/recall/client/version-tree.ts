@@ -1,7 +1,7 @@
 /**
  * 版本家族（‹ X/N › 翻页器的数据源）
  *
- * 每次「撤回 / 编辑重发」都会 fork 出新会话，同一段对话因此有几个真实会话
+ * 每次「撤回」都会 fork 出新会话，同一段对话因此有几个真实会话
  * 版本。host 侧 lineage.json 已有这条链，但客户端要即时渲染翻页器、读不到
  * 磁盘；这里在 fork 成功那一刻把「家族根 → 成员」写进 localStorage。它是
  * 纯增量 UI 数据：丢了只影响翻页器，会话与快照本身不受影响。
@@ -53,7 +53,7 @@ function writeIds(rootId: string, ids: string[]): void {
   } catch (e) { /* 配额满/隐私模式：翻页器降级为不显示，不影响主链 */ }
 }
 
-// 线性扫描全部家族键：家族数量等于「本机用过的撤回/编辑次数」，量级很小，
+// 线性扫描全部家族键：家族数量等于「本机用过的撤回次数」，量级很小，
 // 不值得为它再维护一张 sessionId → rootId 的反查表
 function findRootOf(sessionId: string): string | null {
   const store = storage()
@@ -90,7 +90,7 @@ export function recordVersion(parentId: string, childId: string): void {
   const ids = readIds(rootId)
   const next = ids.length === 0 ? [parent] : ids.slice()
   if (next.indexOf(child) >= 0) return
-  // 新版本总是接在末尾：撤回/编辑只会把「当前版本」再往后推一格
+  // 新版本总是接在末尾：撤回只会把「当前版本」再往后推一格
   next.push(child)
   writeIds(rootId, next)
 }

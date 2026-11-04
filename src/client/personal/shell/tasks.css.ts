@@ -1,5 +1,5 @@
 /**
- * Personal Agent — 任务记录卡与任务详情卡的样式（组件级）。
+ * Personal Agent — 任务记录（card / activity 两种形态）与任务详情卡的样式（组件级）。
  *
  * 两张卡同属「任务」这一族：
  *  · 右栏 `TaskRecordCard` —— 一列任务清单，视觉与 Work 右栏 kr-card 同族，
@@ -14,12 +14,14 @@
 export const PERSONAL_TASK_CSS = `
 /* ═══════════════════════ 任务记录卡（右栏） ═══════════════════════ */
 
+/* 2026-11-04 用户要求：Bot 右栏卡片去外框 —— 去掉背景、边框、圆角与阴影
+ * （本块原本没有阴影），任务记录卡直接融进右栏底色。
+ * 内距保留：卡片自身没有 padding，卡头的 10px 12px 与展开体的 4px 全部原样
+ * 保留，它们是内容与右栏边缘之间唯一的留白；overflow: hidden 也保留，
+ * 用于约束内部列表滚动与折叠内容不溢出。 */
 .pa-taskrec {
   flex: none;
   margin-top: 10px;
-  border-radius: var(--pa-radius-card);
-  border: 1px solid var(--pa-line);
-  background: var(--pa-card);
   overflow: hidden;
 }
 
@@ -174,6 +176,73 @@ export const PERSONAL_TASK_CSS = `
   font-size: calc(10.5px + var(--pa-font-delta));
   line-height: 1.6;
   color: var(--pa-text-4);
+}
+
+/* ═══════════════════ 「动态」页 · 任务记录（activity 变体） ═══════════════════
+ * 不带「任务记录」卡头：动态 tab 里它接着定时任务往下排，按天分组，
+ * 每组标题本身是折叠按钮；行结构复用 pa-taskrec__row，点击仍开任务详情。
+ * 不额外套卡片边框，只在与定时任务区相接时画一条发丝线。 */
+.pa-taskrec--activity {
+  flex: none;
+  margin-top: 10px;
+  padding: 0;
+  min-width: 0;
+  overflow: visible;
+}
+.pa-routines + .pa-taskrec--activity {
+  margin-top: 16px;
+  padding-top: 4px;
+  border-top: 1px solid var(--pa-line);
+}
+.pa-taskrec--activity .pa-taskrec__list {
+  max-height: none;
+  overflow: visible;
+  padding: 0 4px;
+}
+.pa-root .pa-taskrec__group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 8px 4px;
+  text-align: left;
+  color: var(--pa-text-4);
+  border-radius: 6px;
+  transition: color 120ms ease;
+}
+.pa-root .pa-taskrec__group-head:hover { color: var(--pa-text-3); }
+.pa-root .pa-taskrec__group-head:focus-visible {
+  outline: 2px solid var(--pa-accent);
+  outline-offset: -2px;
+}
+.pa-taskrec--activity .pa-taskrec__group-label {
+  flex: none;
+  padding: 0;
+  font-size: calc(10px + var(--pa-font-delta));
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: inherit;
+}
+.pa-taskrec__group-meta {
+  margin-left: auto;
+  flex: none;
+  font-size: calc(9px + var(--pa-font-delta));
+  font-weight: 500;
+  color: var(--pa-text-4);
+  font-variant-numeric: tabular-nums;
+}
+.pa-taskrec__group-caret {
+  flex: none;
+  display: inline-flex;
+  color: var(--pa-text-4);
+  transition: transform 150ms ease;
+}
+.pa-taskrec__group[data-open='false'] .pa-taskrec__group-caret { transform: rotate(-90deg); }
+.pa-taskrec--activity .pa-taskrec__empty {
+  padding: 16px 10px 10px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pa-taskrec__group-caret { transition: none; }
 }
 
 /* ═══════════════════════ 任务详情卡（Work 模式过程时间线） ═══════════════════════ */

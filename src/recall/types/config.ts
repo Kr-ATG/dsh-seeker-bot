@@ -32,8 +32,6 @@ export interface ResolvedConfig {
   // 清单、execute 恒为 session-only——对升级前拍下的旧快照同样生效。
   fileRollbackEnabled: boolean
   archiveOriginal: boolean
-  // issue #26：编辑提交后自动发出改后的文本（关闭则只回填输入框）
-  editSubmitsImmediately: boolean
   retentionDays: number
   locale: LocalePref
 }

@@ -1,8 +1,8 @@
-# 消息撤回 / 编辑重发 — 上游来源与移植约定
+# 消息撤回 — 上游来源与移植约定
 
 本目录（`src/recall/`）是独立插件 [dsh-recall-plugin](https://github.com/limbo947/dsh-recall-plugin)
 的 **vendor 移植**，把「消息撤回」整块能力内嵌进 dsh-seeker-bot：装了本插件就有
-「↶ 撤回」「✎ 编辑」「‹ X/N ›」，不再需要单独安装一个插件包。
+「↶ 撤回」「‹ X/N ›」，不再需要单独安装一个插件包。
 
 ## 上游坐标
 
@@ -19,7 +19,7 @@
 | --- | --- | --- |
 | `host/` | 上游 `src/host/` 全量 | 快照 / 回退 / 维护 / HTTP 端点 / 配置域 |
 | `types/` | 上游 `src/types/` 全量 | 跨域类型与双平台脚本契约（仅类型 + 事件名常量） |
-| `client/` | 上游 `src/client/` 全量 | 撤回按钮 / 确认面板 / 编辑卡 / 版本翻页器 / 设置页三张卡片 |
+| `client/` | 上游 `src/client/` 全量 | 撤回按钮 / 确认面板 / 版本翻页器 / 设置页三张卡片 |
 | `client/apply.ts` | **本仓库新增** | 取代上游 `entry.ts`：改成普通模块导出 `applyRecallClient(ctx)`，由 `src/client/index.ts` 在主 bundle 内延迟挂载 |
 | `host/index.ts` | 上游同名文件 | 导出改名：`applyRecallHost` / `recallInjects` / `RecallConfig`，去掉对 `@deepseek-ai/dsh-settings` 的硬 import |
 | `host/config-file.ts` | **本仓库新增** | 配置持久化兜底（见「移植适配点」第 5 条） |
@@ -67,6 +67,10 @@
      消息会把别的会话刚改的文件一起退回去（现场实测：撤回一条「你是谁」，清单里是另一个会话刚修的
      两个前端文件 + 重新构建的 lib/client.js）。用户的诉求是「像聊天软件那样撤回」。
    - 想恢复上游行为：`messageOnly=false` + `fileRollbackEnabled=true`（配置卡片两个开关）。
+8. **删除「编辑并重发」功能**（2026-11-04，用户现场需求，**行为差异，非接缝**）：本仓库已按用户要求
+   删除上游的「编辑并重发」功能——删除 `client/edit-node.ts`、`client/edit-dismiss.ts`、
+   `client/model-picker.ts`、`client/model-menu.ts`，删除 `editSubmitsImmediately` 配置项与编辑入口
+   按钮；保留消息撤回与版本翻页。
 
 ## 与宿主既有 UI 的座位关系
 
@@ -83,8 +87,7 @@
 - 快照是**尽力捕获**：从收到消息到 `git add` 之间有约 0.5–1.5 秒窗口（Windows 上
   仅一次 PowerShell 启动就占约 0.4 秒），秒级任务若在这个窗口内改完文件，该快照会
   连带捕获本轮改动（撤回时文件回退成为空操作，对话回退不受影响）。
-- 会话**第一条**用户消息无法回退对话（fork 需要更早的 turn 边界），只能回退文件；
-  「编辑并重发」同理会被明确拒绝。
+- 会话**第一条**用户消息无法回退对话（fork 需要更早的 turn 边界），只能回退文件。
 - 目标工作区的 agent 正在运行时拒绝撤回（先停止 agent）。
 - 工作区根路径自身超过 260 字符（Windows MAX_PATH）时不支持撤回；嵌套 git 仓库
   与 win32 目录重解析点（junction / 目录符号链接）不参与快照。
@@ -96,7 +99,7 @@
 ## 维护约定
 
 - **升级上游**：`git clone` 上游（或 `git pull`）→ 与 `src/recall/` 做 sha1 全量
-  对比 → 只把上游改动应用到 `host/` `client/` `types/`（不要覆盖上面六条适配点）
+  对比 → 只把上游改动应用到 `host/` `client/` `types/`（不要覆盖上面八条适配点）
   → `node build.mjs` → `node scripts/test-recall.mjs` → 冒烟脚本 → 真机验收撤回链路。
 - **不要**在 `src/recall/` 里改文案、改算法、加功能：这里的作用是「保持可对比」。
   需要改行为时优先在上游提 PR，或在本仓库外层（`src/host.ts` / `src/client/index.ts`）

@@ -55,7 +55,26 @@ function json(res: any, status: number, payload: Record<string, unknown>): void 
   res.end(JSON.stringify(payload))
 }
 
-function summarizeArgs(argsRaw: string): string {
+/**
+ * 把事件里的 arguments 归一化成字符串。
+ *
+ * 两种事件携带参数的形态并不相同：普通 `tool/call` 给的是 JSON 字符串，
+ * 而 PTC（run_code 内层调用）的 `tool/ptc-dispatch` 直接给**对象**。
+ * 早先这里只认字符串，于是 run_code 里调用的 skill 参数被当成空串，
+ * JSON.parse('') 抛错 → 技能名解析不出来 → Skill 统计永远漏记（2026-11-04 修）。
+ */
+function argsToRaw(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value === undefined || value === null) return ''
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return ''
+  }
+}
+
+function summarizeArgs(value: unknown): string {
+  const argsRaw = argsToRaw(value)
   if (!argsRaw || argsRaw.trim() === '') return ''
   try {
     const obj = JSON.parse(argsRaw)
@@ -165,7 +184,7 @@ function extractCapabilitiesFromEvents(events: readonly any[]): RawExtractedCall
     if (type === 'tool/call') {
       const callId = typeof data.callId === 'string' ? data.callId : ''
       const name = typeof data.name === 'string' ? data.name : ''
-      const argsRaw = typeof data.arguments === 'string' ? data.arguments : ''
+      const argsRaw = argsToRaw(data.arguments)
       if (callId) {
         pendingCalls.set(callId, { name, argsRaw, time: eventTime })
       } else if (name) {
@@ -192,7 +211,7 @@ function extractCapabilitiesFromEvents(events: readonly any[]): RawExtractedCall
     // 3. tool/ptc-dispatch
     if (type === 'tool/ptc-dispatch') {
       const name = typeof data.name === 'string' ? data.name : ''
-      const argsRaw = typeof data.arguments === 'string' ? data.arguments : ''
+      const argsRaw = argsToRaw(data.arguments)
       const isError = data.isError === true
       processCall(name, argsRaw, eventTime, isError ? 'failed' : 'success', undefined)
       continue

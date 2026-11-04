@@ -56,7 +56,6 @@ export function buildConfigForm(
     // config.json 才能重新打开文件回退
     fileRollbackEnabled: boolean
     archiveOriginal: boolean
-    editSubmitsImmediately: boolean
     retentionDays: string
     locale: string
     [key: string]: string | boolean
@@ -100,8 +99,6 @@ export function buildConfigForm(
             // false——与「撤回只撤对话」的新默认一致，不会让旧客户端误以为开着
             fileRollbackEnabled: v.fileRollbackEnabled === true,
             archiveOriginal: v.archiveOriginal !== false,
-            // issue #26：老 Host 的 values 无该字段时按默认 true（与 util 同口径）
-            editSubmitsImmediately: v.editSubmitsImmediately !== false,
             retentionDays: String(v.retentionDays == null ? '' : v.retentionDays),
             locale: typeof v.locale === 'string' && v.locale ? v.locale : 'auto',
           }
@@ -129,7 +126,7 @@ export function buildConfigForm(
     function save(): void {
       if (state.busy || !draft || !baseline) return
       const patch: Record<string, string | boolean> = {}
-      for (const key of ['gcSnaps', 'gcHours', 'maxFileBytes', 'maxWorkspaceBytes', 'scanBudgetMs', 'snapshotBudgetMs', 'maxSnapshotsPerWorkspace', 'baseExcludes', 'refillDraft', 'snapshotEnabled', 'messageOnly', 'fileRollbackEnabled', 'archiveOriginal', 'editSubmitsImmediately', 'retentionDays', 'locale']) {
+      for (const key of ['gcSnaps', 'gcHours', 'maxFileBytes', 'maxWorkspaceBytes', 'scanBudgetMs', 'snapshotBudgetMs', 'maxSnapshotsPerWorkspace', 'baseExcludes', 'refillDraft', 'snapshotEnabled', 'messageOnly', 'fileRollbackEnabled', 'archiveOriginal', 'retentionDays', 'locale']) {
         // 按值判空再纳补丁（A6）：draft 是宽松载荷加载来的全量草稿，索引读取
         // 在类型层可能 undefined；未定义的键与基线无从比较，直接跳过（等价于
         // 原实现里「undefined !== 基线值」的隐式行为，只是不再依赖隐式）。
@@ -187,7 +184,6 @@ export function buildConfigForm(
       // 把字符串 "false" 传给 Host（Host 侧按真值判断会当成开启）
       if (patch.fileRollbackEnabled !== undefined) clean.fileRollbackEnabled = Boolean(patch.fileRollbackEnabled)
       if (patch.archiveOriginal !== undefined) clean.archiveOriginal = Boolean(patch.archiveOriginal)
-      if (patch.editSubmitsImmediately !== undefined) clean.editSubmitsImmediately = Boolean(patch.editSubmitsImmediately)
       if (patch.retentionDays !== undefined) {
         const n = parseInt(String(patch.retentionDays), 10)
         if (!Number.isFinite(n) || n < 0) { setState({ busy: false, message: t('config.err.retentionDays'), error: true }); return }
@@ -345,7 +341,6 @@ export function buildConfigForm(
       boolRow('messageOnly', t('config.messageOnly.label'), t('config.messageOnly.hint')),
       boolRow('refillDraft', t('config.refillDraft.label'), t('config.refillDraft.hint')),
       boolRow('archiveOriginal', t('config.archiveOriginal.label'), t('config.archiveOriginal.hint')),
-      boolRow('editSubmitsImmediately', t('config.editSubmitsImmediately.label'), t('config.editSubmitsImmediately.hint')),
       // 「回退范围」独立成组（2026-11-04）：文件回退默认关闭是**撤回语义**的
       // 变化，不属于「快照写什么」的下一层——单独一个分组标题让用户在设置页
       // 一眼找到「想回退文件」的入口，也避免和 messageOnly（只登记不写快照）

@@ -6087,6 +6087,43 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   .kr-memory__clear-act { transition: opacity 0.12s linear; transform: none; }
 }
 
+/* ══ Seeker 大盘剩余四张卡统一去外框（2026-11-04 用户要求）══════════════════
+ *
+ * 用户要求：右侧 Seeker 大盘里仍在套卡片外框的四张卡——任务概览 / 产出物 /
+ * 工具调用 / 记忆——统一去掉外层卡片包裹。口径与同文件已有的 .kr-card--subs、
+ * .kr-card--plain 完全一致：底色 / 描边 / 圆角 / 投影全部抹掉，悬停不再浮起、
+ * 不再出现边框变色或阴影。
+ *
+ * 只改视觉，不动盒子：
+ *  · 内距必须保留 —— 去掉外框后，卡与卡之间只剩 gap 分隔，上下内距是它们之间
+ *    唯一的呼吸；左右 12px 同时是四张卡与滚动区其它卡共用的左缘对齐线。
+ *    因此这里不写 padding，各卡原有的内距（.kr-card 基类与各卡自己的覆盖）原样生效。
+ *  · 高度约束同样不动：工具调用卡固定 5 行的滚动窗口依赖既有行高变量与
+ *    max-height 规则，本段不触碰任何尺寸。
+ */
+.kr-card--task,
+.kr-card--outputs,
+.kr-card--tools,
+.kr-card--memory {
+  /* 去外框：底色 / 描边 / 圆角 / 投影 全部抹掉 */
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  transform: none;
+}
+
+/* 悬停：不再浮起，也不该出现边框变色或阴影——那会把它读成一张卡。 */
+.kr-card--task:hover,
+.kr-card--outputs:hover,
+.kr-card--tools:hover,
+.kr-card--memory:hover {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
 /* ══ KR 极简 Agent 状态卡：只显示一句当前动作 + 可配置头像 ═══════════════ */
 
 /*

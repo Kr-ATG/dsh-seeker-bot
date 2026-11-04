@@ -93,10 +93,22 @@ console.log('[personal-shell] 侧栏像素对齐')
   check('Bot 分段字号吃 --pa-font-size（与 Work 的 skb 分段同源）',
     /font-size:\s*var\(--pa-font-size\);/.test(segBlock))
   const modeSwitchStyles = read('src/client/mode-switch/styles.ts')
+  const modeSwitchIndex = read('src/client/mode-switch/index.ts')
   check('Work 分段字号吃 --dsh-content-font-size（与 Bot 分段同源）',
     modeSwitchStyles.includes('font-size: var(--dsh-content-font-size, 14px);'))
-  check('切回 Work 时分段滑块不做补间（防止高亮从 Bot 端滑过来）',
-    modeSwitchStyles.includes('body[data-skb-mode="work"] .skb-seg__thumb { transition: none; }'))
+  check('Work 分段滑块不用 transition，位移交给 WAAPI（跨控件不会只剩尾程）',
+    /\.skb-seg__thumb \{[\s\S]*?transition: none;/.test(modeSwitchStyles)
+      && modeSwitchStyles.includes('will-change: transform')
+      && !modeSwitchStyles.includes('@keyframes skb-seg-thumb-from-bot'))
+  check('Bot 侧分段有独立滑块与合成层提示',
+    read('src/client/personal/shell/Sidebar.tsx').includes('pa-mode-seg__thumb')
+      && /\.pa-mode-seg__thumb \{[\s\S]*?will-change: transform;/.test(base))
+  check('滑块动效用项目统一缓动与 240ms',
+    modeSwitchIndex.includes('THUMB_SLIDE_MS = 240')
+      && modeSwitchIndex.includes("cubic-bezier(.22, 1, .36, 1)"))
+  check('两个分段都尊重 prefers-reduced-motion（WAAPI 起播前检查）',
+    modeSwitchIndex.includes("prefers-reduced-motion: reduce")
+      && modeSwitchIndex.includes('function motionReduced'))
   check('Bot 模式用软隐藏（visibility）而不是 display:none，避免 wide-in 重播',
     modeSwitchStyles.includes('[data-skb-mode-hide="true"] { visibility: hidden !important; pointer-events: none !important; }'))
   check('Bot 分段浅色 hover 与官方同值', base.includes(".pa-root[data-pa-theme='light'] .pa-mode-seg button:hover { color: #14161a; }"))
@@ -135,6 +147,98 @@ console.log('[personal-shell] 模型两级选择')
   check('群聊无模型列表时保留手填降级', group.includes('例如：alymagpie') && group.includes('modelGroupsState.loading'))
 }
 
+/* ── 4.6 Bot 右栏卡片去外框（2026-11-04） ───────────────────────────── */
+console.log('[personal-shell] Bot 右栏卡片去外框')
+{
+  const outputs = read('src/client/personal/shell/outputs.css.ts')
+  const tasks = read('src/client/personal/shell/tasks.css.ts')
+  const outBlock = /\.pa-out-card\s*\{([^}]*)\}/.exec(outputs)?.[1] ?? ''
+  const taskBlock = /\.pa-taskrec\s*\{([^}]*)\}/.exec(tasks)?.[1] ?? ''
+  check('页面 / 产出物卡 .pa-out-card 去外框（无背景 / 边框 / 圆角）',
+    outBlock !== '' && !/background\s*:/.test(outBlock)
+    && !/border\s*:/.test(outBlock) && !/border-radius\s*:/.test(outBlock))
+  check('任务记录卡 .pa-taskrec 去外框（无背景 / 边框 / 圆角）',
+    taskBlock !== '' && !/background\s*:/.test(taskBlock)
+    && !/border\s*:/.test(taskBlock) && !/border-radius\s*:/.test(taskBlock))
+  check('去外框后保留内距 / 外边距（内容不贴边）',
+    /padding:\s*10px 12px/.test(outBlock) && /margin-top:\s*10px/.test(taskBlock))
+}
+
+/* ── 4.7 Bot 右栏分类 tab（2026-11-04） ─────────────────────────────── */
+console.log('[personal-shell] Bot 右栏分类 tab')
+{
+  const right = read('src/client/personal/shell/RightPanel.tsx')
+  const activity = read('src/client/personal/shell/ActivityTab.tsx')
+  const taskCard = read('src/client/personal/shell/TaskRecordCard.tsx')
+  const outputsCss = read('src/client/personal/shell/outputs.css.ts')
+  const tasksCss = read('src/client/personal/shell/tasks.css.ts')
+  const tabsBlock = /\.pa-right \.pa-right__tabs\s*\{([^}]*)\}/.exec(outputsCss)?.[1] ?? ''
+  const profileBlock = /\.pa-right \.pa-right__profile\s*\{([^}]*)\}/.exec(outputsCss)?.[1] ?? ''
+  const selectedBlock = /\.pa-root \.pa-right__tab\[aria-selected='true'\]\s*\{([^}]*)\}/.exec(outputsCss)?.[1] ?? ''
+  const thumbBlock = /\.pa-right \.pa-right__tab-thumb\s*\{([^}]*)\}/.exec(outputsCss)?.[1] ?? ''
+  check('右栏顶栏下有 tablist（动态 / 产出物，默认动态）',
+    right.includes('role="tablist"') && right.includes("label: '动态'") && right.includes("label: '产出物'")
+    && /useState<RightTabId>\('activity'\)/.test(right))
+  check('动态 tab 渲染 ActivityTab，产出物 tab 保留 PagesCard + BotOutputsCard',
+    right.includes('<ActivityTab') && right.includes('<PagesCard') && right.includes('<BotOutputsCard')
+    && /panelTab === 'activity'/.test(right))
+  check('面板内容比滑块晚一帧切换（滑块 transition 先起跑）',
+    right.includes('requestAnimationFrame(() => { setPanelTab(tab) })')
+    && right.includes("key={panelTab}"))
+  check('动态 tab 包含定时任务区与任务记录',
+    activity.includes('state.routines') && activity.includes('查看全部定时任务')
+    && activity.includes('<TaskRecordCard') && activity.includes('variant="activity"'))
+  check('TaskRecordCard 支持 activity 变体（无卡头、按天分组可折叠）',
+    taskCard.includes("variant?: 'card' | 'activity'") && taskCard.includes('pa-taskrec--activity')
+    && taskCard.includes('pa-taskrec__group-head'))
+  check('Bot 资料区把 tab 顶到面板约 1/3 高度（头像/名称/状态/编辑）',
+    right.includes('pa-right__profile') && right.includes('<BotAvatar')
+    && right.includes('pa-right__profile-name') && right.includes('pa-right__profile-status')
+    && right.includes('pa-right__edit-btn')
+    && /min-height:\s*clamp\(230px, 30vh, 340px\)/.test(profileBlock))
+  check('tab 条改为接近内容区全宽的分段控件（浅色 track + 独立滑块）',
+    /margin:\s*0 16px/.test(tabsBlock) && /border-radius:\s*12px/.test(tabsBlock)
+    && /padding:\s*3px/.test(tabsBlock)
+    && /position:\s*relative/.test(tabsBlock)
+    && right.includes('pa-right__tab-thumb')
+    && /position:\s*absolute/.test(thumbBlock)
+    && /background:\s*var\(--pa-card-3\)/.test(thumbBlock)
+    && /box-shadow:/.test(thumbBlock))
+  check('右栏 tab 滑块有左右滑动过渡（与 Work ⇄ Bot 同一曲线）',
+    /transition:\s*transform 240ms cubic-bezier\(\.22, 1, \.36, 1\)/.test(thumbBlock)
+      && /\.pa-right__tab-thumb\[data-tab='outputs'\] \{ transform: translateX\(calc\(100% \+ 3px\)\); \}/.test(outputsCss))
+  check('右栏 tab 选中态只改文字，高亮由滑块承载',
+    selectedBlock !== '' && !/background\s*:/.test(selectedBlock) && !/box-shadow\s*:/.test(selectedBlock))
+  check('分类 tab 为纯图标（文字只留在 aria-label / title）',
+    right.includes('aria-label={item.label}') && right.includes('title={item.label}')
+    && !right.includes('pa-right__tab-label')
+    && !outputsCss.includes('.pa-right__tab-label'))
+  check('动态任务记录有独立样式（不套卡片外框）',
+    tasksCss.includes('.pa-taskrec--activity') && tasksCss.includes('.pa-taskrec__group-head'))
+}
+
+/* ── 4.8 产出物分类选择器（2026-11-04） ─────────────────────────────── */
+console.log('[personal-shell] 产出物分类选择器')
+{
+  const card = read('src/client/personal/shell/BotOutputsCard.tsx')
+  const outputsCss = read('src/client/personal/shell/outputs.css.ts')
+  const filterBlock = /\.pa-out-filter\s*\{([^}]*)\}/.exec(outputsCss)?.[1] ?? ''
+  const chipOn = /\.pa-root \.pa-out-filter__chip\[data-on='true'\]\s*\{([^}]*)\}/.exec(outputsCss)?.[1] ?? ''
+  check('产出物卡头下有分类选择器（全部 + 各实际分类）',
+    card.includes('kindFilter') && card.includes('pa-out-filter')
+    && card.includes('aria-pressed={kindFilter ===') && card.includes('全部')
+    && card.includes('groups.map'))
+  check('分类选择器只在两类以上出现，并参与列表过滤',
+    /groups\.length > 1/.test(card) && card.includes('visibleGroups')
+    && /visibleGroups\.map/.test(card) && card.includes("kindFilter === 'all'"))
+  check('取消选择 / 切 Bot 时筛选回落到全部',
+    card.includes("setKindFilter('all')") && card.includes('[botId]'))
+  check('分类 chip 选中态有独立样式（可横向滚动）',
+    /overflow-x:\s*auto/.test(filterBlock)
+    && /background:\s*var\(--pa-card-2\)/.test(chipOn)
+    && /font-weight:\s*600/.test(chipOn))
+}
+
 /* ── 5. 构建产物同步检查（有 lib 才查，避免先要求 build） ─────────────── */
 console.log('[personal-shell] 构建产物')
 {
@@ -148,6 +252,10 @@ console.log('[personal-shell] 构建产物')
     check('产物不含旧版自绘 PanelLeft 路径', !client.includes('<rect x="1.7"') && !client.includes('M6.1 2.7v10.6'))
     check('产物包含两级模型选择器样式', client.includes('pa-model-picker'))
     check('产物不再包含原生模型下拉样式', !client.includes('pa-bset-model'))
+    check('产物包含 Bot 右栏分类 tab 与动态样式',
+      client.includes('pa-right__tabs') && client.includes('pa-routines') && client.includes('pa-taskrec--activity')
+      && client.includes('pa-right__tab-thumb'))
+    check('产物包含产出物分类选择器样式', client.includes('pa-out-filter__chip'))
   }
 }
 

@@ -2181,6 +2181,33 @@ if (krEnabled) {
       pass('操作面板卡头：鲸鱼娘 + 名字 + 当前动作（最多两排，动词按 hideVerb 省略，点击展开详细）')
     }
 
+    /*
+     * 2026-11-04 用户要求：Seeker 大盘里剩下的四张卡（任务概览 / 产出物 / 工具调用 /
+     * 记忆）也统一去掉卡片外框。口径与子智能体 / 操作面板一致：底色、描边、圆角、
+     * 投影四样全部抹掉，hover 不再浮起。
+     *
+     * 只验其中一两样不够——剩下的任何一样都会让卡片仍被读成「被包着」，所以逐项断言。
+     * 组合选择器的顺序就是样式表的真实写法；将来改写法时这里要同步更新。
+     */
+    {
+      const flatBlock = /\.kr-card--task,\s*\.kr-card--outputs,\s*\.kr-card--tools,\s*\.kr-card--memory\s*\{([^}]*)\}/.exec(code)?.[1] ?? ''
+      const flatHover = /\.kr-card--task:hover,\s*\.kr-card--outputs:hover,\s*\.kr-card--tools:hover,\s*\.kr-card--memory:hover\s*\{([^}]*)\}/.exec(code)?.[1] ?? ''
+      const resting = /background:\s*transparent/.test(flatBlock)
+        && /border:\s*0/.test(flatBlock)
+        && /border-radius:\s*0/.test(flatBlock)
+        && /box-shadow:\s*none/.test(flatBlock)
+        && /transform:\s*none/.test(flatBlock)
+      const hover = /background:\s*transparent/.test(flatHover)
+        && /box-shadow:\s*none/.test(flatHover)
+        && /transform:\s*none/.test(flatHover)
+      if (!resting || !hover) {
+        fail('任务概览 / 产出物 / 工具调用 / 记忆四张卡必须统一去掉卡片外框'
+          + '（背景透明 + border:0 + 圆角:0 + 无阴影 + hover 不浮起）')
+      } else {
+        pass('Seeker 大盘四张剩余卡片统一去外框（任务 / 产出物 / 工具 / 记忆）')
+      }
+    }
+
     // 子智能体目录的三态语义：**未加载 ≠ 确实为空**。把「还没读到」说成
     // 「这次没有派生独立的子智能体」，就是在对一件我们并不知道的事下结论
     // （截图里那句自相矛盾的话正是这么来的）。

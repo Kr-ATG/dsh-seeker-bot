@@ -57,6 +57,28 @@ const HIDE_ATTR = 'data-skb-native-hide'
  * 只影响绘制、不打断动画时间轴，切回来时元素保持最终状态，无重播。
  */
 const SOFT_HIDE_ATTR = 'data-skb-mode-hide'
+/**
+ * 分段滑块方向动效的时长与缓动。
+ *
+ * 为什么不用 transition：两个模式各自渲染一枚同规格分段控件，切换时整层界面
+ * 被替换（官方侧栏让位 / Personal App 显示），位移起点和终点落在两枚不同的
+ * DOM 上。transition 只能对同一元素的前后状态补间，跨控件无从接力；这里用
+ * WAAPI 在「切换后可见的那一枚」上显式播放一次位移动画。
+ *
+ * 也刻意不用 CSS animation + data 属性：那需要强制 reflow 才能保证重播，
+ * 而切换瞬间正是整页布局最重的一刻，同步 reflow 会把动画第一帧吞掉（用户
+ * 2026-11-04 反馈「滑动不顺畅」）。WAAPI 直接把起止值交给合成器，不依赖
+ * 样式重算，也不会被定时器半路掐断。
+ */
+const THUMB_SLIDE_MS = 240
+/**
+ * 与 motion-utils.ts 的 MOTION_EASING 同一个值（cubic-bezier(.22,1,.36,1)）。
+ *
+ * 不用官方「标准曲线」(.4,0,.2,1)：那条曲线起步斜率为 0，前 30ms 几乎看不到
+ * 位移，点击后像「顿一下才动」。这条起步即走、尾段平滑收住，点击的即时感更强
+ * （2026-11-04 用户反馈不顺畅后换的）。
+ */
+const THUMB_SLIDE_EASING = 'cubic-bezier(.22, 1, .36, 1)'
 const CONTROLLER_KEY = '__dshSeekerModeSwitchV1__'
 const LOGO_ROW_CLASS = 'hHd-Xa_logoRow'
 const NAV_SECTIONS_ID = 'dsh-sidebar-nav-sections'
@@ -121,8 +143,28 @@ export function setUiMode(next: UiMode): void {
   if (mode === next) return
   mode = next
   writeUiMode(next)
-  renderSeg()
-  applyModeDom()
+  /*
+   * 先把目标滑块钉在起点（见 stageThumbSlide），**再**切换两套界面。
+   *
+   * 顺序很重要：切换后的第一帧如果目标滑块还停在静态终点，用户会先看到它
+   * 在终点闪一下、再回到起点重滑（2026-11-04「滑动不顺畅」）。钉在起点后，
+   * 新界面出现的瞬间滑块位置与旧界面完全一致，然后在布局完成后的下一帧起播。
+   */
+  const staged = stageThumbSlide(next)
+  if (next === 'bot') {
+    /*
+     * 先让 Personal App 盖住官方侧栏，再更新官方分段：否则官方滑块会在 Work
+     * 界面露出的最后一帧先瞬移到 Bot 端，看起来像闪一下。切到 Bot 时官方
+     * 控件已经不可见，更新它没有视觉差。
+     */
+    applyModeDom()
+    renderSeg()
+  } else {
+    // 先把官方分段切到 Work，再露出官方侧栏；方向动效由 startThumbSlide 接上。
+    renderSeg()
+    applyModeDom()
+  }
+  startThumbSlide(staged)
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string): HTMLElementTagNameMap[K] {
@@ -202,6 +244,120 @@ function renderSeg(): void {
     if (on) button.setAttribute('aria-selected', 'true')
     else button.removeAttribute('aria-selected')
   }
+}
+
+/** 滑块当前正在播放的 WAAPI 动画（按元素记，快速连点时取消旧的）。 */
+const thumbAnimations = new WeakMap<HTMLElement, Animation>()
+
+/** 系统「减少动态效果」时直接落位，不做位移。 */
+function motionReduced(): boolean {
+  try {
+    return currentWindow()?.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true
+  } catch {
+    return false
+  }
+}
+
+/** 已预置起点、等待下一帧起播的滑块。 */
+interface StagedThumbSlide {
+  readonly thumb: HTMLElement
+  readonly from: string
+  readonly to: string
+  /** 切换序号：每次切换递增，旧的回调据此作废。 */
+  readonly token: number
+}
+
+let stagedThumbSlide: StagedThumbSlide | null = null
+let thumbSlideToken = 0
+
+/** 把预置的 inline 起点还给样式表（静态位置），避免残留。 */
+function clearStagedThumbSlide(): void {
+  if (stagedThumbSlide === null) return
+  stagedThumbSlide.thumb.style.transform = ''
+  stagedThumbSlide = null
+}
+
+/**
+ * 第一步：在切换界面**之前**把目标滑块钉在起点，并返回起播信息。
+ *
+ * 为什么必须分两步：点击到新界面稳定之间有一次整页大布局（.pa-root 的
+ * display:none → flex，实测主线程会停 100ms 上下）。动画若在切换的 JS task
+ * 里同步起播，首帧会被这次布局吞掉——用户看到的就是「顿一下、然后滑块从
+ * 四分之一处继续滑」。所以这里只钉起点；真正的 animate() 放到布局完成后的
+ * 下一帧（startThumbSlide 的双 rAF），从起点完整滑到终点。
+ *
+ * 只有切换后可见的那一枚需要处理：Work 模式官方侧栏可见，Bot 模式 Personal
+ * App 可见。
+ */
+function stageThumbSlide(target: UiMode): StagedThumbSlide | null {
+  const doc = currentDocument()
+  if (doc === undefined) return null
+  clearStagedThumbSlide()
+  // 两枚滑块上的旧动画都先停掉：切换方向后另一枚可能已被隐藏，留着只会白耗帧。
+  for (const selector of ['.skb-seg__thumb', '.pa-mode-seg__thumb']) {
+    const node = doc.querySelector(selector) as HTMLElement | null
+    if (node === null) continue
+    const running = thumbAnimations.get(node)
+    if (running !== undefined) {
+      running.cancel()
+      thumbAnimations.delete(node)
+    }
+  }
+  const thumb = doc.querySelector(
+    target === 'work' ? '.skb-seg__thumb' : '.pa-mode-seg__thumb',
+  ) as HTMLElement | null
+  if (thumb === null || motionReduced()) return null
+  if (typeof thumb.animate !== 'function') return null
+  // Work 端静态在左（translateX 0），Bot 端静态在右（translateX(100% + 3px)）。
+  const from = target === 'work' ? 'translateX(calc(100% + 3px))' : 'translateX(0)'
+  const to = target === 'work' ? 'translateX(0)' : 'translateX(calc(100% + 3px))'
+  /*
+   * 钉起点用 inline transform，而不是提前 animate()：切换瞬间不能先起播。
+   * 百分比相对滑块自身宽度，布局完成后会自动落到最终正确位置。
+   */
+  thumb.style.transform = from
+  return { thumb, from, to, token: ++thumbSlideToken }
+}
+
+/**
+ * 第二步：等新界面完成布局后的下一帧，从起点播放到位移终点。
+ *
+ * 用**双** requestAnimationFrame：第一个回调仍在本轮渲染的布局之前，第二个
+ * 才落在布局/绘制之后——这正是要避开「首帧被布局吞掉」的时机。
+ * 测试桩没有 rAF 时同步执行，行为等价于「立即起播」。
+ *
+ * 动画完成后 cancel()：终点与静态位置完全一致，取消不会产生跳变，同时把
+ * 合成层动画彻底释放，避免常驻。
+ */
+function startThumbSlide(staged: StagedThumbSlide | null): void {
+  if (staged === null) return
+  const run = (): void => {
+    if (staged.token !== thumbSlideToken) {
+      // 这次切换已被新的切换取代：把预置的 inline 起点还掉，别留在隐藏滑块上。
+      staged.thumb.style.transform = ''
+      return
+    }
+    // 交回静态位置（终点）；紧接着的 animate() 从起点覆盖，样式中不会出现闪终点。
+    staged.thumb.style.transform = ''
+    let animation: Animation
+    try {
+      animation = staged.thumb.animate(
+        [{ transform: staged.from }, { transform: staged.to }],
+        { duration: THUMB_SLIDE_MS, easing: THUMB_SLIDE_EASING, fill: 'both' },
+      )
+    } catch {
+      return
+    }
+    thumbAnimations.set(staged.thumb, animation)
+    animation.onfinish = () => {
+      if (thumbAnimations.get(staged.thumb) !== animation) return
+      thumbAnimations.delete(staged.thumb)
+      animation.cancel()
+    }
+  }
+  const raf = currentWindow()?.requestAnimationFrame
+  if (typeof raf === 'function') raf(() => { raf(run) })
+  else run()
 }
 
 /** 确保宿主挂在侧栏里、且紧贴品牌行之后。 */

@@ -890,6 +890,12 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
 
       {collapsed ? null : (
         <div className="pa-mode-seg" role="tablist" aria-label="模式切换">
+          {/*
+            高亮块是独立 thumb（2026-11-04）：与官方 .skb-seg 同构，切换模式时
+            由 mode-switch/index.ts 的 playThumbSlide 驱动一次左右滑动，而不是
+            给按钮换背景色。按钮只负责文字与点击热区。
+          */}
+          <span className="pa-mode-seg__thumb" aria-hidden="true" />
           <button type="button" role="tab" aria-selected="false" onClick={onExitWork}>Work</button>
           <button type="button" role="tab" aria-selected="true" data-on="true">Bot</button>
         </div>

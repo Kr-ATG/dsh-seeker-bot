@@ -1,5 +1,5 @@
 /**
- * dsh-seeker-bot — 撤回 / 编辑 client 半身入口（vendor 移植自 dsh-recall-plugin，MIT）
+ * dsh-seeker-bot — 撤回 client 半身入口（vendor 移植自 dsh-recall-plugin，MIT）
  *
  * 为什么改成普通模块导出，而不是参考插件那套 window.__ModuleLoader__.load({id, factory})：
  * dsh-recall-plugin 是独立插件包，它的 client 半身由宿主的模块加载器单独装载；
@@ -26,7 +26,7 @@ import { createApp } from './app.js'
 import { appLog } from './log.js'
 
 /**
- * 把撤回 / 编辑能力挂到宿主 client context 上。
+ * 把撤回能力挂到宿主 client context 上。
  *
  * @param ctx 经 ctx.inject 延迟注入后的 cordis 子 scope（slots / sessions /
  *   workspaces / uiWorkspace / timer 已就位）。类型取 any 的「为什么」：调用方

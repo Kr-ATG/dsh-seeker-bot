@@ -1411,9 +1411,7 @@ body[data-pa-resizing='true'] {
   color: #5d6269;
 }
 .pa-root[data-pa-theme='light'] .pa-sidebar .pa-mode-seg button[data-on='true'] {
-  background: #ffffff;
   color: #14161a;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
 }
 .pa-root[data-pa-theme='light'] .pa-sidebar__top .pa-icon-btn--bordered {
   background: rgba(15, 17, 21, 0.06);

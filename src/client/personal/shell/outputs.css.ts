@@ -1,5 +1,5 @@
 /**
- * dsh-seeker-bot — 右栏「产出物」卡与预览弹层样式。
+ * dsh-seeker-bot — 右栏「产出物」卡、分类 tab、定时任务区与预览弹层样式。
  *
  * 与另外几套 personal-agent 样式同一注入模式：一个幂等函数 + 固定 style id，
  * index.tsx / standalone.tsx 统一调用 `injectOutputsStyles()`。
@@ -16,50 +16,72 @@
  */
 
 export const PERSONAL_OUTPUTS_CSS = `
-/* ── 右栏顶栏与卡间节奏 ───────────────────────────────────────────────
- * RightPanel 重写后只剩通话条 + 极简顶栏 + 两张卡（BotEcho 回显已于 2026-11-02
- * 按用户要求整体删除）。顶栏与卡间距在这里补齐（shell.css.ts 仍是旧的三 tab 版
- * 布局，不在本轮写作用域内）。
- * 用 .pa-right 前缀提高优先级，保证本文件无论何时注入都能覆盖基础布局。 */
-.pa-right .pa-right__topbar {
+/* ── 右栏顶部：Bot 资料区 ─────────────────────────────────────────────
+ * 用户口径（2026-11-04 澄清）：分类 tab 的「三分之一」是高度位置，不是宽度。
+ * 资料区撑到面板约 30%（tab 条顶部因此落在 1/3 高度附近），自上而下是：
+ * 居中头像 + 右下编辑铅笔 + 名称 + 绿色状态点。「关闭右栏」仍在右上角。 */
+.pa-right .pa-right__profile {
+  position: relative;
   flex: none;
+  min-height: clamp(230px, 30vh, 340px);
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-  padding: 12px 14px 10px;
-  border-bottom: 1px solid var(--pa-line);
+  justify-content: center;
   min-width: 0;
+  padding: 34px 16px 16px;
+  overflow: hidden;
 }
-.pa-right .pa-right__topbar-main {
-  flex: 1;
-  min-width: 0;
+.pa-right .pa-right__profile-main {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-.pa-right .pa-right__topbar-name {
-  flex: 0 1 auto;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: calc(14px + var(--pa-font-delta));
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  color: var(--pa-text);
+  max-width: 100%;
 }
-.pa-right .pa-right__topbar-role {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: calc(10.5px + var(--pa-font-delta));
-  color: var(--pa-text-3);
-}
-.pa-right .pa-right__topbar-close {
+.pa-right .pa-right__avatar-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: none;
+  margin-bottom: 2px;
+}
+/* 编辑铅笔：压在头像右下角，用面板底色描一圈，避免和头像贴死。 */
+.pa-root .pa-right__edit-btn {
+  position: absolute;
+  right: -2px;
+  bottom: 1px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--pa-right);
+  border-radius: 50%;
+  background: var(--pa-card-3);
+  color: var(--pa-text-2);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.24);
+  transition: background 120ms ease, color 120ms ease, transform 120ms ease;
+}
+.pa-root .pa-right__edit-btn:hover {
+  background: var(--pa-card-2);
+  color: var(--pa-text);
+  transform: translateY(-1px);
+}
+.pa-root .pa-right__edit-btn:active { transform: scale(0.94); }
+.pa-root .pa-right__edit-btn:focus-visible {
+  outline: 2px solid var(--pa-accent);
+  outline-offset: 1px;
+}
+.pa-root[data-pa-theme='light'] .pa-right__edit-btn {
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(15, 17, 21, 0.16);
+}
+.pa-root .pa-right__profile-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
   width: 28px;
   height: 28px;
   display: inline-flex;
@@ -70,20 +92,295 @@ export const PERSONAL_OUTPUTS_CSS = `
   background: rgba(128, 132, 140, 0.13);
   transition: background 120ms ease, color 120ms ease, transform 120ms ease;
 }
-.pa-right .pa-right__topbar-close:hover {
+.pa-root .pa-right__profile-close:hover {
   background: rgba(128, 132, 140, 0.26);
   color: var(--pa-text);
 }
-.pa-right .pa-right__topbar-close:active { transform: scale(0.94); }
-.pa-right .pa-right__topbar-close:focus-visible {
+.pa-root .pa-right__profile-close:active { transform: scale(0.94); }
+.pa-root .pa-right__profile-close:focus-visible {
   outline: 2px solid var(--pa-accent);
   outline-offset: 1px;
+}
+.pa-right .pa-right__profile-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(16.5px + var(--pa-font-delta));
+  font-weight: 650;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+  color: var(--pa-text);
+}
+.pa-right .pa-right__profile-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: calc(10.5px + var(--pa-font-delta));
+  line-height: 1.5;
+  color: var(--pa-text-3);
+  user-select: none;
+}
+.pa-right .pa-right__status-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--pa-text-4);
+  box-shadow: 0 0 0 3px rgba(128, 132, 140, 0.14);
+}
+.pa-right .pa-right__profile-status[data-tone='online'] { color: var(--pa-text-2); }
+.pa-right .pa-right__profile-status[data-tone='online'] .pa-right__status-dot {
+  background: var(--pa-green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pa-green) 18%, transparent);
+}
+.pa-right .pa-right__profile-status[data-tone='busy'] { color: var(--pa-text-2); }
+.pa-right .pa-right__profile-status[data-tone='busy'] .pa-right__status-dot {
+  background: var(--pa-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pa-accent) 18%, transparent);
+}
+.pa-right .pa-right__profile-status[data-tone='off'] .pa-right__status-dot {
+  background: var(--pa-text-4);
+  box-shadow: 0 0 0 3px rgba(128, 132, 140, 0.14);
 }
 /* 右栏滚动区沿用 shell.css.ts 的块级布局（padding: 2px 16px 26px）；
  * 卡间距由两张卡各自的 margin-top 负责 —— 产出物卡与任务记录卡统一 10px，
  * 不在这里加 flex gap，否则任务卡自带的 margin-top 会叠成 20px。 */
 
+/* ── 右栏分类 tab：分段控件（2026-11-04 修正） ───────────────────────
+ * 用户澄清：「三分之一」指的是 tab 条落在面板约 1/3 高度处（由上方资料区撑出），
+ * 不是 tab 条宽度。参考图是一条接近内容区全宽的圆角浅色 track：两段等分，
+ * 选中段为浅色凸起 pill（深色 --pa-card-3；浅色白底 + 轻阴影），不是文字下划线。 */
+.pa-right .pa-right__tabs {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 3px;
+  width: auto;
+  margin: 0 16px;
+  padding: 3px;
+  border: 0;
+  border-radius: 12px;
+  background: rgba(128, 132, 140, 0.12);
+}
+/*
+ * 选中滑块（2026-11-04 用户要求「动态 / 产出物」也有左右滑动动效）。
+ *
+ * 与侧栏 Work ⇄ Bot 分段同一套参数：240ms、cubic-bezier(.22,1,.36,1)、
+ * 合成层提示。区别是这里用 CSS transition 而不是 WAAPI——tab 条始终可见、
+ * 只在一枚控件内位移，不存在跨界面接力，React 改 data-tab 就能平滑补间。
+ *
+ * 宽度按包含块（padding box）算：两段各 (100% - 3px gap) / 2，再减去自身
+ * 所在的 3px 内边距换算 = 50% - 4.5px；位移到第二段要再跨过 gap。
+ */
+.pa-right .pa-right__tab-thumb {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc(50% - 4.5px);
+  border-radius: 9px;
+  background: var(--pa-card-3);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  pointer-events: none;
+  transform: translateX(0);
+  transition: transform 240ms cubic-bezier(.22, 1, .36, 1);
+  will-change: transform;
+}
+.pa-right .pa-right__tab-thumb[data-tab='outputs'] { transform: translateX(calc(100% + 3px)); }
+.pa-root[data-pa-theme='light'] .pa-right__tab-thumb {
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(15, 17, 21, 0.13), 0 0 0 1px rgba(15, 17, 21, 0.04);
+}
+.pa-root[data-pa-theme='light'] .pa-right .pa-right__tabs {
+  background: #eceef2;
+}
+.pa-root .pa-right__tab {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  min-width: 0;
+  height: 34px;
+  padding: 0;
+  border-radius: 9px;
+  text-align: center;
+  white-space: nowrap;
+  font-size: calc(11.5px + var(--pa-font-delta));
+  font-weight: 500;
+  color: var(--pa-text-3);
+  transition: color 120ms ease;
+}
+.pa-root .pa-right__tab:hover { color: var(--pa-text-2); }
+/* 选中态只改文字：高亮块由 .pa-right__tab-thumb 承载（2026-11-04）。 */
+.pa-root .pa-right__tab[aria-selected='true'] {
+  color: var(--pa-text);
+  font-weight: 600;
+}
+.pa-right .pa-right__tab-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+}
+/* 分类名不上屏（用户 2026-11-04：「我不要这个文字」）：可见区只有图标，
+   名字留在 title / aria-label。 */
+.pa-root .pa-right__tab:focus-visible {
+  outline: 2px solid var(--pa-accent);
+  outline-offset: -2px;
+  border-radius: 9px;
+}
+
+/* 分类面板：承载当前 tab 的内容；错峰序号按面板实际子元素给
+ * （ActivityTab 返回 Fragment，它的定时任务区与任务记录就是面板的直接子元素；
+ * 产出物 tab 的两张卡同理）。 */
+.pa-right .pa-right__panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.pa-right__panel[data-page-motion='stagger'] > :nth-child(1) { --i: 0; }
+.pa-right__panel[data-page-motion='stagger'] > :nth-child(2) { --i: 1; }
+.pa-right__panel[data-page-motion='stagger'] > :nth-child(3) { --i: 2; }
+
+/* ── 动态 tab：定时任务区 ─────────────────────────────────────────────
+ * 参考图上半部分：可折叠的「N scheduled tasks」，行 = 圆角图标块 + 名称 +
+ * 频率文案（右侧不挂操作，保持轻量），底部居中「查看全部定时任务」。 */
+.pa-routines {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  margin-top: 10px;
+  min-width: 0;
+  color: var(--pa-text);
+}
+.pa-root .pa-routines__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 10px 12px;
+  text-align: left;
+  color: var(--pa-text-2);
+  border-radius: 8px;
+  transition: background 120ms ease;
+}
+.pa-root .pa-routines__head:hover { background: var(--pa-card-2); }
+.pa-root .pa-routines__head:focus-visible {
+  outline: 2px solid var(--pa-accent);
+  outline-offset: -2px;
+}
+.pa-routines__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(12.5px + var(--pa-font-delta));
+  font-weight: 600;
+  color: var(--pa-text);
+}
+.pa-routines__caret {
+  flex: none;
+  display: inline-flex;
+  color: var(--pa-text-4);
+  transition: transform 150ms ease;
+}
+.pa-routines[data-open='false'] .pa-routines__caret { transform: rotate(-90deg); }
+.pa-routines__body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 4px 2px;
+  min-width: 0;
+}
+.pa-routines__list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.pa-routines__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 7px 8px;
+  border-radius: 10px;
+}
+.pa-routines__row[data-enabled='false'] { opacity: 0.55; }
+.pa-routines__icon {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: var(--pa-card-2);
+  color: var(--pa-text-2);
+}
+.pa-routines__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pa-routines__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(12px + var(--pa-font-delta));
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--pa-text);
+}
+.pa-routines__freq {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(10.5px + var(--pa-font-delta));
+  line-height: 1.45;
+  color: var(--pa-text-3);
+}
+.pa-root .pa-routines__all {
+  align-self: center;
+  margin-top: 2px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  font-size: calc(10.5px + var(--pa-font-delta));
+  color: var(--pa-text-3);
+  transition: color 120ms ease, background 120ms ease;
+}
+.pa-root .pa-routines__all:hover {
+  color: var(--pa-text);
+  background: var(--pa-card-2);
+}
+.pa-root .pa-routines__all:focus-visible {
+  outline: 2px solid var(--pa-accent);
+  outline-offset: 1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pa-routines__caret { transition: none; }
+  .pa-right__tab { transition: none; }
+  .pa-right__tab-thumb { transition: none; }
+  .pa-right__edit-btn { transition: none; }
+  .pa-right__edit-btn:hover { transform: none; }
+}
+
 /* ── 产出物卡 ─────────────────────────────────────────────────────── */
+/* 2026-11-04 用户要求：Bot 右栏卡片去外框 —— 去掉背景、边框、圆角与阴影
+ * （本块原本没有阴影），让页面卡 / 产出物卡直接融进右栏底色。
+ * padding 与 margin 保留：外框去掉后，这圈内距仍是卡头、文件行与右栏边缘
+ * 之间的呼吸空间，也保证与任务记录卡的横向对齐。 */
 .pa-out-card {
   flex: none;
   display: flex;
@@ -92,9 +389,6 @@ export const PERSONAL_OUTPUTS_CSS = `
   min-width: 0;
   margin-top: 10px;
   padding: 10px 12px;
-  border: 1px solid var(--pa-line);
-  border-radius: var(--pa-radius-card);
-  background: var(--pa-card);
   color: var(--pa-text);
 }
 
@@ -155,6 +449,48 @@ export const PERSONAL_OUTPUTS_CSS = `
 }
 .pa-out-head:hover .pa-out-head__chev { color: var(--pa-text-2); }
 .pa-out-head__chev[data-open='true'] { transform: rotate(180deg); }
+
+/* 分类选择器：卡头下面的 chip 行，挑一类只显示那一类。
+ * 两类以上才出现；横向可滚动，窄栏里也不换行撑高卡片。 */
+.pa-out-filter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 0 2px 1px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+.pa-root .pa-out-filter__chip {
+  flex: none;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--pa-line);
+  border-radius: 999px;
+  background: transparent;
+  font-size: calc(10px + var(--pa-font-delta));
+  line-height: 22px;
+  color: var(--pa-text-3);
+  white-space: nowrap;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.pa-root .pa-out-filter__chip:hover {
+  color: var(--pa-text-2);
+  border-color: var(--pa-line-2);
+}
+.pa-root .pa-out-filter__chip[data-on='true'] {
+  color: var(--pa-text);
+  font-weight: 600;
+  background: var(--pa-card-2);
+  border-color: transparent;
+}
+.pa-root .pa-out-filter__chip:focus-visible {
+  outline: 2px solid var(--pa-accent);
+  outline-offset: 1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pa-out-filter__chip { transition: none; }
+}
 
 /* 正文 / 分组 */
 .pa-out-body {

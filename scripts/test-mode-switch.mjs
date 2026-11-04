@@ -99,6 +99,23 @@ class StubElement {
     for (const listener of this.listeners.get(type) ?? []) listener(event)
   }
   click() { this.dispatch('click', { preventDefault() {}, stopPropagation() {}, button: 0 }) }
+  /*
+   * WAAPI 桩（2026-11-04）：分段滑块动效改用 element.animate() 后，测试要能
+   * 断言「切回 Work 时播放的是从 Bot 端到 Work 端的位移」。只记录调用，不真正
+   * 计时；onfinish 由用例决定是否触发。
+   */
+  animate(keyframes, options) {
+    const animation = {
+      keyframes,
+      options,
+      cancelled: false,
+      onfinish: null,
+      cancel() { this.cancelled = true },
+    }
+    if (!Array.isArray(this.animations)) this.animations = []
+    this.animations.push(animation)
+    return animation
+  }
   querySelector(selector) { return this.ownerDocument.querySelectorFrom(this, selector) }
   querySelectorAll(selector) { return this.ownerDocument.querySelectorAllFrom(this, selector) }
   get firstElementChild() { return this.children[0] ?? null }
@@ -277,6 +294,15 @@ console.log('[mode-switch] Bot 可点')
   mod.setUiMode('work')
   check('setUiMode(work) 生效', mod.currentUiMode() === 'work')
   check('setUiMode(work) 后 body 恢复 work', doc.body.getAttribute('data-skb-mode') === 'work')
+  {
+    const workThumb = doc.getElementById('skb-bot-console-host').querySelector('.skb-seg__thumb')
+    const workAnim = (workThumb.animations ?? [])[0]
+    check('切回 Work 时官方滑块播放从右到左的 WAAPI 动画',
+      workAnim !== undefined
+        && workAnim.keyframes[0].transform === 'translateX(calc(100% + 3px))'
+        && workAnim.keyframes[1].transform === 'translateX(0)'
+        && workAnim.options.duration === 240)
+  }
   mod.setUiMode('bot')
   check('setUiMode(bot) 生效', mod.currentUiMode() === 'bot')
   mod.setUiMode('work')

@@ -41,8 +41,7 @@ export interface InitResponse {
   notice: InitNotice | null
   // 仅受支持平台且有 root 时下发（unsupported 分支缺省）；client 读侧可选。
   // A4：locale 为界面语言偏好（老 Host 不下发 → client 按 auto 解析）
-  // issue #26：editSubmitsImmediately 老 Host 不下发 → client 按默认 true 处理
-  config?: { refillDraft: boolean; archiveOriginal: boolean; locale?: LocalePref; editSubmitsImmediately?: boolean }
+  config?: { refillDraft: boolean; archiveOriginal: boolean; locale?: LocalePref }
 }
 
 // ---- snapshot-info ----

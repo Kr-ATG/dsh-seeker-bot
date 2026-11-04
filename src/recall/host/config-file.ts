@@ -56,7 +56,6 @@ const KNOWN_KEYS: Record<keyof ResolvedConfig, true> = {
   // 2026-11-04 新增（文件回退总开关，默认关）
   fileRollbackEnabled: true,
   archiveOriginal: true,
-  editSubmitsImmediately: true,
   retentionDays: true,
   locale: true,
 }

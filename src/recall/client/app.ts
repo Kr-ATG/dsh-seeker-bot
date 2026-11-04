@@ -68,7 +68,7 @@ export function createApp(React: ReactApi) {
     const { UserRecallNode } = buildRecallNode(React, util, ctx, sessionsSvc, workspacesSvc, uiWorkspaceSvc)
     const { RecallSettingsCard } = buildSettingsCards(React, util, sessionsSvc, workspacesSvc, uiWorkspaceSvc)
     // 版本翻页器：挂在回合末尾的官方 assistant-actions list 槽（0.2.1 起存在；
-    // 旧版宿主没有该槽时 inject 静默 no-op，撤回/编辑主链不受影响）
+    // 旧版宿主没有该槽时 inject 静默 no-op，撤回主链不受影响）
     const { VersionPager } = buildVersionPager(React, util, workspacesSvc, uiWorkspaceSvc)
 
     // conversation.chat.node 是 keyed slot，同一 key 的最低 priority 渲染。

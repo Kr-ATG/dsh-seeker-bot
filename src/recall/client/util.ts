@@ -208,7 +208,7 @@ export interface UtilApi {
   // A4：词表取词与语言切换（locale 偏好由 Host config 下发，见 ensureInit）
   t: Translate
   setLocalePref(pref: unknown): void
-  pluginConfig: { refillDraft: boolean; archiveOriginal: boolean; editSubmitsImmediately: boolean }
+  pluginConfig: { refillDraft: boolean; archiveOriginal: boolean }
 }
 
 export function buildUtil(): UtilApi {
@@ -303,7 +303,7 @@ export function buildUtil(): UtilApi {
   // has:false 且不再重试，撤回按钮将永不出现。
   // init 顺带下发插件行为开关（refillDraft 等），存进 pluginConfig 供撤回
   // 执行链读取——设置页改配置 + 重启后随下一次 init 刷新。
-  const pluginConfig = { refillDraft: true, archiveOriginal: true, editSubmitsImmediately: true }
+  const pluginConfig = { refillDraft: true, archiveOriginal: true }
   const initMap = new Map<string, Promise<unknown>>()
   function ensureInit(sessionId: string | null | undefined): Promise<unknown> {
     if (!sessionId) return Promise.resolve()
@@ -311,11 +311,9 @@ export function buildUtil(): UtilApi {
     if (cached) return cached
     const done = api<import('../types/api.js').InitResponse>('init', { sessionId }).then((res) => {
       if (res && res.config && typeof res.config === 'object') {
-        const cfg = res.config as { refillDraft?: unknown; archiveOriginal?: unknown; editSubmitsImmediately?: unknown; locale?: unknown }
+        const cfg = res.config as { refillDraft?: unknown; archiveOriginal?: unknown; locale?: unknown }
         if (typeof cfg.refillDraft === 'boolean') pluginConfig.refillDraft = cfg.refillDraft
         if (typeof cfg.archiveOriginal === 'boolean') pluginConfig.archiveOriginal = cfg.archiveOriginal
-        // issue #26：老 Host 不下发该字段（undefined）时保持默认 true
-        if (typeof cfg.editSubmitsImmediately === 'boolean') pluginConfig.editSubmitsImmediately = cfg.editSubmitsImmediately
         // A4：init 是每会话必经的预热通道，语言偏好随之落地；老 Host 不下发
         // 该字段（undefined）时解析回落 auto（按 navigator.language）
         setLocalePref(cfg.locale)

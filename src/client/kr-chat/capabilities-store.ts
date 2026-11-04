@@ -61,6 +61,7 @@ class CapabilitiesStore {
   private listeners = new Set<Listener>()
   private cachedSnapshot: CapabilitiesSnapshot = EMPTY_SNAPSHOT
   private pollTimer?: number
+  private refreshTimer?: number
   private abortController?: AbortController
 
   constructor() {
@@ -130,9 +131,28 @@ class CapabilitiesStore {
 
   setLiveToolNodes(nodes: readonly unknown[]): void {
     if (this.liveToolNodes === nodes) return
+    const prevCount = this.liveToolNodes.length
     this.liveToolNodes = nodes
     this.recompute()
     this.notify()
+    /*
+     * 会话里出现**新的工具调用**时，主动补一次宿主数据刷新（延迟节流，一次一批）。
+     *
+     * 为什么必须补：徽标只由 host 侧事件日志算出来，而 setSession 只在会话
+     * 切换时抓一次；调用 skill / MCP 之后若从不点开弹窗，卡头数字会一直停在
+     * 上一次抓到的旧值 —— 用户看到的就是「数字从来不变化」。
+     */
+    if (nodes.length !== prevCount) this.scheduleRefresh()
+  }
+
+  /** 延迟抓一次宿主数据；同一批工具调用只排一次，避免每个节点都打一次全量日志。 */
+  private scheduleRefresh(delay = 1200): void {
+    if (!this.sessionId) return
+    if (this.refreshTimer !== undefined) return
+    this.refreshTimer = window.setTimeout(() => {
+      this.refreshTimer = undefined
+      void this.fetchHostData()
+    }, delay)
   }
 
   refresh = async (): Promise<void> => {
@@ -219,8 +239,8 @@ class CapabilitiesStore {
       const isRunning = !('kind' in root)
       const status: 'success' | 'failed' | 'running' = isRunning ? 'running' : isErr ? 'failed' : 'success'
 
-      // 获取 raw arguments
-      const argsRaw = 'kind' in root ? (root.call?.argsRaw ?? '') : (root.argsRaw ?? '')
+      // 获取 raw arguments（PTC 派发的参数是对象，普通工具调用是 JSON 字符串）
+      const argsRaw = rawArgsOf(root)
 
       // 1. MCP
       if (name.startsWith('mcp__')) {
@@ -381,6 +401,26 @@ class CapabilitiesStore {
       sessionId: this.sessionId,
     }
   }
+}
+
+/**
+ * 从工具节点读参数原文。
+ *
+ * 形态有两种：普通工具节点是 `argsRaw` JSON 字符串；PTC 派发（run_code 内层调用）
+ * 直接给对象。只认字符串会让后者退化成空串，`JSON.parse('')` 抛错 → skill 名
+ * 解析不出来，与宿主侧同一处坑（2026-11-04 修）。
+ */
+function rawArgsOf(root: any): string {
+  const raw = 'kind' in root ? (root.call?.argsRaw ?? root.call?.args) : (root.argsRaw ?? root.args)
+  if (typeof raw === 'string') return raw
+  if (raw !== null && typeof raw === 'object') {
+    try {
+      return JSON.stringify(raw)
+    } catch {
+      return ''
+    }
+  }
+  return ''
 }
 
 function summarizeArgsString(argsRaw: string): string {

@@ -28,7 +28,7 @@ export function attachmentRefsFromBlocks(blocks: ChatBlock[]): DraftAttachmentRe
     if (!ref || typeof ref.attachmentId !== 'string' || ref.attachmentId === '') continue
     // 原始引用对象一并带上：≥0.2.2-alpha.1 的 readAttachment 只认完整引用
     // （裸 id 会被判 INVALID_ATTACHMENT_REF），旧版忽略该字段
-    const entry: DraftAttachmentRef = { attachmentId: ref.attachmentId, kind: block.type, attachment: block.attachment }
+    const entry: DraftAttachmentRef = { attachmentId: ref.attachmentId, attachment: block.attachment }
     if (typeof ref.name === 'string' && ref.name !== '') entry.name = ref.name
     refs.push(entry)
   }

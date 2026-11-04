@@ -14,20 +14,11 @@
 
 import type { ReactApi, UtilApi } from './util.js'
 import { buildRecallNotify } from './util.js'
-import type { RecallNotifyOutcome } from './util.js'
 import { recallNodeLog } from './log.js'
 import { resolveUserContentFace, renderOfficialUserContent } from './user-content.js'
-import { buildEditFlow } from './edit-node.js'
-import type { EditStage, EditAttachmentItem, EditMeta } from './edit-node.js'
-import { installEditDismiss } from './edit-dismiss.js'
-import { buildModelPicker } from './model-picker.js'
-import type { ModelOption, ModelPickerApi, ModelPickerState } from './model-picker.js'
-import { renderModelMenu } from './model-menu.js'
-import type { ModelPane } from './model-menu.js'
 import { buildDraftFill, defaultAttachmentName } from './draft-fill.js'
 import { activeSession, recordVersion } from './version-tree.js'
-import type { DraftAttachmentRef } from './draft-fill.js'
-import type { ClientContext, ClientSessionsService, ClientWorkspacesService, ClientUiWorkspaceService, ChatNodeProps, ConversationInputShell, ConversationService } from '../types/client-contract.js'
+import type { ClientContext, ClientSessionsService, ClientWorkspacesService, ClientUiWorkspaceService, ChatNodeProps } from '../types/client-contract.js'
 import type { SnapshotInfoResponse, PreviewResponse, ExecuteResponse, DiffChange, RecallScope } from '../types/api.js'
 
 // defaultAttachmentName 的实现随附件回填链迁到 draft-fill.ts；此 re-export 保住
@@ -87,11 +78,8 @@ export function buildRecallNode(
   uiWorkspaceSvc?: ClientUiWorkspaceService
 ): RecallNodeApi {
   const { api, ensureInit, showThrottledToast, writeClipboard, clockText, pluginConfig, messageFor, t } = util
-  // 编辑面板与图标走独立模块（issue #26）：撤回面板与编辑面板的 stage 语义
-  // 不同（确认 vs 直接发送），强行合并会让两套文案矩阵互相污染
-  const { EditIcon, EditPanel } = buildEditFlow(React, t)
-  // 输入区回填（文本 + 附件 + 可选发送）：撤回回填与编辑重发共用同一条官方
-  // 写入通道，实现见 draft-fill.ts
+  // 输入区回填（文本 + 附件）：撤回后把被撤回消息的文本与附件回填到输入框，
+  // 走与官方输入框同一条写入通道，实现见 draft-fill.ts
   const { fillDraft, preloadAttachmentFiles } = buildDraftFill(ctx)
 
   function CopyIcon() {
@@ -344,27 +332,6 @@ export function buildRecallNode(
     // 例外：crossBusy（同工作区其它会话在跑）时 preview 响应会把默认值改成
     // session-only（见 openPreview；面板里 both 同时置灰，用户也改不回去）
     const [scope, setScope] = React.useState<RecallScope>('both')
-    // 就地编辑（issue #26）：与撤回面板互斥——两条入口共用同一段 fork 收尾，
-    // 但面板语义不同（不可逆确认 vs 改完直接发），stage 各自独立不互相污染
-    const [edit, setEdit] = React.useState<EditStage>({ stage: 'idle' })
-    const stackRef = React.useRef<HTMLElement | null>(null)
-    // 编辑卡上的附件：原消息附件可逐个移除，新加的（粘贴/拖入/选择）随消息发出
-    const [editFiles, setEditFiles] = React.useState<File[]>([])
-    const [droppedRefs, setDroppedRefs] = React.useState<string[]>([])
-    // 图片缩略图：原消息图片走官方 loadImage（与消息里大图同源），本地新加图片
-    // 用 object URL；加载完成前先按文件名 chip 渲染，拿到 URL 后换成缩略图
-    const [refPreviews, setRefPreviews] = React.useState<Record<string, string>>({})
-    const fileUrlsRef = React.useRef<Map<File, string>>(new Map())
-    // 元信息：权限只读（抄自底部官方输入框当前显示）；模型走官方目录服务，
-    // 打开编辑时加载一次，选择后同步到底部 chip 与后续 fork 的子会话
-    const [editMeta, setEditMeta] = React.useState<EditMeta>({ permission: '', model: '' })
-    const [modelState, setModelState] = React.useState<ModelPickerState | null>(null)
-    const [modelOpen, setModelOpen] = React.useState(false)
-    const [modelBusy, setModelBusy] = React.useState(false)
-    // 菜单分两段（模型列表 / 推理等级），与官方同构；query 只作用于模型列表
-    const [modelPane, setModelPane] = React.useState<ModelPane>('main')
-    const [modelQuery, setModelQuery] = React.useState('')
-    const pickerRef = React.useRef<ModelPickerApi | null>(null)
 
     React.useEffect(() => {
       let alive = true
@@ -447,274 +414,8 @@ export function buildRecallNode(
       })
     }
 
-    // ---- 就地编辑（issue #26）----
-    // 权限/模型 chip 只是上下文提示：值从底部官方输入框的槽容器里读，不碰服务
-    // （`data-slot` 名是官方契约，已列在本仓库的类型枚举里）
-    const readComposerMeta = (): EditMeta => {
-      const empty: EditMeta = { permission: '', model: '' }
-      if (typeof document === 'undefined') return empty
-      const card = document.querySelector('[data-composer-card]')
-      if (!card) return empty
-      const textOf = (slot: string): string => {
-        const el = card.querySelector('[data-slot="' + slot + '"]') as HTMLElement | null
-        if (!el) return ''
-        // innerText 会按布局补上元素间的空格（槽里常有「模型 · 档位」两段）；
-        // jsdom 没实现 innerText，回落到 textContent 并自行收敛空白
-        const raw = typeof el.innerText === 'string' ? el.innerText : el.textContent
-        return String(raw || '').replace(/\s+/g, ' ').trim()
-      }
-      return { permission: textOf('conversation.input.permission'), model: textOf('conversation.input.model') }
-    }
-
-    // 官方 loadImage(attachment) → Promise<url>：消息里的大图与缩略图同一来源，
-    // 原消息图片不必自己读字节。旧宿主可能没有该 props，缺失就退回文件名 chip
-    const resolveImage = typeof loadImage === 'function'
-      ? loadImage as (attachment: unknown) => Promise<unknown>
-      : null
-    // 只回收自己创建的 blob: URL；loadImage 返回的 URL 由宿主管理
-    const revokePreview = (url: string) => {
-      if (url.indexOf('blob:') !== 0) return
-      if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(url)
-    }
-    const previewOfFile = (file: File): string => {
-      const cached = fileUrlsRef.current.get(file)
-      if (cached !== undefined) return cached
-      if (typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') return ''
-      const url = URL.createObjectURL(file)
-      fileUrlsRef.current.set(file, url)
-      return url
-    }
-
-    // 未被移除的原消息附件：提交时按此清单早读字节，fork 后重新登记到子会话
-    const keptRefs = (): DraftAttachmentRef[] => attachmentRefs.filter((ref) => droppedRefs.indexOf(ref.attachmentId) < 0)
-    const editAttachments = (): EditAttachmentItem[] => {
-      const items: EditAttachmentItem[] = []
-      let index = 0
-      for (const ref of keptRefs()) {
-        const item: EditAttachmentItem = { key: 'ref:' + ref.attachmentId, name: ref.name || defaultAttachmentName('application/octet-stream', index) }
-        const preview = refPreviews[ref.attachmentId]
-        if (ref.kind === 'image' && typeof preview === 'string' && preview !== '') item.previewUrl = preview
-        items.push(item)
-        index++
-      }
-      for (const [fileIndex, file] of editFiles.entries()) {
-        const item: EditAttachmentItem = { key: 'file:' + fileIndex, name: file.name || ('attachment-' + (fileIndex + 1)) }
-        if (typeof file.type === 'string' && file.type.indexOf('image/') === 0) {
-          const preview = previewOfFile(file)
-          if (preview !== '') item.previewUrl = preview
-        }
-        items.push(item)
-      }
-      return items
-    }
-    const removeEditAttachment = (key: string) => {
-      if (key.indexOf('ref:') === 0) { setDroppedRefs((prev) => prev.concat(key.slice(4))); return }
-      if (key.indexOf('file:') !== 0) return
-      const index = Number(key.slice(5))
-      if (!Number.isFinite(index)) return
-      const removed = editFiles[index]
-      if (removed !== undefined) {
-        const url = fileUrlsRef.current.get(removed)
-        if (url !== undefined) { revokePreview(url); fileUrlsRef.current.delete(removed) }
-      }
-      setEditFiles((prev) => prev.filter((_, i) => i !== index))
-    }
-
-    // 两条入口互斥：preview 在途时不接编辑，打开编辑则把撤回面板收回 idle。
-    // 打开时只改 UI 状态：preview 放到提交时做——「只是想改一个字」的路径
-    // 不该先等一次 git 目录遍历
-    const openEdit = () => {
-      if (edit.stage === 'submitting' || recall.stage === 'loading' || recall.stage === 'executing') return
-      // 已在编辑态：忽略重复点击（否则会用原文覆盖用户改到一半的文本）
-      if (edit.stage === 'editing') return
-      // 错误态重开 = 回到编辑态并保留改过的文本
-      if (edit.stage === 'error') {
-        setEdit({ stage: 'editing', text: edit.text, attachments: edit.attachments })
-        return
-      }
-      setRecall({ stage: 'idle' })
-      setEditFiles([])
-      setDroppedRefs([])
-      setRefPreviews({})
-      setEditMeta(readComposerMeta())
-      setModelState(null)
-      setModelOpen(false)
-      setModelPane('main')
-      setModelQuery('')
-      // 模型目录按会话解析：服务不可用（旧宿主/未注册）时 picker 为 null，
-      // chip 退回只读展示，不打断编辑
-      const picker = buildModelPicker(ctx, String(sessionId || ''))
-      pickerRef.current = picker
-      if (picker) {
-        picker.load().then((state) => { if (state) setModelState(state) }).catch(() => {})
-      }
-      // 原消息里的图片：按块并发取缩略图，先渲染文件名 chip、拿到 URL 再替换
-      if (resolveImage) {
-        for (const block of imageBlocks) {
-          const attachment = block.attachment as { attachmentId?: unknown } | null
-          const id = attachment && typeof attachment.attachmentId === 'string' ? attachment.attachmentId : ''
-          if (id === '') continue
-          Promise.resolve(resolveImage(attachment)).then((url) => {
-            if (typeof url !== 'string' || url === '') return
-            setRefPreviews((prev) => (prev[id] !== undefined ? prev : { ...prev, [id]: url }))
-          }).catch(() => {})
-        }
-      }
-      setEdit({ stage: 'editing', text, attachments: attachmentRefs.length })
-    }
-
-    const editFail = (nextText: string, message: string) => {
-      setEdit({ stage: 'error', text: nextText, attachments: attachmentRefs.length, message })
-    }
-
-    // 关闭一律回 idle：错误态的「关闭」是放弃本次编辑，用户再点 ✎ 重新开始
-    const closeEdit = () => {
-      setEdit({ stage: 'idle' })
-      setEditFiles([])
-      setDroppedRefs([])
-      setRefPreviews({})
-      for (const url of fileUrlsRef.current.values()) revokePreview(url)
-      fileUrlsRef.current.clear()
-      setModelState(null)
-      setModelOpen(false)
-      pickerRef.current = null
-    }
-
-    // 节点卸载（切会话/换视图）也要回收本地缩略图，否则 blob URL 会一直挂着
-    React.useEffect(() => () => {
-      for (const url of fileUrlsRef.current.values()) revokePreview(url)
-      fileUrlsRef.current.clear()
-    }, [])
-
-    // 模型菜单：点开先回主段（模型 / 推理等级两行）；选择走官方 selectModel，
-    // 落地后重读目录刷新标签。失败只提示、菜单留在原处，不打断编辑
-    const toggleModelMenu = () => {
-      if (!pickerRef.current || modelBusy) return
-      setModelOpen((prev) => {
-        if (prev) return false
-        setModelPane('main')
-        setModelQuery('')
-        return true
-      })
-    }
-    const activeModelOption = (): ModelOption | null => {
-      if (!modelState) return null
-      for (const group of modelState.groups) {
-        for (const option of group.options) {
-          if (option.key === modelState.activeKey) return option
-        }
-      }
-      return null
-    }
-    const commitModel = (option: ModelOption, effortId: string) => {
-      const picker = pickerRef.current
-      if (!picker || modelBusy) return
-      setModelBusy(true)
-      picker.select(option, effortId).then((error) => {
-        if (error !== null) {
-          setModelBusy(false)
-          showThrottledToast(error)
-          return
-        }
-        return picker.load().then((state) => {
-          setModelBusy(false)
-          setModelOpen(false)
-          setModelPane('main')
-          if (state) setModelState(state)
-        })
-      }).catch(() => {
-        setModelBusy(false)
-      })
-    }
-    const pickModel = (option: ModelOption) => {
-      // 换模型用该模型的默认档；重选同一模型保留当前档位（官方 selectionOf 同义）
-      const current = modelState
-      const effort = current !== null && option.key === current.activeKey
-        ? current.activeEffortId
-        : (option.defaultEffort || '')
-      commitModel(option, effort)
-    }
-    const pickEffort = (effortId: string) => {
-      const option = activeModelOption()
-      if (option) commitModel(option, effortId)
-    }
-
-    // 菜单开着时点卡片外面只收菜单（不退出编辑）
-    React.useEffect(() => {
-      if (!modelOpen) return
-      const doc = typeof document === 'undefined' ? null : document
-      if (!doc) return
-      const onPointerDown = (event: Event) => {
-        const target = event.target as Element | null
-        if (target && typeof target.closest === 'function' && target.closest('.dsh-recall-composer-model') !== null) return
-        setModelOpen(false)
-      }
-      doc.addEventListener('pointerdown', onPointerDown, true)
-      return () => doc.removeEventListener('pointerdown', onPointerDown, true)
-    }, [modelOpen])
-
-    // 编辑卡没有取消按钮：Esc 是唯一出口（见 edit-dismiss）——点空白不算放弃，
-    // 否则滚动列表或点别的消息都会把正在编辑的文本丢掉
-    const editPanelOpen = edit.stage === 'editing' || edit.stage === 'error'
-    React.useEffect(() => {
-      if (!editPanelOpen) return
-      const doc = typeof document === 'undefined' ? null : document
-      if (!doc) return
-      // 模型菜单开着时 Esc 先收菜单，「退出编辑」留给下一次 Esc
-      return installEditDismiss(doc, {
-        popupSelector: '',
-        onDismiss: () => {
-          if (modelOpen) { setModelOpen(false); return }
-          closeEdit()
-        },
-      })
-    }, [editPanelOpen, modelOpen])
-
-    // 编辑提交：preview 取切点 → execute(scope=session-only) → fork → 回填并发送。
-    // scope 固定 session-only：编辑语义不动项目文件（与撤回面板的二选一是两回事）
-    const submitEdit = () => {
-      if (edit.stage !== 'editing' && edit.stage !== 'error') return
-      const nextText = edit.text
-      const kept = keptRefs()
-      if (nextText.trim() === '' && kept.length === 0 && editFiles.length === 0) {
-        editFail(nextText, t('edit.empty'))
-        return
-      }
-      // 没有新附件就交 null：空数组的 promise 会让 fillDraft 一直等一条不会
-      // 发生的附件链（startAttachDrafts 无 createDrafts 时返回 false）
-      const extraFiles = editFiles.length > 0 ? Promise.resolve(editFiles.slice()) : null
-      setEdit({ stage: 'submitting' })
-      api<PreviewResponse>('preview', { messageId, sessionId }).then((res) => {
-        if (!res || !res.ok) {
-          editFail(nextText, messageFor(res, t('fallback.preview')))
-          return
-        }
-        const cut = typeof res.cutSeq === 'number' ? res.cutSeq : null
-        // 首条用户消息没有更早的 turn 边界：fork 只会复制整段会话，编辑必须
-        // 明确拒绝而不是悄悄退化成「仅回填」
-        if (cut === null) {
-          editFail(nextText, t('edit.noCut'))
-          return
-        }
-        executeRecall({
-          scope: 'session-only',
-          cutSeq: cut,
-          total: typeof res.total === 'number' ? res.total : (res.changes || []).length,
-          treeId: res.treeId || null,
-          editText: nextText,
-          editRefs: kept,
-          editFiles: extraFiles,
-        })
-      }).catch((error) => {
-        editFail(nextText, String(error))
-      })
-    }
-
     const openPreview = () => {
       if (recall.stage === 'loading' || recall.stage === 'executing') return
-      // 撤回入口抢占用编辑面：同一时刻只留一个输入面，避免确认面板与锚定的
-      // 官方输入框并存（closeEdit 负责摘补丁、还原座位与用户原有草稿）
-      closeEdit()
       setScope('both')
       setRecall({ stage: 'loading' })
       api<PreviewResponse>('preview', { messageId, sessionId }).then((res) => {
@@ -751,34 +452,20 @@ export function buildRecallNode(
       })
     }
 
-    // 撤回与编辑共用的执行链：编辑只是把「终态面板」换成「回填后自动发送」，
-    // fork / 归档 / 残留排队清理 / lineage 走同一条路径（各写一份必然漂移）
-    const executeRecall = (overrides?: { scope?: RecallScope; cutSeq?: number | null; total?: number; treeId?: string | null; editText?: string; editRefs?: DraftAttachmentRef[]; editFiles?: Promise<File[]> | null }) => {
-      const editText = overrides && typeof overrides.editText === 'string' ? overrides.editText : null
-      const isEdit = editText !== null
-      if (!isEdit && recall.stage !== 'confirm') return
-      const changes = recall.stage === 'confirm' ? recall.changes || [] : []
+    // 撤回执行链：preview 已拿到切点，execute 负责回退文件（若开）、fork 对话、
+    // 清理残留排队、登记版本与 lineage，并按 refillDraft 回填输入框
+    const executeRecall = () => {
+      if (recall.stage !== 'confirm') return
+      const changes = recall.changes || []
       // 白名单判定而不是 truthy：executeRecall 也会被当作 onClick 处理器传进
       // 事件对象（React 合成事件），真值检查会把事件当 scope 透传给 Host
-      const activeScope: RecallScope = overrides && overrides.scope === 'session-only'
-        ? 'session-only'
-        : overrides && overrides.scope === 'both' ? 'both'
-          // issue #31：仅消息条目没有文件树，Host 会强制降级成 session-only；
-          // 这里按同一口径下发，executing/done 文案才不会误报文件已回退。
-          // crossBusy 锁定同理（防御性兜底）：即便组件态 scope 因事件时序还没更新到
-          // session-only，也绝不能把 both 发给 Host——cross 护栏必拒，用户只会白等一轮
-          : (recall.stage === 'confirm' && (recall.files === false || crossBusyLocksScope(recall)) ? 'session-only' : scope)
-      const previewCut = overrides && overrides.cutSeq !== undefined
-        ? overrides.cutSeq
-        : (recall.stage === 'confirm' && typeof recall.cutSeq === 'number' ? recall.cutSeq : null)
-      // 编辑路径的阶段映射：loading/executing 都归入 submitting，error 写进编辑
-      // 面板（保留用户改到一半的文本）；done 由收尾处按 fork 结果决定
-      const setStage = (stage: RecallStage) => {
-        if (!isEdit) { setRecall(stage); return }
-        if (stage.stage === 'error') {
-          setEdit({ stage: 'error', text: editText === null ? '' : editText, attachments: attachmentRefs.length, message: stage.message })
-        }
-      }
+      const activeScope: RecallScope =
+        // issue #31：仅消息条目没有文件树，Host 会强制降级成 session-only；
+        // 这里按同一口径下发，executing/done 文案才不会误报文件已回退。
+        // crossBusy 锁定同理（防御性兜底）：即便组件态 scope 因事件时序还没更新到
+        // session-only，也绝不能把 both 发给 Host——cross 护栏必拒，用户只会白等一轮
+        (recall.stage === 'confirm' && (recall.files === false || crossBusyLocksScope(recall)) ? 'session-only' : scope)
+      const previewCut = recall.stage === 'confirm' && typeof recall.cutSeq === 'number' ? recall.cutSeq : null
       // 终态上报基座（issue #19）：五处上报点共用；sessionId 断言收口语义同
       // fork 处（撤回按钮可见时恒有）。载荷组装在 util.buildRecallNotify（纯函数，
       // 六场景矩阵单测直钉），这里只负责 fire-and-forget 发送
@@ -788,26 +475,14 @@ export function buildRecallNode(
       // 时校验「预览后文件集是否变化」，变了则返回 STALE 拒绝执行。
       // PF-1：新版同时透传 previewTreeId（内容级指纹），Host 优先用它比对
       // 且免一次重复 diff；老 Host 忽略未知字段自动退回 total 校验。
-      const previewTotal = overrides && typeof overrides.total === 'number'
-        ? overrides.total
-        : (recall.stage === 'confirm' && typeof recall.total === 'number' ? recall.total : changes.length)
-      const previewTreeId = overrides && overrides.treeId !== undefined
-        ? overrides.treeId
-        : (recall.stage === 'confirm' ? recall.treeId : null)
+      const previewTotal = recall.stage === 'confirm' && typeof recall.total === 'number' ? recall.total : changes.length
+      const previewTreeId = recall.stage === 'confirm' ? recall.treeId : null
       // 附件早读：此刻源会话仍在册（归档在 fork 之后才发生）、附件引用可解析；
       // 读成的 File 在 fork 出的子会话里由 fillDraft 注册为草稿附件（见上）。
-      // 编辑路径不看 refillDraft（那是「撤回后是否回填」的开关）——原消息带
-      // 附件就必须带过去，否则编辑重发会静默丢附件
-      // 编辑路径的附件清单由编辑卡决定（原消息附件可能被逐个移除）
-      const refsForFiles = overrides && overrides.editRefs ? overrides.editRefs : attachmentRefs
-      const wantAttachments = refsForFiles.length > 0 && sessionId && (isEdit || pluginConfig.refillDraft)
-      const baseFiles = wantAttachments ? preloadAttachmentFiles(sessionId as string, refsForFiles) : null
-      // 编辑卡里新加的文件（粘贴/拖入/选择）走同一路合并，子会话里重建草稿附件
-      const inlineFiles = overrides && overrides.editFiles ? overrides.editFiles : null
-      const attachmentFiles = baseFiles !== null && inlineFiles !== null
-        ? Promise.all([baseFiles, inlineFiles]).then(([base, extra]) => base.concat(extra))
-        : (baseFiles !== null ? baseFiles : inlineFiles)
-      setStage({ stage: 'executing', changes, scope: activeScope })
+      const attachmentFiles = attachmentRefs.length > 0 && sessionId && pluginConfig.refillDraft
+        ? preloadAttachmentFiles(sessionId as string, attachmentRefs)
+        : null
+      setRecall({ stage: 'executing', changes, scope: activeScope })
       // scope 透传：Host 端 session-only 走零 git 短路径；previewTreeId/
       // previewTotal 照常携带（Host 按 scope 忽略 STALE 校验）。cutSeq 为 null
       // 时 scope 恒为 both（radio 未渲染，无 session-only 可选）
@@ -815,16 +490,10 @@ export function buildRecallNode(
         if (!res || !res.ok) {
           // STALE：预览后文件变了——自动重新拉一次最新清单回到确认阶段
           if (res && res.code === 'STALE') {
-            // 编辑走 session-only，Host 本就跳过 STALE 校验；真收到只可能是版本
-            // 错位——给明确错误而不是把面板停在 submitting
-            if (isEdit) {
-              setStage({ stage: 'error', message: t('err.STALE') })
-              return
-            }
-            setStage({ stage: 'loading' })
+            setRecall({ stage: 'loading' })
             api<PreviewResponse>('preview', { messageId, sessionId }).then((res2) => {
               if (!res2 || !res2.ok) {
-                setStage({ stage: 'error', message: messageFor(res2, t('fallback.preview')) })
+                setRecall({ stage: 'error', message: messageFor(res2, t('fallback.preview')) })
                 return
               }
               const nextConfirm: RecallStage = {
@@ -842,10 +511,10 @@ export function buildRecallNode(
               // 重预览时 crossBusy 可能已经变化：锁定时同样把范围压回 session-only；
               // 解除锁定**不覆盖**用户当前选择（重预览不该重置他主动选的 session-only）
               if (crossBusyLocksScope(nextConfirm)) setScope('session-only')
-              setStage(nextConfirm)
+              setRecall(nextConfirm)
             }).catch((error) => {
               // 重拉失败落错误态（与首次 preview 同显式面）
-              setStage({ stage: 'error', message: String(error) })
+              setRecall({ stage: 'error', message: String(error) })
             })
             return
           }
@@ -858,7 +527,7 @@ export function buildRecallNode(
             code: res && typeof res.code === 'string' ? res.code : undefined,
             error: messageFor(res, ''),
           })).catch(() => {})
-          setStage({ stage: 'error', message: messageFor(res, t('fallback.rollback')) })
+          setRecall({ stage: 'error', message: messageFor(res, t('fallback.rollback')) })
           return
         }
         // 文件已回退；对话回退独立进行，失败只降级为“仅文件回退”而不是整体失败
@@ -887,7 +556,7 @@ export function buildRecallNode(
               else if (typeof sessionsSvc.open === 'function') sessionsSvc.open(childId)
               chatReverted = true
               fillTarget = childId
-              // 版本家族登记：撤回与编辑重发走同一条 fork 收尾，两个入口都要记
+              // 版本家族登记：撤回 fork 出的新会话记入家族
               // （翻页器按家族根聚合，这里只给父子对，聚合在 version-tree 内做）
               recordVersion(String(sessionId || ''), childId)
               // 子会话从 seed 继承了一份「被撤回消息的 inbox 入队记录」，不清理
@@ -929,35 +598,20 @@ export function buildRecallNode(
           }
         }
         setHasSnapshot(false)
-        if (isEdit) {
-          // 编辑收尾：只有真的 fork 出新会话才回填并发送——fork 失败时原会话
-          // 还在、原消息也还在，自动发出会变成同一会话里的重复消息
-          if (chatReverted) {
-            fillDraft(fillTarget as string, editText === null ? '' : editText, attachmentFiles, {
-              submit: pluginConfig.editSubmitsImmediately,
-            })
-            // 收尾同时摘补丁、还原座位与用户原有草稿：会话已切到子会话，
-            // 父会话的输入面必须回到正常状态
-            closeEdit()
-          } else {
-            setEdit({ stage: 'error', text: editText === null ? '' : editText, attachments: attachmentRefs.length, message: chatError || t('edit.forkFailed') })
-          }
-        } else {
-          // 把被撤回的消息文本回填到输入框（可在设置页关闭）
-          // fillTarget 只在撤回链路上赋值（fork 出的 childId 或原 sessionId），
-          // 断言收口——撤回执行必有会话上下文
-          if (pluginConfig.refillDraft) {
-            fillDraft(fillTarget as string, text, attachmentFiles)
-            // 文件附件（非图片）没有回读通道：官方 session.attachment 只认图片引用
-            // （Host 侧 referencedImage + readImage，file 块直接判 ATTACHMENT_NOT_
-            // REFERENCED），插件侧读不到字节就必然填不回输入框。文本与图片照常
-            // 回填，这里只把「少了什么」讲清楚，免得用户以为回填是完整的。
-            if (fileBlocks.length > 0) showThrottledToast(t('toast.fileAttachRefill'))
-          }
-          // 注：快照 tag 在 Host 侧有意保留（幂等回退），刷新页面后该消息的
-          // 撤回按钮会重新出现——这是「可再次回退到同一点」的特性而非 bug。
-          setRecall({ stage: 'done', count: typeof res.count === 'number' ? res.count : changes.length, chatReverted, chatError, scope: activeScope })
+        // 把被撤回的消息文本回填到输入框（可在设置页关闭）
+        // fillTarget 只在撤回链路上赋值（fork 出的 childId 或原 sessionId），
+        // 断言收口——撤回执行必有会话上下文
+        if (pluginConfig.refillDraft) {
+          fillDraft(fillTarget as string, text, attachmentFiles)
+          // 文件附件（非图片）没有回读通道：官方 session.attachment 只认图片引用
+          // （Host 侧 referencedImage + readImage，file 块直接判 ATTACHMENT_NOT_
+          // REFERENCED），插件侧读不到字节就必然填不回输入框。文本与图片照常
+          // 回填，这里只把「少了什么」讲清楚，免得用户以为回填是完整的。
+          if (fileBlocks.length > 0) showThrottledToast(t('toast.fileAttachRefill'))
         }
+        // 注：快照 tag 在 Host 侧有意保留（幂等回退），刷新页面后该消息的
+        // 撤回按钮会重新出现——这是「可再次回退到同一点」的特性而非 bug。
+        setRecall({ stage: 'done', count: typeof res.count === 'number' ? res.count : changes.length, chatReverted, chatError, scope: activeScope })
         // 终态上报（issue #19）：撤回链完整走完才发 complete（fork 失败路径
         // 已发过 failed(fork)，按 chatError 收口防双发矛盾终态——complete 与
         // failed 并存会让下游按 (sessionId,messageId,cutSeq) 幂等去重失灵）
@@ -971,7 +625,7 @@ export function buildRecallNode(
         }
       }).catch((error) => {
         // 端点异常落错误态（文件可能未回退，面板提示可重试）
-        setStage({ stage: 'error', message: String(error) })
+        setRecall({ stage: 'error', message: String(error) })
         // 终态上报（issue #19）：execute 抛异常发 failed(execute)——此时文件
         // 是否已回退不确定（规格 §一注明），下游按 stage 自行决定保守策略
         api('notify', buildRecallNotify(notifyBase, { outcome: 'execute-threw', cutSeq: previewCut, error: String(error) })).catch(() => {})
@@ -1049,82 +703,21 @@ export function buildRecallNode(
         title: t('action.recall.title'),
         onClick: openPreview
       }, React.createElement(UndoIcon, {})))
-      // 编辑入口与撤回并列（issue #26）：撤回是破坏性操作，编辑是新增路径，
-      // 混成一个二级菜单会让「确认回退」的语义被稀释。已在编辑态则不再显示
-      // ✎（点了也是空操作，留着只会让人以为「再点一次能重置」）
-      if (edit.stage === 'idle') {
-        actions.push(React.createElement('button', {
-          key: 'edit',
-          type: 'button',
-          className: 'dsh-recall-action',
-          'aria-label': t('action.edit'),
-          title: t('action.edit.title'),
-          onClick: openEdit
-        }, React.createElement(EditIcon, {})))
-      }
     }
 
     // 宽度约束按面分派：官方面需要外层全宽，官方 .userStack 的百分比才能按整列
     // 解析；legacy/回落面保留 stack 原 cap，自绘气泡的长文本宽度才与官方一致
     const stackClass = 'dsh-recall-stack' + (officialFace ? ' dsh-recall-stack-official' : '')
-    // 编辑卡顶替气泡本体（底部官方输入框原样保留，不受影响）
-    const editing = edit.stage !== 'idle'
-    // 模型菜单节点：两段式（模型列表 / 推理等级），只在菜单打开时渲染
-    const modelNodes = modelOpen && modelState
-      ? renderModelMenu(React, t, {
-          pane: modelPane,
-          query: modelQuery,
-          groups: modelState.groups,
-          activeKey: modelState.activeKey,
-          activeOption: activeModelOption(),
-          modelLabel: modelState.label,
-          effortLabel: modelState.effortLabel,
-          activeEffortId: modelState.activeEffortId,
-          busy: modelBusy,
-          onPane: (next: ModelPane) => {
-            setModelPane(next)
-            if (next !== 'list') setModelQuery('')
-          },
-          onQuery: setModelQuery,
-          onPick: pickModel,
-          onPickEffort: pickEffort,
-        })
-      : null
     const bubble = bubbleChildren.length > 0
-      ? React.createElement('div', { className: stackClass, key: 'stack', ref: stackRef }, ...bubbleChildren)
+      ? React.createElement('div', { className: stackClass, key: 'stack' }, ...bubbleChildren)
       : null
-    const stack = editing
-      ? React.createElement('div', { className: 'dsh-recall-stack dsh-recall-stack-editing', key: 'stack' },
-          EditPanel({
-            stage: edit,
-            submitLabel: t(pluginConfig.editSubmitsImmediately ? 'edit.submit' : 'edit.submit.draftOnly'),
-            meta: editMeta,
-            attachments: editAttachments(),
-            // chip 与官方同构：模型名与思考强度分两个 span（档位空 = provider default）
-            modelLabel: modelState ? modelState.label : '',
-            modelEffort: modelState ? modelState.effortLabel : '',
-            modelOpen,
-            modelBusy,
-            modelNodes,
-            onToggleModel: toggleModelMenu,
-            onChange: (next: string) => setEdit((prev) => (prev.stage === 'editing' || prev.stage === 'error')
-              ? { stage: 'editing', text: next, attachments: prev.attachments }
-              : prev),
-            onSubmit: submitEdit,
-            onClose: closeEdit,
-            onAddFiles: (files: File[]) => setEditFiles((prev) => prev.concat(files)),
-            onRemoveAttachment: removeEditAttachment,
-          })
-        )
-      : bubble
     return React.createElement('div', {
       className: 'dsh-recall-row',
       'data-time-hover-root': true,
-      'data-editing': editing ? 'true' : undefined,
       // 版本翻页器据此确认「当前是哪个会话」（官方槽只给 messageId）
       'data-recall-session': sessionId || undefined,
     },
-      stack,
+      bubble,
       React.createElement('div', { className: 'dsh-recall-actions', key: 'actions' }, ...actions),
       recallPanel(recall, closePanel, () => executeRecall(), scope, setScope)
     )

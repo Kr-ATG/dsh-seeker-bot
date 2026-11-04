@@ -402,7 +402,6 @@ export function createRoutesManage(deps: RoutesManageDeps) {
           // 2026-11-04：文件回退总开关（默认 false = 只撤回对话）
           fileRollbackEnabled: cfg.fileRollbackEnabled,
           archiveOriginal: cfg.archiveOriginal,
-          editSubmitsImmediately: cfg.editSubmitsImmediately,
           retentionDays: cfg.retentionDays,
           // A4：界面语言偏好随 values 下发（设置卡片据此渲染下拉并即时切语言）
           locale: cfg.locale,
@@ -454,7 +453,6 @@ export function createRoutesManage(deps: RoutesManageDeps) {
       // 2026-11-04：文件回退总开关（布尔清洗；打开才会走「文件与对话一并回退」）
       if (patch.fileRollbackEnabled !== undefined) clean.fileRollbackEnabled = Boolean(patch.fileRollbackEnabled)
       if (patch.archiveOriginal !== undefined) clean.archiveOriginal = Boolean(patch.archiveOriginal)
-      if (patch.editSubmitsImmediately !== undefined) clean.editSubmitsImmediately = Boolean(patch.editSubmitsImmediately)
       if (patch.retentionDays !== undefined) {
         const n = Number(patch.retentionDays)
         // 0/负值 = 不启用（schema 校验 base 由 number 承担，NaN 由 settings.write 拒）

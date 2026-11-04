@@ -1,7 +1,7 @@
 /**
  * dsh-recall-plugin — 版本翻页器 ‹ X/N ›（assistant-actions 槽）
  *
- * 每次撤回/编辑重发都会 fork 出新会话，同一段对话于是有多个真实版本。翻页器
+ * 每次撤回都会 fork 出新会话，同一段对话于是有多个真实版本。翻页器
  * 挂在回合末尾的官方操作区，点击在家族成员间切换：归档当前、解档目标、打开
  * 目标。为什么必须「归档当前」——侧栏同时出现两个同名会话时用户无法分辨哪个
  * 是当前分支，官方 fork 出来的会话也共享同一标题。
@@ -96,7 +96,7 @@ export function buildVersionPager(
     const [busy, setBusy] = React.useState(false)
 
     // 家族数据在 fork 成功时写入 localStorage；挂载与消息变化时重读即可覆盖
-    // 「刚提交完编辑、翻页器随新消息重挂」这条路径。延后一拍再判「是否最后一
+    // 「刚撤回完、翻页器随新消息重挂」这条路径。延后一拍再判「是否最后一
     // 个回合」：新 turn-tail 可能在本组件首次 effect 之后才插进文档
     React.useEffect(() => {
       const measure = () => {

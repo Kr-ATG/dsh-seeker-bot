@@ -300,6 +300,7 @@ body[data-pa-sidebar-resizing='true'] {
 
 /* Work / Bot 分段（参考第二张素材：深槽 + 黑色滑块） */
 .pa-mode-seg {
+  position: relative;
   display: flex;
   gap: 3px;
   margin: 8px 14px 12px;
@@ -309,11 +310,43 @@ body[data-pa-sidebar-resizing='true'] {
   flex: none;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.035);
 }
+/*
+ * 选中块改成独立滑块（2026-11-04 用户要求 Work ⇄ Bot 有左右滑动动效）。
+ *
+ * 旧实现是给 [data-on='true'] 的按钮直接上背景，只能淡入淡出、没有位移。
+ * 现在与官方 .skb-seg 同构：一枚绝对定位的 thumb 承载高亮，按钮只负责文字。
+ * Bot 是第二段，所以静态位置在右端；切到 Bot 时由 index.ts 的
+ * playThumbSlide('bot') 用 WAAPI 从 Work 端滑过来（跨控件接力，见那里的注释）。
+ *
+ * will-change / backface-visibility：让滑块单独一层交给合成器，切换瞬间整页
+ * 正在做大布局（.pa-root display:none → flex），不提升的话滑动容易掉帧。
+ */
+.pa-mode-seg__thumb {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: calc(50% - 5.5px);
+  box-sizing: border-box;
+  border-radius: 10px;
+  background: #0b0b0c;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  pointer-events: none;
+  transform: translateX(calc(100% + 3px));
+  will-change: transform;
+  backface-visibility: hidden;
+}
 .pa-root[data-pa-theme='light'] .pa-mode-seg { background: #dfe2e7; box-shadow: none; }
+.pa-root[data-pa-theme='light'] .pa-mode-seg__thumb {
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
 /* 与 Work 模式官方 .skb-seg__btn 的浅色 hover 同值（#14161a）；不加的话
    继承深色主题的 #d8dade，在浅色槽上几乎看不见，两个模式手感不一致。 */
 .pa-root[data-pa-theme='light'] .pa-mode-seg button:hover { color: #14161a; }
 .pa-mode-seg button {
+  position: relative;
+  z-index: 1;
   flex: 1;
   height: 34px;
   border-radius: 10px;
@@ -337,15 +370,12 @@ body[data-pa-sidebar-resizing='true'] {
   font-weight: 500;
   letter-spacing: 0.01em;
   color: #a1a4aa;
-  transition: color 150ms ease, background 150ms ease, box-shadow 150ms ease;
+  transition: color 150ms ease;
 }
 .pa-mode-seg button:hover { color: #d8dade; }
-.pa-mode-seg button[data-on='true'] {
-  background: #0b0b0c;
-  color: #ffffff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.07);
-}
-.pa-root[data-pa-theme='light'] .pa-mode-seg button[data-on='true'] { background: #ffffff; color: #14161a; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+/* 选中态只改文字色：高亮块由 .pa-mode-seg__thumb 承载（2026-11-04）。 */
+.pa-mode-seg button[data-on='true'] { color: #ffffff; }
+.pa-root[data-pa-theme='light'] .pa-mode-seg button[data-on='true'] { color: #14161a; }
 
 .pa-sidebar__scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 2px 10px 10px; min-height: 0; }
 .pa-sidebar__bottom { flex: none; padding: 8px 12px 12px; border-top: 1px solid var(--pa-line); }

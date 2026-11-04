@@ -1,11 +1,15 @@
 /**
- * Personal Agent — 右栏「任务记录」卡。
+ * Personal Agent — 右栏「任务记录」。
  *
  * 回答一个问题：**我和这个 Bot（或这个群）做过哪些事。**
  *
  * 数据源是 store 里的 `state.tasks`（每轮对话一条 TaskRecord），不是消息流——
- * 任务记录是「做过什么」的索引，与聊天气泡是两套视图。卡片只负责把最近几条
- * 摆出来：状态点、自动生成的任务主题、相对时间；点一行打开任务详情卡。
+ * 任务记录是「做过什么」的索引，与聊天气泡是两套视图。
+ *
+ * 两种形态（共用同一套过滤 / 分组 / 行结构）：
+ *  · card（默认）—— 右栏独立卡：带「任务记录」卡头、整体可折叠、按天分组；
+ *  · activity —— 「动态」分类页里的延续列表：没有卡头，按天分组且每组标题可折叠，
+ *    空态只留一行轻提示。点击行仍打开任务详情。
  *
  * 过滤规则（两种用法互斥）：
  *  · 传 `roomId` —— 群聊视角，只看这个群的任务（群任务带 roomId）；
@@ -13,12 +17,8 @@
  *    群任务不能混进 Bot 的私聊记录里，否则同一个 Bot 在群里的活会出现在它的
  *    私聊时间线上，读起来像「它背着我做了什么」。
  *
- * 最多显示 8 条：右栏是纵向堆叠的窄栏，再多就会把下面的卡片挤出视口；更早的
+ * 最多显示 30 条：右栏是纵向堆叠的窄栏，再多就会把下面的内容挤出视口；更早的
  * 记录属于「回看」，不在右栏的日常扫读范围内。
- *
- * 空态不隐藏整张卡：它要告诉用户「这里以后会有东西」，以及怎么产生第一条
- * （和它聊一句）。这一点与产出物卡不同——产出物卡空着就是真的没有可点的东西，
- * 任务记录卡空着是一个可被理解的状态。
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -116,17 +116,53 @@ function taskSummary(task: TaskRecord): string {
   return flatText(task.prompt)
 }
 
+/** 任务行：两种形态共用，保证 card / activity 的点击与读屏信息完全一致。 */
+function TaskRow({ task, now, onOpen }: {
+  task: TaskRecord
+  now: number
+  onOpen: (id: string) => void
+}): JSX.Element {
+  const timeText = taskTimeText(task.startedAt, now)
+  const summary = taskSummary(task)
+  return (
+    <button
+      className="pa-taskrec__row"
+      type="button"
+      title={`${task.title}\n${summary}\n${STATUS_LABEL[task.status]} · ${fullTimeText(task.startedAt)}`}
+      aria-label={`查看任务详情：${task.title}（${STATUS_LABEL[task.status]}）`}
+      onClick={() => onOpen(task.id)}
+    >
+      <span className="pa-taskrec__icon-box" aria-hidden="true">
+        <TaskStatusGlyph status={task.status} />
+      </span>
+      <span className="pa-taskrec__main">
+        <span className="pa-taskrec__name">{task.title.trim() !== '' ? task.title : '未命名任务'}</span>
+        {summary !== '' ? <span className="pa-taskrec__summary">{summary}</span> : null}
+        <span className="pa-taskrec__time">{timeText}</span>
+      </span>
+    </button>
+  )
+}
+
 export interface TaskRecordCardProps {
   /** 私聊任务：只看这个 Bot 的任务（与 roomId 二选一）。 */
   botId?: string
   /** 群聊任务：只看这个群的任务；有值时忽略 botId。 */
   roomId?: string
+  /**
+   * 展示形态：
+   *  · card（默认）—— 右栏独立卡，保留「任务记录」卡头与整体折叠；
+   *  · activity —— 「动态」分类页里的延续列表，不要卡头，按天分组且每组可折叠。
+   */
+  variant?: 'card' | 'activity'
 }
 
-export function TaskRecordCard({ botId, roomId }: TaskRecordCardProps): JSX.Element {
+export function TaskRecordCard({ botId, roomId, variant = 'card' }: TaskRecordCardProps): JSX.Element {
   const { state, actions } = usePersonal()
   /** 折叠状态只属于「这一次想看不想看」，不落盘；切换会话回到展开态。 */
   const [open, setOpen] = useState(true)
+  /** activity 变体里每个日组的折叠状态：key = YYYY-MM-DD，缺省展开。 */
+  const [closedGroups, setClosedGroups] = useState<Record<string, boolean>>({})
   /** 相对时间的基准时刻：每分钟走一格，避免「刚刚」挂十分钟不动。 */
   const [now, setNow] = useState(() => Date.now())
 
@@ -169,6 +205,53 @@ export function TaskRecordCard({ botId, roomId }: TaskRecordCardProps): JSX.Elem
     return result
   }, [tasks])
 
+  /** 切换某个日组的展开 / 收起。 */
+  const toggleGroup = (key: string): void => {
+    setClosedGroups((prev) => ({ ...prev, [key]: prev[key] !== true }))
+  }
+
+  /*
+   * activity 变体：没有「任务记录」卡头，任务记录直接接在定时任务区下面。
+   * 每个日期组标题是一个按钮（chevron 可折叠），行结构复用 pa-taskrec__row。
+   */
+  if (variant === 'activity') {
+    return (
+      <div className="pa-taskrec pa-taskrec--activity" data-variant="activity">
+        {tasks.length === 0 ? (
+          <div className="pa-taskrec__empty pa-taskrec__empty--activity">
+            还没有任务记录，和这个 Bot 聊一句就会开始记录
+          </div>
+        ) : (
+          <div className="pa-taskrec__list pa-taskrec__list--activity">
+            {groups.map((group) => {
+              const collapsed = closedGroups[group.key] === true
+              return (
+                <div className="pa-taskrec__group" key={group.key} data-open={collapsed ? 'false' : 'true'}>
+                  <button
+                    className="pa-taskrec__group-head"
+                    type="button"
+                    aria-expanded={!collapsed}
+                    aria-label={collapsed ? `展开${group.label}的任务记录` : `收起${group.label}的任务记录`}
+                    onClick={() => toggleGroup(group.key)}
+                  >
+                    <span className="pa-taskrec__group-label">{group.label}</span>
+                    <span className="pa-taskrec__group-meta">{group.items.length} 条</span>
+                    <span className="pa-taskrec__group-caret" aria-hidden="true">
+                      <IconChevronDown size={12} />
+                    </span>
+                  </button>
+                  {collapsed ? null : group.items.map((task) => (
+                    <TaskRow key={task.id} task={task} now={now} onOpen={actions.openTaskDetail} />
+                  ))}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    )
+  }
+
   const headerCount = `${tasks.length} 条`
 
   return (
@@ -200,29 +283,9 @@ export function TaskRecordCard({ botId, roomId }: TaskRecordCardProps): JSX.Elem
               {groups.map((group) => (
                 <div className="pa-taskrec__group" key={group.key}>
                   <div className="pa-taskrec__group-label">{group.label}</div>
-                  {group.items.map((task) => {
-                    const timeText = taskTimeText(task.startedAt, now)
-                    const summary = taskSummary(task)
-                    return (
-                      <button
-                        key={task.id}
-                        className="pa-taskrec__row"
-                        type="button"
-                        title={`${task.title}\n${summary}\n${STATUS_LABEL[task.status]} · ${fullTimeText(task.startedAt)}`}
-                        aria-label={`查看任务详情：${task.title}（${STATUS_LABEL[task.status]}）`}
-                        onClick={() => actions.openTaskDetail(task.id)}
-                      >
-                        <span className="pa-taskrec__icon-box" aria-hidden="true">
-                          <TaskStatusGlyph status={task.status} />
-                        </span>
-                        <span className="pa-taskrec__main">
-                          <span className="pa-taskrec__name">{task.title.trim() !== '' ? task.title : '未命名任务'}</span>
-                          {summary !== '' ? <span className="pa-taskrec__summary">{summary}</span> : null}
-                          <span className="pa-taskrec__time">{timeText}</span>
-                        </span>
-                      </button>
-                    )
-                  })}
+                  {group.items.map((task) => (
+                    <TaskRow key={task.id} task={task} now={now} onOpen={actions.openTaskDetail} />
+                  ))}
                 </div>
               ))}
             </div>

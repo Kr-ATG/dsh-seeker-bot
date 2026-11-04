@@ -59,7 +59,7 @@ import { applyDonePill } from './done-pill/pill.tsx'
 import { ensureOverlayMotionStyles } from './motion/overlay-motion.ts'
 import { startShellHotReporter } from './done-pill/shell-hot.ts'
 import { applySidebarMedia } from './sidebar-media/index.tsx'
-// 消息撤回 / 编辑重发（vendor 移植自 dsh-recall-plugin，2026-11-04）
+// 消息撤回（vendor 移植自 dsh-recall-plugin，2026-11-04）
 import { applyRecallClient } from '../recall/client/apply.ts'
 import { setClientCtx } from './client-ctx.ts'
 import { applyFeatureSwitches } from './features/index.tsx'
@@ -469,10 +469,10 @@ export function apply(ctx: ClientContext): void {
     applySidebarMedia(ctx as unknown as Record<string, any>)
   })
 
-  // ── 消息撤回 / 编辑重发（2026-11-04，vendor 移植自 dsh-recall-plugin，MIT）──
+  // ── 消息撤回（2026-11-04，vendor 移植自 dsh-recall-plugin，MIT）──
   // 用户消息旁「↶ 撤回」：工作区文件（影子 git 快照）与对话历史（官方
   // sessions.fork）一起回到这条消息发出之前，消息文本与附件回填输入框；
-  // 同一行还有「✎ 编辑」（就地改完重发，不动文件）与版本翻页「‹ X/N ›」。
+  // 回合操作区另有版本翻页「‹ X/N ›」。
   //
   // 服务用**延迟注入**而不是写进顶层 inject：顶层 inject 是硬依赖，少一个
   // 服务整插件都不 apply（思考折叠 / 卡片 / 截图会一起消失）；撤回只是增强，

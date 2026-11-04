@@ -111,17 +111,43 @@ const mockEvents = [
       content: '请使用 baoyu-design 设计系统',
     },
   },
+  // 6. PTC 派发：run_code 内层调用 skill —— arguments 是**对象**而不是 JSON 字符串
+  //    （DSH 0.2.x 起 run_code 是唯一入口，真实的 skill 调用全部走这条事件；
+  //      早先只认字符串，导致 skill 统计永远为 0，2026-11-04 回归用例）
+  {
+    type: 'tool/ptc-dispatch',
+    time: 1600,
+    data: {
+      rootCallId: 'r2',
+      subCallId: 'r2:ptc:1',
+      name: 'skill',
+      arguments: { name: 'harmonyos-motion' },
+      isError: false,
+    },
+  },
+  // 7. PTC 派发：run_code 内层调用 MCP 工具（同样是对象参数）
+  {
+    type: 'tool/ptc-dispatch',
+    time: 1700,
+    data: {
+      rootCallId: 'r3',
+      subCallId: 'r3:ptc:1',
+      name: 'mcp__weather__get_forecast',
+      arguments: { city: '北京' },
+      isError: false,
+    },
+  },
 ]
 
 const extracted = extractCapabilitiesFromEvents(mockEvents)
 
-check('提取出的能力总调用项为 4 项 (2 MCP + 2 Skill)', extracted.length === 4)
+check('提取出的能力总调用项为 6 项 (3 MCP + 3 Skill)', extracted.length === 6)
 
 const mcpItems = extracted.filter((e) => e.kind === 'mcp')
 const skillItems = extracted.filter((e) => e.kind === 'skill')
 
-check('提取到 2 项 MCP 调用', mcpItems.length === 2)
-check('提取到 2 项 Skill 调用', skillItems.length === 2)
+check('提取到 3 项 MCP 调用（含 PTC 派发）', mcpItems.length === 3)
+check('提取到 3 项 Skill 调用（含 PTC 派发）', skillItems.length === 3)
 
 // 校验 MCP 字段
 const amapCall = mcpItems.find((m) => m.name === 'mcp__amap__maps_around_search')
@@ -139,6 +165,15 @@ check('diagram-design 技能工具调用解析正确', diagramSkill !== undefine
 
 const baoyuSkill = skillItems.find((s) => s.name === 'baoyu-design')
 check('baoyu-design 消息层技能调用解析正确', baoyuSkill !== undefined && baoyuSkill.displayName === 'baoyu-design')
+
+// PTC（run_code 内层调用）解析：arguments 是对象，必须归一化后才解析得出名字
+const ptcSkill = skillItems.find((s) => s.name === 'harmonyos-motion')
+check('PTC 派发的 skill 调用解析出技能名', ptcSkill !== undefined)
+check('PTC 派发的 skill 参数摘要包含技能名', ptcSkill?.argsSummary?.includes('harmonyos-motion') === true)
+
+const ptcMcp = mcpItems.find((m) => m.name === 'mcp__weather__get_forecast')
+check('PTC 派发的 MCP 调用解析出 server/tool', ptcMcp?.server === 'weather' && ptcMcp?.tool === 'get_forecast')
+check('PTC 派发的 MCP 参数摘要包含城市', ptcMcp?.argsSummary?.includes('北京') === true)
 
 // ── 2. 校验客户端编译产物 ────────────────────────────────────────────────────
 console.log('# 2. 测试 Client 产物与样式')

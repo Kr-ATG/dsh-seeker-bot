@@ -347,6 +347,13 @@ export const BotOutputsCard = memo(function BotOutputsCard({
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState(true)
   const [preview, setPreview] = useState<BotOutputItem | null>(null)
+  /**
+   * 当前选中的产出物分类（all = 全部）。
+   *
+   * 分类选择器只在有两类以上时出现：只有一类时筛选没有意义，多一行只会
+   * 把唯一的那组名字重复一次。
+   */
+  const [kindFilter, setKindFilter] = useState<BotOutputKind | 'all'>('all')
   /** 手动刷新计数：window 事件只负责 +1，真正的拉取统一走下面这个 effect。 */
   const [refreshTick, setRefreshTick] = useState(0)
   /** 上一轮请求的 botId：切换 Bot 时清掉旧清单，同一 Bot 刷新则保留旧清单避免闪空。 */
@@ -440,6 +447,26 @@ export const BotOutputsCard = memo(function BotOutputsCard({
       .filter((group) => group.items.length > 0)
   }, [sortedItems])
 
+  /*
+   * 筛选值的收敛：
+   *  · 切 Bot 时回到「全部」（不同 Bot 的分类集合完全不同，继承上一次筛选会
+   *    直接落到空分类）；
+   *  · 刷新后当前选中的分类消失了（文件被删 / 被移走）也要回到「全部」，
+   *    否则列表会一直空着，看起来像产出物丢了。
+   */
+  useEffect(() => {
+    setKindFilter('all')
+  }, [botId])
+  useEffect(() => {
+    if (kindFilter === 'all') return
+    if (!groups.some((group) => group.kind === kindFilter)) setKindFilter('all')
+  }, [groups, kindFilter])
+
+  const visibleGroups = kindFilter === 'all'
+    ? groups
+    : groups.filter((group) => group.kind === kindFilter)
+  const visibleCount = visibleGroups.reduce((sum, group) => sum + group.items.length, 0)
+
   const closePreview = useCallback(() => { setPreview(null) }, [])
 
   const toggleOpen = useCallback(() => { setOpen((value) => !value) }, [])
@@ -448,7 +475,9 @@ export const BotOutputsCard = memo(function BotOutputsCard({
   // 加载中 / 失败时保留卡头与一行轻提示，不让右栏看起来像坏了。
   if (!loading && error === null && sortedItems.length === 0) return null
 
-  const header = `${sortedItems.length} 项 · ${groups.length} 类`
+  const header = kindFilter === 'all'
+    ? `${sortedItems.length} 项 · ${groups.length} 类`
+    : `${visibleCount} 项 · ${KIND_LABEL[kindFilter]}`
 
   return (
     <div className="pa-out-card">
@@ -491,14 +520,50 @@ export const BotOutputsCard = memo(function BotOutputsCard({
             <div className="pa-out-state pa-out-state--error" title={error}>{error}</div>
           ) : null}
           {sortedItems.length > 0 ? (
-            <div className="pa-out-list">
-              {groups.map((group) => (
+            <>
+              {/*
+               * 分类选择器（用户 2026-11-04 要求「产出物下面还可以增加一个分类
+               * 选择器」）：放在卡头下面、列表上面，挑一类只显示那一类。
+               * 只在两类以上时出现；全部 / 图片 / 文档… 与分组标题使用同一套
+               * 中文标签（KIND_LABEL），避免同一类在两个地方叫两个名字。
+               */}
+              {groups.length > 1 ? (
+                <div className="pa-out-filter" role="group" aria-label="产出物分类">
+                  <button
+                    className="pa-out-filter__chip"
+                    type="button"
+                    data-on={kindFilter === 'all' ? 'true' : 'false'}
+                    aria-pressed={kindFilter === 'all'}
+                    onClick={() => setKindFilter('all')}
+                  >
+                    全部
+                  </button>
+                  {groups.map((group) => (
+                    <button
+                      className="pa-out-filter__chip"
+                      type="button"
+                      key={group.kind}
+                      data-on={kindFilter === group.kind ? 'true' : 'false'}
+                      aria-pressed={kindFilter === group.kind}
+                      onClick={() => setKindFilter(group.kind)}
+                    >
+                      {group.label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <div className="pa-out-list">
+              {visibleGroups.map((group) => (
                 <div className="pa-out-group" key={group.kind} data-kind={group.kind} role="group" aria-label={`${group.label}，${group.items.length} 项`}>
-                  <div className="pa-out-group__head">
-                    <span className="pa-out-group__name">{group.label}</span>
-                    <span className="pa-out-group__rule" aria-hidden="true" />
-                    <span className="pa-out-group__count">{group.items.length}</span>
-                  </div>
+                  {/* 筛选到某一类时，卡头已经写明「N 项 · 图片」，组标题不再重复；
+                      只在「全部」视图里保留分组标题，方便一眼看出有哪几类。 */}
+                  {kindFilter === 'all' ? (
+                    <div className="pa-out-group__head">
+                      <span className="pa-out-group__name">{group.label}</span>
+                      <span className="pa-out-group__rule" aria-hidden="true" />
+                      <span className="pa-out-group__count">{group.items.length}</span>
+                    </div>
+                  ) : null}
                   {group.items.map((item) => (
                     <button
                       className="pa-out-row"
@@ -517,7 +582,11 @@ export const BotOutputsCard = memo(function BotOutputsCard({
                   ))}
                 </div>
               ))}
-            </div>
+              </div>
+              {visibleGroups.length === 0 ? (
+                <div className="pa-out-state">该分类下暂无产出物</div>
+              ) : null}
+            </>
           ) : null}
         </div>
       ) : null}

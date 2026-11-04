@@ -103,7 +103,7 @@ export function createRoutesCore(deps: RoutesCoreDeps) {
       }
       // 顺带下发客户端行为开关（fillDraft 等）：Client 无须为读配置单开请求，
       // init 是每会话必经的预热通道；A4 追加 locale（界面语言偏好）
-      return { ok: Boolean(root), root: root || null, notice, config: { refillDraft: cfg.refillDraft, archiveOriginal: cfg.archiveOriginal, editSubmitsImmediately: cfg.editSubmitsImmediately, locale: cfg.locale } }
+      return { ok: Boolean(root), root: root || null, notice, config: { refillDraft: cfg.refillDraft, archiveOriginal: cfg.archiveOriginal, locale: cfg.locale } }
     },
 
     'snapshot-info': async (args: SnapshotInfoArgs): Promise<SnapshotInfoResponse> => {

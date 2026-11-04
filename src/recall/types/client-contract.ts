@@ -188,10 +188,6 @@ export interface ConversationInputShell {
     // 官方 composer 的 addFiles 走 shell.addAttachments（actions 面是同一实现
     // 的公开通道）；返回 false 表示未接纳（调用方应释放已注册的草稿附件）
     addAttachments?(ids: string[]): boolean | unknown
-    // 官方「发送」动词（0.2.1-rc.2 实证：actions.submit 无参，内部即
-    // submit('queue')，与按回车同一条管线）。编辑重发用：setDraft 后调用。
-    // 无参是刻意的——mode 参数是 shell 内部方法的默认值，不由调用方决定
-    submit?(): void
   }
   setDraft?(text: string): void
   addAttachments?(ids: string[]): boolean | unknown
