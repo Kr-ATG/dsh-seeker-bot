@@ -95,6 +95,12 @@ try {
     assert.ok(bundle.includes('dsh:call-hotkey-fire'))
     assert.ok(bundle.includes('getSnapshot'))
   })
+  check('shortcuts 走延迟注入（直接读 ctx.shortcuts 会被 cordis 拒绝）', () => {
+    /* 2026-11-04 回归：shortcuts 不在插件顶层 inject 里，直接读根 ctx.shortcuts
+       抛 cannot get property "shortcuts" without inject，整块快捷键不挂载。 */
+    assert.ok(bundle.includes('ctx.inject(["shortcuts"]'))
+    assert.equal(/const shortcuts = \(?ctx\)?\.shortcuts/u.test(bundle), false)
+  })
   check('自定义设置行已移除（配置源唯一）', () => {
     assert.equal(bundle.includes('data-call-hotkey-row'), false)
     assert.equal(bundle.includes('skb-hotkey-btn--recording'), false)

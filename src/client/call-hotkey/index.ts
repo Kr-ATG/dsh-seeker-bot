@@ -48,51 +48,68 @@ export function applyCallHotkey(ctx: ClientContext): void {
   /* 先给运行时一个可用绑定：即使官方服务不可用，三路通道与 OS 级也有默认键。 */
   setCurrentHotkey(DEFAULT_CALL_HOTKEY)
 
-  const shortcuts = (ctx as unknown as { shortcuts?: ShortcutsLike }).shortcuts
-  if (shortcuts === undefined || typeof shortcuts.register !== 'function') return
+  /** 在 shortcuts 服务就绪的 scope 里装配命令与 catalog 同步。 */
+  const mount = (scope: ClientContext): void => {
+    const shortcuts = (scope as unknown as { shortcuts?: ShortcutsLike }).shortcuts
+    if (shortcuts === undefined || typeof shortcuts.register !== 'function') return
 
-  let dispose: (() => void) | null = null
-  try {
-    dispose = shortcuts.register({
-      id: CALL_HOTKEY_COMMAND_ID,
-      label: () => '语音通话（开始 / 挂断）',
-      aliases: ['voice call', '语音通话'],
-      defaults: {
-        'web:windows': DEFAULT_BINDING,
-        'desktop:windows': DEFAULT_BINDING,
-      },
-      regions: ['page', 'editable', 'terminal'],
-      modals: [],
-      resolve: () => ({
-        status: 'handled',
-        run: () => {
-          try { window.dispatchEvent(new CustomEvent(CALL_HOTKEY_FIRE_EVENT)) } catch { /* 无 window */ }
-        },
-      }),
-    })
-  } catch (error) {
-    /* 默认键被别的命令占/规则不放行：保留默认绑定，只是官方设置页里不出现这行 */
-    console.warn('[dsh-seeker-bot] 语音通话命令注册失败：', error)
-    return
-  }
-
-  const catalog = shortcuts.catalog
-  if (catalog === undefined || typeof catalog.getSnapshot !== 'function') return
-  const sync = (): void => {
+    let dispose: (() => void) | null = null
     try {
-      const row = catalog.getSnapshot().find((item) => item.id === CALL_HOTKEY_COMMAND_ID)
-      if (row === undefined || row.binding === null || row.issue !== null || row.conflicts.length > 0) return
-      const next = fromNormalizedBinding(row.binding)
-      if (next !== null) setCurrentHotkey(next)
-    } catch { /* catalog 尚未就绪 */ }
+      dispose = shortcuts.register({
+        id: CALL_HOTKEY_COMMAND_ID,
+        label: () => '语音通话（开始 / 挂断）',
+        aliases: ['voice call', '语音通话'],
+        defaults: {
+          'web:windows': DEFAULT_BINDING,
+          'desktop:windows': DEFAULT_BINDING,
+        },
+        regions: ['page', 'editable', 'terminal'],
+        modals: [],
+        resolve: () => ({
+          status: 'handled',
+          run: () => {
+            try { window.dispatchEvent(new CustomEvent(CALL_HOTKEY_FIRE_EVENT)) } catch { /* 无 window */ }
+          },
+        }),
+      })
+    } catch (error) {
+      /* 默认键被别的命令占/规则不放行：保留默认绑定，只是官方设置页里不出现这行 */
+      console.warn('[dsh-seeker-bot] 语音通话命令注册失败：', error)
+      return
+    }
+
+    const catalog = shortcuts.catalog
+    if (catalog === undefined || typeof catalog.getSnapshot !== 'function') return
+    const sync = (): void => {
+      try {
+        const row = catalog.getSnapshot().find((item) => item.id === CALL_HOTKEY_COMMAND_ID)
+        if (row === undefined || row.binding === null || row.issue !== null || row.conflicts.length > 0) return
+        const next = fromNormalizedBinding(row.binding)
+        if (next !== null) setCurrentHotkey(next)
+      } catch { /* catalog 尚未就绪 */ }
+    }
+    sync()
+    let off: (() => void) | null = null
+    try { off = catalog.subscribe(sync) } catch { /* 订阅不可用：至少启动同步了一次 */ }
+    try {
+      scope.effect(() => () => {
+        try { off?.() } catch { /* 已释放 */ }
+        try { dispose?.() } catch { /* 已被级联移除 */ }
+      })
+    } catch { /* 宿主未实现 effect */ }
   }
-  sync()
-  let off: (() => void) | null = null
-  try { off = catalog.subscribe(sync) } catch { /* 订阅不可用：至少启动同步了一次 */ }
+
+  /*
+   * shortcuts **不在**插件顶层 inject 列表里：cordis 的服务代理对未声明属性
+   * 直接抛「cannot get property "shortcuts" without inject」。直接在根 ctx 上
+   * 读 ctx.shortcuts 会让整个 applyCallHotkey 被打断（guarded 只记一条 warn），
+   * 表现为「设置 → 通用 → 快捷键」里永远没有「语音通话（开始 / 挂断）」这一行。
+   * 用延迟注入：宿主没挂 shortcuts 服务时静默降级，页面内与壳子两路仍按默认键工作。
+   */
   try {
-    ctx.effect(() => () => {
-      try { off?.() } catch { /* 已释放 */ }
-      try { dispose?.() } catch { /* 已被级联移除 */ }
-    })
-  } catch { /* 宿主未实现 effect */ }
+    ;(ctx as unknown as { inject: (names: string[], callback: (scope: ClientContext) => void) => unknown })
+      .inject(['shortcuts'], mount)
+  } catch (error) {
+    console.warn('[dsh-seeker-bot] 语音通话快捷键注入 shortcuts 服务失败：', error)
+  }
 }
