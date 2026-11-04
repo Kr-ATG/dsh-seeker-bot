@@ -101,6 +101,11 @@ try {
     assert.ok(agentSource.includes('restored && isEmptySessionFile(sessionId)'), 'resume 成功后没有空壳检查')
     assert.ok(agentSource.includes('await discardEmptySession(sessionId)'), '空壳没有删除重建')
   })
+  check('registry / 缓存两条复用路径也检测空壳', () => {
+    assert.ok(agentSource.includes('sessionDirsFor(sessionId).length === 0 || isEmptySessionFile(sessionId)'))
+    assert.ok(agentSource.includes('if (isEmptySessionFile(sessionId)) {\n      agentCache.delete(sessionId)'))
+    assert.ok(agentSource.split('isEmptySessionFile(').length >= 4, 'isEmptySessionFile 调用点不足')
+  })
 
   const botDeleteSource = readFileSync(join(HERE, 'src/host/personal/bot-delete.ts'), 'utf8')
   check('bot-delete 按前缀清理所有代的会话目录', () => {

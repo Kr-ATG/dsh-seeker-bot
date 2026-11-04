@@ -1663,11 +1663,19 @@ export async function ensureBotAgent(ctx: any, spec: BotAgentSpec): Promise<any>
   const cached = agentCache.get(sessionId)
   if (cached !== undefined) {
     /*
-     * 缓存命中也要触发一次清理：ensureBotAgent 是每轮对话的必经之路，放在这里
-     * 才能覆盖「老会话一直复用、从不新建」的情况。节流在 scheduleToolResultsPrune
-     * 里，实际一小时最多跑一次。
+     * 空壳自愈（缓存路径）：缓存里的 agent 可能绑定着一个只有 header、零事件的
+     * 空壳会话（上一版 reset 删除后 DSH 又写回、重启后 resume 成功）。继续复用
+     * 会让 pre-step 直接 blocked——丢掉缓存，让下面的 registry / 重建路径接管。
      */
-    scheduleToolResultsPrune()
+    if (isEmptySessionFile(sessionId)) {
+      agentCache.delete(sessionId)
+    } else {
+      /*
+       * 缓存命中也要触发一次清理：ensureBotAgent 是每轮对话的必经之路，放在这里
+       * 才能覆盖「老会话一直复用、从不新建」的情况。节流在 scheduleToolResultsPrune
+       * 里，实际一小时最多跑一次。
+       */
+      scheduleToolResultsPrune()
     /*
      * 模型 / 推理强度可能刚在设置卡里改过：缓存命中也要重新钉一次。
      * 只在真的变化时 `select`，避免每轮往会话里追加一条 model/selection。
@@ -1678,7 +1686,8 @@ export async function ensureBotAgent(ctx: any, spec: BotAgentSpec): Promise<any>
       pinModel(cached.agent, resolved)
       cached.modelKey = modelKey
     }
-    return cached.agent
+      return cached.agent
+    }
   }
 
   const agents = getAgents(ctx)
@@ -1695,7 +1704,8 @@ export async function ensureBotAgent(ctx: any, spec: BotAgentSpec): Promise<any>
      * 只在 agents.create 可用时自愈：测试里的 mock registry 没有 create，
      * 保持原来的「复用」语义，避免把 mock 场景带进真实创建流程。
      */
-    if (typeof agents.create === 'function' && sessionDirsFor(sessionId).length === 0) {
+    if (typeof agents.create === 'function'
+      && (sessionDirsFor(sessionId).length === 0 || isEmptySessionFile(sessionId))) {
       const { to } = bumpBotSessionGeneration(spec.botId)
       if (to !== sessionId) return await ensureBotAgent(ctx, spec)
     }
