@@ -4997,58 +4997,62 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
   }, [])
 
   /**
-   * 清空某个 bot 的**私聊**。
+   * 清空 / 轮转某个 bot 的**私聊**。
    *
-   * 三件事，少一处就会出现割裂：
-   *  · 归档：先把这段私聊存进历史对话（archivedSessions），聊天记录不丢；
-   *  · 前端：删掉这个 bot 的**当前**私聊消息（归档保留，可在「历史对话」回看）
-   *  · 宿主：dispose 活着的 agent + 删会话文件——只清界面的话，bot 下一轮
-   *    还会引用旧历史，说出「我们刚才聊的…」这种让人困惑的话
+   * 两种模式（用户明确区分过）：
+   *  · **keepMessages = true（整理并开新会话）**：只切换模型上下文——宿主 commit /
+   *    reset，界面消息**一条不删**，聊天记录继续留在对话流里随时往上翻；新回复
+   *    接着追加。追加一条 system 提示说明已开新会话。
+   *  · **keepMessages 缺省（直接清空）**：归档到历史对话后再删除当前私聊消息、
+   *    重建宿主会话（原行为，破坏性操作）。
    *
    * 群聊消息**不动**。原来这里按 `botId` / `senderId` 一刀切，清一次私聊会把
    * 这个 Bot 在所有群里说过的话一起抹掉：群里的上下文对别人还在，对他已经断了，
    * 接着回复就是一副「刚才什么都没发生」的样子。私聊是私聊，群聊记录属于群。
    */
-  const clearConversation = useCallback(async (botId: string, options?: { relay?: RelayBrief }): Promise<void> => {
+  const clearConversation = useCallback(async (botId: string, options?: { relay?: RelayBrief; keepMessages?: boolean }): Promise<void> => {
     const bot = stateRef.current.bots.find((item) => item.id === botId)
     const label = bot?.name ?? '这个 Bot'
+    const keepMessages = options?.keepMessages === true
 
     /*
-     * 先归档、再清空——「清模型上下文 ≠ 清聊天记录」。
+     * 只有「直接清空」才归档 + 删消息；「整理并开新会话」保留对话流，不归档。
      *
      * archiveConversation 自己 setState 写入归档；下面的清空 setState updater
      * 会排在它后面执行，所以写 localStorage 时拿到的 next 已经包含这条归档。
      * 宿主 commit / reset 逻辑保持原样：它只清模型上下文，不影响前端历史。
      */
-    archiveConversation(botId, options?.relay)
+    if (!keepMessages) archiveConversation(botId, options?.relay)
 
     /*
      * 清空时**立刻写 localStorage**，不等防抖持久化。
      * 否则用户清空后顺手刷新，延迟写入还没落地，旧消息会「复活」——
      * 看起来就像清空没生效。updater 里写是幂等的（React 严格模式重复调用结果一致）。
      */
-    setState((prev) => {
-      const next = {
-        ...prev,
-        messages: prev.messages.filter((message) => message.roomId !== undefined
-          || (message.botId !== botId && message.senderId !== botId)),
-        bots: prev.bots.map((item) => (item.id === botId
-          ? { ...item, lastMessage: '', lastAt: undefined, unread: 0 }
-          : item)),
-        // 任务记录同口径：群里的任务属于群，清私聊不该把它从右栏抹掉
-        tasks: prev.tasks.filter((task) => task.roomId !== undefined || task.botId !== botId),
-      }
-      try {
-        // 与防抖保存 effect 同一口径：归档里可能带大量 mergedSegments，写盘前剥掉，
-        // 否则 500 条归档消息很容易顶破 localStorage 配额，导致「清空没生效」。
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(next, (key, value) => (
-          key === 'mergedSegments' || key === 'pagesByBot' ? undefined : value
-        )))
-      } catch {
-        /* 配额满：只影响持久化，界面已经清了 */
-      }
-      return next
-    })
+    if (!keepMessages) {
+      setState((prev) => {
+        const next = {
+          ...prev,
+          messages: prev.messages.filter((message) => message.roomId !== undefined
+            || (message.botId !== botId && message.senderId !== botId)),
+          bots: prev.bots.map((item) => (item.id === botId
+            ? { ...item, lastMessage: '', lastAt: undefined, unread: 0 }
+            : item)),
+          // 任务记录同口径：群里的任务属于群，清私聊不该把它从右栏抹掉
+          tasks: prev.tasks.filter((task) => task.roomId !== undefined || task.botId !== botId),
+        }
+        try {
+          // 与防抖保存 effect 同一口径：归档里可能带大量 mergedSegments，写盘前剥掉，
+          // 否则 500 条归档消息很容易顶破 localStorage 配额，导致「清空没生效」。
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(next, (key, value) => (
+            key === 'mergedSegments' || key === 'pagesByBot' ? undefined : value
+          )))
+        } catch {
+          /* 配额满：只影响持久化，界面已经清了 */
+        }
+        return next
+      })
+    }
 
     /*
      * 宿主侧分两条路：
@@ -5088,6 +5092,27 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       } catch {
         toast('界面消息已清空（宿主未连接，agent 历史留到下次重启）')
       }
+    }
+
+    /*
+     * 「整理并开新会话」：对话流一条不删，只追加一条 system 提示。
+     *
+     * 用户的要求是「旧聊天记录一直留在对话里，随时可以翻阅」——所以这里绝不能
+     * 走下面的清空 / reload。新会话的回复会继续追加在同一条消息流后面。
+     */
+    if (keepMessages) {
+      setState((prev) => ({
+        ...prev,
+        messages: [...prev.messages, {
+          id: shortId('msg'),
+          botId,
+          role: 'system',
+          at: Date.now(),
+          blocks: [{ type: 'text', text: '已整理上一段对话并开启新会话，聊天记录保留在这里。' }],
+        }],
+      }))
+      toast('已开启新会话，聊天记录保留')
+      return
     }
 
     /*

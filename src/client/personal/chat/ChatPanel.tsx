@@ -555,7 +555,7 @@ export function ChatPanel(): JSX.Element {
         >
           <div className="pa-modal pa-confirm" onMouseDown={(event) => event.stopPropagation()}>
             <div className="pa-modal__head">
-              <div className="pa-modal__title">清空对话</div>
+              <div className="pa-modal__title">对话管理</div>
               <button className="pa-modal__close" type="button" onClick={() => closeConfirm()} aria-label="关闭">
                 <IconX size={16} />
               </button>
@@ -565,7 +565,7 @@ export function ChatPanel(): JSX.Element {
                 把与「{clearTarget.name}」的对话整理成接力摘要，然后开启新会话？
               </p>
               <p className="pa-confirm__hint">
-                摘要会带进新会话，{clearTarget.name} 能接着上次的进度继续做。原对话会归档到「历史对话」，可随时回看；选「直接清空」也会先归档，不会丢记录。
+                聊天记录会继续留在对话流里，随时可以往上翻阅；只切换模型上下文（摘要会带进新会话，{clearTarget.name} 能接着上次的进度继续做）。选「直接清空」才会删除聊天记录（会先归档到「历史对话」，可找回）。
               </p>
               {relay.status === 'preparing' ? (
                 <p className="pa-relay-preview__status">正在整理…（模型生成可能需要十几秒）</p>
@@ -594,7 +594,7 @@ export function ChatPanel(): JSX.Element {
               <button
                 className="pa-btn pa-btn--danger"
                 type="button"
-                title="清空当前会话，旧对话会归档到历史对话"
+                title="清空当前会话并删除聊天记录（会先归档到「历史对话」，可找回）"
                 onClick={() => {
                   const target = clearTarget
                   // 「直接清空」不带 relay，走宿主 /reset；但前端 clearConversation 同样先归档，
@@ -612,9 +612,10 @@ export function ChatPanel(): JSX.Element {
                   type="button"
                   onClick={() => {
                     const target = clearTarget
-                    // 确认后带 relay：宿主先落盘摘要并清空会话，再播退场、清本地。
+                    // keepMessages: 只切换模型上下文（宿主落盘摘要 + reset 会话），
+                    // 对话流里的聊天记录一条不删，用户继续往上翻。
                     closeConfirm(() => {
-                      void actions.clearConversation(target.id, { relay: relayBrief })
+                      void actions.clearConversation(target.id, { relay: relayBrief, keepMessages: true })
                     })
                   }}
                 >
@@ -652,7 +653,7 @@ export function ChatPanel(): JSX.Element {
             </div>
             <div className="pa-modal__body">
               {archivedSessions.length === 0 ? (
-                <p className="pa-archive__empty">还没有历史对话。开新会话时，旧对话会自动归档在这里。</p>
+                <p className="pa-archive__empty">还没有历史对话。点「直接清空」时，当前对话会归档在这里，可随时找回。</p>
               ) : (
                 <ul className="pa-archive__list">
                   {archivedSessions.map((session) => {

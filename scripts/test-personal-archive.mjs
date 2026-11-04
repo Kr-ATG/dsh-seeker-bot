@@ -79,7 +79,7 @@ expectContains(storeSource, 'archivedSessions: [record, ...(prev.archivedSession
 expectContains(storeSource, 'const deleteArchivedSession = useCallback((id: string): void => {', '存在 deleteArchivedSession action')
 expectContains(storeSource, 'deleteArchivedSession,', 'actions 对象与依赖挂上 deleteArchivedSession')
 
-// clearConversation：先归档再清空
+// clearConversation：直接清空先归档；整理并开新会话保留消息、只切模型上下文
 const clearStart = storeSource.indexOf('const clearConversation = useCallback')
 assert.ok(clearStart >= 0, '找不到 clearConversation 实现')
 const clearEndMarker = '}, [toast, archiveConversation])'
@@ -91,6 +91,16 @@ const clearMessagesIndex = clearBlock.indexOf('messages: prev.messages.filter')
 assert.ok(archiveCallIndex >= 0, 'clearConversation 没有调用 archiveConversation')
 assert.ok(clearMessagesIndex > archiveCallIndex, 'clearConversation 必须先归档再清空本地消息')
 ok('clearConversation 先归档再清空本地消息')
+
+expectContains(storeSource, 'keepMessages?: boolean', 'clearConversation 支持 keepMessages')
+expectContains(storeSource, 'const keepMessages = options?.keepMessages === true', '解析 keepMessages')
+expectContains(storeSource, 'if (!keepMessages) archiveConversation(botId, options?.relay)', '只有直接清空才归档')
+expectContains(storeSource, '已整理上一段对话并开启新会话，聊天记录保留在这里。', '开新会话追加系统提示')
+const keepBranch = storeSource.indexOf('if (keepMessages) {', clearStart)
+const reloadIndex = storeSource.indexOf('window.location.reload()', clearStart)
+assert.ok(keepBranch > clearStart, '找不到 keepMessages 分支')
+assert.ok(reloadIndex < 0 || keepBranch < reloadIndex, 'keepMessages 分支应在 reload 之前 return')
+ok('keepMessages 分支保留消息且不 reload')
 
 // 归档范围：只收私聊消息
 expectContains(storeSource, 'message.roomId === undefined', '归档只取私聊消息（群聊不参与）')
@@ -105,15 +115,16 @@ expectContains(chatPanelSource, '历史对话', '更多菜单有「历史对话�
 expectContains(chatPanelSource, 'const [historyOpen, setHistoryOpen] = useState(false)', '历史面板有打开状态')
 expectContains(chatPanelSource, 'const [expandedArchiveId, setExpandedArchiveId] = useState<string | null>(null)', '历史面板有展开的归档状态')
 expectContains(chatPanelSource, '历史对话 · {activeBot.name}', '面板标题为「历史对话 · {bot.name}」')
-expectContains(chatPanelSource, '还没有历史对话。开新会话时，旧对话会自动归档在这里。', '历史面板有空态文案')
+expectContains(chatPanelSource, '还没有历史对话。点「直接清空」时，当前对话会归档在这里，可随时找回。', '历史面板有空态文案')
 expectContains(chatPanelSource, 'className="pa-archive__list"', '历史面板有归档列表')
 expectContains(chatPanelSource, 'className="pa-archive__preview"', '历史面板有展开预览')
 expectContains(chatPanelSource, '含接力摘要', '归档有「含接力摘要」标记')
 expectContains(chatPanelSource, 'RelayPreview brief={session.relay}', '有 relay 时复用 RelayPreview 展示摘要')
 expectContains(chatPanelSource, 'actions.deleteArchivedSession(session.id)', '每行删除调 deleteArchivedSession')
 expectContains(chatPanelSource, "actions.toast('已删除历史对话')", '删除后有 toast')
-expectContains(chatPanelSource, '原对话会归档到「历史对话」，可随时回看；选「直接清空」也会先归档，不会丢记录。', '清空确认卡文案说明归档可回看、直接清空也不丢记录')
-expectContains(chatPanelSource, 'title="清空当前会话，旧对话会归档到历史对话"', '「直接清空」按钮补充归档说明')
+expectContains(chatPanelSource, '聊天记录会继续留在对话流里，随时可以往上翻阅', '清空确认卡文案说明聊天记录保留')
+expectContains(chatPanelSource, '选「直接清空」才会删除聊天记录（会先归档到「历史对话」，可找回）', '「直接清空」按钮说明删除并归档')
+expectContains(chatPanelSource, 'clearConversation(target.id, { relay: relayBrief, keepMessages: true })', '「整理并开新会话」传 keepMessages:true')
 expectContains(chatPanelSource, 'function ArchiveMessage({ message }: { message: Message }): JSX.Element | null {', '存在只读消息预览组件')
 
 console.log('[personal-archive] 静态断言：chat.css.ts')
