@@ -92,6 +92,11 @@ export const css = {
   viewTabCount: 'dsh-memory-view-tab-count',
   /** 低频入口（设置）推到行尾的修饰类。 */
   viewTabTail: 'dsh-memory-view-tab-tail',
+  /** 顶栏归属徽章（2026-11 Bot 记忆上线：当前这批记忆属于 Work 还是某台 Bot）。 */
+  ownerBadge: 'dsh-memory-owner-badge',
+  ownerBadgeLabel: 'dsh-memory-owner-badge-label',
+  ownerBadgeSep: 'dsh-memory-owner-badge-sep',
+  ownerBadgeScope: 'dsh-memory-owner-badge-scope',
   /** 顶栏「分类」下拉（原侧栏分类区的替代入口）。 */
   categorySelect: 'dsh-memory-category-select',
   searchWrap: 'dsh-memory-search-wrap',
@@ -339,6 +344,35 @@ const SHEET = `
 /* 设置是低频入口：用 auto 左边距把它推到行尾，与前面五个视图拉开距离。 */
 .dsh-memory-view-tab-tail{margin-left:auto}
 
+/* 顶栏归属徽章（2026-11 Bot 记忆上线后新增）。
+   回答「我现在看的这一批记忆属于谁」：Work 侧显示 Work + 当前范围，Bot 侧
+   显示 Bot 名（主色）。点一下回到 Work 的全部工作区 —— 进了某台 Bot 的资料库
+   之后，用户需要一个不用去侧栏就能退出的出口。 */
+.dsh-memory-owner-badge{
+  flex:none;display:inline-flex;align-items:center;gap:6px;
+  height:32px;box-sizing:border-box;padding:0 11px;max-width:220px;
+  border:1px solid var(--m-border);border-radius:var(--m-r-pill);
+  background:color-mix(in srgb,var(--m-text-3) 5%,transparent);
+  color:var(--m-text-2);
+  font-family:inherit;font-size:var(--m-fs-sm);font-weight:500;line-height:18px;
+  white-space:nowrap;cursor:pointer;
+  transition:background .15s cubic-bezier(.2,.8,.2,1),color .15s cubic-bezier(.2,.8,.2,1),border-color .15s cubic-bezier(.2,.8,.2,1);
+}
+.dsh-memory-owner-badge:hover{background:var(--m-hover);color:var(--m-text)}
+.dsh-memory-owner-badge:active{transform:scale(.98)}
+.dsh-memory-owner-badge:focus-visible{outline:none;box-shadow:0 0 0 2px color-mix(in srgb,var(--m-primary) 35%,transparent)}
+/* Bot 归属：主色描边 + 柔底，与 Work 的灰底拉开层级（不是装饰，是「你现在
+   在另一个人的资料库里」这件事的信号）。 */
+.dsh-memory-owner-badge[data-bot="true"]{
+  border-color:color-mix(in srgb,var(--m-primary) 38%,transparent);
+  background:var(--m-primary-soft);color:var(--m-primary);
+}
+.dsh-memory-owner-badge[data-bot="true"]:hover{background:color-mix(in srgb,var(--m-primary) 16%,transparent)}
+.dsh-memory-owner-badge-label{overflow:hidden;text-overflow:ellipsis;min-width:0}
+.dsh-memory-owner-badge-sep{opacity:.45}
+.dsh-memory-owner-badge-scope{overflow:hidden;text-overflow:ellipsis;min-width:0;color:var(--m-text-3);font-weight:400}
+.dsh-memory-owner-badge[data-bot="true"] .dsh-memory-owner-badge-scope{color:color-mix(in srgb,var(--m-primary) 70%,transparent)}
+
 /* 顶栏「分类」下拉：原侧栏分类区的替代入口（筛选能力不能丢）。
    与「变更」工具行的范围下拉同一副皮（.dsh-memory-filter-select 那套），
    只是宽度更收敛——它要在顶栏挤进去。 */
@@ -347,6 +381,12 @@ const SHEET = `
 /* 搜索框：从「带图标的输入框 + 右侧 ⌘K 角标」重做成「胶囊容器 + 内嵌清除键」。
    重点变化：高度 36→38、圆角改胶囊、聚焦时主色描边 + 柔和光晕。 */
 .dsh-memory-search-wrap{
+  /* 2026-11-04 修复：放大镜图标（.dsh-memory-top-search-icon）是
+     position:absolute; left:11px; top:50%。父级若不建立包含块，它会相对于
+     更外层的 .dsh-memory-modal-body（position:relative）定位，飘到侧栏右缘、
+     两条记忆条目之间 —— 用户看到的「有个搜索按钮放错位置了」。
+     这一行是那个图标的唯一锚点，删掉就会复现。 */
+  position:relative;
   display:flex;align-items:center;gap:8px;
   flex:1;min-width:0;max-width:520px;height:38px;box-sizing:border-box;
   padding:0 12px;
@@ -694,7 +734,11 @@ const SHEET = `
 /* 头部：吸顶。滚动长正文时标题与操作始终可见——
    旧版滚下去就找不到「编辑」「删除」在哪了。 */
 .dsh-memory-detail-head{
-  display:flex;align-items:flex-start;gap:10px;
+  /* 2026-11-04：必须允许换行。头部是「标题 + 7 枚 30px 图标钮」的一行 flex，
+     详情列只有 380px，图标组独占约 234px，标题被压到 ~100px —— min-width:0
+     又允许它继续缩，于是中文逐字换行、右边空一大片（用户截图报障）。
+     让标题占满第一行，操作组自动落到第二行，两行都拿到完整宽度。 */
+  display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap;
   position:sticky;top:0;z-index:2;
   margin:-16px -18px 0;padding:16px 18px 12px;
   background:linear-gradient(
@@ -705,9 +749,13 @@ const SHEET = `
 }
 /* 标题：从 16px 提到 17px 并加字重，它是详情里唯一的一级信息。 */
 .dsh-memory-detail-title{
-  flex:1;min-width:0;margin:0;
+  /* 0 0 100% = 独占整行，不参与剩余空间分配；配合父级 flex-wrap 换行。
+     不要再改回 flex:1 —— 那会让标题重新被图标组挤成一条竖列。 */
+  flex:0 0 100%;min-width:0;margin:0;
   font-size:17px;line-height:1.42;font-weight:680;
-  color:var(--m-text);word-break:break-word;letter-spacing:-.01em;
+  /* anywhere 兜住超长英文串（localStorage / dsh-shell / 长路径），
+     避免在任意宽度下把容器撑破。 */
+  color:var(--m-text);word-break:break-word;overflow-wrap:anywhere;letter-spacing:-.01em;
 }
 .dsh-memory-chips{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:var(--m-fs-meta);line-height:18px}
 /* chip 统一成胶囊（旧版是 6px 圆角小方块，与卡片圆角体系不协调）*/

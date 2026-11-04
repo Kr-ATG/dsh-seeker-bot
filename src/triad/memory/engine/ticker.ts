@@ -7,7 +7,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { MemoryConfig } from '../types.js'
+import type { ConsolidateResult, MemoryConfig } from '../types.js'
 import { compileAll, promoteEntries, writeDailyLog } from './compile.js'
 import { consolidateAll } from './consolidate.js'
 import { decayImportance, daysSince, shouldEvict } from './scoring.js'
@@ -15,6 +15,8 @@ import {
   isExpired,
   localDate,
   nowIso,
+  ownerGroupsOf,
+  ownerOf,
   summarize,
   type MemoryStore,
 } from './store.js'
@@ -281,10 +283,16 @@ export function createTicker(
       })
 
       // 4) 变更流。
+      /*
+       * 下面三组 delete 都是「条目已从数组里移除」的路径（purged/evicted/pruned）：
+       * appendChange 反查不到条目，必须用循环里的条目快照显式传 owner，
+       * 否则 Bot 的自动清理记录会被兜底成 work。
+       */
       for (const entry of purged) {
         await store.appendChange({
           action: 'delete',
           entryId: entry.id,
+          owner: ownerOf(entry),
           scope: entry.scope,
           projectHash: entry.projectHash,
           summary: entry.pending === true
@@ -319,6 +327,7 @@ export function createTicker(
         await store.appendChange({
           action: 'delete',
           entryId: entry.id,
+          owner: ownerOf(entry),
           scope: entry.scope,
           projectHash: entry.projectHash,
           summary: entry.deprecated === true
@@ -330,6 +339,7 @@ export function createTicker(
         await store.appendChange({
           action: 'delete',
           entryId: entry.id,
+          owner: ownerOf(entry),
           scope: entry.scope,
           projectHash: entry.projectHash,
           summary: `闲置 ${config.pruneNeverHitDays} 天自动清理：${summarize(entry.content)}`,
@@ -344,10 +354,26 @@ export function createTicker(
       // 6) LLM 语义整理（Memory Dream）：合并去重 / 精炼重写 / 删除 / 提升长期。
       //    与规则整理正交：规则处理「分数」，本步处理「语义」。失败不阻塞（内部吞错）。
       if (config.consolidateEnabled) {
-        const results = await consolidateAll(ctx, store, config, 'daily')
+        /*
+         * 按 owner 分组整理（2026-11）：无人值守路径同样不能把不同归属的条目塞进
+         * 同一批 LLM 决策。所有 Bot 与 Work 共用同一个工作目录（projectHash 相同），
+         * 只按 scope 切分时一个批次里会同时有多个归属的条目，LLM 一次 merge 就把
+         * 两台 Bot 的相似记忆合成一条，合并产物落在第一条源条目的归属上——另一方
+         * 的记忆凭空消失。
+         *
+         * 成本取舍：LLM 调用次数从「每个 scope 一次」变成「每个 owner × scope 一次」。
+         * owner 数量通常是个位数，且每日只跑一次，这个代价可接受；真正发请求的只有
+         * 条目数 ≥ 2 的组合，空批次在 consolidateScope 里**调用 LLM 之前**就早退
+         * （只落一行 consolidate.log），所以不会出现「空请求」。
+         */
+        const owners = ownerGroupsOf(await store.readEntries())
+        const results: ConsolidateResult[] = []
+        for (const owner of owners) {
+          results.push(...await consolidateAll(ctx, store, config, 'daily', owner))
+        }
         const changed = results.reduce((sum, result) => sum + result.changed, 0)
         if (changed > 0) {
-          ctx.logger?.debug?.(`[dsh-memory] daily consolidate done (scopes=${results.length}, changed=${changed})`)
+          ctx.logger?.debug?.(`[dsh-memory] daily consolidate done (owners=${owners.length}, scopes=${results.length}, changed=${changed})`)
         }
       }
 

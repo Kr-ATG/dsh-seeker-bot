@@ -86,6 +86,7 @@ import {
   type NavSectionIcon,
 } from './nav-registry.js'
 import { fetchWorkspaces, projectsToChildren } from './workspace-source.js'
+import { BotGroupIcon, botsToChildren, readBotRoster, subscribeBotRoster } from './memory-bot-source.js'
 import {
   clearVaultScene,
   fetchVaultSceneChildren,
@@ -1218,18 +1219,38 @@ export function attachSidebarSections(): () => void {
    * 失败静默：拉不到就保持两项固定项，侧栏照常可用。
    */
   let disposed = false
-  /** 把工作区子项写进注册表（固定项 + 数据项）。 */
-  const pushWorkspaceChildren = async (): Promise<void> => {
-    const projects = await fetchWorkspaces()
-    if (disposed) return
+  /**
+   * 上一次拉到的工作区清单（名册变化时重推子项要复用它，不必再打一次接口）。
+   *
+   * 用 `Awaited<ReturnType<...>>` 而不是 import ProjectView：本模块只消费
+   * `projectsToChildren` 的入参形状，跟着数据源走就不会与它漂移。
+   */
+  let cachedProjects: Awaited<ReturnType<typeof fetchWorkspaces>> = []
+  /**
+   * 把记忆子项写进注册表：固定两项 + 各工作区 + Bot 分组。
+   *
+   * 拆成同步版本是为了让「名册变化」这条低频路径只重推菜单、不重拉工作区：
+   * Bot 名册读的是 localStorage（同步），而工作区清单要打接口（异步）。
+   */
+  const pushMemoryChildren = (): void => {
     setNavEntryChildren('workbench-memory', [
       ...MEMORY_FIXED_CHILDREN,
       ...projectsToChildren(
-        projects,
+        cachedProjects,
         WorkspaceIcon,
         (scope) => { requestMemoryScope(scope as Parameters<typeof requestMemoryScope>[0]) },
       ),
+      // Bot 分组：从 Personal Agent 名册读（见 ./memory-bot-source.tsx）。
+      // 读不到名册时返回空数组，菜单保持「固定项 + 工作区」原样。
+      ...botsToChildren(readBotRoster(), BotGroupIcon),
     ])
+  }
+  /** 拉工作区清单并重推记忆子项（固定项 + 工作区 + Bot）。 */
+  const pushWorkspaceChildren = async (): Promise<void> => {
+    const projects = await fetchWorkspaces()
+    if (disposed) return
+    cachedProjects = projects
+    pushMemoryChildren()
   }
 
   /**
@@ -1336,6 +1357,9 @@ export function attachSidebarSections(): () => void {
   // 侧栏自带的工作区数据源：挂载即拉，与「记忆页面有没有被访问过」无关。
   // 只拉一次（不轮询）：工作区清单变动频率极低，而 1.5s 轮询已经在跑。
   void pushWorkspaceChildren()
+  // Bot 名册变化（Bot 模式新建/改名/删除 Bot、或另一个标签页改了名册）时重推
+  // 记忆子项：侧栏不重新挂载，只换这一组菜单，高度变化由 CSS 过渡兜住。
+  const disposeBotRoster = subscribeBotRoster(() => { pushMemoryChildren() })
   // 档案场景同理（侧栏自己拉，不进档案页也要有菜单）。
   void pushVaultChildren()
   // 页面里增删场景后侧栏的计数要跟上：档案页会在场景变动时广播一次场景意图
@@ -1352,6 +1376,7 @@ export function attachSidebarSections(): () => void {
     disposed = true
     window.clearInterval(timer)
     window.removeEventListener(VAULT_SCENE_EVENT, onVaultScene)
+    disposeBotRoster()
     stopAnchorWatch()
     observer?.disconnect()
     observer = undefined

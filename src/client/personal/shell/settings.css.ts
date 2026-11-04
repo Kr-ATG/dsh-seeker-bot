@@ -694,6 +694,115 @@ export const SETTINGS_CSS = `
 }
 .pa-bset-output__actions { display: flex; gap: 8px; }
 
+/* ─────────────────── Bot 设置卡的左右分栏（分类导航 + 面板） ─────────────────── */
+/*
+ * 只有 Bot 设置卡挂 .pa-sheet--tabs。9 个分区一列排下来要滚好几屏：想改
+ * 「记忆检索间隔」得先翻过语音、权限、例行任务。改成左侧分类导航 + 右侧
+ * 面板后，一屏只放一件事。
+ *
+ * 高度写死成 min(84vh, 760px)，不跟内容收放：各页内容量差得很远（「权限」
+ * 只有两行，「记忆」能有几十条），若跟着内容伸缩，每切一次页签整张卡就跳
+ * 一次高度，眼睛得重新找位置。
+ */
+.pa-sheet--tabs {
+  width: min(820px, 94vw);
+  height: min(84vh, 760px);
+}
+/* 左导航 + 右面板这一行占满 head 与 foot 之间的剩余高度 */
+.pa-sheet__main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.pa-bset-nav {
+  flex: none;
+  width: 148px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-right: 1px solid var(--pa-line);
+  background: rgba(128, 132, 140, 0.04);
+}
+/* 导航最多 8 项，正常高度不出滚动条；窗口很矮时也别露出一条粗滚动条 */
+.pa-bset-nav::-webkit-scrollbar { width: 0; }
+.pa-bset-nav__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pa-bset-nav__icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--pa-text-4);
+  transition: color 140ms ease;
+}
+.pa-bset-nav__badge {
+  flex: none;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(128, 132, 140, 0.2);
+  color: var(--pa-text-3);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: calc(9.5px + var(--pa-font-delta));
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 右侧面板：滚动仍然交给 .pa-sheet__body，这里只补内边距与换页入场 */
+.pa-sheet__body.pa-bset-panes {
+  flex: 1;
+  min-width: 0;
+  padding: 16px 18px 22px;
+}
+.pa-bset-pane {
+  min-width: 0;
+  outline: none;
+  animation: pa-bset-pane-in 180ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+/*
+ * 换页入场：内容整体上浮 6px 淡入，和弹窗本身的 240ms 弹入区分开——
+ * 页签切换是「同一层里换内容」，位移要小、要快，不能像又开了一张卡。
+ */
+@keyframes pa-bset-pane-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 窄屏：导航挪到顶部变成一条横向 chips，面板占满剩余高度 */
+@media (max-width: 720px) {
+  .pa-sheet--tabs { width: 100%; height: min(88vh, 720px); }
+  .pa-sheet__main { flex-direction: column; }
+  /*
+   * 窄屏导航换成顶部 chips，但**不**做成横向滚动：8 个 chip 在 614px 里
+   * 排不下，「产出」会被切在可视区外，用户看不出右边还有一项（滚动条也被
+   * 这条规则自己藏了）。改成换行后所有分类一眼可见，代价只是多占一行高度。
+   */
+  .pa-bset-nav {
+    width: auto;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 9px 10px;
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--pa-line);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pa-bset-pane { animation: none; }
+  .pa-bset-nav__icon { transition: none; }
+}
+
 /* ───────────────────────── 群聊设置专用 ───────────────────────── */
 .pa-sheet-radio {
   display: flex;
@@ -923,6 +1032,65 @@ export const SETTINGS_CSS = `
 .pa-root .pa-sheet .pa-bset-mini-btn--danger:hover {
   background: rgba(255, 69, 58, 0.24);
   color: #ffb3ae;
+}
+
+/* 左侧分类导航的页签按钮 */
+/*
+ * 同样要带 .pa-root .pa-sheet 前缀：base.css.ts 的「.pa-root button」重置
+ * （0,1,1）会把单类规则（0,1,0）的 padding / color / font 全部吃掉，
+ * 表现就是「导航项只有文字、没有内边距、颜色也不对」。
+ */
+.pa-root .pa-sheet .pa-bset-nav__item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: none;
+  height: 34px;
+  padding: 0 9px;
+  border-radius: 9px;
+  color: var(--pa-text-3);
+  font-size: calc(12px + var(--pa-font-delta));
+  font-weight: 500;
+  text-align: left;
+  transition: background 140ms ease, color 140ms ease;
+}
+.pa-root .pa-sheet .pa-bset-nav__item:hover {
+  background: rgba(128, 132, 140, 0.12);
+  color: var(--pa-text-2);
+}
+/*
+ * 选中底：深色主题用 0.18、浅色用 0.13。
+ * 同一档透明度在深色底上更不显眼（暗背景会把橙压暗），深色稍微提亮一点，
+ * 两边「当前在哪一页」的强度才一致；文字与图标颜色两边都走 token，不用分。
+ */
+.pa-root .pa-sheet .pa-bset-nav__item[data-on='true'] {
+  background: rgba(255, 159, 10, 0.18);
+  color: var(--pa-text);
+  font-weight: 600;
+}
+.pa-root[data-pa-theme='light'] .pa-sheet .pa-bset-nav__item[data-on='true'] {
+  background: rgba(255, 159, 10, 0.13);
+}
+.pa-root .pa-sheet .pa-bset-nav__item[data-on='true'] .pa-bset-nav__icon { color: var(--pa-accent); }
+.pa-root .pa-sheet .pa-bset-nav__item[data-on='true'] .pa-bset-nav__badge {
+  background: rgba(255, 159, 10, 0.24);
+  color: var(--pa-accent);
+}
+.pa-root .pa-sheet .pa-bset-nav__item:focus-visible {
+  outline: 2px solid var(--pa-accent);
+  outline-offset: -2px;
+}
+@media (max-width: 720px) {
+  .pa-root .pa-sheet .pa-bset-nav__item {
+    height: 30px;
+    padding: 0 11px;
+    gap: 6px;
+    border-radius: 999px;
+  }
+  .pa-root .pa-sheet .pa-bset-nav__item .pa-bset-nav__badge { min-width: 16px; height: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pa-root .pa-sheet .pa-bset-nav__item { transition: none; }
 }
 
 /* 行内文字按钮（立即运行 / 删除） */

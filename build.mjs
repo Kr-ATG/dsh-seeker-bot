@@ -221,7 +221,10 @@ const hostBundle = {
  * @returns {void} 违规时抛错，正常时静默返回。
  */
 function assertCssTemplateDelimiters() {
-  const roots = ['src/client']
+  // 2026-11-04：消息撤回模块（vendor 移植自 dsh-recall-plugin）自带整张
+  // 样式表常量 src/recall/client/css.ts，与自家 css 同属「注入式 CSS」风险面，
+  // 一并纳入反引号守卫扫描。
+  const roots = ['src/client', 'src/recall/client']
   const problems = []
 
   /** 逐行状态机：找出「模板字面量内部又出现反引号」的位置。 */

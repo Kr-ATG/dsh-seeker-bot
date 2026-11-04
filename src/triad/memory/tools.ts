@@ -9,7 +9,7 @@ import { defineTool } from '../../vendor/dsh-tools/schema.js'
 import type { InferArgs, ParameterSchemaSpec } from '../../vendor/dsh-tools/schema.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ConsolidateResult, MemoryConfig } from './types.js'
-import { ownerOf, ownerOfSessionId, projectHashOf, summarize, type MemoryStore } from './engine/store.js'
+import { consolidateOwnerForSessionId, ownerOf, ownerOfSessionId, projectHashOf, summarize, type MemoryStore } from './engine/store.js'
 import { visibilityFor } from './engine/visibility.js'
 import { compileAll, workspaceHashOf } from './engine/compile.js'
 import { consolidateAll, consolidateScope } from './engine/consolidate.js'
@@ -311,9 +311,11 @@ export function registerMemoryTools(
       if (entry === undefined) throw new Error(`记忆不存在：${id}`)
       const ok = await store.removeEntry(id)
       if (!ok) throw new Error(`记忆不存在：${id}`)
+      // 删除路径：removeEntry 之后条目已不在数组里，归属用删除前的快照显式传入。
       await store.appendChange({
         action: 'delete',
         entryId: id,
+        owner: ownerOf(entry),
         scope: entry.scope,
         projectHash: entry.projectHash,
         summary: `删除：${summarize(entry.content)}`,
@@ -429,16 +431,25 @@ export function registerMemoryTools(
       scope: { type: 'string', enum: ['all', 'global', 'project'], description: 'all=全局+全部项目；global=仅全局层；project=当前工作区项目。默认 all。' },
     },
     async execute(args, exec) {
+      /*
+       * 归属收窄（2026-11）：**只在 Bot 会话收窄**。
+       *
+       * Bot 是分身，它没有资格替主人整理别的分身的记忆——跨 owner 的 merge 会把
+       * 两台 Bot 的相似记忆合成一条，另一方的记忆就此消失。Work 会话（用户本人）
+       * 保持全量：那是原有语义，收窄反而会让主人以为机器人漏整理了。
+       * 判定逻辑见 store.consolidateOwnerForSessionId。
+       */
+      const agent = exec.agent as AgentLike | undefined
+      const owner = consolidateOwnerForSessionId(agent !== undefined ? agent.session.id : null)
       let results: ConsolidateResult[]
       if (args.scope === 'global') {
-        results = [await consolidateScope(ctx, store, config, 'global', 'manual')]
+        results = [await consolidateScope(ctx, store, config, 'global', 'manual', owner)]
       } else if (args.scope === 'project') {
-        const agent = exec.agent as AgentLike | undefined
         const hash = agent !== undefined ? workspaceHashOf(agent.session.header) : null
         if (hash === null) throw new Error('无法判定当前工作区项目（无 cwd），请用 scope: "all" 或 "global"')
-        results = [await consolidateScope(ctx, store, config, { projectHash: hash }, 'manual')]
+        results = [await consolidateScope(ctx, store, config, { projectHash: hash }, 'manual', owner)]
       } else {
-        results = await consolidateAll(ctx, store, config, 'manual')
+        results = await consolidateAll(ctx, store, config, 'manual', owner)
       }
       const changed = results.reduce((sum, result) => sum + result.changed, 0)
       if (changed === 0) return '记忆已是最佳状态，本次整理无变动。'
@@ -516,9 +527,11 @@ export function registerMemoryTools(
         if (existing === undefined) throw new Error(`记忆不存在：${id}`)
         throw new Error('该记忆不是待确认状态（已生效），拒绝操作被忽略。要删除已生效记忆请用 memory_forget。')
       }
+      // 拒绝是硬删（rejectPending 已把条目摘出数组）：归属只能从返回的条目上取。
       await store.appendChange({
         action: 'delete',
         entryId: entry.id,
+        owner: ownerOf(entry),
         scope: entry.scope,
         projectHash: entry.projectHash,
         summary: `拒绝待确认：${summarize(entry.content)}`,

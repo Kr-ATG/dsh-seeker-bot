@@ -16,6 +16,15 @@
  */
 export type MemoryOwner = 'work' | `bot:${string}`
 
+/**
+ * owner **过滤**值（面板 / API 的 owner 参数）：在归属之上多一个特殊值 `bots`。
+ *
+ * - `work` / `bot:<botId>`：精确匹配某个归属；
+ * - `bots`：所有 Bot（等价于「`bot:` 前缀」），供主 Bot 的资料库一次列出全部子 Bot；
+ * - 不传（undefined）：不过滤，保持旧调用方的行为。
+ */
+export type OwnerFilter = MemoryOwner | 'bots'
+
 /** 记忆条目（~/.dsh/memories/dsh-memory/store/entries.json, schema v1）。 */
 export interface MemoryEntry {
   /** mem_<sha1>，由 content+scope+projectHash 稳定推导（同内容合并）。 */
@@ -136,6 +145,16 @@ export interface ChangeRecord {
   action: 'add' | 'update' | 'promote' | 'delete' | 'revise' | 'retire' | 'consolidate'
   /** 关联记忆条目 id（consolidate 汇总记录为空串）。 */
   entryId: string
+  /**
+   * 归属主体（schema v6）。缺省 = `work`，兼容本次改造前写入的存量记录。
+   *
+   * 为什么变更流也要带 owner：面板「变更」页要按 Bot 过滤，而记录里原本只有
+   * entryId —— 删除类记录指向的条目已经从库里消失，反查不到归属，于是所有删除
+   * 都会被算成 Work 的。写入侧（`appendChange`）自动补全：调用方显式传入优先，
+   * 否则按 entryId 反查条目取 `ownerOf()`，查不到（条目已删除 / 空 entryId）
+   * 兜底 `work`。
+   */
+  owner?: MemoryOwner
   scope: 'global' | 'project'
   projectHash: string | null
   /** 摘要（截断 80 字）。 */

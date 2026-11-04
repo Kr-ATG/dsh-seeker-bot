@@ -1,0 +1,785 @@
+/**
+ * dsh-recall-plugin — 管理路由域（R2 从 index.js 拆出）
+ *
+ * exclude-get/set、config-get/set/reset、manage（列表/标题/文本/占用/删除/
+ * 删除全部/gc/lineage）端点，以及 manage 用的删除辅助（deleteSnapshotsByFilter /
+ * deleteAllSnapshots）。依赖经 deps 注入；listCache/excludeCache 是 apply 级
+ * 可变 holder（改属性而非重绑定），与 index.js 的事件接线共享同一引用。
+ */
+
+import { isSafetySnapshotId } from './snapshots.js'
+import { parseExcludeDump } from './dump-parse.js'
+// 接缝适配 ④：配置的用户层改由本插件自己的 config.json 承载（读写都走这里）。
+// 原实现 import { resolveSettingsNs } from './config.js' 并用 settings 服务
+// describe/update/replace——宿主内嵌形态下 settings ns 不可写，故整体换源；
+// resolveSettingsNs / SettingsService 在本文件已无消费点（settings.ts 的接线
+// 仍在自己文件里用），一并移除以免留下「看起来还在用 settings」的误导。
+import { readConfigFile, writeConfigFile, clearConfigFile } from './config-file.js'
+import type { Runtime, SharedState, StoreInfo } from '../types/state.js'
+import type { HostContext, SessionQueryEngine, SessionLogSnapshot } from '../types/dsh-contract.js'
+import type { ResolvedConfig } from '../types/config.js'
+import type { StoreDumpInfo } from './dump-parse.js'
+import type { SnapshotsApi, RollbackResult } from './snapshots.js'
+import type { MaintenanceApi } from './maintenance.js'
+import type { SessionInfoApi } from './session-info.js'
+import type { ManageListItem, ManageResponse, ManageArgs, ExcludeGetResponse, ExcludeSetArgs, ExcludeSetResponse, ConfigGetResponse, ConfigSetResponse, ConfigResetResponse } from '../types/api.js'
+import type { titleFromEvents, messageTextFromEvents } from './session-info.js'
+
+export interface RoutesManageDeps {
+  ctx: HostContext
+  rt: Runtime
+  snaps: SnapshotsApi
+  maint: MaintenanceApi
+  state: SharedState
+  cfg: ResolvedConfig
+  supported: boolean
+  // 按工作区隔离的任务队列（queues.ts）：同 root 串行、跨 root 并行
+  enqueueFor<T>(root: string | null | undefined, task: () => Promise<T>): Promise<T>
+  enqueueMany<T>(roots: Array<string | null | undefined>, task: () => Promise<T>): Promise<T>
+  runLimited<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<void>
+  listExcludeFiles(): Promise<Map<string, { store: StoreInfo; roots: string[] }>>
+  dumpStores(): Promise<Map<string, StoreDumpInfo>>
+  locateSnapshotOnDisk(id: string): Promise<{ store: StoreInfo; root: string } | null>
+  collectAllSnapshotRecords(): Promise<Map<string, { id: string; root: string | null; sessionId: string | null; time: number }>>
+  listCache: { at: number; items: ManageListItem[] | null; stale: boolean; refreshing: Promise<void> | null }
+  excludeCache: { at: number; payload: { ok: boolean; files: Array<{ path: string; home: boolean; roots: string[]; content: string }>; unsupported?: boolean } | null }
+  usageCache: { at: number; payload: { ok: true; bytes: number; gitAvailable: boolean; homeStores: number; fallbackStores: number } | null }
+  sessionInfo: SessionInfoApi
+  titleFromEvents: typeof titleFromEvents
+  messageTextFromEvents: typeof messageTextFromEvents
+  applyResolvedConfig(resolved: unknown): void
+  readSettings(): unknown
+  DEFAULTS: ResolvedConfig
+  E: typeof import('./errors.js')
+}
+
+export function createRoutesManage(deps: RoutesManageDeps) {
+  const {
+    ctx, rt, snaps, maint, state, cfg, supported, enqueueFor, enqueueMany, runLimited,
+    listExcludeFiles, dumpStores, locateSnapshotOnDisk, collectAllSnapshotRecords,
+    listCache, excludeCache, usageCache, sessionInfo, titleFromEvents, messageTextFromEvents,
+    applyResolvedConfig, readSettings, DEFAULTS, E,
+  } = deps
+  const { sessionTitles, messageTexts, liveTitleFast, liveMessageTextFast } = sessionInfo
+
+  // dump 失败统一出口：细节已由 dumpStores 写入「最近错误」，端点只回一句可行动
+  // 的话——把 shell 栈丢进 UI 既看不懂又会撑爆 toast。issue #30 之前这里是空树，
+  // 用户没有任何「失败了」的信号。
+  function dumpFailed(): { ok: false; code: typeof E.RECALL_DUMP_FAILED; message: string } {
+    return { ok: false, code: E.RECALL_DUMP_FAILED, message: '读取磁盘快照失败，列表与批量删除不可用；请查看「最近错误」中的原因后重试' }
+  }
+
+  // PF-6：list items 构建（磁盘 dump + 内存并集 + 排序）从 list 分支抽出——
+  // 同步路径与 stale 后台刷新共用同一实现（改一处漏一处的风险随合并消失）。
+  async function buildListItems(): Promise<ManageListItem[]> {
+          const allItems: ManageListItem[] = []
+
+    // 磁盘全量：一条 shell dump。标题只查 live/缓存（liveTitleFast，同步
+    // 瞬时）——冷会话标题由 Client 拿到列表后异步调 titles 补齐。
+    const dump = await dumpStores()
+    const hints = new Map()
+    for (const [root, st] of state.stores.entries()) {
+      if (st && st.dir) hints.set(st.dir, root)
+    }
+    // 去重只用 id（消息 ID 全局唯一）：带 root 进 key 会让同一快照因
+    // 「磁盘来源 root 缺失 / 内存来源 root 齐全」出现两条重复行
+    const byId = new Map<string, ManageListItem>()
+    function push(id: string, time: number | null, root: string | null, sessionId: string | null | undefined, files?: boolean): void {
+      if (!id || typeof id !== 'string') return
+      // F-G1 防御性展示过滤：修复前 rebuildOrphans 曾把 safety tag
+      // （pre-rollback-<ts>）strip 前缀后写进 index.json——存量污染条目
+      // 不做迁移清理（一次性数据，代价收益不划算），这里挡住可见性：
+      // 安全快照不是消息快照，本就不该出现在管理列表/树里。
+      if (isSafetySnapshotId(id)) return
+      const old = byId.get(id)
+      if (!old) {
+        const rec: ManageListItem = {
+          id,
+          time: typeof time === 'number' ? time : 0,
+          root: root || null,
+          workspace: root ? (root.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? null) : null,
+          sessionId: sessionId || null,
+          sessionTitle: liveTitleFast(sessionId || '')
+        }
+        // 消息文本只放已确认值：live 命中字符串则带，否则不设字段。
+        const liveText = liveMessageTextFast(sessionId || '', id)
+        if (liveText) rec.messageText = liveText
+        // issue #31：仅消息条目在树上标「仅消息」（缺省＝有文件树，与读侧同口径）
+        if (files === false) rec.files = false
+        byId.set(id, rec)
+        allItems.push(rec)
+        return
+      }
+      // 与 collectAllSnapshotRecords 同款补全：磁盘先占位、内存后补全 root
+      if (!old.root && root) { old.root = root; old.workspace = root.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || null }
+      if (!old.sessionId && sessionId) { old.sessionId = sessionId; old.sessionTitle = liveTitleFast(sessionId) }
+      // 与 !old 分支同规（live 命中才写字段）：null 落进属性会让 client
+      // 误判「已查过」而跳过 messages 冷读——冷会话快照永远只显示消息 ID
+      if (!old.messageText && id) { const t = liveMessageTextFast(sessionId, id); if (t) old.messageText = t }
+      if (!old.time && time) old.time = time
+      // 两来源不一致时取 false：没有文件树是更保守的展示（隐藏文件回退单选）
+      if (files === false) old.files = false
+    }
+    for (const [dir, info] of dump) {
+      const baseRoot = info.root || hints.get(dir) || null
+      for (const e of info.entries || []) {
+        if (!e || typeof e.id !== 'string') continue
+        // root 优先取 root.txt（info.root，resolveStore 写下的权威映射）：index.json
+        // 条目里的 e.root 曾出现丢失反斜杠的坏数据（哈希↔root 错位，删除落到空
+        // store），root.txt 是每次 resolveStore 都重写的规范源，兜底才用条目值
+        push(e.id, e.time, baseRoot || (typeof e.root === 'string' && e.root) || null, e.sessionId, e.files)
+      }
+    }
+    // 内存兜底（刚拍未落盘的保险，正常已被磁盘 dump 覆盖）
+    for (const [id, s] of state.snapshots.entries()) {
+      push(id, s.time, s.root, s.sessionId, s.files)
+    }
+    allItems.sort((a, b) => (b.time || 0) - (a.time || 0))
+    return allItems
+  }
+
+  // PF-6：stale 时的后台缓存刷新（in-flight 去重）——stale 期间重复 list
+  // 复用同一进行中的 dump，不重复起进程（否则进程数反而放大）。完成后清
+  // stale 标记；失败静默（下次 stale 触发自然重试）。
+  function refreshListCacheInBackground() {
+    if (listCache.refreshing) return listCache.refreshing
+    listCache.refreshing = buildListItems()
+      .then((allItems) => {
+        listCache.items = allItems
+        listCache.at = Date.now()
+        listCache.stale = false
+      })
+      // 冒烟实证：这里的静默吞错曾让 stale 卡死近半小时无任何观测点——
+      // 失败必须留痕（console），否则只能靠行为异常反推
+      .catch((error) => { console.error('recall list refresh failed:', String(error && error.stack || error)) })
+      .finally(() => { listCache.refreshing = null })
+    return listCache.refreshing
+  }
+
+  // 按过滤条件批量删除快照（工作区/会话两个树节点共用）：先收集匹配
+  // id 并按 root 分组，再整体进串行队列——与快照/gc 互斥，避免 git 锁
+  // 竞态。每个 root 先 purge tag 再补载索引后重写 index.json，防止冷启动
+  // 时用残缺内存覆盖同 store 其余磁盘快照。
+  // PF-6：缓存非空（含 stale）时直接由缓存 items 构造 records，省一次
+  // 全量 dumpStores——删除以「用户当前所见」为准（stale 说明有新快照未
+  // 入列表，用户没看到的也不在删除预期内）；缓存为空才全量收集。
+  async function deleteSnapshotsByFilter(match: (rec: { root: string | null; sessionId: string | null }) => boolean, sessionId: string | null): Promise<number> {
+    let records
+    if (Array.isArray(listCache.items) && listCache.items.length) {
+      records = new Map()
+      for (const it of listCache.items) {
+        if (!it || typeof it.id !== 'string') continue
+        records.set(it.id, { id: it.id, root: it.root || null, sessionId: it.sessionId || null, time: typeof it.time === 'number' ? it.time : 0 })
+      }
+    } else {
+      records = await collectAllSnapshotRecords()
+    }
+    const byRoot = new Map<string, string[]>()
+    for (const rec of records.values()) {
+      if (!match(rec) || !rec.root) continue
+      // get-or-create 守卫（A6）：替代 `get(...)!` 断言
+      const list = byRoot.get(rec.root)
+      if (list) list.push(rec.id)
+      else byRoot.set(rec.root, [rec.id])
+    }
+    let deleted = 0
+    // 批量删除跨多个 root：等这些 root 的链尾全部落地再动手——与同仓库的
+    // 快照/回退互斥，但不阻塞无关工作区
+    await enqueueMany(Array.from(byRoot.keys()), async () => {
+      for (const [root, rootIds] of byRoot) {
+        let store: StoreInfo | null = state.stores.get(root) || null
+        if (!store) {
+          // 现场解析失败按无 store 跳过该 root（其余 root 继续清理）
+          try { store = await rt.resolveStore(root) } catch (error) { store = null }
+        }
+        if (!store) continue
+        // A3：格式守卫——拒写态下该 root 跳过（批量删除为 best-effort 语义，
+        // 其余 root 照常；告警由 guard 侧节流 recordError）
+        if (!(await snaps.guardStoreFormat(store))) continue
+        try {
+          if (state.gitExe) {
+            // tag 分块删除：win32 命令行有 32767 字符上限，整批传大量 tag 会
+            // 在长历史工作区上爆掉；与 maintenance.purgeSession 同款 100 个/块。
+            const tags = rootIds.map((id) => 'snap-' + id)
+            for (let i = 0; i < tags.length; i += 100) {
+              await rt.runShell(rt.scripts.purgeTagsScript(store, state.gitExe, tags.slice(i, i + 100)), { timeoutMs: 120000, stdoutMaxBytes: 4096 })
+            }
+          }
+          if (!state.indexLoaded.has(root)) {
+            try { await snaps.loadIndex(root, sessionId) } catch (error) { /* 载入失败照常重写，退化为旧行为 */ }
+          }
+          for (const id of rootIds) state.snapshots.delete(id)
+          await snaps.saveIndex(root, sessionId)
+          deleted += rootIds.length
+        } catch (error) {
+          // 单个 root 失败不阻断其他 root：best-effort，错误进状态页可见的
+          // 错误缓冲，剩余 root 继续清理。
+          rt.recordError('recall batch delete failed for ' + root + ': ' + String(error))
+        }
+      }
+      listCache.items = null
+      usageCache.payload = null
+    })
+    return deleted
+  }
+
+  // 删除所有工作区的全部快照。树形管理的「工作区/会话」批量删除以
+  // index.json 中的记录为目标；但「全部删除」必须把 git tag 当作真相源：
+  // index 可能因旧版/崩溃/手动修复而为空或过期，不能因为索引里没有条目就
+  // 漏删真实快照。磁盘枚举到的 store 即使 root.txt 丢失也直接按目录操作。
+  async function deleteAllSnapshots() {
+    // 锁住当前已知的全部 root（磁盘新增但内存没有的 store 也不会有并发任务：
+    // 任何快照/回退都必须先 resolveStore 把它放进 state.stores）
+    return enqueueMany(Array.from(state.stores.keys()), async () => {
+      const stores = new Map<string, { store: StoreInfo; root: string | null; entries?: unknown[] }>()
+      for (const [root, store] of state.stores.entries()) {
+        if (store && store.dir) stores.set(store.dir, { store, root })
+      }
+      const dump = await dumpStores()
+      for (const [dir, info] of dump.entries()) {
+        const known = stores.get(dir)
+        if (known) {
+          if (!known.root && info.root) known.root = info.root
+          known.entries = info.entries || []
+        } else {
+          stores.set(dir, {
+            // 全局删除只动该目录下的 git/index；不必、也不能依赖可反解的 root。
+            store: rt.storeFromDir(dir, false),
+            root: info.root || null,
+            entries: info.entries || []
+          })
+        }
+      }
+
+      if (stores.size === 0) return { deleted: 0, stores: 0, failed: 0 }
+
+      const gitExe = await rt.resolveGit()
+      if (!gitExe) {
+        const message = '未检测到 git CLI，无法验证并删除快照 tag'
+        rt.recordError('recall delete all failed: ' + message)
+        return { deleted: 0, stores: 0, failed: stores.size || 1, message }
+      }
+
+      let deleted = 0
+      let clearedStores = 0
+      let failed = 0
+      for (const { store, root } of stores.values()) {
+        // A3：格式守卫——拒写态下该 store 计入 failed（客户端 PARTIAL_DELETE
+        // 提示「有存储未完成，查看最近错误后重试」）；此处必须显式守卫：
+        // 本路径直写 index.json（不经 saveIndex 的守卫）
+        if (!(await snaps.guardStoreFormat(store))) {
+          failed += 1
+          continue
+        }
+        try {
+          // 先列出实际 tag；不要使用 entries 推导 tag，entries 是可丢失缓存。
+          const output = await rt.runShell(rt.scripts.listTagsScript(store, gitExe), { timeoutMs: 120000, stdoutMaxBytes: 4194304 })
+          const tags = rt.scripts.stripBom(output).split(/\r?\n/).map((tag) => tag.trim()).filter((tag) => tag.indexOf('snap-') === 0)
+          for (let i = 0; i < tags.length; i += 100) {
+            await rt.runShell(rt.scripts.purgeTagsScript(store, gitExe, tags.slice(i, i + 100)), { timeoutMs: 120000, stdoutMaxBytes: 4096 })
+          }
+          // purgeTagsScript 为幂等 best-effort，故必须回读校验，避免脚本吞掉
+          // 个别失败后仍错误地把 index.json 清空。
+          const remainedOutput = await rt.runShell(rt.scripts.listTagsScript(store, gitExe), { timeoutMs: 120000, stdoutMaxBytes: 4194304 })
+          const remained = rt.scripts.stripBom(remainedOutput).split(/\r?\n/).map((tag) => tag.trim()).filter((tag) => tag.indexOf('snap-') === 0)
+          if (remained.length) throw new Error('仍有 ' + remained.length + ' 个快照 tag 未删除')
+
+          // tag 清理被确认后才清空索引。直接写已枚举的 store，兼容 root.txt
+          // 缺失/错位的旧仓库；不能调用 saveIndex(root)，后者会重新按 root 寻址。
+          await rt.writeTextViaShell(store.dir + (rt.isWin ? '\\' : '/') + 'index.json', '[]')
+          for (const tag of tags) state.snapshots.delete(tag.slice('snap-'.length))
+          if (root) {
+            for (const [id, snap] of state.snapshots.entries()) {
+              if (snap && snap.root === root) state.snapshots.delete(id)
+            }
+            state.indexLoaded.add(root)
+          }
+          deleted += tags.length
+          clearedStores += 1
+        } catch (error) {
+          // 单 store 失败计入 failed 继续（客户端按失败数提示可重试）
+          failed += 1
+          rt.recordError('recall delete all failed for ' + store.dir + ': ' + String(error))
+        }
+      }
+      // list 既合并内存也 dump 磁盘；无论完全/部分完成都必须失效，才能让
+      // 成功删除的 store 立即从树上消失，而失败 store 仍保留供用户重试。
+      listCache.items = null
+      usageCache.payload = null
+      return { deleted, stores: clearedStores, failed }
+    })
+  }
+
+  return {
+    'exclude-get': async (): Promise<ExcludeGetResponse> => {
+      // 设置页「撤回设置」标签的配置读取。不支持平台照常短路：Client
+      // 显示不可用提示而不是空白表单，与 init 的 notice 语义对齐。
+      if (!supported) return { ok: false, unsupported: true }
+      // 30s 结果缓存：首次进入要 resolveStore 链 + 读取，二次打开/切标签
+      // 不应重复付出这份代价；exclude-set 写入后失效。
+      if (excludeCache.payload && Date.now() - excludeCache.at < 30000) return excludeCache.payload
+      const byFile = await listExcludeFiles()
+      // PF-8：一条脚本 base64 读全部 exclude 文件——原每文件一条 Get-Content/
+      // cat 进程是首开 4-6 条链路里的大头；内容走 base64 对任意用户文本
+      // 免疫（定界不会被内容行打乱），parse 失败/文件缺失按空内容处理
+      // （与原 readExclude 对不存在文件输出空串的语义一致）。
+      let contents = new Map()
+      try {
+        const text = rt.scripts.stripBom(await rt.runShell(rt.scripts.excludeDumpScript(Array.from(byFile.keys())), { stdoutMaxBytes: 1048576 }))
+        contents = parseExcludeDump(text)
+      } catch (error) { /* dump 失败退回空内容列表（读失败的原语义） */ }
+      const payload = {
+        ok: true,
+        files: Array.from(byFile.entries()).map(([path, info]) => ({
+          path,
+          home: Boolean(info.store.home),
+          roots: info.roots,
+          content: contents.get(path) || ''
+        }))
+      }
+      excludeCache.at = Date.now()
+      excludeCache.payload = payload
+      return payload
+    },
+
+    'exclude-set': async (args: ExcludeSetArgs): Promise<ExcludeSetResponse> => {
+      if (!supported) return { ok: false, unsupported: true }
+      const path = args && args.path ? String(args.path) : ''
+      const content = args && typeof args.content === 'string' ? args.content : ''
+      // 路径白名单：重新枚举当前已知 exclude 文件并要求精确命中，
+      // 客户端伪造的任意路径在这里被拒（见 listExcludeFiles 注释）
+      const byFile = await listExcludeFiles()
+      const info = byFile.get(path)
+      if (!info) return { ok: false, code: E.RECALL_UNKNOWN_PATH, message: '未知的排除文件路径' }
+      await snaps.writeExclude(info.store, content)
+      // 写入后立即失效：设置页保存后刷新必须看到最新内容
+      excludeCache.payload = null
+      return { ok: true }
+    },
+
+    // 设置页「插件配置」卡片读配置：resolved 全量值 + 用户已覆盖字段 + env
+    // 锁定字段（环境变量优先级最高）+ 可写性（只读 provider 禁存）。
+    // ns 不写死：0.1.7 的 settings ns 是 profile entry id（本机实测 'recall'），
+    // ≤0.1.6 才是注册出来的 namespace 'dsh-recall'——统一由 resolveSettingsNs
+    // 按 describe 交集解析（解析不到时按「无覆盖」读，卡片仍展示 resolved 值）。
+    // ↳ 接缝适配 ④：上面这套 ns/describe 解析在本插件内嵌形态下不再适用，
+    //   overridden 改为直接读 config.json（见下方实现与 config-file.ts 文件头）。
+    'config-get': async (): Promise<ConfigGetResponse> => {
+      const envLocks = {
+        gcSnaps: Boolean(process.env && process.env.DSH_RECALL_GC_SNAPS),
+        gcHours: Boolean(process.env && process.env.DSH_RECALL_GC_HOURS),
+      }
+      // 接缝适配 ④：用户已覆盖字段从本插件的 config.json 读（原实现读
+      // settings.describe() 里的 user 层）。为什么必须换：宿主内嵌形态下
+      // entry 是宿主行、宿主没给 loader 导出 recall 的 Config schema，
+      // describe 的 user 层里通常根本没有 recall 的字段——读它只会恒返回
+      // 空 {}，卡片把「用户已覆盖」显示成「全是默认」，用户改完再看还是默认。
+      // readConfigFile 对缺失/损坏一律返回 {} 且不抛，与原来 catch 后的降级
+      // 语义一致。
+      const overridden: Record<string, unknown> = { ...readConfigFile() }
+      // writable 恒 true + 真实失败在 config-set 里报准信：不在这里做「试写
+      // 判据」——那会在每次打开设置页时 mkdir/落盘一次，副作用大于收益；而且
+      // accessSync 在 Windows 上对「目录可写」的判定本就不可靠。真写不下去时
+      // config-set 会拿 writeConfigFile 的 errno 回 RECALL_SETTINGS_WRITE_FAILED
+      // （message 带绝对路径），用户仍能用 profile 行 config 兜底。
+      const writable = true
+      return {
+        ok: true,
+        values: {
+          gcSnaps: cfg.gcSnaps,
+          gcHours: cfg.gcHours,
+          maxFileBytes: cfg.maxFileBytes,
+          maxWorkspaceBytes: cfg.maxWorkspaceBytes,
+          scanBudgetMs: cfg.scanBudgetMs,
+          // issue #29：单次快照总时限（设置卡片的「单次快照时限」）
+          snapshotBudgetMs: cfg.snapshotBudgetMs,
+          maxSnapshotsPerWorkspace: cfg.maxSnapshotsPerWorkspace,
+          baseExcludes: cfg.baseExcludes.slice(),
+          refillDraft: cfg.refillDraft,
+          snapshotEnabled: cfg.snapshotEnabled,
+          // issue #31：只回退消息（不写文件快照）；2026-11-04 起默认 true
+          messageOnly: cfg.messageOnly,
+          // 2026-11-04：文件回退总开关（默认 false = 只撤回对话）
+          fileRollbackEnabled: cfg.fileRollbackEnabled,
+          archiveOriginal: cfg.archiveOriginal,
+          editSubmitsImmediately: cfg.editSubmitsImmediately,
+          retentionDays: cfg.retentionDays,
+          // A4：界面语言偏好随 values 下发（设置卡片据此渲染下拉并即时切语言）
+          locale: cfg.locale,
+        },
+        overridden,
+        envLocks,
+        writable,
+      }
+    },
+
+    // 设置页「插件配置」卡片存配置：白名单字段 + 类型清洗后经 settings.update
+    // 写进用户层（旧面）或 profile entry（新面），热更链路把新值更新进 cfg，
+    // 无需重启。ns 取解析结果——未解析到时与「服务不可用」同一出口：文案保留
+    // 「按 id: recall 覆盖配置」的逃生口（改 profile 的 cordis.patch.yml 仍是
+    // 任何版本下都能生效的兜底路径）。
+    // ↳ 接缝适配 ④：写入目标改为本插件自己的 config.json（writeConfigFile）；
+    //   上面「经 settings.update 写进用户层 / profile entry」的描述留作历史背景。
+    'config-set': async (args: unknown): Promise<ConfigSetResponse> => {
+      const patch = args && (args as { patch?: unknown }).patch && typeof (args as { patch?: unknown }).patch === 'object'
+        ? (args as { patch: Record<string, unknown> }).patch
+        : {}
+      const clean: Partial<ResolvedConfig> = {}
+      if (patch.gcSnaps !== undefined) clean.gcSnaps = Number(patch.gcSnaps)
+      if (patch.gcHours !== undefined) clean.gcHours = Number(patch.gcHours)
+      if (patch.maxFileBytes !== undefined) clean.maxFileBytes = Number(patch.maxFileBytes)
+      // issue #24 护栏：0 = 显式不限制；负数拒绝（误输入不该把安全护栏关掉）。
+      // 与 maxSnapshotsPerWorkspace 的「负值按 0」不同——那个是历史上限，
+      // 这两个是防病态目录的止损闸。
+      if (patch.maxWorkspaceBytes !== undefined) {
+        const n = Number(patch.maxWorkspaceBytes)
+        if (!Number.isFinite(n) || n < 0) return { ok: false, code: E.RECALL_BAD_TYPE, message: '工作区总量上限必须是 >= 0 的数字（0 表示不限制）' }
+        clean.maxWorkspaceBytes = Math.trunc(n)
+      }
+      if (patch.scanBudgetMs !== undefined) {
+        const n = Number(patch.scanBudgetMs)
+        if (!Number.isFinite(n) || n < 0) return { ok: false, code: E.RECALL_BAD_TYPE, message: '扫描时间预算必须是 >= 0 的数字（0 表示不限制）' }
+        clean.scanBudgetMs = Math.trunc(n)
+      }
+      if (patch.maxSnapshotsPerWorkspace !== undefined) {
+        const n = Number(patch.maxSnapshotsPerWorkspace)
+        // 0 或负值 = 不限制（schema 由 number 校验，非法 NaN 在 settings.write 层被拒）
+        if (!Number.isFinite(n)) return { ok: false, code: E.RECALL_BAD_TYPE, message: '快照总量上限必须是数字' }
+        clean.maxSnapshotsPerWorkspace = Math.max(0, n)
+      }
+      if (patch.refillDraft !== undefined) clean.refillDraft = Boolean(patch.refillDraft)
+      if (patch.snapshotEnabled !== undefined) clean.snapshotEnabled = Boolean(patch.snapshotEnabled)
+      // issue #31：只回退消息开关（布尔清洗与其它开关同层）
+      if (patch.messageOnly !== undefined) clean.messageOnly = Boolean(patch.messageOnly)
+      // 2026-11-04：文件回退总开关（布尔清洗；打开才会走「文件与对话一并回退」）
+      if (patch.fileRollbackEnabled !== undefined) clean.fileRollbackEnabled = Boolean(patch.fileRollbackEnabled)
+      if (patch.archiveOriginal !== undefined) clean.archiveOriginal = Boolean(patch.archiveOriginal)
+      if (patch.editSubmitsImmediately !== undefined) clean.editSubmitsImmediately = Boolean(patch.editSubmitsImmediately)
+      if (patch.retentionDays !== undefined) {
+        const n = Number(patch.retentionDays)
+        // 0/负值 = 不启用（schema 校验 base 由 number 承担，NaN 由 settings.write 拒）
+        if (!Number.isFinite(n) || n < 0) return { ok: false, code: E.RECALL_BAD_TYPE, message: '保留天数必须是 >= 0 的数字（0 表示不启用）' }
+        clean.retentionDays = Math.trunc(n)
+      }
+      if (patch.baseExcludes !== undefined) {
+        if (!Array.isArray(patch.baseExcludes)) return { ok: false, code: E.RECALL_BAD_TYPE, message: 'baseExcludes 必须是字符串数组' }
+        clean.baseExcludes = patch.baseExcludes.filter((p) => typeof p === 'string' && p.trim())
+      }
+      // locale（A4）：三值白名单在端点侧再收一遍——schema union 已拦非法值，
+      // 这里是「直调 API 绕过表单」时的第二道（与其它字段的类型清洗同层）
+      if (patch.locale !== undefined) {
+        const v = String(patch.locale)
+        if (v !== 'auto' && v !== 'zh' && v !== 'en') return { ok: false, code: E.RECALL_BAD_TYPE, message: '界面语言必须是 auto / zh / en 之一' }
+        clean.locale = v
+      }
+      if (!Object.keys(clean).length) return { ok: false, code: E.RECALL_EMPTY_PATCH, message: '没有可写入的配置字段' }
+      // 接缝适配 ④：写本插件自己的 config.json（原实现 settings.update(ns, clean)）。
+      // 为什么不能沿用：settings ns 在宿主内嵌形态下大概率不可写（见
+      // config-file.ts 文件头的原因链），继续走它会必失败——「保存」按钮点了
+      // 没反应是最坏的静默失效。错误码沿用 RECALL_SETTINGS_WRITE_FAILED
+      // （client 按 code 渲染文案，协议不动），message 换成带文件路径的准信。
+      const written = writeConfigFile(clean)
+      if (!written.ok) {
+        return { ok: false, code: E.RECALL_SETTINGS_WRITE_FAILED, message: '配置写入失败：' + written.message }
+      }
+      // 热更运行中的 cfg：readSettings 已是「组合 base + 文件层」的活绑定，
+      // 走与 settings watch 同一条 applyResolvedConfig 链路，无需重启。
+      // 注意 snapLimits（快照护栏停用记录，snapshots.ts）自带「配置值变化即
+      // 重试」判据（记录时存了 maxWorkspaceBytes/scanBudgetMs），所以调大上限后
+      // 下一条消息就会自动重试，不需要在这里清那些映射。
+      applyResolvedConfig(readSettings())
+      // 快照列表按配置激进程度可能变化（maxSnapshotsPerWorkspace / retentionDays
+      // 影响后续清理结果），保守标 stale：下次打开管理树后台重拉一次。
+      // listCache/excludeCache/usageCache 都不以配置为输入，无需清空。
+      listCache.stale = true
+      return { ok: true }
+    },
+
+    // 设置页「快照管理」卡片：列表 / 磁盘占用 / 单条删除 / 手动 gc。
+    // 全部走串行队列——删除 tag 与 gc 与快照争的是同一个 git 仓库。
+    'manage': async (args: ManageArgs): Promise<ManageResponse> => {
+      if (!supported) return { ok: false, unsupported: true }
+      const op = args && args.op ? String(args.op) : 'list'
+      const sessionId = args && args.sessionId ? String(args.sessionId) : null
+      if (op === 'list') {
+        const limitRaw = args && args.limit !== undefined ? Number(args.limit) : 200
+        const safeLimit = Math.min(Math.max(Number.isFinite(limitRaw) ? Math.trunc(limitRaw) : 200, 1), 2000)
+        // PF-6：缓存非空且（fresh 或 stale）→ 立即用旧 items 应答，对话中
+        // 打开快照管理不再等全量 dump（30s TTL 曾被每条消息的清空形同虚设）。
+        // stale 时后台刷新（in-flight 去重），Client 凭 stale 标记静默再拉
+        // 一次渐进补新。缓存为空 → 同步 dump（首开现状）。
+        if (listCache.items && (Date.now() - listCache.at < 30000 || listCache.stale)) {
+          const stale = Boolean(listCache.stale)
+          if (stale) refreshListCacheInBackground()
+          return { ok: true, items: listCache.items.slice(0, safeLimit), total: listCache.items.length, stale }
+        }
+        // dump 失败不再静默成空列表：返回 DUMP_FAILED 让卡片显示失败与重试入口
+        let allItems: ManageListItem[]
+        try { allItems = await buildListItems() } catch (error) { return dumpFailed() }
+        listCache.at = Date.now()
+        listCache.items = allItems
+        listCache.stale = false
+        return { ok: true, items: allItems.slice(0, safeLimit), total: allItems.length }
+      }
+      if (op === 'titles') {
+        // supported 已在 manage 入口短路（A3：此处重复检查是死代码）
+        const ids: string[] = Array.from(new Set(
+          (Array.isArray(args && args.sessionIds) ? args.sessionIds! : []).map(String).filter(Boolean)
+        )).slice(0, 100)
+        const out: Record<string, string | null> = {}
+        // 并发限 4：冷标题 readSession 是重 IO，限制后列表不受影响、标题渐进补齐
+        await runLimited(ids.map((sid) => async () => {
+          if (out[sid] !== undefined) return
+          let title: string | null = liveTitleFast(sid)
+          if (title === null) {
+            const query = ctx.get<SessionQueryEngine>('sessionQuery')
+            if (query && typeof query.readSession === 'function') {
+              try {
+                const log = await query.readSession(sid)
+                title = titleFromEvents(log && log.events)
+              } catch (error) {
+                // 冷读失败标题按 null 缓存（列表已渲染，标题留白不阻断）
+                title = null
+              }
+            }
+          }
+          sessionTitles.set(sid, title)
+          out[sid] = title
+        }), 4)
+        return { ok: true, titles: out }
+      }
+      if (op === 'messages') {
+        // supported 已在 manage 入口短路（A3：此处重复检查是死代码）
+        // 先落局部再收窄（A6）：Array.isArray 收窄不覆盖复杂表达式，去掉 `!` 断言
+        const reqsRaw = args && args.requests
+        const reqs = Array.isArray(reqsRaw) ? reqsRaw.slice(0, 200) : []
+        const bySession = new Map<string, string[]>()
+        for (const r of reqs) {
+          const sid = r && r.sessionId ? String(r.sessionId) : null
+          const mid = r && r.messageId ? String(r.messageId) : null
+          if (!sid || !mid) continue
+          // get-or-create 守卫（A6）：替代 `get(...)!` 断言
+          const midList = bySession.get(sid)
+          if (midList) midList.push(mid)
+          else bySession.set(sid, [mid])
+        }
+        const texts: Record<string, string | null> = {}
+        await runLimited(Array.from(bySession.entries()).map(([sid, mids]) => async () => {
+          // 该会话所有消息都已缓存（含 null）时，不必 readSession 冷读
+          const allCached = mids.every((mid) => messageTexts.has(String(sid) + '\u0000' + String(mid)))
+          let log: SessionLogSnapshot | null = null
+          if (!allCached) {
+            const query = ctx.get<SessionQueryEngine>('sessionQuery')
+            if (query && typeof query.readSession === 'function') {
+              try {
+                log = await query.readSession(sid)
+              } catch (error) {
+                // 冷读失败按无日志：该会话消息文本全部回落 null（叶子留白）
+                log = null
+              }
+            }
+          }
+          for (const mid of mids) {
+            const key = String(sid) + '\u0000' + String(mid)
+            // 缓存命中（含 null）直接复用，避免已确认无文本的消息反复冷读
+            if (messageTexts.has(key)) {
+              texts[mid] = messageTexts.get(key) ?? null
+              continue
+            }
+            let text = liveMessageTextFast(sid, mid)
+            if (text === null && log && Array.isArray(log.events)) {
+              text = messageTextFromEvents(log.events, mid)
+            }
+            messageTexts.set(key, text)
+            texts[mid] = text
+          }
+        }), 4)
+        return { ok: true, messageTexts: texts }
+      }
+      if (op === 'usage') {
+        // PF-3 顺带：全量 usage 结果 30s TTL（与 listCache 同款，删除/gc 后
+        // 由调用点失效）——ManageCard 每次 refresh 都重算的话，枚举再快
+        // 也是白付。仅缓存无 sessionId 的全量分支（client 唯一调用形态；
+        // 单工作区分支无调用方，不值得引入 key 维度）。
+        if (!sessionId && usageCache.payload && Date.now() - usageCache.at < 30000) {
+          return usageCache.payload
+        }
+        let bytes = 0
+        let homeStores = 0
+        let fallbackStores = 0
+        if (sessionId) {
+          const root = await rt.resolveRoot(sessionId)
+          if (!root) return { ok: false, code: E.RECALL_NO_ROOT, message: '无法解析当前工作区' }
+          const store = state.stores.get(root)
+          if (!store) return { ok: false, code: E.RECALL_NO_STORE, message: '当前工作区尚未创建快照存储' }
+          if (store.home) homeStores++
+          else fallbackStores++
+          const out = await rt.runShell(rt.scripts.diskUsageScript(store.dir), { stdoutMaxBytes: 4096 })
+          bytes = parseInt(rt.scripts.stripBom(out).trim(), 10) || 0
+        } else {
+          // PF-3 顺带：多 store 并行——读操作不碰 index.lock，但为防极端
+          // 磁盘争抢仍走 runLimited（并发 4）而不是裸 Promise.all；单 store
+          // 失败跳过的既有语义不变。
+          const knownStores = Array.from(state.stores.values()).filter((s) => s && s.dir)
+          const perStore = new Map()
+          await runLimited(knownStores.map((store) => async () => {
+            try {
+              const out = await rt.runShell(rt.scripts.diskUsageScript(store.dir), { stdoutMaxBytes: 4096 })
+              perStore.set(store.dir, parseInt(rt.scripts.stripBom(out).trim(), 10) || 0)
+            } catch (error) { /* 单 store 失败跳过 */ }
+          }), 4)
+          for (const store of knownStores) {
+            if (store.home) homeStores++
+            else fallbackStores++
+            bytes += perStore.get(store.dir) || 0
+          }
+        }
+        // ok: true 显式标注：无上下文时对象字面量 true 会宽化为 boolean，
+        // 与 usageCache.payload 的 { ok: true } 契约类型不匹配（TS 字面量宽化）
+        const payload: { ok: true; bytes: number; gitAvailable: boolean; homeStores: number; fallbackStores: number } = { ok: true, bytes, gitAvailable: state.gitExe !== '', homeStores, fallbackStores }
+        if (!sessionId) {
+          usageCache.at = Date.now()
+          usageCache.payload = payload
+        }
+        return payload
+      }
+      if (op === 'delete') {
+        const scope = args && args.scope ? String(args.scope) : 'snapshot'
+        const root = args && args.root ? String(args.root) : null
+        const targetSessionId = args && args.sessionId ? String(args.sessionId) : null
+        const id = args && args.messageId ? String(args.messageId) : ''
+        if (scope === 'workspace') {
+          if (!root) return { ok: false, code: E.RECALL_NO_ROOT, message: '缺少工作区路径' }
+          // 列表缓存空时这一步要全量 dump——失败必须报错，不能删掉 0 条还回 ok
+          let deleted: number
+          try { deleted = await deleteSnapshotsByFilter((rec) => rec.root === root, sessionId) } catch (error) { return dumpFailed() }
+          return { ok: true, deleted }
+        }
+        if (scope === 'session') {
+          if (!targetSessionId) return { ok: false, code: E.RECALL_NO_SESSION, message: '缺少会话 ID' }
+          // 树形中会话挂在具体工作区下，客户端会传 root 限定范围；不传则保持
+          // 旧语义（删该会话全部工作区的快照），兼容老调用方。
+          let deleted: number
+          try {
+            deleted = await deleteSnapshotsByFilter(
+              (rec) => rec.sessionId === targetSessionId && (!root || rec.root === root),
+              sessionId
+            )
+          } catch (error) { return dumpFailed() }
+          return { ok: true, deleted }
+        }
+        // 管理列表来自磁盘（跨工作区全量），而内存 state.snapshots 只含当前
+        // 工作区 + 预热过的——冷启动时列表里有、内存里没有，只查内存会误报
+        // 「不存在」。解析链：内存命中 → Client 透传的条目 root → 磁盘 index 反查。
+        let snap = state.snapshots.get(id) || null
+        let snapRoot = snap ? snap.root : root
+        let store: StoreInfo | null = null
+        if (snapRoot) {
+          // 解析失败按无 store：下落 locateSnapshotOnDisk 磁盘兜底链
+          try { store = await rt.resolveStore(snapRoot) } catch (error) { store = null }
+        }
+        if (!store) {
+          // 兜底：扫 home 容器与降级目录的 index.json，找到含该 id 的 store
+          const found = await locateSnapshotOnDisk(id)
+          if (found) { store = found.store; snapRoot = found.root }
+        }
+        if (!store) return { ok: false, code: E.RECALL_NO_SNAPSHOT, message: '该快照不存在' }
+        // A3：格式守卫——拒写态下拒绝删除并给出可行动提示（code 供 client 渲染）
+        if (!(await snaps.guardStoreFormat(store))) {
+          return { ok: false, code: E.RECALL_FORMAT_BLOCKED, message: '磁盘格式不受支持，已停止写入；详见「最近错误」' }
+        }
+        const finalStore = store
+        // 非空断言：store 非 null 只能来自 resolveStore(snapRoot)（snapRoot 非 null
+        // 才会尝试）或 locateSnapshotOnDisk（同时给出 root: string）——两条路径
+        // store 非 null 时 snapRoot 必非 null
+        const finalRoot = snapRoot!
+        await enqueueFor(finalRoot, async () => {
+          if (state.gitExe) {
+            await rt.runShell(rt.scripts.purgeTagsScript(finalStore, state.gitExe, ['snap-' + id]), { timeoutMs: 120000, stdoutMaxBytes: 4096 })
+          }
+          // 兜底路径到这里时内存可能还没载入过该 root 的索引——先 loadIndex
+          // 补齐内存视图，再删目标条目后重写，避免用残缺内存覆盖同 store
+          // 其余磁盘快照。
+          if (!state.indexLoaded.has(finalRoot)) {
+            try { await snaps.loadIndex(finalRoot, sessionId) } catch (error) { /* 载入失败照常重写，退化为旧行为 */ }
+          }
+          state.snapshots.delete(id)
+          await snaps.saveIndex(finalRoot, sessionId)
+          // 列表缓存失效：Client 删除后会立刻 refresh，必须看到最新状态
+          listCache.items = null
+          usageCache.payload = null
+        })
+        return { ok: true }
+      }
+      if (op === 'deleteAll') {
+        // 「全部删除」把枚举到的磁盘仓当目标：dump 失败时继续等于「知道几个删几个」
+        // 却回成功，必然漏删——直接报错让用户重试
+        let result: Awaited<ReturnType<typeof deleteAllSnapshots>>
+        try { result = await deleteAllSnapshots() } catch (error) { return dumpFailed() }
+        if (result.failed > 0) {
+          return {
+            ok: false,
+            code: E.RECALL_PARTIAL_DELETE,
+            deleted: result.deleted,
+            message: result.message || ('已删除 ' + result.deleted + ' 条快照，但有 ' + result.failed + ' 个存储未完成；请查看最近错误后重试')
+          }
+        }
+        return { ok: true, deleted: result.deleted, stores: result.stores }
+      }
+      if (op === 'gc') {
+        // 带会话上下文：只 gc 该会话的工作区；无上下文（设置卡片）：全部已知
+        // store 逐个 gc。两者都排进串行队列，与快照互斥。
+        const done = sessionId
+          ? await enqueueFor(await rt.resolveRoot(sessionId), () => maint.runGc(sessionId, true))
+          : await enqueueMany(Array.from(state.stores.keys()), () => maint.runGcAll())
+        // gc 后占用显著下降：立即失效占用缓存，设置页 refresh 必须看到新值
+        usageCache.payload = null
+        return { ok: true, gc: Boolean(done) }
+      }
+      if (op === 'lineage') {
+        // F1 / PF-4：返回全部已知工作区的 fork lineage（childId ↔ parentId
+        // 撤回链），供快照管理树聚族。原实现对每个 root 串行 loadLineage
+        // （每 root 一条进程，20 工作区 ≈ 10s，版本家族标记最后才亮）——
+        // LINEAGE 段并入 storesDump 后一次 dump 全拿，零新增进程。dump 的
+        // ==DIR 就是磁盘 store 目录（比 roots 全集更全，还免去对未知 root
+        // resolveStore 建目录的副作用）；无 LINEAGE 段的旧输出按空 lineage
+        // 处理（parseStoresDump 容错）。
+        const hints = new Map()
+        for (const [root, st] of state.stores.entries()) {
+          if (st && st.dir) hints.set(st.dir, root)
+        }
+        let dump
+        // dump 失败按空 lineage：树退化为无版本家族标记，不阻断列表
+        try { dump = await dumpStores() } catch (error) { dump = new Map() }
+        const out = []
+        for (const info of dump.values()) {
+          for (const e of info.lineage || []) out.push(e)
+        }
+        return { ok: true, lineage: out }
+      }
+      return { ok: false, code: E.RECALL_UNKNOWN_OP, message: '未知的管理操作: ' + op }
+    },
+
+    // 设置页「插件配置」卡片恢复默认：整段清空 user 层回组合 base——官方
+    // settings RPC 的 replace 明确是「restoration/reset 路径」。老版本服务
+    // 没有 replace 时降级 settings.update 写 DEFAULTS。
+    // ↳ 接缝适配 ④：实现改为删除 config.json（clearConfigFile），理由见下方注释。
+    'config-reset': async (): Promise<ConfigResetResponse> => {
+      // 接缝适配 ④：恢复默认 = 删掉用户层文件（原实现 settings.replace(ns, {}) /
+      // update(ns, DEFAULTS)）。删文件后 readSettings 重算得到「组合 base +
+      // DEFAULTS」——精确等价原 replace 的「清空 user 层、回组合 base」语义，
+      // 同时保留 env 覆盖（DSH_RECALL_GC_SNAPS/HOURS）的最高优先级（createConfig
+      // 的既有语义，未改；用 DEFAULTS 硬写反而会把 env 调过的档位抹平）。
+      const cleared = clearConfigFile()
+      if (!cleared.ok) {
+        return { ok: false, code: E.RECALL_SETTINGS_WRITE_FAILED, message: '恢复默认失败：' + cleared.message }
+      }
+      // 重置后热更运行中的 cfg（原来靠 settings watch 的 onChange，现在由活
+      // 绑定重算，效果一致且不依赖 settings 面是否可用）
+      applyResolvedConfig(readSettings())
+      // 与 config-set 同理：列表保守标 stale，下次打开后台重拉
+      listCache.stale = true
+      return { ok: true }
+    }
+  }
+}

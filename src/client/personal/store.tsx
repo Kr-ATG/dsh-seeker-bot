@@ -34,6 +34,7 @@ import {
 } from './engine.ts'
 import { resolveRoomTrigger } from './room-trigger.ts'
 import { shouldStartNext } from './room-queue.ts'
+import { BOT_ROSTER_EVENT } from '../triad/hub/memory-bot-source.tsx'
 import {
   createInitialState,
   createMainBot,
@@ -2364,6 +2365,14 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state, (key, value) => (
           key === 'mergedSegments' || key === 'pagesByBot' ? undefined : value
         )))
+        /*
+         * 名册变了要通知侧栏（2026-11）：操作间 → 记忆的二级菜单里有一组
+         * 「Bot」子项，它读的就是这份 localStorage。侧栏是常驻组件、不会
+         * 因为 Bot 模式开关而重新挂载，所以必须有一条显式通道——否则新建
+         * 一个 Bot 之后，切回 Work 的记忆菜单里要等到下次刷新才出现它。
+         * 事件在 setItem 之后发：监听方重读时拿到的已是新值。
+         */
+        window.dispatchEvent(new Event(BOT_ROSTER_EVENT))
       } catch {
         /* 配额满：只影响持久化 */
       }

@@ -69,11 +69,14 @@ import { PshBody, PopoverShell } from '../popover-shell.js'
 import { PAGE_MOTION_IN } from '../../motion/overlay-motion.js'
 import { markReadIds, markViewed, readIds } from './Notify.js'
 import {
+  isBotMemoryScope,
+  memoryOwnerOf,
   readMemoryScope,
   requestMemoryScope,
   subscribeWorkbenchIntent,
   type MemoryScopeIntent,
 } from '../hub/workbench-intent.js'
+import { BotGroupIcon, botsToChildren, readBotRoster, subscribeBotRoster } from '../hub/memory-bot-source.js'
 import { setNavEntryActiveChild, setNavEntryChildren } from '../hub/nav-registry.js'
 
 /**
@@ -96,8 +99,13 @@ type ViewState =
   | { readonly status: 'error' }
   | { readonly status: 'ready'; readonly snapshot: MemoryListResponse }
 
-/** 项目筛选值：all | global | project:<hash>。 */
-type ScopeFilter = 'all' | 'global' | `project:${string}`
+/**
+ * 作用域筛选值（与侧栏二级菜单的 `MemoryScopeIntent` 同一套取值）。
+ *
+ * 2026-11 起多了归属维度：`'bots'` 全部 Bot、`bot:<id>` 某个 Bot。页面
+ * 内部不再自己定义一份枚举——两处各写一份迟早漂移（侧栏能写出一个页面不认的值）。
+ */
+type ScopeFilter = MemoryScopeIntent
 
 /** 变更 Tab 的时间范围。 */
 type ChangeRange = 'today' | 'all'
@@ -428,6 +436,14 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
   const [tag, setTag] = useState('')
   const [state, setState] = useState<ViewState>({ status: 'loading' })
   const [allTags, setAllTags] = useState<Array<{ tag: string; count: number }>>([])
+  /**
+   * Bot 名册（侧栏「记忆 → Bot」子项与条目来源徽章共用）。
+   *
+   * 名册在 Personal Agent 的 localStorage 里，Work 模式同源可读；Bot 模式落盘
+   * 会广播 `pa:state-changed`，这里订阅后重读——页面开着时新建 Bot 也能立刻
+   * 在菜单里出现（见 hub/memory-bot-source.tsx 的说明）。
+   */
+  const [botRoster, setBotRoster] = useState(() => readBotRoster())
   // 无筛选的活跃条目集（分类 / 项目计数的本地口径来源）。
   const [activePool, setActivePool] = useState<MemoryEntryView[] | null>(null)
   const [summary, setSummary] = useState<MemorySummaryResponse | null>(null)
@@ -494,6 +510,17 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
    * 不会重渲染，但值比较的语义比依赖 setState 的 bailout 更明确、更省一次
    * 全链路 diff。
    */
+  /**
+   * 当前归属过滤值（`work` / `bots` / `bot:<id>`）与「是否 Bot 归属视图」。
+   *
+   * ⚠ **必须定义在所有使用它的 effect 之前**：effect 的依赖数组在**渲染期**求值，
+   * 如果这两个常量定义在后面，渲染会直接抛
+   * `ReferenceError: Cannot access 'botScope' before initialization`（TDZ）——
+   * 整个记忆页白屏、工作台卸载。2026-11-04 实测踩过，别再往下挪。
+   */
+  const ownerFilter = memoryOwnerOf(scope)
+  const botScope = isBotMemoryScope(scope)
+
   const scopeRef = useRef(scope)
   scopeRef.current = scope
 
@@ -539,20 +566,37 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
     if (options.silent !== true) setState({ status: 'loading' })
     setError('')
     try {
-      const scopeParam = scope === 'all' ? undefined : scope === 'global' ? 'global' : 'project'
-      const projectParam = scope.startsWith('project:') ? scope.slice('project:'.length) : undefined
+      /*
+       * 归属（owner）与范围（scope）是两个正交维度：
+       *   · Work 侧作用域（all / global / project:<hash>）→ owner 恒为 'work'，
+       *     范围参数照旧；
+       *   · Bot 侧作用域（bots / bot:<id>）→ owner 传下去，**范围参数一律不带**：
+       *     Bot 的记忆只在自己的库里，再按工作区切没有意义（所有 Bot 共用同一个
+       *     工作目录，projectHash 对它们完全相同）。
+       * 不传 owner 时 host 不过滤——这正是改造前 Bot 记忆混进 Work 列表的原因，
+       * 所以这里必须显式传。
+       */
+      const botScope = isBotMemoryScope(scope)
+      const owner = memoryOwnerOf(scope)
+      const scopeParam = botScope
+        ? undefined
+        : scope === 'all' ? undefined : scope === 'global' ? 'global' : 'project'
+      const projectParam = !botScope && scope.startsWith('project:')
+        ? scope.slice('project:'.length)
+        : undefined
       // 当前这次请求本身就是「无筛选」时，list 即条目全集，不必再拉一遍。
       const unfiltered = scopeParam === undefined && projectParam === undefined
         && tag === '' && debouncedQ === ''
       const [list, poolRes] = await Promise.all([
         current.list({
+          owner,
           scope: scopeParam,
           project: projectParam,
           q: debouncedQ !== '' ? debouncedQ : undefined,
           tag: tag !== '' ? tag : undefined,
           includeDeprecated: true,
         }),
-        unfiltered ? Promise.resolve(null) : current.list({ includeDeprecated: true }),
+        unfiltered ? Promise.resolve(null) : current.list({ owner, includeDeprecated: true }),
       ])
       const pool = (unfiltered ? list.entries : poolRes?.entries ?? []).filter(entry => entry.deprecated !== true)
       setState({ status: 'ready', snapshot: list })
@@ -741,6 +785,24 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
     )
   }, [])
 
+  // Bot 名册变化（Bot 模式新建/改名/删除、或另一个标签页改了名册）时重读。
+  // 页面挂着不动，只换菜单与徽章里的名字，不触发列表重拉。
+  useEffect(() => subscribeBotRoster(() => { setBotRoster(readBotRoster()) }), [])
+
+  /*
+   * 当前选中的 Bot 已被删除 → 回落「全部工作区」。
+   *
+   * 只在**名册非空且确实不含它**时才回落：名册读不到（隐私模式 / 从没进过
+   * Bot 模式）时长度为 0，那种情况下回落会把用户莫名其妙踢回 Work。
+   * 不回落的话，页面会停在一个空列表上，而侧栏里已经没有这一项可点回来。
+   */
+  useEffect(() => {
+    if (!botScope || scope === 'bots') return
+    if (botRoster.length === 0) return
+    if (botRoster.some(bot => `bot:${bot.id}` === scope)) return
+    changeScope('all')
+  }, [botScope, scope, botRoster])
+
   // 切项目时清空别名草稿：草稿是「当前选中项目」的编辑态，跟着筛选一起复位。
   useEffect(() => { setAliasDraft(null) }, [scope])
 
@@ -860,7 +922,13 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
       .catch(() => { setError(t('copyContent')) })
   }
 
-  /** 一键整理（Memory Dream）：当前筛选为某项目时只整理该项目，否则全量。 */
+  /**
+   * 一键整理（Memory Dream）：当前筛选为某项目时只整理该项目，否则全量。
+   *
+   * 2026-11 起还要带归属：Bot 视图下只整理这台 Bot 的记忆。不带的话宿主会
+   * 把 Work 与其它 Bot 的条目混进同一批 LLM 决策，跨归属的相似条目可能被合并
+   * 成一条（整理器按「语义相似」合并，不看归属）。
+   */
   const handleConsolidate = (): void => {
     askConfirm(t('consolidateConfirm'), () => {
       setConsolidating(true)
@@ -871,7 +939,7 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
             ? 'global'
             : scope.startsWith('project:') ? 'project' : 'all'
           const hash = scope.startsWith('project:') ? scope.slice('project:'.length) : undefined
-          const response = await apiRef.current.consolidate(target, hash)
+          const response = await apiRef.current.consolidate(target, hash, ownerFilter)
           const changed = response.results.reduce((sum, result) => sum + result.changed, 0)
           // 失败原因走 error 条（role=alert、持久可见），不再把失败误报成「无需整理」；
           // 部分成功（如 global 完成、project 超时）时并存：error=失败原因，notice=完成数。
@@ -922,6 +990,12 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
         content: addContent.trim(),
         scope: addScope,
         projectHash: addScope === 'project' ? addProject : undefined,
+        /*
+         * 在谁的视图里添加，就记到谁名下（Bot 设置卡的记忆区同口径）。
+         * `bots` 聚合视图写不了：它不是一个具体归属，saveAdd 已在那条路径上
+         * 拦住并提示先选一个 Bot。
+         */
+        owner: ownerFilter === 'bots' ? undefined : ownerFilter,
         tags: splitTags(addTags),
         pinned: addPinned,
         importance: 8,
@@ -939,6 +1013,11 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
   const saveAdd = (): void => {
     const content = addContent.trim()
     if (content === '') return
+    // 「全部 Bot」是聚合视图，不是具体归属：在这里添加没法决定记到哪台 Bot 名下。
+    if (ownerFilter === 'bots') {
+      setError('「全部 Bot」是聚合视图：请先在侧栏选一台具体 Bot，再添加记忆')
+      return
+    }
     if (addScope === 'project' && addProject === '') {
       setError(t('selectProject'))
       return
@@ -1064,6 +1143,13 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
   // ── 渲染数据 ─────────────────────────────────────────────────────────
 
   const snapshot = state.status === 'ready' ? state.snapshot : null
+  /** `bot:<id>` → Bot 名（名册里没有的 → undefined，由调用方兜底显示 id）。 */
+  const botNameById = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const bot of botRoster) map.set(`bot:${bot.id}`, bot.name)
+    return map
+  }, [botRoster])
+  const botNameOf = (owner: string): string | undefined => botNameById.get(owner)
   /** 项目列表：计数按活跃条目重算（见 countTagsFromEntries 处的口径说明）。 */
   const projects: ProjectView[] = useMemo(
     () => (activePool === null ? snapshot?.projects ?? [] : recountProjects(snapshot?.projects ?? [], activePool)),
@@ -1113,8 +1199,33 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
         icon: WorkspaceIcon,
         run: () => { requestMemoryScope(`project:${project.hash}` as MemoryScopeIntent) },
       })),
+      /*
+       * Bot 分组（2026-11）：与工作区并列的第二个维度。空名册返回空数组，
+       * 从没进过 Bot 模式的用户不会看到一行点开全空的「Bot」。
+       * 页面这份与侧栏自带那份（hub/nav-sections.tsx 的 pushMemoryChildren）
+       * 同源同结构，后写的赢——页面手上有更准的工作区计数，名册两边一致。
+       */
+      ...botsToChildren(botRoster, BotGroupIcon),
     ])
-  }, [projects])
+  }, [projects, botRoster])
+
+  /**
+   * Bot 视图下的计数（替代 `/summary` 的全量数字）。
+   *
+   * `/summary` 是**全库**口径（不分 owner），而 Bot 视图只显示一台 Bot 的记忆。
+   * 直接用它会得到「顶部写 1200 条、列表只有 8 条」这种自相矛盾的界面。这里
+   * 用当前已加载的活跃条目集现算——数据源就是列表本身，数字与列表永远一致。
+   * Work 视图仍用 summary（它有全库口径，且不受当前分页/搜索影响）。
+   */
+  const ownerStats = useMemo(() => {
+    if (!botScope) return null
+    const pool = activePool ?? []
+    return {
+      entries: pool.length,
+      pinned: pool.filter(entry => entry.pinned && entry.pending !== true).length,
+      deprecated: (state.status === 'ready' ? state.snapshot.entries : []).filter(entry => entry.deprecated === true).length,
+    }
+  }, [botScope, activePool, state])
 
   /** 当前视图的条目集（回收站=只保留已废弃；其余视图=只保留活跃条目）。 */
   const filtered = useMemo(() => {
@@ -1149,8 +1260,20 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
     () => groupEntries(ordered.filter(entry => !entry.pinned && entry.pending !== true)),
     [ordered],
   )
-  // 变更按当前 全部/全局/项目 筛选（chips 选择即时生效）。
+  // 变更按「归属 + 范围」筛选（chips 选择即时生效）。
+  //
+  // 归属在前：Work 视图只看 work 的变更，Bot 视图只看该 Bot 的，`bots` 聚合看
+  // 全部 Bot 的。旧 host 不回 owner（升级前落盘的记录）→ 按 work 兜底，与
+  // `ownerOf()` 的缺省语义一致，不会因为字段缺失把老记录全筛掉。
   const visibleChanges = useMemo(() => changes.filter(change => {
+    const owner = change.owner ?? 'work'
+    if (ownerFilter === 'bots') {
+      if (!owner.startsWith('bot:')) return false
+    } else if (owner !== ownerFilter) {
+      return false
+    }
+    // 范围维度只在 Work 侧有意义：Bot 的记忆不按工作区切（共用同一工作目录）。
+    if (ownerFilter !== 'work') return true
     if (scope === 'global') return change.scope === 'global'
     if (scope.startsWith('project:')) {
       return change.scope === 'project' && change.projectHash === scope.slice('project:'.length)
@@ -1159,7 +1282,7 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
   }).filter(change => {
     if (changeRange === 'today') return change.at.slice(0, 10) === (summary?.today ?? '')
     return true
-  }), [changes, scope, changeRange, summary])
+  }), [changes, scope, changeRange, summary, ownerFilter])
 
   /** 当前页渲染的变更（visibleChanges 的前 changeLimit 条）。 */
   const shownChanges = useMemo(
@@ -1238,14 +1361,25 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
     }).length
   }, [activePool, state, scope])
 
-  /** 一键删除今日记忆（跟随当前范围筛选；置顶与已废弃条目保留）。 */
+  /**
+   * 一键删除今日记忆（跟随当前范围与归属筛选；置顶与已废弃条目保留）。
+   *
+   * owner 必须显式传：宿主侧这条路由原本只按 scope/projectHash 过滤，Bot 视图
+   * 下不带归属会把 Work 与其它 Bot 的今日记忆一起删掉。
+   */
   const handleDeleteToday = (): void => {
     if (todayCount === 0) return
-    const target: { scope?: 'global' | 'project'; projectHash?: string } = scope === 'global'
-      ? { scope: 'global' }
-      : scope.startsWith('project:')
-        ? { scope: 'project', projectHash: scope.slice('project:'.length) }
-        : {}
+    const target: { scope?: 'global' | 'project'; projectHash?: string; owner?: string } = {
+      // Bot 视图不按 scope 切（宿主侧 owner 过滤已经收窄到这台 Bot 的全部条目）。
+      ...(botScope
+        ? {}
+        : scope === 'global'
+          ? { scope: 'global' as const }
+          : scope.startsWith('project:')
+            ? { scope: 'project' as const, projectHash: scope.slice('project:'.length) }
+            : {}),
+      owner: ownerFilter,
+    }
     askConfirm(
       t('deleteTodayConfirm', { n: todayCount }),
       () => {
@@ -1302,8 +1436,21 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
     [related, detail],
   )
 
-  /** 变更导航计数：优先全量 changeCount，旧 host 无该字段时回落 todayChanges。 */
-  const changeCount = summary?.changeCount ?? summary?.todayChanges ?? 0
+  /**
+   * Bot 视图下的变更数（按归属过滤）。
+   *
+   * `/changes` 不接受 owner 参数（变更流是全量文件），所以聚合视图与单 Bot
+   * 视图都在客户端按 `change.owner` 过滤——与「变更」页的 `visibleChanges`
+   * 同一口径，页签上的数字和点进去看到的条数不会对不上。
+   */
+  const ownerChangeCount = botScope
+    ? changes.filter(change => {
+        const owner = change.owner ?? 'work'
+        return ownerFilter === 'bots' ? owner.startsWith('bot:') : owner === ownerFilter
+      }).length
+    : null
+  /** 变更导航计数：Bot 视图用归属口径；Work 视图优先全量 changeCount，旧 host 回落 todayChanges。 */
+  const changeCount = ownerChangeCount ?? summary?.changeCount ?? summary?.todayChanges ?? 0
   /** 项目总数：与下面列出的项目行同源（含零记忆的 DSH 工作区）。 */
   const projectTotal = projects.length > 0 ? projects.length : (summary?.projectCount ?? 0)
 
@@ -1360,12 +1507,29 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
   }
 
   /** 作用域小徽章（列表行内）。 */
-  const renderScopeChip = (entry: MemoryEntryView): JSX.Element => (
-    <span className={css.entryChip} title={t('scopeBadgeTitle')}>
-      {entry.scope === 'global' ? <GlobeIcon size={9} /> : <FolderIcon size={9} />}
-      {entry.scope === 'global' ? t('scopeGlobal') : projectName(entry.projectHash, projects)}
-    </span>
-  )
+  const renderScopeChip = (entry: MemoryEntryView): JSX.Element => {
+    const owner = entry.owner ?? 'work'
+    /*
+     * 来源徽章只在「聚合视图」里出现：单台 Bot 的资料库里每条都是它的，标出来
+     * 是噪音；而 `bots` 聚合视图混着多台 Bot，必须让人一眼看出这条是谁的
+     * （与 Bot 设置卡里主 Bot 的资料库同口径）。
+     */
+    const showOwner = ownerFilter === 'bots' && owner.startsWith('bot:')
+    return (
+      <>
+        <span className={css.entryChip} title={t('scopeBadgeTitle')}>
+          {entry.scope === 'global' ? <GlobeIcon size={9} /> : <FolderIcon size={9} />}
+          {entry.scope === 'global' ? t('scopeGlobal') : projectName(entry.projectHash, projects)}
+        </span>
+        {showOwner && (
+          <span className={css.entryChip} title={`来自 ${botNameOf(owner) ?? owner}`}>
+            <BotGroupIcon size={9} />
+            {botNameOf(owner) ?? owner.slice('bot:'.length)}
+          </span>
+        )}
+      </>
+    )
+  }
 
   /**
    * 记忆卡片（2026-10 重做的核心）。
@@ -1624,6 +1788,16 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
         {entry.scope === 'global' ? <GlobeIcon /> : <FolderIcon />}
         {entry.scope === 'global' ? t('scopeGlobal') : projectName(entry.projectHash, projects)}
       </span>
+      {/*
+        归属 chip（2026-11）：只在条目属于某台 Bot 时出现。Work 条目不带——
+        「Work」是默认归属，每条都标一个默认值等于噪音。
+      */}
+      {(entry.owner ?? 'work').startsWith('bot:') && (
+        <span className={css.chipMute} title={`归属：${botNameOf(entry.owner ?? '') ?? entry.owner}`}>
+          <BotGroupIcon size={11} />
+          {botNameOf(entry.owner ?? '') ?? (entry.owner ?? '').slice('bot:'.length)}
+        </span>
+      )}
       {entry.source === 'manual'
         ? <span className={css.chipAccent}><PenIcon />{t('sourceManual')}</span>
         : <span className={css.chipMute}><SparkIcon />{t('sourceExtract')}</span>}
@@ -1996,6 +2170,47 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
     : undefined
 
   /**
+   * 顶栏归属徽章（2026-11）。
+   *
+   * 回答的是「我现在看的这一批记忆属于谁」——Bot 记忆上线后，同一页会呈现
+   * 两种完全不同的归属，而列表/详情的外观是一样的。没有这个徽章，用户进了
+   * 某台 Bot 的资料库之后没有任何视觉信号，容易把 Bot 的记忆当成自己的改。
+   *
+   * 点一下回到 Work 的全部工作区：进了 Bot 视图后需要一个不用回侧栏的出口。
+   */
+  const ownerBadgeEl = ((): JSX.Element => {
+    const botView = ownerFilter !== 'work'
+    const ownerLabel = ownerFilter === 'bots'
+      ? '全部 Bot'
+      : ownerFilter.startsWith('bot:')
+        ? (botNameOf(ownerFilter) ?? ownerFilter.slice('bot:'.length))
+        : 'Work'
+    const scopeLabel = botView
+      ? (ownerFilter === 'bots' ? '聚合视图' : '个人资料库')
+      : scope === 'all'
+        ? '全部工作区'
+        : scope === 'global'
+          ? '全局记忆'
+          : projectName(scope.slice('project:'.length), projects)
+    return (
+      <button
+        type="button"
+        className={css.ownerBadge}
+        data-bot={botView ? 'true' : undefined}
+        title={botView
+          ? `当前归属：${ownerLabel}（${scopeLabel}）· 点击回到 Work 全部工作区`
+          : `当前归属：Work（${scopeLabel}）`}
+        onClick={() => { if (botView) changeScope('all') }}
+      >
+        {botView ? <BotGroupIcon size={13} /> : <GlobeIcon size={13} />}
+        <span className={css.ownerBadgeLabel}>{ownerLabel}</span>
+        <span className={css.ownerBadgeSep} aria-hidden="true">·</span>
+        <span className={css.ownerBadgeScope}>{scopeLabel}</span>
+      </button>
+    )
+  })()
+
+  /**
    * 顶栏视图分段控件的一项。
    *
    * 2026-10-25 第三次重做：这些视图原本长在页内左侧栏里（第二轮重做时从
@@ -2083,16 +2298,19 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
                 最右侧、与「3 条记忆 · 置顶 · 添加」贴成一团）。它承担的是整页
                 导航，视觉权重应该压过下面那排筛选。 */}
             <div className={css.viewTabs} role="tablist" aria-label={t('panelTitle')}>
-              {viewTab('all', t('navAll'), summary?.entryCount ?? 0, t('hintActive'))}
+              {viewTab('all', t('navAll'), ownerStats?.entries ?? summary?.entryCount ?? 0, t('hintActive'))}
               {viewTab('changes', t('tabChanges'), changeCount, t('hintAllChanges'))}
               {viewTab('revisions', t('tabRevisions'), revisions.length, t('hintRevisions'))}
-              {viewTab('trash', t('navTrash'), summary?.deprecatedCount ?? 0, t('hintDeprecated'))}
+              {viewTab('trash', t('navTrash'), ownerStats?.deprecated ?? summary?.deprecatedCount ?? 0, t('hintDeprecated'))}
               {/* 设置是低频入口：推到行尾，与前面四个视图拉开距离 */}
               {viewTab('settings', t('tabSettings'), null, undefined, true)}
             </div>
 
-            {/* ── 第二行：搜索 + 分类 + 统计 + 主按钮 ── */}
+            {/* ── 第二行：归属 + 搜索 + 分类 + 统计 + 主按钮 ── */}
             <div className={css.viewRow}>
+              {/* 归属徽章：Bot 视图时变主色，点一下回 Work。放最左是因为它回答
+                  「这批记忆是谁的」——比搜索更靠前的问题。 */}
+              {ownerBadgeEl}
               {/* 搜索框（胶囊容器 + 聚焦光晕 + 内容清除键）。
                   只有能搜索的视图才给：变更/修订/首页/设置里输入框无处生效，
                   摆一个打了字没反应的框比没有更让人困惑。 */}
@@ -2126,18 +2344,23 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
 
               <div className={css.topActions}>
                 <div className={css.topStats}>
-                  {summary !== null && (
+                  {/*
+                    统计数字的归属口径：Bot 视图用当前归属的现算值（ownerStats），
+                    Work 视图沿用 /summary 的全库值。两个来源不会同时显示——bot 视图
+                    下 summary 仍是全库数，混着用就是自相矛盾的数字。
+                  */}
+                  {(ownerStats !== null || summary !== null) && (
                     <>
                       <span className={css.topStat}>
-                        <span className={css.topStatVal}>{summary.entryCount}</span>
+                        <span className={css.topStatVal}>{ownerStats?.entries ?? summary?.entryCount ?? 0}</span>
                         {t('statEntries')}
                       </span>
-                      {summary.pinnedCount !== undefined && (
+                      {(ownerStats !== null || summary?.pinnedCount !== undefined) && (
                         <>
                           <span className={css.topStatSep}>·</span>
                           <span className={css.topStat} title={t('tabPinned')}>
                             <span className={css.topStatIcon} aria-hidden="true">★</span>
-                            <span className={css.topStatVal}>{summary.pinnedCount}</span>
+                            <span className={css.topStatVal}>{ownerStats?.pinned ?? summary?.pinnedCount ?? 0}</span>
                             {t('statPinnedShort')}
                           </span>
                         </>
@@ -2161,6 +2384,11 @@ export function MemoryPanel({ onClose, initialTab, embedded = false, t = makeT()
                       if (scope.startsWith('project:')) {
                         setAddScope('project')
                         setAddProject(scope.slice('project:'.length))
+                      } else if (botScope) {
+                        // Bot 视图没有「当前工作区」这回事：默认落到全局层，
+                        // 用户仍可在表单里改成项目层并选一个工作区。
+                        setAddScope('global')
+                        setAddProject('')
                       }
                     }
                   }}

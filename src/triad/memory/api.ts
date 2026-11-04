@@ -8,11 +8,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { URL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { rejectCrossSite } from '../../shared/csrf.ts'
-import { applyConfigOverrides, DEFAULT_CONFIG, publicConfig, type ConsolidateResult, type MemoryConfig, type MemoryEntry, type MemoryKind, type MemoryOwner } from './types.js'
+import { applyConfigOverrides, DEFAULT_CONFIG, publicConfig, type ConsolidateResult, type MemoryConfig, type MemoryEntry, type MemoryKind, type MemoryOwner, type OwnerFilter } from './types.js'
 import { compileAll } from './engine/compile.js'
 import { consolidateAll, consolidateScope } from './engine/consolidate.js'
 import { searchEntries } from './engine/retrieval.js'
-import { isWorkspacePathAlive, localDate, mergeTags, nowIso, ownerOf, projectHashOf, entryIdOf, summarize, type MemoryStore } from './engine/store.js'
+import { isDeletableToday, isWorkspacePathAlive, localDate, matchesOwner, mergeTags, nowIso, ownerOf, projectHashOf, entryIdOf, summarize, type MemoryStore } from './engine/store.js'
 
 /** Minimal service-shaped view of the webserver route register. */
 declare module '@deepseek-ai/cordis' {
@@ -69,6 +69,19 @@ interface EntryView {
   pending?: boolean
   /** 进入待确认状态的时间 ISO。 */
   pendingAt?: string
+}
+
+/**
+ * 解析 API 传入的 owner 过滤值：只认 `work` / `bots` / `bot:<id>`。
+ *
+ * 非法值一律当作「不传」而不是报错：旧调用方、面板的空串、将来的新字段都可能
+ * 出现在这里，静默不过滤的后果只是范围大了（还能救），而抛 400 会让整条操作
+ * 直接失败（用户点了「删除今日」什么也没发生，却看不出原因）。
+ */
+function parseOwnerFilter(value: unknown): OwnerFilter | undefined {
+  if (value === 'work' || value === 'bots') return value
+  if (typeof value === 'string' && value.startsWith('bot:') && value.length > 4) return value as MemoryOwner
+  return undefined
 }
 
 /** MemoryKind 取值校验（/update 的 kind 字段）。 */
@@ -640,9 +653,11 @@ async function handle(
         json(res, 200, { ok: true, alreadyGone: true })
         return
       }
+      // 删除路径：条目已从数组移除，反查不到 owner，必须用删除前的快照显式传入。
       await store.appendChange({
         action: 'delete',
         entryId,
+        owner: ownerOf(existing),
         scope: existing.scope,
         projectHash: existing.projectHash,
         summary: `删除：${summarize(existing.content)}`,
@@ -668,6 +683,8 @@ async function handle(
         await store.appendChange({
           action: 'delete',
           entryId: entry.id,
+          // 删除路径：同上，用 mutateEntries 返回的条目快照显式带出归属。
+          owner: ownerOf(entry),
           scope: entry.scope,
           projectHash: entry.projectHash,
           summary: `删除：${summarize(entry.content)}`,
@@ -683,22 +700,20 @@ async function handle(
       // 且未废弃的条目（口径与面板「今天」分组一致）。可选 scope/projectHash
       // 收窄范围（缺省=全局+全部项目）。置顶是用户显式标记的重要条目，批量
       // 删除时跳过（与 /delete-project 同款豁免）。
+      //
+      // 可选 owner（2026-11 补）：面板在某个 Bot 的视图里点「删除今日」，只该删
+      // 这个归属的今日条目——不加这道过滤会把 Work 与所有 Bot 的今日记忆一起清掉。
+      // 语义与 GET /list 一致（`bots` = 所有 Bot），不传 = 不过滤（旧行为不变）。
       const body = await readBody(req) as Record<string, unknown>
       const scope = body.scope === 'global' || body.scope === 'project' ? body.scope : undefined
       const projectHash = typeof body.projectHash === 'string' && body.projectHash.trim() !== ''
         ? body.projectHash.trim()
         : undefined
+      const owner = parseOwnerFilter(body.owner)
       const today = localDate()
       const removed = await store.mutateEntries(entries => {
-        const targets = entries.filter(entry => {
-          if (entry.pinned || entry.deprecated === true) return false
-          if (scope !== undefined && entry.scope !== scope) return false
-          if (scope === 'project' && projectHash !== undefined && entry.projectHash !== projectHash) return false
-          const stamp = entry.updatedAt ?? entry.createdAt
-          const time = Date.parse(stamp)
-          // updatedAt/createdAt 是 UTC ISO，用 localDate 换算成本地日期再比对。
-          return !Number.isNaN(time) && localDate(new Date(time)) === today
-        })
+        // 判定收在 store.isDeletableToday 里：唯一判据，回归测试直接断言它。
+        const targets = entries.filter(entry => isDeletableToday(entry, { today, scope, projectHash, owner }))
         for (const target of targets) entries.splice(entries.indexOf(target), 1)
         return targets
       })
@@ -706,6 +721,8 @@ async function handle(
         await store.appendChange({
           action: 'delete',
           entryId: entry.id,
+          // 删除路径：同上，用 mutateEntries 返回的条目快照显式带出归属。
+          owner: ownerOf(entry),
           scope: entry.scope,
           projectHash: entry.projectHash,
           summary: `删除今日：${summarize(entry.content)}`,
@@ -800,9 +817,11 @@ async function handle(
         if (existing === undefined) throw new Error(`记忆不存在：${entryId}`)
         throw new Error('该记忆不是待确认状态，拒绝操作被忽略（要删除已生效记忆请用 /delete）')
       }
+      // 拒绝是硬删（rejectPending 已把条目摘出数组）：归属只能从返回的条目上取。
       await store.appendChange({
         action: 'delete',
         entryId: entry.id,
+        owner: ownerOf(entry),
         scope: entry.scope,
         projectHash: entry.projectHash,
         summary: `拒绝待确认：${summarize(entry.content)}`,
@@ -870,6 +889,8 @@ async function handle(
         await store.appendChange({
           action: 'delete',
           entryId: entry.id,
+          // 删除路径：同上，用 mutateEntries 返回的条目快照显式带出归属。
+          owner: ownerOf(entry),
           scope: entry.scope,
           projectHash: entry.projectHash,
           summary: `清空项目：${summarize(entry.content)}`,
@@ -994,16 +1015,25 @@ async function handle(
 
     // ── 记忆整理（Memory Dream）与修订回滚 ─────────────────────────────
     if (method === 'POST' && rest === '/consolidate') {
+      /*
+       * 可选 owner（2026-11 补）：面板在某个 Bot 的记忆页点「整理」时只整理该归属。
+       *
+       * 不加这道过滤的后果是**跨 owner 合并**：整理集合原本只按 scope 切分，一个
+       * 批次里同时有 Work 与多个 Bot 的条目，LLM 把「两台 Bot 各记了一句相似的话」
+       * 合并成一条，合并产物落在第一条源条目的归属上——另一台 Bot 的记忆就此消失。
+       * 语义与 GET /list 一致（`bots` = 所有 Bot），不传 = 不过滤（旧行为不变）。
+       */
       const body = await readBody(req) as Record<string, unknown>
       const scopeRaw = typeof body.scope === 'string' ? body.scope : 'all'
+      const owner = parseOwnerFilter(body.owner)
       let results: ConsolidateResult[]
       if (scopeRaw === 'global') {
-        results = [await consolidateScope(ctx, store, config, 'global', 'manual')]
+        results = [await consolidateScope(ctx, store, config, 'global', 'manual', owner)]
       } else if (scopeRaw === 'project') {
         const projectHash = requireString(body.projectHash, 'projectHash')
-        results = [await consolidateScope(ctx, store, config, { projectHash }, 'manual')]
+        results = [await consolidateScope(ctx, store, config, { projectHash }, 'manual', owner)]
       } else {
-        results = await consolidateAll(ctx, store, config, 'manual')
+        results = await consolidateAll(ctx, store, config, 'manual', owner)
       }
       json(res, 200, { ok: true, results })
       return
@@ -1052,9 +1082,9 @@ async function listView(store: MemoryStore, params: URLSearchParams): Promise<{ 
     if (project !== null && project !== '' && entry.projectHash !== project) return false
     // owner 过滤是「子 Bot 只看自己 / 主 Bot 看全部」在面板侧的落点。
     // 特殊值 `bots` = 所有 Bot 的（主 Bot 资料库要一次列出全部子 Bot 并标注来源），
-    // 单个 `bot:<id>` 则精确匹配。`work` 与其它值走精确匹配。
-    if (owner !== null && owner !== '' && owner !== 'bots' && ownerOf(entry) !== owner) return false
-    if (owner === 'bots' && !ownerOf(entry).startsWith('bot:')) return false
+    // 单个 `bot:<id>` 则精确匹配。判据收在 store.matchesOwner（与 /delete-today、
+    // /consolidate 共用一份，避免前缀判断在三个入口分叉）。
+    if (owner !== null && owner !== '' && !matchesOwner(entry, owner)) return false
     if (tag !== null && tag !== '' && !entry.tags.includes(tag)) return false
     if (!includeDeprecated && entry.deprecated === true) return false
     return true

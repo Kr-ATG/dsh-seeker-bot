@@ -45,13 +45,25 @@ export const MEMORY_SCOPE_STORE = 'dsh-workbench-memory-scope'
 export const GALLERY_KIND_STORE = 'dsh-workbench-gallery-kind'
 
 /**
- * 记忆页的作用域筛选值。
+ * 记忆页的作用域筛选值（两个正交维度合成一个字符串）。
  *
  * 与 `memory/Panel.tsx` 内部的 `ScopeFilter` 同构（那边是面板私有类型，
- * 这里复制的是一份**通讯协议**而不是实现）：`'all'` 全部 / `'global'`
- * 全局记忆 / `project:<hash>` 某个工作区。
+ * 这里复制的是一份**通讯协议**而不是实现）。
+ *
+ * ── 维度一：范围（Work 侧）────────────────────────────────────────
+ *  · `'all'` 全部工作区 / `'global'` 全局记忆 / `project:<hash>` 某个工作区。
+ *
+ * ── 维度二：归属（2026-11 Bot 记忆上线后新增）──────────────────────
+ *  · `'bots'` 全部 Bot（主 Bot 聚合视图）；
+ *  · `bot:<botId>` 某一个 Bot 的资料库。
+ *
+ * 为什么合成一个字符串而不是拆成两个状态：侧栏二级菜单的**一项**只能写一个
+ * 意图（`NavChildDef.id` 是单值、持久化键也是单值），拆成两个字段会让「点一项
+ * 同时改两个维度」在持久化层出现两次写入、两条广播，页面侧还要自己定合并优先级。
+ * 归属是「更粗」的那一维：一旦选了 Bot，范围维度就让位（Bot 的记忆只在它自己的
+ * 库里，不再按工作区切），所以单值字符串足以表达，不需要笛卡尔积。
  */
-export type MemoryScopeIntent = 'all' | 'global' | `project:${string}`
+export type MemoryScopeIntent = 'all' | 'global' | `project:${string}` | 'bots' | `bot:${string}`
 
 /** 一条意图。判别式 `kind` 决定 payload 形状（加新意图就往这里加成员）。 */
 export type WorkbenchIntent =
@@ -132,13 +144,39 @@ function broadcast(intent: WorkbenchIntent): void {
 
 /* ───────────────────── 记忆：工作区（scope） ───────────────────── */
 
-/** 读当前记忆工作区（持久化回填，非法值回落 'all'）。 */
+/** 读当前记忆作用域（持久化回填，非法值回落 'all'）。 */
 export function readMemoryScope(): MemoryScopeIntent {
   const saved = readStored(MEMORY_SCOPE_STORE)
   if (saved === null) return DEFAULT_MEMORY_SCOPE
-  if (saved === 'all' || saved === 'global') return saved
+  if (saved === 'all' || saved === 'global' || saved === 'bots') return saved
   if (saved.startsWith('project:')) return saved as MemoryScopeIntent
+  // `bot:` 后面必须真的有 id：`'bot:'` 这种残值会让页面带着一个空归属去请求，
+  // 宿主侧 owner 匹配不到任何条目，表现为「列表永远空」而没有任何报错。
+  if (saved.startsWith('bot:') && saved.length > 'bot:'.length) return saved as MemoryScopeIntent
   return DEFAULT_MEMORY_SCOPE
+}
+
+/**
+ * 这个作用域是不是「Bot 归属」视图。
+ *
+ * 页面据此决定 owner 过滤口径：Bot 视图传 `bot:<id>` / `bots`，Work 视图传
+ * `work`。放在协议层而不是各调用方各写一遍 startsWith，是为了让「bots 聚合」
+ * 与「单个 bot」这两档的判定只有一个真相。
+ */
+export function isBotMemoryScope(scope: MemoryScopeIntent): boolean {
+  return scope === 'bots' || scope.startsWith('bot:')
+}
+
+/**
+ * 作用域 → 归属过滤值（host `/list?owner=` 的取值）。
+ *
+ * `'work'` 覆盖全部 Work 侧作用域（all / global / project:<hash>）——那三种都
+ * 是「Work 自己写的记忆按范围再切」，归属恒为 work。
+ */
+export function memoryOwnerOf(scope: MemoryScopeIntent): 'work' | 'bots' | `bot:${string}` {
+  if (scope === 'bots') return 'bots'
+  if (scope.startsWith('bot:')) return scope as `bot:${string}`
+  return 'work'
 }
 
 /** 请求记忆页切到某个工作区（写持久化 + 广播 + 通知）。 */

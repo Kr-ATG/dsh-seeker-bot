@@ -3741,6 +3741,23 @@ if (krEnabled) {
     reasons.push('记忆页内左栏样式（dsh-memory-sidebar-nav）必须整条删除')
   }
   if (/css\.sidebarNav/.test(memorySrc)) reasons.push('记忆页内左栏 DOM 必须整条删除（css.sidebarNav 不得再出现）')
+  /*
+   * 2026-11-04 用户报障：「这里怎么有个搜索按钮，放错位置了？」
+   *
+   * 根因不是多画了一个按钮，而是**定位锚点丢了**：放大镜
+   * .dsh-memory-top-search-icon 是 position:absolute; left:11px; top:50%，
+   * 父级 .dsh-memory-search-wrap 却是 position:static —— 图标于是相对于
+   * 更外层 .dsh-memory-modal-body（position:relative）定位，飘到侧栏右缘、
+   * 两条记忆条目之间，看起来就是一枚"放错位置的搜索按钮"。
+   *
+   * 这条钉住 search-wrap 必须建立包含块，删掉 position:relative 就会复现。
+   */
+  const searchWrapRule = /\.dsh-memory-search-wrap\s*\{([\s\S]*?)\}/.exec(memoryStylesSrc)
+  if (searchWrapRule === null) {
+    reasons.push('记忆页必须有 .dsh-memory-search-wrap 规则')
+  } else if (!/position\s*:\s*relative/.test(searchWrapRule[1])) {
+    reasons.push('.dsh-memory-search-wrap 必须 position:relative（否则绝对定位的放大镜会飘到侧栏右缘）')
+  }
   for (const view of ['all', 'changes', 'revisions', 'trash', 'settings']) {
     if (!new RegExp(`viewTab\\(\\s*'${view}'`).test(memorySrc)) {
       reasons.push(`视图 ${view} 的入口必须保留在页内顶部（viewTab('${view}', …)）`)
@@ -3838,8 +3855,78 @@ if (krEnabled) {
   if (cleanupBlock !== null) {
     reasons.push('记忆页卸载时不得把工作区子项缩回固定项（会抹掉侧栏自拉的那份）')
   }
-  if (!/}, \[projects\]\)/.test(memoryCode)) {
+  // 2026-11：依赖里多了 botRoster（Bot 归属维度上线后，名册变化也要重推子项），
+  // 所以这里放宽成「projects 在依赖里」，但**不允许**它退化成空依赖数组。
+  if (!/}, \[projects(?:, botRoster)?\]\)/.test(memoryCode)) {
     reasons.push('记忆页必须仍在 projects 变化时把更准的清单推给侧栏')
+  }
+
+  /* ── ②e Bot 归属维度（2026-11 用户要求「记忆页面增加二级菜单适配 bot」）──
+   *
+   * 这组断言钉住「归属」这条链路的五个关键接点。任何一处退回去，表现都是
+   * **静默的**（不报错、不白屏）：菜单里少一组、列表里混进别人的记忆、
+   * 变更页显示全库、或者一键操作跨归属误删。所以每一条都值得钉。
+   */
+  const botSrcPath = resolve(ROOT, 'src/client/triad/hub/memory-bot-source.tsx')
+  const botSrc = existsSync(botSrcPath)
+    ? readFileSync(botSrcPath, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+    : ''
+  if (botSrc === '') {
+    reasons.push('必须存在 hub/memory-bot-source.tsx（Bot 名册数据源）')
+  } else {
+    if (!/export function readBotRoster/.test(botSrc)) reasons.push('memory-bot-source 必须导出 readBotRoster')
+    if (!/export function botsToChildren/.test(botSrc)) reasons.push('memory-bot-source 必须导出 botsToChildren')
+    if (!/export function subscribeBotRoster/.test(botSrc)) {
+      reasons.push('memory-bot-source 必须导出 subscribeBotRoster（新建 Bot 后侧栏要能刷新）')
+    }
+    if (!/catch[\s\S]{0,120}return \[\]/.test(botSrc)) {
+      reasons.push('readBotRoster 读不到 / 脏数据必须静默返回空数组（侧栏不能因为名册坏了少菜单）')
+    }
+  }
+  if (!/botsToChildren/.test(sectionsCode2)) {
+    reasons.push('侧栏挂载器必须把 Bot 名册写进记忆子项（botsToChildren）')
+  }
+  if (!/subscribeBotRoster/.test(sectionsCode2)) {
+    reasons.push('侧栏必须订阅名册变化（Bot 模式新建 Bot 后，切回 Work 菜单要立刻出现）')
+  }
+  if (!/memoryOwnerOf/.test(memoryCode)) {
+    reasons.push('记忆页必须用 memoryOwnerOf 把作用域映射成归属')
+  }
+  // /list 必须显式传 owner：不传时宿主不过滤，Bot 的记忆会混进 Work 列表（改造前的真实缺陷）。
+  // 用 [\s\S] 而不是 \n：仓库文件在 Windows 上是 CRLF，写死 \n 会假失败。
+  if (!/owner,[\s\S]{0,60}scope: scopeParam/.test(memoryCode)) {
+    reasons.push('记忆页的 /list 必须显式传 owner（不传 = 宿主不过滤，Bot 记忆混进 Work 列表）')
+  }
+  if (!/change\.owner \?\? 'work'/.test(memoryCode)) {
+    reasons.push('变更页必须按 change.owner 过滤（旧 host 缺字段按 work 兜底）')
+  }
+  if (!/consolidate\(target, hash, ownerFilter\)/.test(memoryCode)) {
+    reasons.push('整理必须带归属（否则跨 owner 合批，不同 Bot 的记忆会被合并）')
+  }
+  if (!/owner: ownerFilter/.test(memoryCode)) {
+    reasons.push('删除今日必须带归属（否则会把 Work 与其它 Bot 的今日记忆一起删掉）')
+  }
+  /*
+   * 2026-11-04 实测事故：botScope / ownerFilter 原先定义在组件中段，而前面那个
+   * 「Bot 被删除就回落」的 effect 在**依赖数组**里引用它们 —— 依赖数组是渲染期
+   * 求值，于是每次渲染都抛
+   *   ReferenceError: Cannot access 'botScope' before initialization
+   * 结果整页记忆白屏、工作台卸载。静态断言看不出来，只有真渲染才会炸。
+   * 这条钉住「定义必须早于第一个 effect 依赖引用」。
+   */
+  const ownerConstIndex = memoryCode.indexOf('const ownerFilter = memoryOwnerOf(scope)')
+  const firstEffectDepIndex = memoryCode.indexOf('}, [botScope')
+  if (ownerConstIndex < 0) {
+    reasons.push('记忆页必须用 const ownerFilter = memoryOwnerOf(scope) 派生归属')
+  } else if (firstEffectDepIndex >= 0 && ownerConstIndex > firstEffectDepIndex) {
+    reasons.push('ownerFilter/botScope 必须定义在第一个引用它们的 effect 之前（TDZ 会让记忆页整页白屏）')
+  }
+  const intentSrc = readFileSync(resolve(ROOT, 'src/client/triad/hub/workbench-intent.ts'), 'utf8')
+  if (!/export type MemoryScopeIntent[\s\S]{0,400}'bots'/.test(intentSrc)) {
+    reasons.push("MemoryScopeIntent 必须包含 'bots'（全部 Bot 聚合视图）")
+  }
+  if (!/export function memoryOwnerOf/.test(intentSrc)) {
+    reasons.push('workbench-intent 必须导出 memoryOwnerOf（作用域→归属的唯一映射）')
   }
 
   /* ── ②d 切筛选时不得闪骨架屏（2026-10-25 用户报障）───────────────

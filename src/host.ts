@@ -67,6 +67,12 @@ import { applySystemPromptInspector } from './system-prompt/index.ts'
 import { applyGitStatusRoutes, GIT_STATUS_ROUTE, collectGitStatus, handleGitStatusRoute } from './git-status/index.ts'
 import { applyFeatureRoutes, hostFeatureEnabled, initializeFeatures } from './features/store.ts'
 import { applyPersonalAgentHost } from './host/personal/index.ts'
+// 消息撤回 / 编辑重发（vendor 移植自 dsh-recall-plugin，2026-11-04，MIT）
+import { applyRecallHost, recallInjects } from './recall/host/index.ts'
+// 装配面导出给冒烟（端点表 / 事件监听 / 配置 schema 的接缝断言）：
+// 撤回的「注册漏一条」都不会抛错，只会表现为按钮不出现或撤销永远 404。
+export { applyRecallHost, recallInjects, isSelfAgentBusy, isCrossAgentBusy } from './recall/host/index.ts'
+export { RecallConfig, RecallDefaults } from './recall/host/index.ts'
 export { applyPersonalAgentHost } from './host/personal/index.ts'
 export { applyDownloadRoutes, downloadTool, readDownloadState, watchShellDownload } from './download/index.ts'
 export { applyFontRoutes, FONT_ROUTE } from './fonts/index.ts'
@@ -563,6 +569,30 @@ export function apply(ctx: Record<string, any>, config?: { toolsGate?: Record<st
   } catch (error) {
     ctx.logger?.warn?.(
       `[dsh-seeker-bot] done-pill host failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+    )
+  }
+
+  // ── 消息撤回 / 编辑重发（2026-11-04，vendor 移植自 dsh-recall-plugin，MIT）──
+  // 每条用户消息发出时把工作区快照进影子 git 仓库（不碰项目自身的 git），
+  // 撤回时用 git 恢复文件、并用官方 sessions.fork 把对话切回该消息之前；
+  // 消息文本与附件回填输入框，「编辑」可改完直接重发。配置 / 排除表 / 快照
+  // 管理在插件配置页的撤回卡片里，数据落在 $DSH_HOME/dsh-recall-snapshots。
+  //
+  // 依赖 shell / sessions / agents（快照执行、会话与沙箱策略、运行中 agent
+  // 拦截）。用延迟注入：任一服务缺失时只有撤回不挂，前面的对话增强与工作台
+  // 完全不受影响（与参考插件「inject 声明就绪才 apply」同语义）。
+  // 端点走 connection 的**载体无关** fetch 路由（/api/recall/*），web 与桌面端
+  // 共用同一份注册；connection 缺席时 client 打不通这些 API，表现是撤回按钮
+  // 不出现，不会崩（参考插件相同的降级边界）。
+  try {
+    ctx.inject(recallInjects, (recallCtx: any) => {
+      // 传整个 config 而不是只传 recall 段：pickRecallConfig 两种形态都认
+      // （段形态 config.recall / 扁平形态直接写在行 config 根），只取段会漏掉后者。
+      applyRecallHost(recallCtx, (config as unknown as Record<string, any> | undefined)?.recall ?? config ?? {})
+    })
+  } catch (error) {
+    ctx.logger?.warn?.(
+      `[dsh-seeker-bot] recall host failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
     )
   }
 }

@@ -103,6 +103,13 @@ export interface ChangeView {
   entryId: string
   scope: 'global' | 'project'
   projectHash: string | null
+  /**
+   * 归属主体（`work` / `bot:<botId>`）。
+   *
+   * 2026-11 起 host 在变更记录里透出该字段；旧 host / 旧记录不回，按 `work`
+   * 兜底（与 `ownerOf()` 的缺省语义一致）。记忆面板据此在「变更」页按 Bot 过滤。
+   */
+  owner?: string
   summary: string
   before?: string
   after?: string
@@ -423,8 +430,14 @@ export interface MemoryApi {
    * 并回条数；true 时那些条目一并**软废弃**（进回收站，可恢复），随后删掉档案目录。
    */
   pruneProject: (projectHash: string, purgeEntries: boolean) => Promise<PruneProjectResponse>
-  /** 一键删除今日记忆（更新/创建于本地今天；置顶与已废弃跳过）。 */
-  deleteToday: (target?: { scope?: 'global' | 'project'; projectHash?: string }) => Promise<{ ok: boolean; deleted: number }>
+  /**
+   * 一键删除今日记忆（更新/创建于本地今天；置顶与已废弃跳过）。
+   *
+   * `owner` 收窄归属（2026-11）：不传 = 全量（旧行为）；传 `work` / `bot:<id>`
+   * / `bots` 时只删该归属的今日条目——面板在 Bot 视图下必须传，否则会把 Work
+   * 与其它 Bot 的今日记忆一起删掉。
+   */
+  deleteToday: (target?: { scope?: 'global' | 'project'; projectHash?: string; owner?: string }) => Promise<{ ok: boolean; deleted: number }>
   meta: (projectHash: string, patch: { alias?: string; locked?: boolean; path?: string; autoMemory?: boolean; injectExcluded?: boolean }) => Promise<{ ok: boolean; meta: ProjectView }>
   remember: (input: {
     content: string
@@ -460,7 +473,13 @@ export interface MemoryApi {
    */
   getTodoClosureState: () => Promise<ZhInjectStateView>
   setTodoClosureState: (enabled: boolean) => Promise<ZhInjectStateView & { ok: boolean }>
-  consolidate: (scope?: 'all' | 'global' | 'project', projectHash?: string) => Promise<{ ok: boolean; results: ConsolidateResultView[] }>
+  /**
+   * 整理（LLM 合并/改写/废弃）。
+   *
+   * `owner` 收窄整理范围（2026-11）：不传 = 全量（旧行为）；面板在 Bot 视图下
+   * 必须传，否则跨归属的条目会被同一批 LLM 决策合并，丢掉归属边界。
+   */
+  consolidate: (scope?: 'all' | 'global' | 'project', projectHash?: string, owner?: string) => Promise<{ ok: boolean; results: ConsolidateResultView[] }>
   revisions: () => Promise<{ revisions: RevisionView[] }>
   rollback: (revisionId: string) => Promise<{ ok: boolean }>
   getConfig: () => Promise<{ config: MemoryConfigView }>
@@ -564,7 +583,12 @@ export function createMemoryApi(): MemoryApi {
     setTodoRuleInjectState: (enabled) => sendJson<ZhInjectStateView & { ok: boolean }>('/todo-rule-inject-state', { enabled }),
     getMotionInjectState: () => getJson<ZhInjectStateView>('/motion-inject-state'),
     setMotionInjectState: (enabled) => sendJson<ZhInjectStateView & { ok: boolean }>('/motion-inject-state', { enabled }),
-    consolidate: (scope = 'all', projectHash) => sendJson<{ ok: boolean; results: ConsolidateResultView[] }>('/consolidate', { scope, projectHash }),
+    consolidate: (scope = 'all', projectHash, owner) => sendJson<{ ok: boolean; results: ConsolidateResultView[] }>('/consolidate', {
+      scope,
+      projectHash,
+      // owner 缺省时不进 body：老 host 收到未知字段无害，但「不传 = 旧行为」的口径要写清楚。
+      ...(owner !== undefined && owner !== '' ? { owner } : {}),
+    }),
     revisions: () => getJson<{ revisions: RevisionView[] }>('/revisions'),
     rollback: (revisionId) => sendJson<{ ok: boolean }>('/rollback', { revisionId }),
     getConfig: () => getJson<{ config: MemoryConfigView }>('/config'),

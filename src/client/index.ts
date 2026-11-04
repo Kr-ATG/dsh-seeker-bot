@@ -58,6 +58,8 @@ import { applyDonePill } from './done-pill/pill.tsx'
 import { ensureOverlayMotionStyles } from './motion/overlay-motion.ts'
 import { startShellHotReporter } from './done-pill/shell-hot.ts'
 import { applySidebarMedia } from './sidebar-media/index.tsx'
+// 消息撤回 / 编辑重发（vendor 移植自 dsh-recall-plugin，2026-11-04）
+import { applyRecallClient } from '../recall/client/apply.ts'
 import { setClientCtx } from './client-ctx.ts'
 import { applyFeatureSwitches } from './features/index.tsx'
 import { applyModeSwitch } from './mode-switch/index.ts'
@@ -459,6 +461,23 @@ export function apply(ctx: ClientContext): void {
   // 的 keyed 正文槽位），正文是原生 <video> / <audio>。
   featureMount(ctx, 'card.sidebar-media', 'sidebar media renderer', () => {
     applySidebarMedia(ctx as unknown as Record<string, any>)
+  })
+
+  // ── 消息撤回 / 编辑重发（2026-11-04，vendor 移植自 dsh-recall-plugin，MIT）──
+  // 用户消息旁「↶ 撤回」：工作区文件（影子 git 快照）与对话历史（官方
+  // sessions.fork）一起回到这条消息发出之前，消息文本与附件回填输入框；
+  // 同一行还有「✎ 编辑」（就地改完重发，不动文件）与版本翻页「‹ X/N ›」。
+  //
+  // 服务用**延迟注入**而不是写进顶层 inject：顶层 inject 是硬依赖，少一个
+  // 服务整插件都不 apply（思考折叠 / 卡片 / 截图会一起消失）；撤回只是增强，
+  // 服务没齐时让它自己静默不挂即可。本机 0.2.2-alpha.3 上 workspaces
+  // （api-workspace-controller 的 client 服务）、uiWorkspace（ui-workspace）、
+  // timer（cordis client runner 的 TimerService）三个都在，正常会挂上。
+  // 挂载失败只记日志（guarded 的行为），撤回坏掉不连坐其余功能。
+  guarded(ctx, 'recall (message revert)', () => {
+    ;(ctx as any).inject(['workspaces', 'uiWorkspace', 'timer'], (recallCtx: any) => {
+      applyRecallClient(recallCtx)
+    })
   })
 }
 

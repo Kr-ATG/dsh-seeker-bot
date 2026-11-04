@@ -15,6 +15,7 @@ import type {
   MemoryEntry,
   MemoryKind,
   MemoryOwner,
+  OwnerFilter,
   ProjectMeta,
   RevisionMeta,
   SessionTickerState,
@@ -95,6 +96,66 @@ export function ownerOf(entry: Pick<MemoryEntry, 'owner'>): MemoryOwner {
 }
 
 /**
+ * owner 过滤判据：`bots` = 所有 Bot（`bot:` 前缀），其余走精确匹配。
+ *
+ * 面板 / API 里凡是要「按归属收窄」的地方都走这一条（GET /list、POST /delete-today、
+ * POST /consolidate），避免三处各写一份前缀判断——那种分叉最难发现：某处把
+ * `bots` 当成字面归属，结果一个 Bot 都匹配不上，表现为「过滤后啥都没有」。
+ */
+export function matchesOwner(entry: Pick<MemoryEntry, 'owner'>, owner: string): boolean {
+  const current = ownerOf(entry)
+  return owner === 'bots' ? current.startsWith('bot:') : current === owner
+}
+
+/** 按 owner 过滤条目集合（整理输入等批量场景）；owner 缺省 = 不过滤。 */
+export function filterByOwner<T extends Pick<MemoryEntry, 'owner'>>(entries: T[], owner?: string): T[] {
+  return owner === undefined ? entries : entries.filter(entry => matchesOwner(entry, owner))
+}
+
+/**
+ * 条目集合里出现过的归属（去重；`work` 排最前，其余按字典序）。
+ *
+ * 用途：每日整理按 owner 分组（ticker 的 runDailyCompile）。所有 Bot 与 Work 共用
+ * 同一个工作目录（projectHash 完全相同），只按 scope 切分时一个批次里会同时有多个
+ * 归属的条目，LLM 一次 merge 就把两台 Bot 的相似记忆合成一条，合并产物落在第一条
+ * 源条目的归属上——另一方的记忆凭空消失。无人值守路径同样不能跨归属合批。
+ *
+ * 排序固定（work 在前）只为让日志与调试输出稳定；每日只跑一次，排序开销可忽略。
+ * 空集合返回空数组：调用方据此跳过整个整理步骤，不发空请求。
+ */
+export function ownerGroupsOf(entries: Array<Pick<MemoryEntry, 'owner'>>): MemoryOwner[] {
+  const seen = new Set<MemoryOwner>()
+  for (const entry of entries) seen.add(ownerOf(entry))
+  return [...seen].sort((a, b) => (a === 'work' ? -1 : b === 'work' ? 1 : a.localeCompare(b)))
+}
+
+/**
+ * 「今日记忆」的可删除判定（面板「删除今日」与 POST /delete-today 共用）。
+ *
+ * 口径：置顶与已软废弃的条目一律跳过（前者是用户显式标记，后者已在回收站）；
+ * scope / projectHash / owner 只在明确传入时收窄（owner 语义见 matchesOwner）。
+ *
+ * 为什么放这里而不是留在 api.ts 里内联：它是「哪些条目会被删」的唯一判据，
+ * 必须能被回归测试直接断言（api.ts 是 HTTP 层，单独测要起服务器）。
+ */
+export function isDeletableToday(entry: MemoryEntry, options: {
+  /** 本地日期 YYYY-MM-DD，由调用方算好传进来（避免同一批过滤跨过零点）。 */
+  today: string
+  scope?: 'global' | 'project'
+  projectHash?: string
+  owner?: string
+}): boolean {
+  if (entry.pinned || entry.deprecated === true) return false
+  if (options.scope !== undefined && entry.scope !== options.scope) return false
+  if (options.scope === 'project' && options.projectHash !== undefined && entry.projectHash !== options.projectHash) return false
+  if (options.owner !== undefined && !matchesOwner(entry, options.owner)) return false
+  const stamp = entry.updatedAt ?? entry.createdAt
+  const time = Date.parse(stamp)
+  // updatedAt/createdAt 是 UTC ISO，用 localDate 换算成本地日期再比对。
+  return !Number.isNaN(time) && localDate(new Date(time)) === options.today
+}
+
+/**
  * 条目是否已过期（临时信息 TTL，见 MemoryEntry.ttlDays）。
  *
  * 判据从**创建时间**起算，不是最近更新/命中：ttlDays 表达的是「这件事本身的有效
@@ -133,6 +194,23 @@ export function ownerOfSessionId(sessionId: string | undefined | null): MemoryOw
    */
   if (botId === '' || /^v\d+-$/.test(botId)) return 'work'
   return `bot:${botId}`
+}
+
+/**
+ * 模型工具 memory_consolidate 的归属收窄：Bot 会话返回自己的归属，
+ * Work 会话返回 undefined（= 全量，保持原有语义）。
+ *
+ * 为什么 Work 不收窄、Bot 收窄：用户是主人，Work 侧「整理全部记忆」是原有语义，
+ * 收窄会让他以为机器人漏整理了；而 Bot 是**分身**，它没有资格替主人整理别的分身
+ * 的记忆——一次跨 owner 的 merge 会把两台 Bot 的相似记忆合成一条，合并产物落在
+ * 第一条源条目的归属上，另一方的记忆就此消失。
+ *
+ * 拿不到会话 id 时同样返回 undefined：宁可退回全量（还能救），也不要猜一个归属
+ * 把整理范围静默缩小。
+ */
+export function consolidateOwnerForSessionId(sessionId: string | undefined | null): OwnerFilter | undefined {
+  const owner = ownerOfSessionId(sessionId)
+  return owner === 'work' ? undefined : owner
 }
 
 /** 校验落盘数据里的 owner 是否合法（脏数据一律当作缺失，由会话溯源兜底）。 */
@@ -1057,14 +1135,41 @@ export class MemoryStore {
 
   // ── 变更流 ──────────────────────────────────────────────────────────
 
+  /**
+   * 追加一条变更记录。
+   *
+   * **owner 在这里自动补全**（schema v6），调用方一般不用管：显式传入优先，
+   * 否则按 `entryId` 反查条目取 `ownerOf()`，查不到兜底 `work`。
+   *
+   * 为什么补在写入侧而不是逐个调用点：全仓 31 处调用绝大多数是「条目还在库里」
+   * 的普通变更，反查一定成功；只有**删除路径**（条目已从数组里移除，反查必失败）
+   * 和 consolidate 的汇总记录（entryId 为空串，无从反查）必须由调用方在删除前
+   * 取出 owner 显式传——否则 Bot 的删除记录会被兜底成 `work`，混进 Work 的变更页。
+   */
   async appendChange(change: Omit<ChangeRecord, 'id' | 'at'>): Promise<ChangeRecord> {
     const record: ChangeRecord = {
       ...change,
+      // 显式值优先（删除路径的唯一正确来源）；反查兜底让普通变更免于逐点改造。
+      owner: change.owner ?? await this.ownerOfEntryId(change.entryId),
       id: `chg_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`,
       at: nowIso(),
     }
     await appendJsonl(this.changesFile(localDate()), record)
     return record
+  }
+
+  /**
+   * 按条目 id 反查归属，供 `appendChange` 自动补 owner。
+   *
+   * 查不到兜底 `work` 的两种情形都是正常的：consolidate 汇总记录 entryId 为空串，
+   * 删除路径的条目已经不在数组里（那些调用点必须自己显式传 owner）。
+   * 这里**不做**会话溯源兜底（`ownerOfSessionId`）——变更记录不带 sessionId，
+   * 拿不到会话身份，硬猜只会把 Work 的删除记成某个 Bot 的。
+   */
+  private async ownerOfEntryId(entryId: string): Promise<MemoryOwner> {
+    if (typeof entryId !== 'string' || entryId === '') return 'work'
+    const entry = await this.getEntry(entryId)
+    return entry === undefined ? 'work' : ownerOf(entry)
   }
 
   async readChanges(date?: string): Promise<ChangeRecord[]> {

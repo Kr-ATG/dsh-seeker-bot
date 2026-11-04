@@ -19,10 +19,12 @@ import type {
   ConsolidateResult,
   MemoryConfig,
   MemoryEntry,
+  MemoryOwner,
+  OwnerFilter,
 } from '../types.js'
 import { compileAll, writeDailyLog } from './compile.js'
 import { isSensitiveContent, resolveRoute, type MinimalAgent } from './extract.js'
-import { entryIdOf, nowIso, ownerOf, summarize, type MemoryStore } from './store.js'
+import { entryIdOf, filterByOwner, nowIso, ownerOf, summarize, type MemoryStore } from './store.js'
 
 /** 整理用伪 agent：无显式 provider/model，resolveRoute 回退默认模型。 */
 const CONSOLIDATE_AGENT: MinimalAgent = {
@@ -48,6 +50,26 @@ function scopeLabel(scope: ConsolidateScope): string {
   return scope === 'global' ? 'global' : `project:${scope.projectHash}`
 }
 
+/**
+ * 整理汇总记录的归属：本次输入集合的**唯一** owner，跨 owner（或空集合）兜底 `work`。
+ *
+ * 为什么不能靠 appendChange 自动补：汇总记录 entryId 为空串，反查不到条目，会被
+ * 兜底成 work。
+ *
+ * 调用方传了 owner 过滤时集合天然单值，这里直接给出该归属；**不传**时（全量整理）
+ * 一个 scope 下可能同时有 Work 与多个 Bot 的条目，挂到任何单个 Bot 上都等于替
+ * 另一方冒领，所以退回 work（见调用点注释）。
+ */
+function consolidateOwnerOf(entries: MemoryEntry[]): MemoryOwner {
+  let owner: MemoryOwner | undefined
+  for (const entry of entries) {
+    const current = ownerOf(entry)
+    if (owner === undefined) owner = current
+    else if (owner !== current) return 'work'
+  }
+  return owner ?? 'work'
+}
+
 /** 整理统计（内部）。 */
 interface ConsolidateStats {
   merged: number
@@ -70,6 +92,16 @@ export async function consolidateScope(
   config: MemoryConfig,
   scope: ConsolidateScope,
   trigger: 'daily' | 'manual',
+  /**
+   * owner 过滤（可选）：只整理这个归属的条目。缺省 = 不过滤（旧行为）。
+   *
+   * 为什么必须有这道口子：整理集合原本只按 scope 切分，而所有 Bot 与 Work 共用
+   * 同一个工作目录（projectHash 完全相同），一个批次里同时有多个归属的条目时，
+   * LLM 会把「两台 Bot 各记了一句相似的话」合并成一条，合并产物落在第一条源条目
+   * 的归属上——另一台 Bot 的记忆就此消失。面板在某个 Bot 的视图里点「整理」时
+   * 传 `bot:<id>`（或 `bots`）即可把批次限制在该归属内。
+   */
+  owner?: OwnerFilter,
 ): Promise<ConsolidateResult> {
   const label = scopeLabel(scope)
   const empty: ConsolidateResult = { scope: label, merged: 0, rewritten: 0, dropped: 0, promoted: 0, changed: 0 }
@@ -91,6 +123,9 @@ export async function consolidateScope(
   // pending 条目（待确认）同理：它还没被用户认可，自动整理器没有资格替它做
   // 合并/重写/删除——那等于让机器替用户决定他还没看过的内容。
   owned = owned.filter(entry => !entry.pinned && entry.disabled !== true && entry.deprecated !== true && entry.pending !== true)
+  // owner 过滤必须在 selectConsolidationSet **之前**：先选后滤会让「本轮只轮到了
+  // 别的归属的 20 条」变成空批次，看起来像「整理没生效」。
+  owned = filterByOwner(owned, owner)
   owned = selectConsolidationSet(owned, config.consolidateMaxEntries)
   // 至少 2 条才有语义整理空间（单条重写/提升由规则层处理）。
   if (owned.length < 2) {
@@ -180,11 +215,20 @@ export async function consolidateScope(
 
     // 变更流（驱动面板「变更」tab 与 daily 日志）。
     for (const event of events) await store.appendChange(event)
-    // 整理汇总记录：变更 Tab 里一条「整理」徽标即可看到本次结果
-    //（合并/改写/废弃/提升数量 + 范围），无需逐条翻合并事件。
+    /*
+     * 整理汇总记录：变更 Tab 里一条「整理」徽标即可看到本次结果
+     *（合并/改写/废弃/提升数量 + 范围），无需逐条翻合并事件。
+     *
+     * owner 必须显式给：汇总记录 entryId 为空串，appendChange 无从反查，会兜底
+     * 成 work。取值规则是「本次整理输入集合的唯一归属」：调用方传了 owner 过滤时
+     * 集合天然单值；不传（全量整理）时集合可能跨 owner，按 work 兜底——一条汇总
+     * 记录只能挂一个归属，算给任何单个 Bot 都会让另外几方在面板上看到「不是自己
+     * 干的整理」（见 consolidateOwnerOf）。
+     */
     await store.appendChange({
       action: 'consolidate',
       entryId: '',
+      owner: consolidateOwnerOf(owned),
       scope: scope === 'global' ? 'global' : 'project',
       projectHash: scope === 'global' ? null : scope.projectHash,
       summary: `整理完成：合并 ${stats.merged} / 改写 ${stats.rewritten} / 废弃 ${stats.dropped} / 提升 ${stats.promoted}`,
@@ -212,18 +256,26 @@ export async function consolidateAll(
   store: MemoryStore,
   config: MemoryConfig,
   trigger: 'daily' | 'manual',
+  /** owner 过滤（可选），逐个 scope 透传，语义见 consolidateScope。 */
+  owner?: OwnerFilter,
 ): Promise<ConsolidateResult[]> {
   if (!config.consolidateEnabled) return []
-  const entries = await store.readEntries()
+  /*
+   * 收集项目列表时先按 owner 收窄：只扫这个归属真正有项目的 hash。
+   * 不这么做的话，owner=work 的批次也会去「整理」只有 Bot 条目的项目——那些
+   * 组合在 consolidateScope 里会因 owned<2 早退（不发 LLM 请求），但白跑一次
+   * 全库读 + 过滤，owner 多了就是纯浪费。
+   */
+  const entries = filterByOwner(await store.readEntries(), owner)
   const hashes = new Set<string>()
   for (const entry of entries) {
     if (entry.scope === 'project' && entry.projectHash !== null) hashes.add(entry.projectHash)
   }
   const results: ConsolidateResult[] = []
-  const globalResult = await consolidateScope(ctx, store, config, 'global', trigger)
+  const globalResult = await consolidateScope(ctx, store, config, 'global', trigger, owner)
   if (globalResult.changed > 0 || globalResult.failed !== undefined) results.push(globalResult)
   for (const hash of hashes) {
-    const result = await consolidateScope(ctx, store, config, { projectHash: hash }, trigger)
+    const result = await consolidateScope(ctx, store, config, { projectHash: hash }, trigger, owner)
     if (result.changed > 0 || result.failed !== undefined) results.push(result)
   }
   return results
@@ -265,9 +317,14 @@ function applyOps(
         const scope = sources[0].scope
         const projectHash = sources[0].projectHash
         /*
-         * 归属取第一条源条目：合并只在同一 owner 的条目之间发生（consolidateScope
-         * 按 owner 分组喂进来），所以这里不会把两个 bot 的记忆搅在一起。
-         * 若将来放开跨 owner 合并，这一行必须改成「拒绝合并」而不是取第一条。
+         * 归属取第一条源条目。
+         *
+         * 整理集合默认只按 global / project 切分，跨 owner 合并只在调用方**不传**
+         * owner 过滤时才可能发生（面板在某个 Bot 视图里点「整理」会传 bot:<id>，
+         * 批次天然单归属）。全量整理时若真的跨了 owner，合并产物落在第一条源条目
+         * 的归属上——这是已知取舍：收紧成「跨 owner 拒绝合并」要么让全量整理对
+         * 多 Bot 库失效，要么得把批次按 owner 再拆一遍。下面每条源条目的 delete
+         * 事件仍按各自真实归属记录，面板据此能看出这次合并动过谁。
          */
         const owner = ownerOf(sources[0])
         // 字段合成必须尊重源条目已有的事实，不能一律取第一条或写死默认值：
@@ -333,6 +390,8 @@ function applyOps(
           events.push({
             action: 'delete',
             entryId: source.id,
+            // 合并源条目会被移出数组，appendChange 反查不到 → 显式带出各自归属。
+            owner: ownerOf(source),
             scope: source.scope,
             projectHash: source.projectHash,
             summary: `合并：${summarize(source.content)}`,

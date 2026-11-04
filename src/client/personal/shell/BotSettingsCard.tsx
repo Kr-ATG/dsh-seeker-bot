@@ -21,7 +21,15 @@
  * 迁移来源：`RightPanel.tsx` 旧「详情 / 资料库」tab 里的模型、音色、供应商、权限、
  * 主动询问、例行任务、子 Bot 管理、记忆；视觉从居中弹窗改成右侧滑出卡片。
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from 'react'
 import { BotAvatar } from '../Avatar.tsx'
 import {
   IconClock,
@@ -74,6 +82,43 @@ interface OutputsState {
 const VOICE_OPTIONS: PaSelectOption[] = [
   { value: '', label: `跟随全局默认（${voiceLabel(REALTIME_DEFAULT_VOICE)}）` },
   ...REALTIME_VOICES.map((item) => ({ value: item.id, label: item.label, hint: item.hint })),
+]
+
+/**
+ * 设置卡的分类页签。
+ *
+ * 9 个分区一列排下来要滚好几屏：想改「记忆检索间隔」得先翻过语音、权限、
+ * 例行任务。改成左侧导航 + 右侧面板后，每一屏只放一件事。
+ *
+ * `mainOnly` 的页（团队 / 子 Bot 管理）只有主 Bot 有——子 Bot 打开自己的
+ * 设置卡时，这一项既不该出现，也不该留下一个永远点不进去的空页。
+ */
+type BotTabId =
+  | 'profile'
+  | 'model'
+  | 'voice'
+  | 'permission'
+  | 'automation'
+  | 'team'
+  | 'memory'
+  | 'outputs'
+
+interface BotTab {
+  id: BotTabId
+  label: string
+  icon: ReactNode
+  mainOnly?: boolean
+}
+
+const BOT_TABS: BotTab[] = [
+  { id: 'profile', label: '资料', icon: <IconSparkles size={14} /> },
+  { id: 'model', label: '模型', icon: <IconCpu size={14} /> },
+  { id: 'voice', label: '语音', icon: <IconPhone size={14} /> },
+  { id: 'permission', label: '权限', icon: <IconTerminal size={14} /> },
+  { id: 'automation', label: '自动化', icon: <IconClock size={14} /> },
+  { id: 'team', label: '团队', icon: <IconUsers size={14} />, mainOnly: true },
+  { id: 'memory', label: '记忆', icon: <IconMemory size={14} /> },
+  { id: 'outputs', label: '产出', icon: <IconFolder size={14} /> },
 ]
 
 const WEEK_LABELS = ['日', '一', '二', '三', '四', '五', '六']
@@ -174,6 +219,17 @@ export function BotSettingsCard(): JSX.Element | null {
   const [closing, setClosing] = useState(false)
   const closeTimerRef = useRef<number | null>(null)
 
+  /*
+   * 当前页签（左侧导航选中哪一页，右侧就只渲染那一页）。
+   *
+   * 不写进 localStorage：设置卡是「打开 → 改一件事 → 关掉」的短任务，
+   * 每次都从「资料」开始更符合预期；记住上次停在「记忆」反而让人每次
+   * 打开都要先找一下资料在哪。
+   */
+  const [tab, setTab] = useState<BotTabId>('profile')
+  /** 右侧面板的滚动容器：换页签后回到顶部，别让人接着上一页的位置读。 */
+  const bodyRef = useRef<HTMLDivElement | null>(null)
+
   /** 关闭：先播 240ms 退场，再真正卸载（直接置 null 会硬消失）。 */
   const requestClose = useCallback((): void => {
     if (closeTimerRef.current !== null) return
@@ -273,6 +329,8 @@ export function BotSettingsCard(): JSX.Element | null {
     setMemoryQuery('')
     setMemoryFilter(null)
     setNewMemory('')
+    // 换一台 Bot 就回到第一页：上一台停在「记忆」不该带到这一台。
+    setTab('profile')
   }, [botId])
 
   /* 拉产出物根目录（只取 root；文件列表由右栏 BotOutputsCard 负责）。 */
@@ -430,6 +488,28 @@ export function BotSettingsCard(): JSX.Element | null {
       .sort((a, b) => b.createdAt - a.createdAt)
   }, [engineMemories, memoryFilter, memoryQuery])
 
+  /*
+   * 可用页签：子 Bot 没有「团队」页（那是主 Bot 管子 Bot 的地方）。
+   *
+   * 依赖写 `bot?.isMain` 而不是 `bot`：只有身份变了才需要重算，
+   * 改个名字 / 换个音色不该让左侧导航重建一遍。
+   */
+  const availableTabs = useMemo(
+    () => BOT_TABS.filter((item) => item.mainOnly !== true || bot?.isMain === true),
+    [bot?.isMain],
+  )
+  /*
+   * 当前页签的兜底：`tab` 可能指向一个已经不可用的页（开着「团队」页时
+   * 从主 Bot 切到子 Bot），这时按「资料」渲染，而不是留一片空白。
+   */
+  const activeTab: BotTabId = availableTabs.some((item) => item.id === tab) ? tab : 'profile'
+
+  /* 换页签后把右侧面板滚回顶部（内容长度差很大，不重置会停在中段）。 */
+  useEffect(() => {
+    const body = bodyRef.current
+    if (body !== null) body.scrollTop = 0
+  }, [activeTab])
+
   /* ── 以下都是「打开状态下」才用得到的派生值 / 事件处理 ── */
   if (bot === null) return null
 
@@ -537,6 +617,44 @@ export function BotSettingsCard(): JSX.Element | null {
 
   const botName = (id: string): string => state.bots.find((item) => item.id === id)?.name ?? '未知 Bot'
 
+  /**
+   * 导航项右侧的小角标：有数量才显示，空的时候不挂一个「0」占位。
+   *
+   * 只给「条数会变、且用户会关心规模」的三页配角标：记忆、例行任务、子 Bot。
+   * 资料 / 模型这些没有可数的东西，硬凑一个数字只是噪音。
+   */
+  const tabBadge = (id: BotTabId): string | undefined => {
+    if (id === 'automation' && routines.length > 0) return String(routines.length)
+    if (id === 'team' && subBots.length > 0) return String(subBots.length)
+    if (id === 'memory' && memories.length > 0) return String(memories.length)
+    return undefined
+  }
+
+  /**
+   * 左侧导航的键盘操作：上下 / 左右移动、Home / End 跳到首尾。
+   *
+   * 这是 WAI-ARIA tablist 的惯例动作，缺了它键盘用户按方向键没反应，
+   * 只能靠 Tab 逐个穿过 8 个页签。焦点跟着选中项走，否则按完方向键
+   * 焦点还留在旧页签上，再按一次又跳回去。
+   */
+  const onNavKeyDown = (event: ReactKeyboardEvent<HTMLElement>): void => {
+    const { key } = event
+    if (key !== 'ArrowDown' && key !== 'ArrowUp' && key !== 'ArrowLeft'
+      && key !== 'ArrowRight' && key !== 'Home' && key !== 'End') return
+    event.preventDefault()
+    const index = availableTabs.findIndex((item) => item.id === activeTab)
+    const last = availableTabs.length - 1
+    let next = index
+    if (key === 'ArrowDown' || key === 'ArrowRight') next = index >= last ? 0 : index + 1
+    else if (key === 'ArrowUp' || key === 'ArrowLeft') next = index <= 0 ? last : index - 1
+    else if (key === 'Home') next = 0
+    else next = last
+    const target = availableTabs[next]
+    if (target === undefined) return
+    setTab(target.id)
+    document.getElementById(`pa-bset-tab-${target.id}`)?.focus()
+  }
+
   const addMemory = (): void => {
     const text = newMemory.trim()
     if (text === '') return
@@ -596,7 +714,7 @@ export function BotSettingsCard(): JSX.Element | null {
       }}
     >
       <aside
-        className="pa-sheet pa-sheet--dialog"
+        className="pa-sheet pa-sheet--dialog pa-sheet--tabs"
         role="dialog"
         aria-modal="true"
         aria-label={`${bot.name} 设置`}
@@ -613,8 +731,69 @@ export function BotSettingsCard(): JSX.Element | null {
           </button>
         </div>
 
-        <div className="pa-sheet__body">
-          {/* 1. 基本资料 */}
+        {/*
+         * 左导航 + 右面板。
+         *
+         * 只渲染当前页签那一份 JSX（而不是把 9 个分区都挂上再用 display:none
+         * 藏起来）：记忆列表可能有几十条，藏在 DOM 里既白占内存，也会让屏幕
+         * 阅读器把看不见的分区念出来。key={activeTab} 让换页时面板重建一次，
+         * 顺带把入场动画重新播一遍。
+         *
+         * 面板 id 固定为 pa-bset-pane、所有页签的 aria-controls 都指向它：
+         * 只有一个面板在用，id 跟着页签变的话，没被选中的那些 aria-controls
+         * 就会指向一个不存在的元素（屏幕阅读器只能忽略，关系是断的）。
+         * 面板自己的 aria-labelledby 仍然跟着当前页签走，读出来是「记忆 面板」。
+         */}
+        <div className="pa-sheet__main">
+          <nav
+            className="pa-bset-nav"
+            role="tablist"
+            aria-orientation="vertical"
+            aria-label="Bot 设置分类"
+            onKeyDown={onNavKeyDown}
+          >
+            {availableTabs.map((item) => {
+              const on = item.id === activeTab
+              const badge = tabBadge(item.id)
+              return (
+                <button
+                  key={item.id}
+                  id={`pa-bset-tab-${item.id}`}
+                  className="pa-bset-nav__item"
+                  type="button"
+                  role="tab"
+                  aria-selected={on}
+                  aria-controls="pa-bset-pane"
+                  tabIndex={on ? 0 : -1}
+                  data-on={on ? 'true' : 'false'}
+                  onClick={() => setTab(item.id)}
+                >
+                  <span className="pa-bset-nav__icon">{item.icon}</span>
+                  <span className="pa-bset-nav__label">{item.label}</span>
+                  {/*
+                    * 角标对读屏隐藏：视觉上是「团队 · 1」，读出来会变成
+                    * 「团队一」这种把数字并进名字的怪句子。页签名本身才是
+                    * 读屏需要的那个词，数量只是辅助。
+                    */}
+                  {badge === undefined ? null : (
+                    <span className="pa-bset-nav__badge" aria-hidden="true">{badge}</span>
+                  )}
+                </button>
+              )
+            })}
+          </nav>
+
+          <div className="pa-sheet__body pa-bset-panes" ref={bodyRef}>
+            <div
+              key={activeTab}
+              className="pa-bset-pane"
+              id="pa-bset-pane"
+              role="tabpanel"
+              aria-labelledby={`pa-bset-tab-${activeTab}`}
+              tabIndex={0}
+            >
+          {/* 1. 基本资料（资料页） */}
+          {activeTab === 'profile' ? (
           <SheetSection icon={<IconSparkles size={13} />} title="基本资料">
             <div className="pa-sheet-field-row">
               <label className="pa-sheet-label">头像</label>
@@ -678,8 +857,10 @@ export function BotSettingsCard(): JSX.Element | null {
               </button>
             </div>
           </SheetSection>
+          ) : null}
 
-          {/* 2. 模型 */}
+          {/* 2. 模型（模型页） */}
+          {activeTab === 'model' ? (
           <SheetSection icon={<IconCpu size={13} />} title="模型" extra={modelLabel}>
             {modelGroups.length === 0 ? (
               <div className="pa-sheet-empty">
@@ -708,8 +889,10 @@ export function BotSettingsCard(): JSX.Element | null {
             ) : null}
             <p className="pa-sheet-hint">选择后立即保存；下一轮对话开始生效，不影响已经开始的回合。</p>
           </SheetSection>
+          ) : null}
 
-          {/* 3. 语音通话 */}
+          {/* 3. 语音通话（语音页） */}
+          {activeTab === 'voice' ? (
           <SheetSection
             icon={<IconPhone size={13} />}
             title="语音通话"
@@ -766,8 +949,10 @@ export function BotSettingsCard(): JSX.Element | null {
               </button>
             </div>
           </SheetSection>
+          ) : null}
 
-          {/* 4. 工具权限 */}
+          {/* 4. 工具权限（权限页） */}
+          {activeTab === 'permission' ? (
           <SheetSection
             icon={<IconTerminal size={13} />}
             title="工具权限"
@@ -792,8 +977,15 @@ export function BotSettingsCard(): JSX.Element | null {
                 : '写文件 / 跑命令前先问你一次；只读操作直接放行。'}
             </p>
           </SheetSection>
+          ) : null}
 
-          {/* 5. 主动询问 */}
+          {/*
+           * 5. 主动询问 + 6. 例行任务（自动化页）。
+           * 这两块都回答同一个问题「Bot 什么时候自己动起来」，放一页里连着看，
+           * 不用在两个页签之间来回跳着配。
+           */}
+          {activeTab === 'automation' ? (
+          <>
           <SheetSection
             icon={<IconMessage size={13} />}
             title="主动询问"
@@ -928,9 +1120,11 @@ export function BotSettingsCard(): JSX.Element | null {
               </button>
             )}
           </SheetSection>
+          </>
+          ) : null}
 
-          {/* 7. 子 Bot 管理（仅主 Bot） */}
-          {bot.isMain ? (
+          {/* 7. 子 Bot 管理（仅主 Bot；团队页） */}
+          {activeTab === 'team' && bot.isMain ? (
             <SheetSection
               icon={<IconUsers size={13} />}
               title="子 Bot 管理"
@@ -1038,7 +1232,8 @@ export function BotSettingsCard(): JSX.Element | null {
             </SheetSection>
           ) : null}
 
-          {/* 8. 记忆 */}
+          {/* 8. 记忆（记忆页） */}
+          {activeTab === 'memory' ? (
           <SheetSection
             icon={<IconMemory size={13} />}
             title="记忆"
@@ -1166,8 +1361,10 @@ export function BotSettingsCard(): JSX.Element | null {
               </button>
             </div>
           </SheetSection>
+          ) : null}
 
-          {/* 9. 产出物文件夹 */}
+          {/* 9. 产出物（产出页） */}
+          {activeTab === 'outputs' ? (
           <SheetSection
             icon={<IconFolder size={13} />}
             title="产出物"
@@ -1189,6 +1386,9 @@ export function BotSettingsCard(): JSX.Element | null {
               <div className="pa-sheet-empty">{outputs.error ?? '还没有产出物文件夹'}</div>
             )}
           </SheetSection>
+          ) : null}
+            </div>
+          </div>
         </div>
 
         <div className="pa-sheet__foot">
