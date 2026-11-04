@@ -1,26 +1,64 @@
+<div align="center">
+
 # dsh-seeker-bot
 
-**DeepSeek Harness 的对话体验增强套件**：让对话读得更顺、能出可交互的卡片、把执行过程翻译成人话；
-再把记忆 / SKILL / 连接器 / 画廊 / 档案 / 系统提示词 / 同步设置收成一排工作台。
+**DeepSeek Harness 的对话体验增强套件**
 
-零 DSH 源码改动 —— 全部能力以 Cordis 插件注入，官方升级不动它。
+双栏执行大盘 · 可交互卡片 · Bot 团队 / 群聊 / 语音 · 记忆 · 档案 · 技能 · 同步
+
+[![stars](https://img.shields.io/github/stars/Kr-ATG/dsh-seeker-bot?style=for-the-badge&color=4c8dff)](https://github.com/Kr-ATG/dsh-seeker-bot/stargazers)
+[![forks](https://img.shields.io/github/forks/Kr-ATG/dsh-seeker-bot?style=for-the-badge&color=8b7cf6)](https://github.com/Kr-ATG/dsh-seeker-bot/network/members)
+[![license](https://img.shields.io/github/license/Kr-ATG/dsh-seeker-bot?style=for-the-badge&color=2dd4bf)](LICENSE)
+[![discussions](https://img.shields.io/github/discussions/Kr-ATG/dsh-seeker-bot?style=for-the-badge&color=f59e0b)](https://github.com/Kr-ATG/dsh-seeker-bot/discussions)
+[![last commit](https://img.shields.io/github/last-commit/Kr-ATG/dsh-seeker-bot?style=for-the-badge&color=94a3b8)](https://github.com/Kr-ATG/dsh-seeker-bot/commits/master)
+
+</div>
+
+<img src="docs/demo.gif" alt="Seeker 双栏执行大盘 + HTML 卡片" width="100%">
+
+## 这是什么
+
+普通 AI 对话界面只给你一个输入框和一个滚动条。**dsh-seeker-bot 把「AI 到底在干什么」摊开给你看**，
+再把记忆、档案、技能这些散落的东西收成一排工作台：
+
+| 你在意的 | 装上之后 |
+|---|---|
+| 想知道 AI 干了什么，但不想看一屏工具日志 | 右栏双栏执行大盘，工具调用翻成中文人话 |
+| 想让它直接给个能点的东西 | 正文里出 **HTML 卡片**（真跑 JS）与 **iu 原生交互卡**（滑块 / 表格 / 清单 / 看板） |
+| 想让它画架构图 / 流程图 | 手写内联 SVG，直接在对话流里渲染 |
+| 想要一整个 AI 团队 | 主 Bot + 子 Bot + **群聊**（成员真能互相看见上下文）+ 日记 + 语音通话 |
+| 想让 AI 记住你的偏好 | 工作台**记忆**（按 owner 隔离，Bot 之间不串味） |
+| 存账号密码 / 卡 / 证件，还要自动进上下文 | 工作台**档案**（端侧加密，明文不进模型上下文） |
+| 换电脑不想重新配一遍 | **同步设置**：记忆 / 档案 / 技能 / MCP / 密钥端侧加密推到你的 GitHub 私库 |
+
+## 安装
 
 ```bash
 dsh plugin --profile web add github:Kr-ATG/dsh-seeker-bot
 ```
 
 装完重启 DSH 即可。本包声明了 `dsh.bundle.patch`，`dsh plugin add` 会自动加进 profile 的
-bundles 层，不用手改配置文件。
+bundles 层，**不用手改配置文件**。
 
----
+**零 DSH 源码改动** —— 全部能力以 Cordis 插件注入，官方升级不动它。
 
-安装/回滚请按 [docs/INSTALL-TROUBLESHOOTING.md](docs/INSTALL-TROUBLESHOOTING.md)；
-**不要手工改 profile，也不要用定时 kill 重启当前 DSH**。
+> 安装 / 回滚请看 [docs/INSTALL-TROUBLESHOOTING.md](docs/INSTALL-TROUBLESHOOTING.md)。
+> 不要手工改 profile，也不要用定时 kill 重启当前 DSH。
+
+## 适合谁
+
+- 已经在用 **DeepSeek Harness (DSH)**，觉得官方界面不够用
+- 需要**中文界面 + 中文人话**的执行过程反馈
+- 想把 AI 当**团队**用（多 Bot 协作、群聊、定时干活、语音通话）
+- 关心**数据在自己机器上**：档案、记忆、密钥全部端侧存储与加密
 
 ---
 
 ## 目录
 
+- [这是什么](#这是什么)
+- [安装](#安装)
+- [适合谁](#适合谁)
 - [你可能最想要的](#你可能最想要的)
 - [Seeker 视图：双栏执行大盘](#seeker-视图双栏执行大盘)
 - [正文里能出卡片](#正文里能出卡片)
