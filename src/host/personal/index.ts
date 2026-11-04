@@ -32,7 +32,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { extname, isAbsolute, join, resolve, sep } from 'node:path'
-import { botWorkspaceDir, cancelBotTurn, ensureBotAgent, getLastTurnDebug, resetBotConversation, runBotTurn, type BotAgentSpec, type PersonalStreamEvent } from './agent.ts'
+import { botWorkspaceDir, cancelBotTurn, ensureBotAgent, getBotContextPressure, getLastTurnDebug, resetBotConversation, runBotTurn, type BotAgentSpec, type PersonalStreamEvent } from './agent.ts'
 import { scanBotOutputs } from './outputs.ts'
 import { recallBotTurn } from './recall.ts'
 import { botRoomOf, buildRoomContextBlock, setBotRoom } from './room-context.ts'
@@ -1108,6 +1108,7 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
             ok: true,
             routes: [
               'reply', 'reply/stream', 'reset', 'recall', 'models',
+              'context',
               'relay', 'relay/prepare', 'relay/commit',
               'journal/image', 'journal/asset',
               'journal/list', 'journal/status', 'journal/generate', 'journal/check', 'journal/rule', 'journal/feed',
@@ -1565,6 +1566,35 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
           } catch (error: any) {
             return sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
           }
+        }
+
+        /*
+         * 上下文占用：前端据此在快满时提示「整理并开新会话」。
+         *
+         * 只读宿主 tokenMeter 的最新投影，不建会话、不触发测量。占用是提示性
+         * 数据——服务缺失 / 会话还没跑过一轮时回 usage:null（仍 200），绝不
+         * 让一个统计接口挡住正常对话。
+         */
+        if ((tail === '/context' || tail === '/context/') && method === 'GET') {
+          const botId = (url.searchParams.get('botId') ?? '').trim()
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          let usage: { usedTokens: number; contextWindow: number; percent: number } | null = null
+          try {
+            const pressure = getBotContextPressure(webCtx, botId)
+            if (pressure !== null) {
+              const ratio = (pressure.usedTokens / pressure.contextWindow) * 100
+              usage = {
+                usedTokens: pressure.usedTokens,
+                contextWindow: pressure.contextWindow,
+                // 一位小数 + 0–100 钳制：前端直接当进度条百分比用
+                percent: Math.round(Math.max(0, Math.min(100, ratio)) * 10) / 10,
+              }
+            }
+          } catch {
+            /* 提示性数据：任何异常都按「没有数据」返回，不报 5xx */
+            usage = null
+          }
+          return sendJson(res, 200, { ok: true, usage })
         }
 
         /*

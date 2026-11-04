@@ -34,6 +34,7 @@ import {
 } from './engine.ts'
 import { resolveRoomTrigger } from './room-trigger.ts'
 import { shouldStartNext } from './room-queue.ts'
+import { normalizeRelayAuto } from './relay-trigger.ts'
 import { BOT_ROSTER_EVENT } from '../triad/hub/memory-bot-source.tsx'
 import {
   createInitialState,
@@ -882,6 +883,8 @@ function normalizeState(parsed: AppState): AppState {
       unread: 0,
       permission: bot.permission === 'approval' ? 'approval' : 'full',
       autoSpeak: bot.autoSpeak === true,
+      // 上下文接力设置：旧数据没有该字段 / 被手改成坏值，一律归一化回合法域。
+      relayAuto: normalizeRelayAuto(bot.relayAuto),
     }))
   if (!bots.some((bot: Bot) => bot.isMain)) bots = [createMainBot(), ...bots]
   /*

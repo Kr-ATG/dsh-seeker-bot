@@ -7,7 +7,7 @@
  *
  * 结构：遮罩 `.pa-sheet-overlay` + 右贴边全高容器 `.pa-sheet`（样式见 settings.css.ts）。
  * 分区依次是：基本资料 / 模型 / 语音通话 / 工具权限 / 主动询问 / 例行任务 /
- * 子 Bot 管理（仅主 Bot）/ 记忆 / 产出物文件夹。
+ * 上下文接力 / 子 Bot 管理（仅主 Bot）/ 记忆 / 产出物文件夹。
  *
  * 保存口径：
  *  · 基本资料（名称、角色、简介、行为约定）走「保存资料」按钮——一次提交四个字段，
@@ -42,6 +42,7 @@ import {
   IconPhone,
   IconPlay,
   IconPlus,
+  IconRefresh,
   IconSearch,
   IconSparkles,
   IconTerminal,
@@ -61,8 +62,10 @@ import {
   type Bot,
   type BotPermission,
   type MemoryEntry,
+  type RelayAuto,
   type RoutineSchedule,
 } from '../types.ts'
+import { normalizeRelayAuto } from '../relay-trigger.ts'
 import { REALTIME_DEFAULT_VOICE, REALTIME_VOICES } from '../../../shared/realtime-protocol.ts'
 import { createMemoryApi, type MemoryEntryView } from '../../triad/memory/api.ts'
 
@@ -83,6 +86,19 @@ const VOICE_OPTIONS: PaSelectOption[] = [
   { value: '', label: `跟随全局默认（${voiceLabel(REALTIME_DEFAULT_VOICE)}）` },
   ...REALTIME_VOICES.map((item) => ({ value: item.id, label: item.label, hint: item.hint })),
 ]
+
+/** 上下文接力提示方式（默认「仅提示」）。 */
+const RELAY_MODE_OPTIONS: PaSelectOption[] = [
+  { value: 'off', label: '关闭' },
+  { value: 'prompt', label: '仅提示', hint: '默认' },
+  { value: 'auto', label: '自动提示', hint: '目前只提示' },
+]
+
+function relayModeLabel(mode: RelayAuto['mode']): string {
+  if (mode === 'off') return '已关闭'
+  if (mode === 'auto') return '自动提示'
+  return '仅提示'
+}
 
 /**
  * 设置卡的分类页签。
@@ -199,6 +215,167 @@ function SheetSection(props: {
       </div>
       {children}
     </section>
+  )
+}
+
+/**
+ * 「上下文接力」设置块。
+ *
+ * 四个字段即改即存（走 actions.updateBot）。数字输入和记忆刷新间隔同一套草稿口径：
+ * 失焦 / 回车才提交，避免「删空重打」的中间态写进配置；越界值按
+ * normalizeRelayAuto 的规则钳制（5%–95% / 1–72 小时）。
+ *
+ * 文案里明确说明「自动提示目前只提示，不自动清空」：这个模式先保留给后续版本，
+ * 现在与「仅提示」行为完全一致，不能让人以为选了它就会自动动会话。
+ */
+function RelayAutoSettings({ bot }: { bot: Bot }): JSX.Element {
+  const { actions } = usePersonal()
+  const current = normalizeRelayAuto(bot.relayAuto)
+  const [softDraft, setSoftDraft] = useState(() => String(Math.round(current.softRatio * 100)))
+  const [hardDraft, setHardDraft] = useState(() => String(Math.round(current.hardRatio * 100)))
+  const [idleDraft, setIdleDraft] = useState(() => String(Math.round(current.idleHours)))
+
+  /* 外部改了 bot.relayAuto（另一个窗口 / 另一处设置）时，回填草稿。 */
+  useEffect(() => {
+    const next = normalizeRelayAuto(bot.relayAuto)
+    setSoftDraft(String(Math.round(next.softRatio * 100)))
+    setHardDraft(String(Math.round(next.hardRatio * 100)))
+    setIdleDraft(String(Math.round(next.idleHours)))
+  }, [bot.id, bot.relayAuto])
+
+  const apply = (patch: Partial<RelayAuto>): void => {
+    actions.updateBot(bot.id, { relayAuto: { ...normalizeRelayAuto(bot.relayAuto), ...patch } })
+  }
+
+  const commitRatio = (key: 'softRatio' | 'hardRatio', raw: string): void => {
+    const parsed = Number(raw)
+    const fallback = normalizeRelayAuto(bot.relayAuto)
+    if (raw.trim() === '' || !Number.isFinite(parsed)) {
+      if (key === 'softRatio') setSoftDraft(String(Math.round(fallback.softRatio * 100)))
+      else setHardDraft(String(Math.round(fallback.hardRatio * 100)))
+      return
+    }
+    const ratio = Math.min(0.95, Math.max(0.05, parsed / 100))
+    if (key === 'softRatio') {
+      setSoftDraft(String(Math.round(ratio * 100)))
+      apply({ softRatio: ratio })
+    } else {
+      setHardDraft(String(Math.round(ratio * 100)))
+      apply({ hardRatio: ratio })
+    }
+  }
+
+  const commitIdle = (raw: string): void => {
+    const parsed = Number(raw)
+    const fallback = normalizeRelayAuto(bot.relayAuto)
+    if (raw.trim() === '' || !Number.isFinite(parsed)) {
+      setIdleDraft(String(Math.round(fallback.idleHours)))
+      return
+    }
+    const hours = Math.min(72, Math.max(1, Math.round(parsed)))
+    setIdleDraft(String(hours))
+    apply({ idleHours: hours })
+  }
+
+  return (
+    <SheetSection icon={<IconRefresh size={13} />} title="上下文接力" extra={relayModeLabel(current.mode)}>
+      <div className="pa-bset-row">
+        <div className="pa-bset-row__main">
+          <b>提示方式</b>
+          <span>上下文占用偏高、隔太久或像换了话题时，在输入框上方提醒整理并开新会话</span>
+        </div>
+        <PaSelect
+          className="pa-select--compact"
+          value={current.mode}
+          options={RELAY_MODE_OPTIONS}
+          ariaLabel="上下文接力提示方式"
+          onChange={(next) => {
+            if (next === 'off' || next === 'prompt' || next === 'auto') apply({ mode: next })
+          }}
+        />
+      </div>
+      <div className="pa-bset-row">
+        <div className="pa-bset-row__main">
+          <b>软阈值</b>
+          <span>占用达到该比例且看起来换了话题时提示</span>
+        </div>
+        <label className="pa-bset-num">
+          <input
+            type="number"
+            inputMode="numeric"
+            min={5}
+            max={95}
+            step={5}
+            value={softDraft}
+            aria-label="上下文接力软阈值（百分比）"
+            onChange={(event) => setSoftDraft(event.target.value)}
+            onBlur={(event) => commitRatio('softRatio', event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                commitRatio('softRatio', event.currentTarget.value)
+              }
+            }}
+          />
+          <span className="pa-bset-num__unit">%</span>
+        </label>
+      </div>
+      <div className="pa-bset-row">
+        <div className="pa-bset-row__main">
+          <b>硬阈值</b>
+          <span>占用达到该比例就直接提示，不再判断话题</span>
+        </div>
+        <label className="pa-bset-num">
+          <input
+            type="number"
+            inputMode="numeric"
+            min={5}
+            max={95}
+            step={5}
+            value={hardDraft}
+            aria-label="上下文接力硬阈值（百分比）"
+            onChange={(event) => setHardDraft(event.target.value)}
+            onBlur={(event) => commitRatio('hardRatio', event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                commitRatio('hardRatio', event.currentTarget.value)
+              }
+            }}
+          />
+          <span className="pa-bset-num__unit">%</span>
+        </label>
+      </div>
+      <div className="pa-bset-row">
+        <div className="pa-bset-row__main">
+          <b>空闲小时数</b>
+          <span>隔这么久没说话且上下文仍有占用时提示</span>
+        </div>
+        <label className="pa-bset-num">
+          <input
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={72}
+            step={1}
+            value={idleDraft}
+            aria-label="上下文接力空闲小时数"
+            onChange={(event) => setIdleDraft(event.target.value)}
+            onBlur={(event) => commitIdle(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                commitIdle(event.currentTarget.value)
+              }
+            }}
+          />
+          <span className="pa-bset-num__unit">小时</span>
+        </label>
+      </div>
+      <p className="pa-sheet-hint">
+        「自动提示」目前只做提示，不会自动清空对话；整理动作始终需要点提示条上的「去整理」再确认。
+      </p>
+    </SheetSection>
   )
 }
 
@@ -1120,6 +1297,9 @@ export function BotSettingsCard(): JSX.Element | null {
               </button>
             )}
           </SheetSection>
+
+          {/* 7. 上下文接力（第 2 步）：提示方式 + 软/硬阈值 + 空闲小时数 */}
+          <RelayAutoSettings bot={bot} />
           </>
           ) : null}
 

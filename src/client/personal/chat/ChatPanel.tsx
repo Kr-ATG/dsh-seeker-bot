@@ -17,9 +17,14 @@ import type { RelayBrief } from '../../../shared/relay.ts'
 import { Composer } from './Composer.tsx'
 import { MessageList, jumpToMessage } from './MessageList.tsx'
 import { pendingSummaryOf, pendingTasksOf } from './pending.ts'
+import { evaluateRelayTrigger, normalizeRelayAuto, relayHintKey, type RelayTrigger } from '../relay-trigger.ts'
 
 const MIN_CHAT_WIDTH = 520
 const MAX_CHAT_WIDTH = 1600
+/** 上下文占用探测：每轮结束后先防抖 800ms，避免流式收尾的连续状态变化打出多次请求。 */
+const RELAY_PROBE_DEBOUNCE_MS = 800
+/** 两次探测至少隔 3 分钟：占用变化是慢变量，不必每轮都问宿主。 */
+const RELAY_PROBE_THROTTLE_MS = 3 * 60_000
 
 export function ChatPanel(): JSX.Element {
   const { state, ui, actions, activeBot, activeRoom, activeMessages } = usePersonal()
@@ -47,6 +52,17 @@ export function ChatPanel(): JSX.Element {
   /** 摘要就绪时给按钮用；派生出来便于 JSX 里收窄类型。 */
   const relayBrief = relay.status === 'ready' ? relay.brief : null
   const relayDegraded = relay.status === 'ready' && relay.degraded
+  /** 当前上下文接力提示（null = 不显示）；点「关闭」后同一档不再出现。 */
+  const [relayHint, setRelayHint] = useState<RelayTrigger | null>(null)
+  /** 关闭记忆：botId + kind + 百分比十位档，只活在本次页面会话。 */
+  const relayHintDismissedRef = useRef<Set<string>>(new Set())
+  /** 上次探测的 bot / 时间（3 分钟节流；切 Bot 后重新计时）。 */
+  const relayProbeRef = useRef<{ botId: string; at: number }>({ botId: '', at: 0 })
+  /** 探测请求序号：切 Bot / 发起新请求后，迟到的旧结果直接丢弃。 */
+  const relayProbeTokenRef = useRef(0)
+  /** 当前会话 Bot id，异步回调里用它确认还停在同一个聊天里。 */
+  const activeBotIdRef = useRef(activeBot.id)
+  activeBotIdRef.current = activeBot.id
 
   /*
    * 退场状态：菜单与确认卡关闭时先播 240ms 动画再真正卸载。
@@ -220,6 +236,78 @@ export function ChatPanel(): JSX.Element {
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [moreOpen, clearTarget, closeMenu, closeConfirm])
 
+  /*
+   * 上下文接力提示的探测时机：**每轮结束**（最后一条是 bot 消息、没有 pending 占位、
+   * 且是单聊）。防抖 800ms 避开流式收尾的连续 messages 更新；3 分钟节流避免每轮都
+   * 打一次接口。请求失败静默——提示条是锦上添花，不能因此打断聊天。
+   *
+   * 判定本身在 relay-trigger.ts（纯逻辑）：hard / soft / idle 三档，mode='off' 不探测。
+   * mode='auto' 目前与 prompt 完全一致：只提示，绝不自动清空。
+   */
+  useEffect(() => {
+    if (activeRoom !== null) {
+      setRelayHint(null)
+      return undefined
+    }
+    const last = activeMessages.length > 0 ? activeMessages[activeMessages.length - 1] : undefined
+    const hasPending = activeMessages.some((message) => message.pending === true)
+    if (last === undefined || last.role !== 'bot' || hasPending) {
+      setRelayHint(null)
+      return undefined
+    }
+    let lastUserAt = 0
+    for (const message of activeMessages) {
+      if (message.role === 'user') lastUserAt = Math.max(lastUserAt, message.at)
+    }
+    if (lastUserAt === 0) {
+      setRelayHint(null)
+      return undefined
+    }
+    const bot = activeBot
+    if (normalizeRelayAuto(bot.relayAuto).mode === 'off') {
+      setRelayHint(null)
+      return undefined
+    }
+    const messagesSnapshot = activeMessages
+    const handle = window.setTimeout(() => {
+      const now = Date.now()
+      const previousProbe = relayProbeRef.current
+      if (previousProbe.botId === bot.id && now - previousProbe.at < RELAY_PROBE_THROTTLE_MS) return
+      relayProbeRef.current = { botId: bot.id, at: now }
+      const token = relayProbeTokenRef.current + 1
+      relayProbeTokenRef.current = token
+      void (async () => {
+        try {
+          const response = await fetch(`/api/personal-agent/context?botId=${encodeURIComponent(bot.id)}`)
+          if (!response.ok) return
+          const data = (await response.json()) as {
+            ok?: boolean
+            usage?: { usedTokens: number; contextWindow: number; percent: number } | null
+          }
+          // 迟到的结果 / 已经切到别的 Bot：直接丢弃，别把 A 的占用提示挂到 B 上。
+          if (token !== relayProbeTokenRef.current) return
+          if (activeBotIdRef.current !== bot.id) return
+          const trigger = evaluateRelayTrigger({
+            usage: data.ok === true ? data.usage ?? null : null,
+            lastUserAt,
+            now: Date.now(),
+            messages: messagesSnapshot,
+            settings: bot.relayAuto,
+          })
+          if (trigger === null) {
+            setRelayHint(null)
+            return
+          }
+          if (relayHintDismissedRef.current.has(`${bot.id}:${relayHintKey(trigger)}`)) return
+          setRelayHint(trigger)
+        } catch {
+          /* 宿主未就绪 / 网络失败：静默，下一轮再试 */
+        }
+      })()
+    }, RELAY_PROBE_DEBOUNCE_MS)
+    return () => window.clearTimeout(handle)
+  }, [activeMessages, activeBot, activeRoom])
+
   const handleCall = (): void => {
     if (ui.call.status !== 'idle') {
       actions.minimizeCall(false)
@@ -375,6 +463,41 @@ export function ChatPanel(): JSX.Element {
         />
         <MessageList messages={activeMessages} bot={activeBot} room={activeRoom} />
         <PendingBar messages={activeMessages} />
+        {relayHint !== null ? (
+          <div className="pa-relay-hint" role="status" data-kind={relayHint.kind}>
+            <span className="pa-relay-hint__dot" aria-hidden="true" />
+            <div className="pa-relay-hint__body">
+              <span className="pa-relay-hint__title">{relayHint.title}</span>
+              <span className="pa-relay-hint__detail">{relayHint.detail}</span>
+            </div>
+            <button
+              className="pa-relay-hint__go"
+              type="button"
+              onClick={() => {
+                // 复用第 1 步的「整理并开新会话」确认卡：这里只打开，不自动整理 / 清空。
+                relayRequestRef.current += 1
+                setRelay({ status: 'idle' })
+                setClearTarget(activeBot)
+                setRelayHint(null)
+              }}
+            >
+              去整理
+            </button>
+            <button
+              className="pa-relay-hint__close"
+              type="button"
+              title="关闭提示"
+              aria-label="关闭提示"
+              onClick={() => {
+                // 同一 kind + 百分比档位本次会话不再弹（组件内 state 即可，不落盘）。
+                relayHintDismissedRef.current.add(`${activeBot.id}:${relayHintKey(relayHint)}`)
+                setRelayHint(null)
+              }}
+            >
+              <IconX size={12} />
+            </button>
+          </div>
+        ) : null}
         <Composer />
 
       {clearTarget !== null ? (

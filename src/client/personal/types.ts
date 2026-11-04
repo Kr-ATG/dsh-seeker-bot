@@ -58,6 +58,22 @@ export interface ProactiveConfig {
   lastAt?: number
 }
 
+/**
+ * 上下文接力（自动提示整理并开新会话）设置。
+ *
+ * mode:
+ *  · off    完全关闭，不探测上下文占用；
+ *  · prompt 仅提示（默认）：命中阈值时在输入框上方出一条提示，由用户点「去整理」；
+ *  · auto   自动提示——目前与 prompt 行为一致，只提示，不会自动清空会话。
+ * softRatio / hardRatio 是 0–1 的占用比例，idleHours 是空闲小时数。
+ */
+export interface RelayAuto {
+  mode: 'off' | 'prompt' | 'auto'
+  softRatio: number
+  hardRatio: number
+  idleHours: number
+}
+
 export interface Bot {
   id: string
   name: string
@@ -99,6 +115,12 @@ export interface Bot {
   autoSpeak?: boolean
   /** 工具权限档位；旧数据没有这个字段时按 `full` 处理。 */
   permission?: BotPermission
+  /**
+   * 上下文接力自动提示设置；旧数据没有这个字段 = 走默认值（仅提示）。
+   *
+   * 只影响「要不要在输入框上方提示整理」，不会自动清空任何会话。
+   */
+  relayAuto?: RelayAuto
   proactive: ProactiveConfig
   createdAt: number
   createdBy: string | null

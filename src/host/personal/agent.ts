@@ -1890,6 +1890,64 @@ export function cancelBotTurn(ctx: any, botId: string): { ok: boolean; sessionId
 }
 
 /**
+ * 读某个 Bot 当前会话的上下文占用（提示词规模 / 上下文窗口）。
+ *
+ * 数据源是宿主的 `tokenMeter` 服务：`contextPressure(session)` 同步读取
+ * 「最新一次请求的提示词规模」和「路由声明的上下文窗口」，不触发任何模型调用。
+ *
+ * ## 为什么任何异常都返回 null
+ *
+ * 占用只是前端「快满了该轮转」的提示，不是对话本身的一部分。宿主没装
+ * token-meter、会话还没跑过一轮（没有 request/context 记录）、或者投影数据
+ * 暂时不可读，都只会让提示缺失——绝不能因此让 /context 报错。
+ *
+ * 会话优先取 `agentCache`（本插件自己创建 / 恢复的 agent），其次查
+ * `agents` 实时注册表——进程重启后缓存是空的，但宿主里活着的会话仍然在。
+ *
+ * @returns `{ usedTokens, contextWindow }`（均为四舍五入后的整数）；无数据时 null。
+ */
+export function getBotContextPressure(ctx: any, botId: string): { usedTokens: number; contextWindow: number } | null {
+  try {
+    const sessionId = botSessionId(botId)
+    let agent: any = agentCache.get(sessionId)?.agent
+    if (agent === undefined || agent === null) {
+      try {
+        const agents = getAgents(ctx)
+        agent = typeof agents?.get === 'function' ? agents.get(sessionId) : undefined
+      } catch {
+        /* agents 服务不可用：按无会话处理 */
+      }
+    }
+    if (agent === undefined || agent === null) return null
+    const session = agent?.session ?? agent
+    if (session === undefined || session === null) return null
+
+    let tokenMeter: any
+    try {
+      tokenMeter = typeof ctx?.get === 'function' ? ctx.get('tokenMeter') : undefined
+    } catch {
+      tokenMeter = undefined
+    }
+    if (tokenMeter === undefined || tokenMeter === null) tokenMeter = ctx?.tokenMeter
+    if (typeof tokenMeter?.contextPressure !== 'function') return null
+
+    const pressure = tokenMeter.contextPressure(session)
+    if (pressure === null || typeof pressure !== 'object') return null
+    const used = Number(pressure.pressureTokens)
+    const window = Number(pressure.contextWindow)
+    // 两个字段都可能在首轮请求前缺席：NaN 会被 Number.isFinite 拦住
+    if (!Number.isFinite(used) || !Number.isFinite(window) || window <= 0) return null
+    const usedTokens = Math.max(0, Math.round(used))
+    const contextWindow = Math.round(window)
+    if (!Number.isFinite(usedTokens) || !Number.isFinite(contextWindow) || contextWindow <= 0) return null
+    return { usedTokens, contextWindow }
+  } catch {
+    /* 任何服务 / 投影异常都按「没有数据」处理，不抛穿到路由层 */
+    return null
+  }
+}
+
+/**
  * 找出某个 sessionId 的持久化目录。
  *
  * 会话文件按「cwd 编码」分目录存放：`~/.dsh/sessions/<cwd 编码>/<sessionId>/`。

@@ -2656,6 +2656,81 @@ button.dgi__save-button:disabled { opacity: 0.6; cursor: default; }
 .pa-pending__count { flex: none; color: var(--pa-text-3); font-variant-numeric: tabular-nums; }
 .pa-pending__jump { flex: none; display: inline-flex; align-items: center; gap: 1px; color: var(--pa-text-3); }
 .pa-pending:hover .pa-pending__jump { color: var(--pa-text); }
+
+/* ---------- 上下文接力提示条（第 2 步） ----------
+ * 与待处理上浮条同一档：输入框上方的细条，不抢消息的注意力。
+ * 颜色全部走 --pa-* 变量，深浅主题自动适配；点「去整理」才打开确认卡，
+ * 不会自动生成摘要或清空会话。 */
+.pa-relay-hint {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 26px 8px;
+  padding: 7px 10px 7px 12px;
+  border-radius: 10px;
+  background: var(--pa-chat-glass);
+  border: 1px solid var(--pa-line);
+  color: var(--pa-text-2);
+  font-size: calc(11.5px + var(--pa-font-delta));
+  line-height: calc(16px + var(--pa-font-delta));
+}
+.pa-relay-hint__dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--pa-accent);
+}
+.pa-relay-hint[data-kind='hard'] .pa-relay-hint__dot { background: var(--pa-red); }
+.pa-relay-hint__body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  overflow: hidden;
+}
+.pa-relay-hint__title { flex: none; font-weight: 500; color: var(--pa-text); }
+.pa-relay-hint__detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--pa-text-3);
+}
+.pa-relay-hint__go {
+  flex: none;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 7px;
+  border: 1px solid var(--pa-line-2);
+  background: var(--pa-card);
+  color: var(--pa-accent);
+  font-size: calc(11px + var(--pa-font-delta));
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.pa-relay-hint__go:hover { background: var(--pa-chat-glass-2); border-color: var(--pa-accent); }
+.pa-relay-hint__go:focus-visible { outline: 2px solid var(--pa-accent); outline-offset: 1px; }
+.pa-relay-hint__close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--pa-text-3);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.pa-relay-hint__close:hover { background: var(--pa-chat-glass-2); color: var(--pa-text); }
+.pa-relay-hint__close:focus-visible { outline: 2px solid var(--pa-accent); outline-offset: 1px; }
 /* 从上浮条跳到原消息时闪一下描边，否则用户只看到消息流动了一下、不知道落在哪。
  * 加在外层消息容器上（MessageList 的 id 节点），描边画在内层内容块上。 */
 .pa-flash .pa-msg__content { animation: pa-flash-ring 1.6s ease-out; }
@@ -2671,6 +2746,7 @@ button.dgi__save-button:disabled { opacity: 0.6; cursor: default; }
   .pa-chat__scroll { padding: 18px 20px 24px; }
   .pa-composer { padding: 6px 18px 16px; }
   .pa-pending { margin-left: 18px; margin-right: 18px; }
+  .pa-relay-hint { margin-left: 18px; margin-right: 18px; }
   .pa-msg--bot { padding-right: 6%; }
   .pa-msg--user { padding-left: 10%; }
 }
@@ -2678,6 +2754,7 @@ button.dgi__save-button:disabled { opacity: 0.6; cursor: default; }
   .pa-chat__scroll { padding: 14px 14px 20px; }
   .pa-composer { padding: 6px 12px 14px; }
   .pa-pending { margin-left: 12px; margin-right: 12px; }
+  .pa-relay-hint { margin-left: 12px; margin-right: 12px; }
   .pa-msg--bot { padding-right: 0; }
   .pa-msg--user { padding-left: 0; }
   .pa-msg__content { max-width: calc(100% - 42px); }
