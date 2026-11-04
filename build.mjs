@@ -190,6 +190,12 @@ const hostBundle = {
       build.onResolve({ filter: /^undici$/ }, args => ({ path: args.path, external: true }))
       // ssh2 的可选原生加速件：保持 external，运行时装不上会由 ssh2 自己回退。
       build.onResolve({ filter: /^cpu-features$/ }, args => ({ path: args.path, external: true }))
+      // ssh2 内联的原生二进制（crypto/build/Release/sshcrypto.node 等）：esbuild
+      // 没有 .node 的 loader，若不标成 external 会在构建期直接报
+      // "No loader is configured for .node files" 而整包构建失败。
+      // 标成 external 后运行时会走 ssh2 自己的 try/catch —— 装得上就用原生加速，
+      // 装不上回退纯 JS，行为与设计一致（Linux/CI 上本来就没有预编译 .node）。
+      build.onResolve({ filter: /\.node$/ }, args => ({ path: args.path, external: true }))
     },
   }],
 }
