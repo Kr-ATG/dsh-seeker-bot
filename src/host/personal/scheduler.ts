@@ -30,7 +30,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { botWorkspaceDir, ensureBotAgent, runBotTurn, type BotAgentSpec, type BotMessage, type PersonalStreamEvent, type TurnResult } from './agent.ts'
+import { botWorkspaceDir, ensureBotAgent, runBotTurn, toUserFacingError, type BotAgentSpec, type BotMessage, type PersonalStreamEvent, type TurnResult } from './agent.ts'
 import { publish } from './events.ts'
 import { checkJournalTrigger } from './journal.ts'
 import { runAsBackgroundApproval } from './approval.ts'
@@ -493,11 +493,11 @@ export async function runProactiveNow(ctx: any, config: HostProactive): Promise<
       return { ok: true }
     }
     const error = turn.error ?? '未知原因'
-    publish(config.botId, { type: 'error', message: `主动询问未完成：${error}` })
+    publish(config.botId, { type: 'error', message: `主动询问未完成：${toUserFacingError(String(error))}` })
     return { ok: false, error }
   } catch (error: any) {
     const message = String(error?.message ?? error)
-    publish(config.botId, { type: 'error', message: `主动询问出错：${message}` })
+    publish(config.botId, { type: 'error', message: `主动询问出错：${toUserFacingError(message)}` })
     return { ok: false, error: message }
   } finally {
     publish(config.botId, { type: 'status', status: 'idle' })
@@ -737,7 +737,7 @@ export function applyPersonalAgentScheduler(ctx: any): () => void {
       return { ok: false, outcome: 'failed', partial: false, attempts, noData: false, messages: [], error: reason }
     } catch (error: any) {
       const message = String(error?.message ?? error)
-      publish(routine.botId, { type: 'error', message: `例行任务「${routine.name}」执行出错：${message}` })
+      publish(routine.botId, { type: 'error', message: `例行任务「${routine.name}」执行出错：${toUserFacingError(message)}` })
       return { ok: false, outcome: 'failed', partial: false, attempts, noData: false, messages: [], error: message }
     } finally {
       publish(routine.botId, { type: 'status', status: 'idle' })

@@ -3459,30 +3459,41 @@ function steerRunningTurn(agent: any, spec: BotAgentSpec, text: string): { steer
  * 边收边通过 emit 推给前端，最后返回完整 blocks。
  */
 /**
- * 把 turn/end 里的失败信息变成用户能看懂的一行。
+ * 把宿主 / 模型提供方的错误折叠成一句**中文**提示（界面只显示中文）。
  *
- * 上游 provider 的错误经常是 `429: {"code":null,"message":"...","type":"rate_limit_error"}`
- * 这种「状态码 + 原始 JSON」——直接抛给用户既长又难读。能解析出 message 字段时
- * 优先用它，并把 429 之类的前缀保留下来（用户需要知道是额度问题还是网络问题）。
+ * 上游错误经常是 `429: {"code":null,"message":"MiniMax ... insufficient balance"}`
+ * 这种「状态码 + 英文 JSON」，直接抛给用户既长又难读、还是英文。这里按关键字
+ * 映射成中文；无法识别的英文错误也不把原文显示给用户，只提示查看宿主日志
+ * （英文原文仍写进 stderr 日志，排查时看得到）。
  */
-function readableTurnFailure(raw: string): string {
+export function toUserFacingError(raw: string): string {
   const text = raw.trim()
-  if (text === '') return ''
-  const start = text.indexOf('{')
-  const end = text.lastIndexOf('}')
-  if (start >= 0 && end > start) {
-    try {
-      const parsed = JSON.parse(text.slice(start, end + 1)) as { message?: unknown }
-      const detail = typeof parsed.message === 'string' ? parsed.message.trim() : ''
-      if (detail !== '') {
-        const prefix = text.slice(0, start).replace(/[:：]\s*$/, '').trim()
-        return prefix === '' ? detail : `${prefix}：${detail}`
-      }
-    } catch {
-      /* 不是 JSON：保留原文 */
-    }
+  if (text === '') return '本轮没有产生任何输出'
+  // 本来就是中文的错误（插件自己抛的）原样保留
+  if (/[\u4e00-\u9fa5]/.test(text)) return text
+  const lower = text.toLowerCase()
+  if (/(usage limit|insufficient balance|quota|balance)/.test(lower) || /\b429\b/.test(text)) {
+    return '模型额度已用尽或请求过于频繁（429），请稍后重试或更换模型'
   }
-  return text.length > 300 ? `${text.slice(0, 300)}…` : text
+  if (/(401|unauthorized|invalid api key|authentication failed)/.test(lower)) {
+    return '模型鉴权失败（401），请检查模型配置或密钥'
+  }
+  if (/(403|forbidden)/.test(lower)) return '模型拒绝访问（403），请检查权限或额度'
+  if (/(404|not found|model not found)/.test(lower)) return '模型或接口不存在（404），请检查模型配置'
+  if (/(timeout|timed out|etimedout)/.test(lower)) return '模型请求超时，请稍后重试'
+  if (/(context length|maximum context|too many tokens|token limit|exceed.*token)/.test(lower)) {
+    return '上下文超过模型上限，请整理对话后重试'
+  }
+  if (/(overloaded|service unavailable|503|502|500|internal server error)/.test(lower)) {
+    return '模型服务暂时不可用，请稍后重试'
+  }
+  if (/(network|fetch failed|econnrefused|enotfound|socket|connect.*refused)/.test(lower)) {
+    return '网络连接失败，请检查网络后重试'
+  }
+  if (/(rate limit|too many requests)/.test(lower)) return '请求过于频繁，请稍后重试'
+  const codeMatch = /\b(?:error|code|status)[:：]?\s*(\d{3})\b/i.exec(text)
+  if (codeMatch !== null) return `模型调用失败（错误码 ${codeMatch[1]}），请稍后重试或查看宿主日志`
+  return '模型调用失败，请稍后重试或查看宿主日志'
 }
 
 export async function runBotTurn(
@@ -3519,7 +3530,7 @@ export async function runBotTurn(
   try {
     agent = await ensureBotAgent(ctx, spec)
   } catch (error: any) {
-    const message = String(error?.message ?? error)
+    const message = toUserFacingError(String(error?.message ?? error))
     emit({ type: 'error', message })
     return { ok: false, blocks: [], messages: [], error: message }
   }
@@ -4204,8 +4215,9 @@ export async function runBotTurn(
     docWatchActive = false
     stopDocWatch()
     closeDocumentProgress()
+    const userFacingMessage = toUserFacingError(message)
     finalizeMessages()
-    emit({ type: 'error', message })
+    emit({ type: 'error', message: userFacingMessage })
     return { ok: false, blocks, messages, error: message, sessionId }
   }
 
@@ -4261,7 +4273,7 @@ export async function runBotTurn(
     } | null
     const reason = typeof turnEnd?.reason?.kind === 'string' ? turnEnd.reason.kind : ''
     const failure = turnEnd?.reason?.error
-    const failureText = typeof failure?.message === 'string' ? readableTurnFailure(failure.message) : ''
+    const failureText = typeof failure?.message === 'string' ? toUserFacingError(failure.message) : ''
     try {
       console.warn('[personal-agent] 空轮诊断', JSON.stringify({
         sessionId,

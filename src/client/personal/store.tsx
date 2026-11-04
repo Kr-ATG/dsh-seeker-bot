@@ -123,6 +123,21 @@ function isDemoMode(): boolean {
 }
 
 /**
+ * 前端兜底错误文案：界面只显示中文。
+ *
+ * host 的 SSE error 事件已经是中文；这里覆盖的是「网络 / 降级链自身抛错」这类
+ * 前端异常（fetch failed、timeout 等英文原文），避免聊天窗直接显示英文。
+ */
+function userFacingErrorText(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error)
+  if (/[\u4e00-\u9fa5]/.test(text)) return text
+  if (/(fetch|network|failed to fetch|timeout|econnrefused|enotfound)/i.test(text)) {
+    return '网络请求失败，请稍后重试'
+  }
+  return '请求失败，请稍后重试'
+}
+
+/**
  * 流式字幕合并窗口（毫秒）。
  *
  * 全双工的转写增量是几十毫秒一条；每条都 setUi 会让整个 Bot 应用（含 200 条消息
@@ -4035,7 +4050,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
           return
         }
         // 兜底：降级链自己出错也不能让 pending 消息永远挂着
-        const reason = streamError !== '' ? streamError : (error instanceof Error ? error.message : String(error))
+        const reason = streamError !== '' ? streamError : userFacingErrorText(error)
         /*
          * 多消息模式下，pending 标记留在任何一条消息上都会让它在下一轮的 history
          * 过滤里被丢掉（`!msg.pending`），表现为「Bot 记不住刚说过的话」。

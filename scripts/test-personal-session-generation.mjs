@@ -98,7 +98,8 @@ try {
   })
   check('空壳会话不再自动删除（新建会话只有 header 是正常状态）', () => {
     assert.ok(!agentSource.includes('isEmptySessionFile'), '仍在自动判定空壳（会导致每轮空轮都换代）')
-    assert.ok(agentSource.includes('function readableTurnFailure('), '缺少真实错误透传（429/QUOTA 会被吞）')
+    assert.ok(agentSource.includes('function toUserFacingError('), '缺少错误中文化/真实错误透传')
+    assert.ok(agentSource.includes('模型额度已用尽或请求过于频繁'), '429/额度错误没有中文映射')
     assert.ok(agentSource.includes('discardEmptySession(sessionId)'), 'create 冲突时的空壳兜底应保留')
   })
 

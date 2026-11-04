@@ -32,7 +32,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { extname, isAbsolute, join, resolve, sep } from 'node:path'
-import { botWorkspaceDir, cancelBotTurn, ensureBotAgent, getBotContextPressure, getLastTurnDebug, resetBotConversation, runBotTurn, type BotAgentSpec, type PersonalStreamEvent } from './agent.ts'
+import { botWorkspaceDir, cancelBotTurn, ensureBotAgent, getBotContextPressure, getLastTurnDebug, resetBotConversation, runBotTurn, toUserFacingError, type BotAgentSpec, type PersonalStreamEvent } from './agent.ts'
 import { scanBotOutputs } from './outputs.ts'
 import { recallBotTurn } from './recall.ts'
 import { botRoomOf, buildRoomContextBlock, setBotRoom } from './room-context.ts'
@@ -2286,7 +2286,7 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
              */
             if (!turn.ok && turn.error !== undefined) write({ type: 'error', message: turn.error })
           } catch (error: any) {
-            turnText = String(error?.message ?? error)
+            turnText = toUserFacingError(String(error?.message ?? error))
             write({ type: 'error', message: turnText })
           } finally {
             /*
