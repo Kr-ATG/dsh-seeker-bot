@@ -94,6 +94,11 @@ import {
   type RealtimeArtifact,
   type RealtimeVendorRecord,
 } from '../../shared/realtime-protocol.ts'
+import {
+  RELAY_MESSAGES_MAX,
+  type RelayBrief,
+  type RelayMessage,
+} from '../../shared/relay.ts'
 import { RealtimeCall, type RealtimeCallHandlers } from './call/realtime-client.ts'
 import { sortTurns, takePendingUserTurn, type PendingUserTurn } from './call/call-turns.ts'
 import { relocateToEnd } from './chat/message-order.ts'
@@ -762,8 +767,20 @@ export interface PersonalActions {
   runRoutine(id: string): void
   deleteRoutine(id: string): void
   proactiveNow(botId: string): void
-  /** 清空某个 bot 的全部对话（界面消息 + 宿主侧 agent 会话）。 */
-  clearConversation(botId: string): Promise<void>
+  /**
+   * 把某个 bot 的最近私聊整理成「接力摘要」，供「整理并开新会话」确认卡预览。
+   *
+   * 只送最近 `RELAY_MESSAGES_MAX` 条带正文的消息（text 块拼接）；宿主不可用时
+   * 返回 null（已 toast 过原因），调用方仍可退回「直接清空」。
+   */
+  prepareRelay(botId: string): Promise<{ brief: RelayBrief; degraded: boolean; error?: string } | null>
+  /**
+   * 清空某个 bot 的全部对话（界面消息 + 宿主侧 agent 会话）。
+   *
+   * 传 `options.relay` 时走「整理并开新会话」：先让宿主落盘摘要并 reset，界面
+   * 清理与重载逻辑不变；不传时保持原来的 /reset 行为。
+   */
+  clearConversation(botId: string, options?: { relay?: RelayBrief }): Promise<void>
   /**
    * 拉取某个 Bot 的 Pages（3.1）。
    *
@@ -4560,6 +4577,106 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
   }, [appendMessage, toast])
 
   /**
+   * 把某个 bot 的最近私聊整理成「接力摘要」（「整理并开新会话」的第一步）。
+   *
+   * 为什么在**前端**抽消息：宿主只拿得到它自己的会话历史，而界面上可能有刚发出
+   * 还没落进 agent 上下文的轮次；以界面消息为准，用户看到的和摘要取材的才是同一段
+   * 对话。只送最近 RELAY_MESSAGES_MAX 条，太长既费 token 也没必要。
+   *
+   * 失败返回 null（toast 已提示原因），确认卡里仍保留「直接清空」——
+   * 「整理」是增强路径，不能因为它失败就把用户卡在弹窗里。
+   */
+  const prepareRelay = useCallback(async (botId: string): Promise<{ brief: RelayBrief; degraded: boolean; error?: string } | null> => {
+    const bot = stateRef.current.bots.find((item) => item.id === botId)
+    const label = bot?.name ?? '这个 Bot'
+
+    // 与 clearConversation 同口径：私聊消息（群聊属于群，不参与这个 bot 的接力摘要）
+    const recent = stateRef.current.messages
+      .filter((message) => message.roomId === undefined
+        && (message.botId === botId || message.senderId === botId)
+        && message.role !== 'system'
+        && message.pending !== true)
+      .slice(-RELAY_MESSAGES_MAX)
+
+    const messages: RelayMessage[] = []
+    for (const message of recent) {
+      // 只取正文块：图片 / 工具卡 / 期刊卡没有可摘要的自然语言
+      const text = message.blocks
+        .map((block) => (block.type === 'text' ? block.text : ''))
+        .filter((part) => part !== '')
+        .join('\n')
+        .trim()
+      if (text === '') continue
+      messages.push({
+        role: message.role === 'user' ? 'user' : 'bot',
+        text,
+        at: message.at,
+      })
+    }
+
+    if (messages.length === 0) {
+      toast(`「${label}」还没有可整理的对话`)
+      return null
+    }
+    if (isDemoMode()) {
+      toast('演示页没有宿主，无法整理对话')
+      return null
+    }
+
+    try {
+      /*
+       * 摘要生成要过一次模型，可能十几秒：给足够超时，但别无限等——
+       * 用户点完按钮会一直看到「正在整理…」，卡死比失败更糟。
+       */
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 120_000)
+      try {
+        const res = await fetch('/api/personal-agent/relay/prepare', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            botId,
+            ...(bot !== undefined && bot.model !== undefined
+              ? {
+                  botModel: {
+                    provider: bot.model.provider,
+                    model: bot.model.model,
+                    ...(bot.model.effort !== undefined && bot.model.effort !== ''
+                      ? { effort: bot.model.effort }
+                      : {}),
+                  },
+                }
+              : {}),
+            messages,
+          }),
+          signal: controller.signal,
+        })
+        const data = (await res.json()) as {
+          ok?: boolean
+          brief?: RelayBrief | null
+          degraded?: boolean
+          error?: string
+        }
+        if (data.ok !== true || data.brief === undefined || data.brief === null) {
+          toast(`整理失败：${data.error ?? `HTTP ${res.status}`}`)
+          return null
+        }
+        return {
+          brief: data.brief,
+          // 模型不可用时宿主用 fallbackRelayBrief 兜底，degraded 标记让确认卡说明情况
+          degraded: data.degraded === true,
+          ...(typeof data.error === 'string' && data.error !== '' ? { error: data.error } : {}),
+        }
+      } finally {
+        clearTimeout(timer)
+      }
+    } catch {
+      toast('整理失败：宿主未连接或接口不可用')
+      return null
+    }
+  }, [toast])
+
+  /**
    * 清空某个 bot 的**私聊**。
    *
    * 两处都要清，少一处就会出现割裂：
@@ -4571,7 +4688,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
    * 这个 Bot 在所有群里说过的话一起抹掉：群里的上下文对别人还在，对他已经断了，
    * 接着回复就是一副「刚才什么都没发生」的样子。私聊是私聊，群聊记录属于群。
    */
-  const clearConversation = useCallback(async (botId: string): Promise<void> => {
+  const clearConversation = useCallback(async (botId: string, options?: { relay?: RelayBrief }): Promise<void> => {
     const bot = stateRef.current.bots.find((item) => item.id === botId)
     const label = bot?.name ?? '这个 Bot'
 
@@ -4599,20 +4716,44 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       return next
     })
 
-    try {
-      const res = await fetch('/api/personal-agent/reset', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ botId }),
-      })
-      const data = await res.json() as { ok?: boolean; error?: string; removed?: number }
-      if (data.ok === false) {
-        toast(`界面消息已清空；宿主侧没清干净：${data.error ?? '未知原因'}`)
-      } else {
-        toast(`已清空「${label}」的全部对话`)
+    /*
+     * 宿主侧分两条路：
+     *  · 带 relay = 「整理并开新会话」：commit 端点负责落盘摘要 + 清空会话（等价 /reset），
+     *    不能再调一次 /reset——commit 已经 reset 过了，重复调用只会多一轮无谓的会话重建；
+     *  · 不带 relay = 原来的「直接清空」：维持 /reset 行为不动。
+     */
+    if (options?.relay !== undefined) {
+      try {
+        const res = await fetch('/api/personal-agent/relay/commit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ botId, brief: options.relay }),
+        })
+        const data = await res.json() as { ok?: boolean; error?: string }
+        if (data.ok === false) {
+          toast(`界面消息已清空；宿主侧没清干净：${data.error ?? '未知原因'}`)
+        } else {
+          toast('已整理上一段对话，并开启新会话')
+        }
+      } catch {
+        toast('界面消息已清空；宿主未连接，摘要没落盘、agent 历史留到下次重启')
       }
-    } catch {
-      toast('界面消息已清空（宿主未连接，agent 历史留到下次重启）')
+    } else {
+      try {
+        const res = await fetch('/api/personal-agent/reset', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ botId }),
+        })
+        const data = await res.json() as { ok?: boolean; error?: string; removed?: number }
+        if (data.ok === false) {
+          toast(`界面消息已清空；宿主侧没清干净：${data.error ?? '未知原因'}`)
+        } else {
+          toast(`已清空「${label}」的全部对话`)
+        }
+      } catch {
+        toast('界面消息已清空（宿主未连接，agent 历史留到下次重启）')
+      }
     }
 
     /*
@@ -5678,6 +5819,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
      * 补漏：接口里有、依赖数组里也有，但这个对象漏了它——ChatPanel 的「清空对话」
      * 直接调 `actions.clearConversation`，不补就是点击必崩（tsc 也会报 TS2741）。
      */
+    prepareRelay,
     clearConversation,
     refreshPages,
     addMemory,
@@ -5706,7 +5848,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     selectBot, selectRoom, setTheme, sendMessage, stopReply, createBot, updateBot, deleteBot, setBotEnabled, setBotPinned, moveBot,
     createGroup, renameGroup, deleteGroup, createRoom, updateRoom, setRoomPinned, deleteRoom, answerInteractive,
     recallMessage,
-    addMemory, deleteMemory, createRoutine, toggleRoutine, runRoutine, deleteRoutine, proactiveNow, clearConversation,
+    addMemory, deleteMemory, createRoutine, toggleRoutine, runRoutine, deleteRoutine, proactiveNow, prepareRelay, clearConversation,
     refreshPages,
     generateJournal, runJournalCheck, startCall, endCall, callUserTurn, interruptCall, retryCallMicrophone,
     callLevel, setCallMuted, setCallSpeaker, setCallVolume,

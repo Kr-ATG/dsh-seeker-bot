@@ -30,6 +30,7 @@
 import { pickVendor, readUserConfig, writeUserConfig } from './config-store.ts'
 import { ensureBotAgent, runBotTurn, type BotAgentSpec, type BotPermission, type PersonalStreamEvent, type TurnResult } from '../agent.ts'
 import { injectWorkingMemoryIntoAgent } from '../working-memory.ts'
+import { injectRelayIntoAgent } from '../relay.ts'
 import {
   REALTIME_DEFAULT_KEY_REF,
   REALTIME_DEFAULT_UPSTREAM,
@@ -279,6 +280,8 @@ export function applyPersonalAgentRealtime(ctx: any, config: PersonalRealtimeCon
         try {
           const liveAgent = await ensureBotAgent(webCtx, spec)
           await injectWorkingMemoryIntoAgent(liveAgent, spec.botId)
+          // 接力摘要：语音里让 Bot「动手」时同样要接着上一段对话干（见 ../relay.ts）
+          await injectRelayIntoAgent(liveAgent, spec.botId)
         } catch {
           /* agent 建不起来：交给 runBotTurn 报错 */
         }

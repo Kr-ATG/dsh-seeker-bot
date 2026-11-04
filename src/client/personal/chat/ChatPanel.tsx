@@ -13,6 +13,7 @@ import { BotAvatar } from '../Avatar.tsx'
 import { IconBook, IconChevronRight, IconMore, IconPhone, IconSettings, IconTrash, IconUsers, IconX } from '../icons.tsx'
 import { usePersonal } from '../store.tsx'
 import type { Bot, Message } from '../types.ts'
+import type { RelayBrief } from '../../../shared/relay.ts'
 import { Composer } from './Composer.tsx'
 import { MessageList, jumpToMessage } from './MessageList.tsx'
 import { pendingSummaryOf, pendingTasksOf } from './pending.ts'
@@ -26,6 +27,26 @@ export function ChatPanel(): JSX.Element {
   const moreRef = useRef<HTMLDivElement>(null)
   /** 待清空对话的目标 bot（非 null 时显示确认卡片）。 */
   const [clearTarget, setClearTarget] = useState<Bot | null>(null)
+  /**
+   * 「整理并开新会话」的摘要状态。
+   *
+   * idle → preparing（正在调宿主生成）→ ready（卡片内展示预览）/ error（仍允许直接清空）。
+   * 状态只活在确认卡打开期间：每次重新打开都重置，避免看到上一个 Bot 的摘要。
+   */
+  const [relay, setRelay] = useState<
+    | { status: 'idle' }
+    | { status: 'preparing' }
+    | { status: 'ready'; brief: RelayBrief; degraded: boolean; error?: string }
+    | { status: 'error'; message: string }
+  >({ status: 'idle' })
+  /** 摘要请求序号：关闭 / 换目标 / 重新点击后，让迟到的异步结果失效。 */
+  const relayRequestRef = useRef(0)
+  /** 当前清空目标的最新值（异步回调里读 state 闭包会过期）。 */
+  const clearTargetRef = useRef<Bot | null>(null)
+  clearTargetRef.current = clearTarget
+  /** 摘要就绪时给按钮用；派生出来便于 JSX 里收窄类型。 */
+  const relayBrief = relay.status === 'ready' ? relay.brief : null
+  const relayDegraded = relay.status === 'ready' && relay.degraded
 
   /*
    * 退场状态：菜单与确认卡关闭时先播 240ms 动画再真正卸载。
@@ -84,6 +105,36 @@ export function ChatPanel(): JSX.Element {
       after?.()
     }, 240)
   }, [])
+
+  /**
+   * 点「整理并开新会话」：调 store 生成接力摘要，成功后卡片内展示预览。
+   *
+   * 请求期间按钮显示「正在整理…」并禁用；失败只显示错误文案，不拦「直接清空」——
+   * 宿主模型不可用时，用户至少还能把这段对话清掉。
+   */
+  const handlePrepareRelay = useCallback((): void => {
+    const target = clearTargetRef.current
+    if (target === null) return
+    relayRequestRef.current += 1
+    const requestId = relayRequestRef.current
+    setRelay({ status: 'preparing' })
+    void (async () => {
+      const result = await actions.prepareRelay(target.id)
+      // 迟到结果：卡片已关闭 / 换了 Bot / 又点了一次，一律丢弃
+      if (relayRequestRef.current !== requestId) return
+      if (clearTargetRef.current?.id !== target.id) return
+      if (result === null) {
+        setRelay({ status: 'error', message: '整理失败，请稍后重试；也可以直接清空对话。' })
+        return
+      }
+      setRelay({
+        status: 'ready',
+        brief: result.brief,
+        degraded: result.degraded,
+        ...(typeof result.error === 'string' && result.error !== '' ? { error: result.error } : {}),
+      })
+    })()
+  }, [actions])
 
   useEffect(() => () => {
     if (menuTimerRef.current !== null) window.clearTimeout(menuTimerRef.current)
@@ -285,6 +336,9 @@ export function ChatPanel(): JSX.Element {
                        * "dsh-shell" 这种页面标题、样式完全脱离 Bot 界面，很突兀。
                        * 群聊下不提供：那会连带清掉其他成员的发言。
                        */
+                      // 每次打开都重置整理状态，避免看到上一次（甚至另一个 Bot）的摘要。
+                      relayRequestRef.current += 1
+                      setRelay({ status: 'idle' })
                       setClearTarget(activeBot)
                     })}
                   >
@@ -339,10 +393,31 @@ export function ChatPanel(): JSX.Element {
               </button>
             </div>
             <div className="pa-modal__body">
-              <p className="pa-confirm__lead">清空与「{clearTarget.name}」的全部对话？</p>
-              <p className="pa-confirm__hint">
-                界面上的消息和它记住的上下文会一起清掉。清空后它不会再提起之前聊过的内容，此操作不可撤销。
+              <p className="pa-confirm__lead">
+                把与「{clearTarget.name}」的对话整理成接力摘要，然后开启新会话？
               </p>
+              <p className="pa-confirm__hint">
+                摘要会带进新会话，{clearTarget.name} 能接着上次的进度继续做。原对话记录会在确认后清空，此操作不可撤销。
+              </p>
+              {relay.status === 'preparing' ? (
+                <p className="pa-relay-preview__status">正在整理…（模型生成可能需要十几秒）</p>
+              ) : null}
+              {relay.status === 'error' ? (
+                <p className="pa-relay-preview__error">{relay.message}</p>
+              ) : null}
+              {relay.status === 'ready' ? (
+                <div className="pa-relay-preview">
+                  {relayDegraded ? (
+                    <p className="pa-relay-preview__degraded">
+                      模型不可用，已用最近对话生成简易摘要
+                      {relay.status === 'ready' && typeof relay.error === 'string' && relay.error !== ''
+                        ? `（${relay.error.slice(0, 120)}）`
+                        : ''}
+                    </p>
+                  ) : null}
+                  <RelayPreview brief={relay.brief} />
+                </div>
+              ) : null}
             </div>
             <div className="pa-modal__foot">
               <button className="pa-btn pa-btn--ghost" type="button" onClick={() => closeConfirm()}>
@@ -353,14 +428,39 @@ export function ChatPanel(): JSX.Element {
                 type="button"
                 onClick={() => {
                   const target = clearTarget
+                  // 「直接清空」保留原行为：不带 relay，走宿主 /reset。
                   // 清空动作等退场播完再执行：卡片滑出时背景消息同步刷新，不会先闪一下空流。
                   closeConfirm(() => {
                     void actions.clearConversation(target.id)
                   })
                 }}
               >
-                清空
+                直接清空
               </button>
+              {relayBrief !== null ? (
+                <button
+                  className="pa-btn pa-btn--primary"
+                  type="button"
+                  onClick={() => {
+                    const target = clearTarget
+                    // 确认后带 relay：宿主先落盘摘要并清空会话，再播退场、清本地。
+                    closeConfirm(() => {
+                      void actions.clearConversation(target.id, { relay: relayBrief })
+                    })
+                  }}
+                >
+                  确认并开新会话
+                </button>
+              ) : (
+                <button
+                  className="pa-btn pa-btn--primary"
+                  type="button"
+                  disabled={relay.status === 'preparing'}
+                  onClick={handlePrepareRelay}
+                >
+                  {relay.status === 'preparing' ? '正在整理…' : '整理并开新会话'}
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -410,5 +510,47 @@ function PendingBar({ messages }: { messages: Message[] }): JSX.Element | null {
         <IconChevronRight size={12} />
       </span>
     </button>
+  )
+}
+
+/* ───────────────────────── 接力摘要预览 ───────────────────────── */
+
+/**
+ * 「整理并开新会话」确认卡里的摘要预览。
+ *
+ * 只展示有内容的字段，每个列表最多 5 条——卡片宽度有限，完整摘要已经由宿主落盘，
+ * 这里的作用是让用户在清空前**确认它整理对了**，不是阅读器。
+ */
+function RelayPreview({ brief }: { brief: RelayBrief }): JSX.Element | null {
+  const groups: Array<{ key: string; label: string; items: string[] }> = [
+    { key: 'done', label: '已完成', items: brief.done },
+    { key: 'decisions', label: '关键决策与约束', items: brief.decisions },
+    { key: 'pending', label: '未完成', items: brief.pending },
+    { key: 'next', label: '下一步', items: brief.next },
+    { key: 'files', label: '相关文件', items: brief.files },
+  ]
+  const visible = groups
+    .map((group) => ({ ...group, items: group.items.slice(0, 5) }))
+    .filter((group) => group.items.length > 0)
+  if (brief.goal === '' && visible.length === 0) return null
+  return (
+    <>
+      {brief.goal !== '' ? (
+        <div className="pa-relay-preview__group">
+          <div className="pa-relay-preview__label">目标</div>
+          <div className="pa-relay-preview__goal">{brief.goal}</div>
+        </div>
+      ) : null}
+      {visible.map((group) => (
+        <div key={group.key} className="pa-relay-preview__group">
+          <div className="pa-relay-preview__label">{group.label}</div>
+          <ul className="pa-relay-preview__list">
+            {group.items.map((item, index) => (
+              <li key={group.key + '-' + String(index)}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </>
   )
 }

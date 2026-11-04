@@ -601,7 +601,7 @@ interface ResolvedChatModel {
   effort?: string
 }
 
-function getLlm(ctx: any): any {
+export function getLlm(ctx: any): any {
   try {
     return ctx.get?.('llm') ?? ctx.llm
   } catch {
@@ -620,7 +620,7 @@ function getLlm(ctx: any): any {
  * 都拿不到返回 null，调用方给出「未配置可用的聊天模型」——**不能**静默降级成
  * 模板文案，那会让「模型不可用」伪装成「生成成功」。
  */
-async function resolveChatModel(
+export async function resolveChatModel(
   ctx: any,
   wanted?: { provider?: string; model?: string; effort?: string },
 ): Promise<ResolvedChatModel | null> {

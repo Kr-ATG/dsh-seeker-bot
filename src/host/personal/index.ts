@@ -43,6 +43,8 @@ import { readCreatedBots, removeCreatedBot } from './bot-create.ts'
 import { purgeBot } from './bot-delete.ts'
 import { applyPersonalAgentScheduler, nextProactiveAt, nextRoutineAt, normalizeNoDataPolicy, normalizeRetryPolicy, readProactive, readRoutines, readServerMessages, runProactiveNow, writeProactive, writeRoutines, type HostProactive, type HostRoutine } from './scheduler.ts'
 import { buildWorkingMemoryBlock, createWorkingMemoryMessage, injectWorkingMemoryIntoAgent, pruneWorkingTasks, readWorkingTasks, resetWorkingMemoryInjection, upsertWorkingTask, workingMemoryFile, type WorkingTask } from './working-memory.ts'
+import { clearRelayBrief, generateRelayBrief, injectRelayIntoAgent, readRelayBrief, resetRelayInjection, writeRelayBrief } from './relay.ts'
+import { normalizeRelayBrief } from '../../shared/relay.ts'
 import { listPages, readPage, writePage } from './pages.ts'
 import {
   checkJournalTrigger,
@@ -593,6 +595,8 @@ async function injectWorkingMemoryForReply(ctx: any, spec: BotAgentSpec): Promis
   try {
     const agent = await ensureBotAgent(ctx, spec)
     await injectWorkingMemoryIntoAgent(agent, spec.botId)
+    // 接力摘要：手动轮转后的新会话靠它接着上一段干（见 ./relay.ts）
+    await injectRelayIntoAgent(agent, spec.botId)
   } catch {
     /* agent 建不起来：交给 runBotTurn 报错 */
   }
@@ -1104,6 +1108,7 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
             ok: true,
             routes: [
               'reply', 'reply/stream', 'reset', 'recall', 'models',
+              'relay', 'relay/prepare', 'relay/commit',
               'journal/image', 'journal/asset',
               'journal/list', 'journal/status', 'journal/generate', 'journal/check', 'journal/rule', 'journal/feed',
               'asr',
@@ -1563,6 +1568,74 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
         }
 
         /*
+         * 接力摘要（手动轮转的「整理并开新会话」）：把当前对话整理成结构化交接单，
+         * 新会话每轮注入（生成 / 落盘 / 注入实现全部在 ./relay.ts）。
+         *
+         * 两步式流程对应前端确认卡：
+         *  · POST /relay/prepare → 先生成给用户预览（不落盘；模型不可用时 degraded 兜底）
+         *  · POST /relay/commit  → 用户确认后落盘 + 清空对话（重置两个注入指纹）
+         */
+        if ((tail === '/relay' || tail === '/relay/') && method === 'GET') {
+          const botId = (url.searchParams.get('botId') ?? '').trim()
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          try {
+            return sendJson(res, 200, { ok: true, brief: await readRelayBrief(botId) })
+          } catch (error: any) {
+            return sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
+          }
+        }
+        if ((tail === '/relay/prepare' || tail === '/relay/prepare/') && method === 'POST') {
+          const body = await readJsonBody(req) as Record<string, unknown>
+          const botId = typeof body.botId === 'string' ? body.botId.trim() : ''
+          const botModel = body.botModel !== null && typeof body.botModel === 'object' && !Array.isArray(body.botModel)
+            ? body.botModel as { provider?: string; model?: string; effort?: string }
+            : undefined
+          try {
+            const result = await generateRelayBrief(webCtx, {
+              botId,
+              ...(botModel !== undefined ? { botModel } : {}),
+              messages: Array.isArray(body.messages) ? body.messages : [],
+            })
+            /* messages 为空才是 4xx；模型失败会走 degraded 兜底，仍是 200 */
+            return sendJson(res, result.ok ? 200 : 400, result)
+          } catch (error: any) {
+            return sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
+          }
+        }
+        if ((tail === '/relay/commit' || tail === '/relay/commit/') && method === 'POST') {
+          const body = await readJsonBody(req) as Record<string, unknown>
+          const botId = typeof body.botId === 'string' ? body.botId.trim() : ''
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          const brief = normalizeRelayBrief(body.brief)
+          if (brief === null) return sendJson(res, 400, { ok: false, error: 'brief required' })
+          try {
+            await writeRelayBrief(botId, brief)
+          } catch (error: any) {
+            return sendJson(res, 500, { ok: false, error: `接力摘要落盘失败：${String(error?.message ?? error)}` })
+          }
+          /*
+           * 先清两个注入指纹再重置会话：新会话 sessionId 会变，旧指纹命中
+           * 「sessionId 包含 botId」的兜底逻辑时会让刚写好的摘要被误判成
+           * 「已注入过」而永远不注入。
+           */
+          resetWorkingMemoryInjection(botId)
+          resetRelayInjection(botId)
+          const result = await resetBotConversation(webCtx, botId)
+          return sendJson(res, result.ok ? 200 : 502, result)
+        }
+        if ((tail === '/relay' || tail === '/relay/') && method === 'DELETE') {
+          const botId = (url.searchParams.get('botId') ?? '').trim()
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          try {
+            await clearRelayBrief(botId)
+            resetRelayInjection(botId)
+            return sendJson(res, 200, { ok: true })
+          } catch (error: any) {
+            return sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
+          }
+        }
+
+        /*
          * Pages（路线图 3.1）：可回访的持久页面。
          *
          * 与消息内卡片的区别：卡片是即时的，Pages 是权威副本——Bot 产出报告 /
@@ -1701,6 +1774,11 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
            * 自己手上有活了」。
            */
           resetWorkingMemoryInjection(botId)
+          /*
+           * 接力摘要的注入指纹同理：清空对话后新会话内容不变也要重新注入，
+           * 否则「上一段对话的交接单」永远进不了新会话。
+           */
+          resetRelayInjection(botId)
           const result = await resetBotConversation(webCtx, botId)
           return sendJson(res, result.ok ? 200 : 502, result)
         }

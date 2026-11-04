@@ -247,6 +247,61 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
   color: var(--pa-text-3);
 }
 
+/* ---------- 接力摘要预览（清空确认卡内） ----------
+ * 卡片宽度只有 380px：限高滚动，每类最多 5 条，保证「确认摘要」而不是「读摘要」。
+ * 颜色全部走 --pa-* 变量，深浅主题自动适配。 */
+.pa-relay-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--pa-line);
+  border-radius: 10px;
+  background: var(--pa-chat-glass);
+}
+.pa-relay-preview__group { display: flex; flex-direction: column; gap: 2px; }
+.pa-relay-preview__label {
+  font-size: calc(10.5px + var(--pa-font-delta));
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--pa-text-3);
+}
+.pa-relay-preview__goal {
+  font-size: calc(12px + var(--pa-font-delta));
+  line-height: 1.55;
+  color: var(--pa-text);
+}
+.pa-relay-preview__list {
+  margin: 0;
+  padding-left: 15px;
+  font-size: calc(12px + var(--pa-font-delta));
+  line-height: 1.55;
+  color: var(--pa-text-2);
+}
+.pa-relay-preview__list li { margin: 1px 0; }
+.pa-relay-preview__list li::marker { color: var(--pa-accent); }
+.pa-relay-preview__status {
+  margin: 10px 0 0;
+  font-size: calc(12px + var(--pa-font-delta));
+  line-height: 1.55;
+  color: var(--pa-text-2);
+}
+.pa-relay-preview__error {
+  margin: 10px 0 0;
+  font-size: calc(12px + var(--pa-font-delta));
+  line-height: 1.55;
+  color: var(--pa-red);
+}
+.pa-relay-preview__degraded {
+  margin: 0;
+  font-size: calc(11px + var(--pa-font-delta));
+  line-height: 1.5;
+  color: var(--pa-accent);
+}
+
 /* ---------- 撤回原地确认（不弹窗，贴在消息下方的一排两枚按钮） ----------
  * 父级 .pa-msg__content 是 flex column 且用户消息 align-items:flex-end，
  * 这一行自然靠右、宽度收成内容宽，间距交给父级的 gap 统一给。 */

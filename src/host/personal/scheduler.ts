@@ -35,6 +35,7 @@ import { publish } from './events.ts'
 import { checkJournalTrigger } from './journal.ts'
 import { runAsBackgroundApproval } from './approval.ts'
 import { injectWorkingMemoryIntoAgent } from './working-memory.ts'
+import { injectRelayIntoAgent } from './relay.ts'
 
 /** 例行任务的调度规则（与前端 `RoutineSchedule` 对齐）。 */
 export type HostRoutineSchedule =
@@ -429,6 +430,8 @@ async function injectWorkingMemoryForTurn(ctx: any, spec: BotAgentSpec): Promise
   try {
     const agent = await ensureBotAgent(ctx, spec)
     await injectWorkingMemoryIntoAgent(agent, spec.botId)
+    // 接力摘要：例行任务 / 主动询问同样要接着上一段对话干（见 ./relay.ts）
+    await injectRelayIntoAgent(agent, spec.botId)
   } catch {
     /* agent 建不起来时 runBotTurn 自己会报错，这里不必重复 */
   }
