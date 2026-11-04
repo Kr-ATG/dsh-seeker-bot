@@ -1696,19 +1696,11 @@ export async function ensureBotAgent(ctx: any, spec: BotAgentSpec): Promise<any>
   const cached = agentCache.get(sessionId)
   if (cached !== undefined) {
     /*
-     * 空壳自愈（缓存路径）：缓存里的 agent 可能绑定着一个只有 header、零事件的
-     * 空壳会话（上一版 reset 删除后 DSH 又写回、重启后 resume 成功）。继续复用
-     * 会让 pre-step 直接 blocked——丢掉缓存，让下面的 registry / 重建路径接管。
+     * 缓存命中也要触发一次清理：ensureBotAgent 是每轮对话的必经之路，放在这里
+     * 才能覆盖「老会话一直复用、从不新建」的情况。节流在 scheduleToolResultsPrune
+     * 里，实际一小时最多跑一次。
      */
-    if (isEmptySessionFile(sessionId)) {
-      agentCache.delete(sessionId)
-    } else {
-      /*
-       * 缓存命中也要触发一次清理：ensureBotAgent 是每轮对话的必经之路，放在这里
-       * 才能覆盖「老会话一直复用、从不新建」的情况。节流在 scheduleToolResultsPrune
-       * 里，实际一小时最多跑一次。
-       */
-      scheduleToolResultsPrune()
+    scheduleToolResultsPrune()
     /*
      * 模型 / 推理强度可能刚在设置卡里改过：缓存命中也要重新钉一次。
      * 只在真的变化时 `select`，避免每轮往会话里追加一条 model/selection。
@@ -1719,8 +1711,7 @@ export async function ensureBotAgent(ctx: any, spec: BotAgentSpec): Promise<any>
       pinModel(cached.agent, resolved)
       cached.modelKey = modelKey
     }
-      return cached.agent
-    }
+    return cached.agent
   }
 
   const agents = getAgents(ctx)
@@ -1737,8 +1728,7 @@ export async function ensureBotAgent(ctx: any, spec: BotAgentSpec): Promise<any>
      * 只在 agents.create 可用时自愈：测试里的 mock registry 没有 create，
      * 保持原来的「复用」语义，避免把 mock 场景带进真实创建流程。
      */
-    if (typeof agents.create === 'function'
-      && (sessionDirsFor(sessionId).length === 0 || isEmptySessionFile(sessionId))) {
+    if (typeof agents.create === 'function' && sessionDirsFor(sessionId).length === 0) {
       const { to } = bumpBotSessionGeneration(spec.botId)
       if (to !== sessionId) return await ensureBotAgent(ctx, spec)
     }
@@ -1837,28 +1827,6 @@ export async function ensureBotAgent(ctx: any, spec: BotAgentSpec): Promise<any>
       agent = handle?.agent ?? handle
       restored = agent !== undefined && agent !== null
       if (!restored) resumeError = 'resume 返回了空 agent'
-      /*
-       * 空壳自愈：resume 可能「成功」返回一个只有 header、零事件的会话（实测 235B）。
-       * 这种会话在下一步的 pre-step 会被宿主拒绝（turn/end reason=blocked），
-       * 但 create 又因 id 已存在失败——用户看到的就是「会话状态异常，建议重启
-       * DSH 或重建该 Bot 会话」。
-       *
-       * 这里先只读判断（不删），确认是空壳后 dispose 掉刚 resume 的 agent，
-       * 再调用 discardEmptySession 删除文件（此时文件已释放），最后走 create 重建。
-       * 有事件的会话一律不动。
-       */
-      if (restored && isEmptySessionFile(sessionId)) {
-        try {
-          await handle?.dispose?.()
-        } catch {
-          /* 已经释放 */
-        }
-        await discardEmptySession(sessionId)
-        agent = undefined
-        handle = undefined
-        restored = false
-        console.warn(`[personal-agent] 会话 ${sessionId} 是空壳（零事件），已删除并重建`)
-      }
     } catch (error: any) {
       /*
        * 原来这里是空 catch，于是「resume 为什么失败」永远查不到。
@@ -2125,29 +2093,6 @@ function sessionDirsFor(sessionId: string): string[] {
   return found
 }
 
-/**
- * 只读判断一个会话是不是「空壳」（只有 header、零事件）。
- *
- * 与 discardEmptySession 拆开：resume 可能已经把写句柄打开，先读判断、dispose
- * 释放句柄之后才能安全删除。读不出来 / 没有 zstd 能力一律按「不是空壳」处理，
- * 宁可报错也不误删有历史的会话。
- */
-function isEmptySessionFile(sessionId: string): boolean {
-  const decompress = (zlib as any).zstdDecompressSync
-  if (typeof decompress !== 'function') return false
-  for (const dir of sessionDirsFor(sessionId)) {
-    const file = join(dir, 'session.v4.jsonl.zstd')
-    if (!existsSync(file)) continue
-    try {
-      const out = decompress(readFileSync(file))
-      const lines = String(out).split('\n').filter((line: string) => line.trim() !== '')
-      if (lines.length <= 1) return true
-    } catch {
-      return false
-    }
-  }
-  return false
-}
 
 /**
  * 丢弃一个「空壳会话」（只有 header、零事件）。
@@ -3513,6 +3458,33 @@ function steerRunningTurn(agent: any, spec: BotAgentSpec, text: string): { steer
  * 跑一轮：把用户这句话投给 agent，收集「文本 / 工具调用 / 工具结果」，
  * 边收边通过 emit 推给前端，最后返回完整 blocks。
  */
+/**
+ * 把 turn/end 里的失败信息变成用户能看懂的一行。
+ *
+ * 上游 provider 的错误经常是 `429: {"code":null,"message":"...","type":"rate_limit_error"}`
+ * 这种「状态码 + 原始 JSON」——直接抛给用户既长又难读。能解析出 message 字段时
+ * 优先用它，并把 429 之类的前缀保留下来（用户需要知道是额度问题还是网络问题）。
+ */
+function readableTurnFailure(raw: string): string {
+  const text = raw.trim()
+  if (text === '') return ''
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start >= 0 && end > start) {
+    try {
+      const parsed = JSON.parse(text.slice(start, end + 1)) as { message?: unknown }
+      const detail = typeof parsed.message === 'string' ? parsed.message.trim() : ''
+      if (detail !== '') {
+        const prefix = text.slice(0, start).replace(/[:：]\s*$/, '').trim()
+        return prefix === '' ? detail : `${prefix}：${detail}`
+      }
+    } catch {
+      /* 不是 JSON：保留原文 */
+    }
+  }
+  return text.length > 300 ? `${text.slice(0, 300)}…` : text
+}
+
 export async function runBotTurn(
   ctx: any,
   spec: BotAgentSpec,
@@ -4284,8 +4256,12 @@ export async function runBotTurn(
      * 产生任何输出」——看起来像模型抽风，实际是会话状态问题。这里把 reason、
      * 事件序列与会话 header 一起写进宿主日志（stderr），并把可读原因带给前端。
      */
-    const turnEnd = debug.turnEnd as { reason?: { kind?: string } } | null
+    const turnEnd = debug.turnEnd as {
+      reason?: { kind?: string; error?: { message?: string; code?: string } }
+    } | null
     const reason = typeof turnEnd?.reason?.kind === 'string' ? turnEnd.reason.kind : ''
+    const failure = turnEnd?.reason?.error
+    const failureText = typeof failure?.message === 'string' ? readableTurnFailure(failure.message) : ''
     try {
       console.warn('[personal-agent] 空轮诊断', JSON.stringify({
         sessionId,
@@ -4299,7 +4275,9 @@ export async function runBotTurn(
     }
     const message = reason === 'blocked'
       ? '本轮被宿主拒绝（pre-step blocked）：会话状态异常，建议重启 DSH 或重建该 Bot 会话'
-      : '本轮没有产生任何输出'
+      : failureText !== ''
+        ? failureText
+        : '本轮没有产生任何输出'
     finalizeMessages()
     emit({ type: 'error', message })
     return { ok: false, blocks, messages, error: message, sessionId }

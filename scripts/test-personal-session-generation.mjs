@@ -96,15 +96,10 @@ try {
     assert.ok(!resetBlock.includes('sessionDirsFor(sessionId)'), '仍在按 sessionId 删除会话目录')
     assert.ok(!resetBlock.includes('rmSync(dir'), '仍在 rmSync 会话目录')
   })
-  check('resume 空壳会话自愈（isEmptySessionFile + discardEmptySession）', () => {
-    assert.ok(agentSource.includes('function isEmptySessionFile('), '缺少 isEmptySessionFile')
-    assert.ok(agentSource.includes('restored && isEmptySessionFile(sessionId)'), 'resume 成功后没有空壳检查')
-    assert.ok(agentSource.includes('await discardEmptySession(sessionId)'), '空壳没有删除重建')
-  })
-  check('registry / 缓存两条复用路径也检测空壳', () => {
-    assert.ok(agentSource.includes('sessionDirsFor(sessionId).length === 0 || isEmptySessionFile(sessionId)'))
-    assert.ok(agentSource.includes('if (isEmptySessionFile(sessionId)) {\n      agentCache.delete(sessionId)'))
-    assert.ok(agentSource.split('isEmptySessionFile(').length >= 4, 'isEmptySessionFile 调用点不足')
+  check('空壳会话不再自动删除（新建会话只有 header 是正常状态）', () => {
+    assert.ok(!agentSource.includes('isEmptySessionFile'), '仍在自动判定空壳（会导致每轮空轮都换代）')
+    assert.ok(agentSource.includes('function readableTurnFailure('), '缺少真实错误透传（429/QUOTA 会被吞）')
+    assert.ok(agentSource.includes('discardEmptySession(sessionId)'), 'create 冲突时的空壳兜底应保留')
   })
 
   const botDeleteSource = readFileSync(join(HERE, 'src/host/personal/bot-delete.ts'), 'utf8')
