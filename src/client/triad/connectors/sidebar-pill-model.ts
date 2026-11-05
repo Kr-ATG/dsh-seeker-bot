@@ -1,5 +1,5 @@
 /**
- * dsh-seeker-bot — 「MCP服务器」胶囊的纯数据模型（无 React / 无 DOM）。
+ * dsh-seeker-bot — 「MCP 连接器」胶囊的纯数据模型（无 React / 无 DOM）。
  *
  * 单独拆出来的唯一理由：胶囊的图标清单来自两份宿主接口的合并，规则里最容易
  * 出错的是「目录 id → serverName 的换算」。这条换算必须与宿主

@@ -393,7 +393,7 @@ export function CallOverlay(): JSX.Element | null {
           <span className="pa-call__pulse" />
           <span className="pa-call__pulse" />
           <div className="pa-call__avatar">
-            {bot !== null ? <BotAvatar avatar={bot.avatar} size={88} /> : null}
+            {bot !== null ? <BotAvatar avatar={bot.avatar} size={88} motionState={bot.isMain ? 'idle' : undefined} /> : null}
           </div>
         </div>
         <div className="pa-call__name">{bot?.name ?? '实时语音'}</div>

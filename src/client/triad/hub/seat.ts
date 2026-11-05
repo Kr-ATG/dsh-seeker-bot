@@ -47,7 +47,7 @@ export function applyWorkbenchSeat(ctx: ClientContext): void {
   // rail 折叠态官方行只剩图标，hover 浮层与滚轮直切仍作兜底入口保留。
   ctx.effect(attachWorkbenchRowFlyout, 'dsh-triad: workbench row flyout + wheel switch')
 
-  // 连接器的常驻入口：侧栏最下面（账号行）右侧的「MCP服务器」胶囊。
+  // 连接器的常驻入口：侧栏最下面（账号行）右侧的「MCP 连接器」胶囊。
   // 操作间里那一行已由 nav-sections 移除；连接器以弹窗卡片出现（见 ConnectorModal），
   // 宿主常驻 body，胶囊与 Bot 推荐卡等任何入口都能直接 openConnectorModal()。
   ctx.effect(attachConnectorPill, 'dsh-triad: MCP connector pill')

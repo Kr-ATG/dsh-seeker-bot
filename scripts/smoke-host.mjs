@@ -340,10 +340,18 @@ else pass('deferred webServer callback executed')
 // 2026-11-03：每日情报卡新增三条 exact 路由（brief/today、brief/generate、
 // brief/list），27 → 30。漏注册的表现是胶囊上方那张斜插卡永远停在「今日情报
 // 整理中」——同样是静默失败，必须钉住。
+// 2026-11-05：卡头三态头像动图新增 prefix /api/chat-flow/avatars（无动作 /
+// 生成中 / 执行中），30 → 31。漏注册的表现是头像永远退回内联 PNG（客户端
+// img.onError 降级），界面上不会报任何错，只能靠计数与路径断言钉住。
+// 2026-11-05：节日卡新增 3 条 exact（festival/today、festival/generate、
+// festival/list）与 1 条 prefix（festival/image，按 festivalDate 流式返回实拍图），
+// 31 → 35。漏注册同样全是静默失败：胶囊左侧永远不出现「立冬」小纸片、点开只有
+// 空态/骨架，或者卡里图片 404 只剩节日大字占位 —— 只能靠计数与路径断言钉住。
 // 这些路由漏注册的表现全是静默的：胶囊不出现、通知不弹、录屏面板只剩整屏、
-// 情报卡永远转圈 —— 只有计数与路径断言能钉住它们。
-if (registered.length !== 30) {
-  fail(`expected exactly 30 route registrations, got ${registered.length}: ${JSON.stringify(registered)}`)
+// 情报卡永远转圈、头像退回静态图、节日卡永远停在「准备节日卡」—— 只有计数与
+// 路径断言能钉住它们。
+if (registered.length !== 35) {
+  fail(`expected exactly 35 route registrations, got ${registered.length}: ${JSON.stringify(registered)}`)
 } else {
   if (!registered.some(spec => spec?.path === '/api/dsh-done-pill/brief/today')) {
     fail('missing daily-brief today route (exact /api/dsh-done-pill/brief/today)')
@@ -354,8 +362,23 @@ if (registered.length !== 30) {
   }
   const exacts = registered.filter(spec => spec?.kind === 'exact')
   const prefix = registered.filter(spec => spec?.kind === 'prefix')
+  // 节日卡（2026-11-05）：3 条 exact + 1 条 prefix。客户端靠这几条路由拉今日卡、
+  // 手动生成与取图；缺任何一条都不会抛错，只会静默显示空态或占位图。
+  if (!exacts.some(spec => spec?.path === '/api/dsh-done-pill/festival/today')) {
+    fail('missing festival today route (exact /api/dsh-done-pill/festival/today)')
+  } else if (!exacts.some(spec => spec?.path === '/api/dsh-done-pill/festival/generate')) {
+    fail('missing festival generate route (exact /api/dsh-done-pill/festival/generate)')
+  } else if (!exacts.some(spec => spec?.path === '/api/dsh-done-pill/festival/list')) {
+    fail('missing festival list route (exact /api/dsh-done-pill/festival/list)')
+  } else if (!prefix.some(spec => spec?.path === '/api/dsh-done-pill/festival/image')) {
+    fail('missing festival image route (prefix /api/dsh-done-pill/festival/image)')
+  } else {
+    pass('registered festival routes (today / generate / list exact + image prefix)')
+  }
   if (!prefix.some(spec => spec?.path === '/api/session-admin')) {
     fail(`missing session-admin route (prefix /api/session-admin): ${JSON.stringify(prefix)}`)
+  } else if (!prefix.some(spec => spec?.path === '/api/chat-flow/avatars')) {
+    fail(`missing avatar asset route (prefix /api/chat-flow/avatars): ${JSON.stringify(prefix)}`)
   } else if (!exacts.some(spec => spec?.path === '/api/chat-flow/components')) {
     fail(`missing feature switches route (exact /api/chat-flow/features): ${JSON.stringify(exacts)}`)
   } else if (!exacts.some(spec => spec?.path === '/api/chat-flow/generated-images')) {

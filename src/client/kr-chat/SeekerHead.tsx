@@ -22,8 +22,9 @@
  * 身份位在两套骨架里**是同一个东西**（2026-10-31 用户两次点名）：
  * 先「操作面板的这个人物删除替换为我们的插件头像」，再「新对话的也换上，之前那个
  * 人物彻底删除」。原来那 9 段任务动画（SeekerStage / motion-clips / stage-mode /
- * assets/motion / host 的 /api/chat-flow/motion 路由）已整条链路删除，两处都只用
- * brand-avatar.ts 里那张 128×128 的内联 PNG，尺寸由 CSS 区分。
+ * assets/motion / host 的 /api/chat-flow/motion 路由）已整条链路删除。2026-11-05
+ * 起头像改为三态透明 WebP 动图（idle / generating / executing，见 brand-avatar.ts
+ * 与 src/shared/avatar-assets.ts），加载失败时降级为内联 PNG，尺寸由 CSS 区分。
  *
  * ## 它不负责什么
  *
@@ -36,7 +37,8 @@
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { MouseEvent as ReactMouseEvent, ReactElement } from 'react'
-import { BRAND_AVATAR_SRC } from './brand-avatar.ts'
+import { BRAND_AVATAR_SRC, brandAvatarSrc } from './brand-avatar.ts'
+import type { SeekerAvatarState } from '../../shared/avatar-assets.ts'
 import { activateBrowserWindow } from '../browser-flag/activate.ts'
 import { browserFlagTitle } from '../browser-flag/store.ts'
 import type { BrowserActivitySession } from '../browser-flag/store.ts'
@@ -64,10 +66,20 @@ export interface SeekerHeadLine {
 export interface SeekerHeadProps {
   /** 当前这一行要显示什么；null 表示没有动作，显示 {@link idleLine}。 */
   readonly line?: SeekerHeadLine | null
-  /** 没动作时显示的那句话（休息中 / 吃饭中 / 在思考中…）。 */
+  /**
+   * 没动作时显示的那句话（Hero 传按钟点选的空闲文案；操作面板传空串 = 不渲染这一行）。
+   */
   readonly idleLine: string
   /** idleLine 是否表示「正在思考」（驱动主色与呼吸点）。 */
   readonly thinking?: boolean
+  /**
+   * 头像动图状态（2026-11-05）。
+   *
+   * 不传时由组件按 `line` / `thinking` 自己推导（见 resolvedAvatarState）：
+   * 新对话页 Hero 不传它，而发消息后 Hero 只有 thinking=true 这一个信号，
+   * 也必须显示「正在执行」的动图，不能还停在无动作的观月姿势。
+   */
+  readonly avatarState?: SeekerAvatarState
   /** 本会话的浏览器活动条目（有就显示那枚可点击的图标）。 */
   readonly browserEntry?: BrowserActivitySession | undefined
   /** 是否显示浏览器标志（粘滞判据在调用方，见 KrPlainTimelineCard）。 */
@@ -118,6 +130,7 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
     line = null,
     idleLine,
     thinking = false,
+    avatarState,
     browserEntry,
     browserOn = false,
     onClick,
@@ -128,6 +141,38 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
     stepCount,
     chrome = true,
   } = props
+
+  /*
+   * 头像三态推导（2026-11-05）。
+   *
+   * 优先用调用方传的 avatarState（操作面板卡按 currentAction 推导，能分出
+   * generating）；没传时按本组件已有的信号兜底 —— 新对话页 Hero 没有动作
+   * 时间线，只有 line / thinking：
+   *
+   *   · 有动作行 → executing（这一行本身就是一个动作）；
+   *   · thinking === true → executing（本轮在跑、还没调工具，对应「在思考中」）；
+   *   · 其余 → idle（本轮没在跑）。
+   *
+   * 兜底必须留在组件里而不是让 Hero 自己算：两处共用一份卡头，Hero 那边只有
+   * running 一个布尔，未来再加调用点时不必记得再补一个 avatarState。
+   */
+  const resolvedAvatarState: SeekerAvatarState = avatarState
+    ?? (line !== null && line !== undefined
+      ? 'executing'
+      : thinking === true
+        ? 'executing'
+        : 'idle')
+
+  /*
+   * 动图加载失败 → 退回 BRAND_AVATAR_SRC 的内联 PNG。
+   *
+   * 为什么按状态重置：旧宿主没有 /api/chat-flow/avatars/* 路由，第一次会 404；
+   * 如果失败标记一直留着，之后换到别的状态也不会再试。状态一变就清掉标记，
+   * 让新状态重新走一次网络请求；真正取不到的那张会再次 onError，再退回静态图。
+   * 失败退回是最后一道保险：宁可显示旧静态头像，也不能让身份位变成破图。
+   */
+  const [avatarFailed, setAvatarFailed] = useState(false)
+  useEffect(() => { setAvatarFailed(false) }, [resolvedAvatarState])
 
   /*
    * 功能开关（live）——卡头是「右栏操作面板」与「新对话页 Hero」共用的唯一一份，
@@ -251,7 +296,7 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
       role={onClick === undefined ? undefined : 'button'}
       tabIndex={onClick === undefined ? undefined : 0}
       aria-expanded={onClick === undefined ? undefined : expanded}
-      aria-label={`Seeker · ${lineText ?? ''}${expanded === true ? '（已展开时间线）' : ''}`}
+      aria-label={`Seeker${lineText !== '' ? ' · ' + lineText : ''}${expanded === true ? '（已展开时间线）' : ''}`}
       onKeyDown={onClick === undefined ? undefined : (event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault()
@@ -264,13 +309,25 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
        *
        * 2026-10-31 用户先要求「操作面板的这个人物删除替换为我们的插件头像」，
        * 随后「新对话的也换上，之前那个人物彻底删除」—— 于是那 9 段任务动画
-       * （SeekerStage 的透明底 WebM）连同它的整条链路一起删掉了，卡头不再有
-       * 任何人物动画分支。图片是 brand-avatar.ts 内联的 128×128 PNG。
+       * （SeekerStage 的透明底 WebM）连同它的整条链路一起删掉了。
+       *
+       * 2026-11-05 起 src 默认是**三态透明 WebP 动图**（brand-avatar.ts 的
+       * brandAvatarSrc），由 host 路由 /api/chat-flow/avatars/* 提供；加载失败
+       * （旧宿主没这个路由 / 网络问题）时 onError 退回 BRAND_AVATAR_SRC 的
+       * 内联 PNG。data-avatar-state 把当前状态暴露到 DOM，便于验收与调试。
        *
        * 尺寸由 CSS 给：Hero 96×96、紧凑骨架 64×64（见 .kr-plain-head__avatar）。
-       * 不写 width/height 属性 —— 图片是内联 data URL，解码零延迟，不会抖。
+       * 不写 width/height 属性 —— 动图按 CSS 尺寸显示，浏览器按固有比例绘制，
+       * 不会在解码前后改变布局。
        */}
-      <img className="kr-plain-head__avatar" src={BRAND_AVATAR_SRC} alt="" draggable={false} />
+      <img
+        className="kr-plain-head__avatar"
+        src={avatarFailed ? BRAND_AVATAR_SRC : brandAvatarSrc(resolvedAvatarState)}
+        data-avatar-state={resolvedAvatarState}
+        alt=""
+        draggable={false}
+        onError={() => setAvatarFailed(true)}
+      />
       {/*
        * 名字行：Seeker + **浏览器标志**（2026-10-31 按用户要求还原）。
        *
@@ -317,11 +374,11 @@ export function SeekerHead(props: SeekerHeadProps): ReactElement {
             <span className="kr-plain-head__detail">{line.detail}</span>
           )}
         </span>
-      ) : (
+      ) : idleLine !== '' ? (
         <span className="kr-plain-head__idle" data-thinking={thinking || undefined}>
           {idleLine}
         </span>
-      )}
+      ) : null}
 
       {/*
        * 紧凑骨架底部的摘要行（2026-10-30）。

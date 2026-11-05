@@ -43,7 +43,7 @@ import { answerQuestion, pendingQuestionCount } from './questions.ts'
 import { currentSeq, parseSinceByBot, publish, subscribe, subscribeAll } from './events.ts'
 import { readCreatedBots, removeCreatedBot } from './bot-create.ts'
 import { purgeBot } from './bot-delete.ts'
-import { applyPersonalAgentScheduler, nextProactiveAt, nextRoutineAt, normalizeNoDataPolicy, normalizeRetryPolicy, readProactive, readRoutines, readServerMessages, runProactiveNow, writeProactive, writeRoutines, type HostProactive, type HostRoutine } from './scheduler.ts'
+import { applyPersonalAgentScheduler, nextProactiveAt, nextRoutineAt, normalizeNoDataPolicy, normalizeRetryPolicy, readProactive, readProactiveMarks, readRoutines, readServerMessages, runProactiveNow, upsertProactiveMark, writeProactive, writeRoutines, type HostProactive, type HostRoutine } from './scheduler.ts'
 import { buildWorkingMemoryBlock, createWorkingMemoryMessage, injectWorkingMemoryIntoAgent, pruneWorkingTasks, readWorkingTasks, resetWorkingMemoryInjection, upsertWorkingTask, workingMemoryFile, type WorkingTask } from './working-memory.ts'
 import { clearRelayBrief, generateRelayBrief, injectRelayIntoAgent, readRelayBrief, resetRelayInjection, writeRelayBrief } from './relay.ts'
 import { injectHistoryIntoAgent, resetHistoryInjection, searchHistory, upsertHistoryMessages } from './history-search.ts'
@@ -1527,6 +1527,42 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
           }
           const result = await runProactiveNow(webCtx, config)
           return sendJson(res, result.ok ? 200 : 502, result)
+        }
+
+        /*
+         * 主动消息的「提醒标记」：用户对某条主动提醒选择继续 / 不再提醒。
+         *
+         * 路径是 /proactive/marks，与上面的 /proactive（精确匹配）和
+         * /proactive/run 互不抢占——三条都是 tail 全等比较。
+         */
+        if (tail === '/proactive/marks' && method === 'GET') {
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          const botId = (url.searchParams.get('botId') ?? '').trim()
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          return sendJson(res, 200, { ok: true, marks: readProactiveMarks(botId) })
+        }
+        if (tail === '/proactive/marks' && method === 'POST') {
+          const body = await readJsonBody(req) as Record<string, unknown>
+          const botId = typeof body.botId === 'string' ? body.botId.trim() : ''
+          const messageId = typeof body.messageId === 'string' ? body.messageId.trim() : ''
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          if (messageId === '') return sendJson(res, 400, { ok: false, error: 'messageId required' })
+          /*
+           * kind 三态：keep / mute 写入，null 清除；缺失与其它值一律 400。
+           * 不能把「缺失」也当成清除——前端漏传字段会静默删掉用户的标记。
+           */
+          const kind = body.kind === 'keep' || body.kind === 'mute'
+            ? body.kind
+            : body.kind === null
+              ? null
+              : undefined
+          if (kind === undefined) return sendJson(res, 400, { ok: false, error: 'kind must be keep, mute or null' })
+          const marks = upsertProactiveMark(botId, {
+            messageId,
+            ...(typeof body.text === 'string' ? { text: body.text } : {}),
+            kind,
+          })
+          return sendJson(res, 200, { ok: true, marks })
         }
 
         /*

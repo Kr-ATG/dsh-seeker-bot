@@ -2240,12 +2240,13 @@ body[data-ds-dark-theme] .kr-card--reasoning[data-inline] {
 }
 
 /*
- * 身份位：插件头像（2026-10-31）。
+ * 身份位：插件头像（2026-10-31 起；2026-11-05 起是三态透明 WebP 动图）。
  *
  * 这是卡头里**唯一**的身份图形：原来那块 92×164 的任务动画（.kr-stage 的 9 段
  * 透明底 WebM）连同 .kr-stage / .kr-stage__glow / .kr-stage__clip 全套样式已于
- * 2026-10-31 随「新对话的也换上，之前那个人物彻底删除」一起删除，两套骨架现在
- * 共用这一张 brand-avatar.ts 里的 128×128 内联 PNG。
+ * 2026-10-31 随「新对话的也换上，之前那个人物彻底删除」一起删除。2026-11-05
+ * 起默认图换成 brand-avatar.ts 的 brandAvatarSrc 指向的三态动图（透明底，
+ * 由 host 路由 /api/chat-flow/avatars/* 提供），内联 PNG 只作加载失败的降级。
  *
  * 基础尺寸 = **Hero（新对话页）**：96×96。原来 Hero 那块竖版立绘是 92×164，
  * 换成方形头像后卡头自然矮了 68px，但「她在这儿」的观感靠的是画面本身，不靠高度。
@@ -2260,12 +2261,15 @@ body[data-ds-dark-theme] .kr-card--reasoning[data-inline] {
   height: 96px;
   align-self: center;
   display: block;
-  /* 头像本身是浅底插画：解码前先给一块同色系占位，避免深色下闪一块黑。 */
-  background: #EAF2FB;
+  /*
+   * 透明底动图不能给矩形底色 / 盒阴影（2026-11-05）：三张 WebP 的人物之外
+   * 全是 alpha=0，背景色会在人物周围露出一块圆角方块，深色主题下尤其像贴歪
+   * 的补丁。改用 filter: drop-shadow —— 它按像素 alpha 描边，只给人物轮廓投
+   * 一层柔光，透明区域仍然透出侧栏背景。
+   */
   border-radius: 26px;
   object-fit: cover;
-  /* 柔和边 + 浅投影：浅色插画贴浅色侧栏时，没有这一圈边会「糊进背景」。 */
-  box-shadow: 0 3px 12px rgba(60, 110, 170, .18), 0 0 0 1px rgba(60, 110, 170, .08);
+  filter: drop-shadow(0 3px 10px rgba(60, 110, 170, .22));
   user-select: none;
   -webkit-user-drag: none;
 }
@@ -2275,16 +2279,27 @@ body[data-ds-dark-theme] .kr-card--reasoning[data-inline] {
   width: 64px;
   height: 64px;
   border-radius: 18px;
-  box-shadow: 0 2px 8px rgba(60, 110, 170, .16), 0 0 0 1px rgba(60, 110, 170, .08);
+  filter: drop-shadow(0 2px 6px rgba(60, 110, 170, .2));
 }
 
+/*
+ * 深色主题下这三张透明底动图会「融进」深色侧栏：人物本身是深蓝头发 + 深藏青
+ * 女仆裙，深底上只剩轮廓，看起来像半透明。2026-11-05 用户点名「太透明了」。
+ *
+ * 处理分两层，都不改变透明底这件事：
+ *  1. 人物身后给一圈非常淡的冷色径向光（径向渐变到 72% 处全透明，四角不会
+ *     出现方形底色板）——只把人物轮廓从深底里托出来；
+ *  2. 对动图本身轻微提亮 / 加饱和 / 加对比，压住深色衣料与头发。
+ * 亮色主题不加这两层（那边本来对比就够，加了反而显脏）。
+ */
 body[data-ds-dark-theme] .kr-plain-head__avatar {
-  background: #1F2228;
-  box-shadow: 0 3px 12px rgba(0, 0, 0, .45), 0 0 0 1px rgba(255, 255, 255, .08);
+  background: radial-gradient(circle at 50% 55%, rgba(206, 230, 255, .22) 0%, rgba(206, 230, 255, .08) 46%, rgba(206, 230, 255, 0) 72%);
+  filter: brightness(1.12) saturate(1.06) contrast(1.03) drop-shadow(0 3px 10px rgba(0, 0, 0, .5));
 }
 
 body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
-  box-shadow: 0 2px 10px rgba(0, 0, 0, .45), 0 0 0 1px rgba(255, 255, 255, .08);
+  background: radial-gradient(circle at 50% 55%, rgba(206, 230, 255, .20) 0%, rgba(206, 230, 255, .07) 48%, rgba(206, 230, 255, 0) 72%);
+  filter: brightness(1.12) saturate(1.06) contrast(1.03) drop-shadow(0 2px 8px rgba(0, 0, 0, .5));
 }
 
 .kr-plain-head--compact .kr-plain-head__name-row {

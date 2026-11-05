@@ -59,7 +59,6 @@ function renderAvatarHtml(avatar: Avatar | undefined, size = 34, online = false)
   if (avatar.image && avatar.image.trim() !== '') {
     return '<span class="pa-avatar pa-avatar--image" style="width:' + size + 'px; height:' + size + 'px;">' +
       '<img class="pa-avatar__image" src="' + escapeHtml(avatar.image) + '" alt="" />' +
-      (online ? '<i class="pa-avatar__online"></i>' : '') +
       '</span>'
   }
 
@@ -87,7 +86,6 @@ function renderAvatarHtml(avatar: Avatar | undefined, size = 34, online = false)
     '<g fill="url(#' + gradientId + ')">' + shapePath + '</g>' +
     eyesSvg +
     '</svg>' +
-    (online ? '<i class="pa-avatar__online"></i>' : '') +
     '</span>'
 }
 

@@ -97,13 +97,13 @@ html[data-dsh-glass] body[data-ds-dark-theme] .psh-card[data-solid]{
 .psh-card[data-mode='sheet'][data-anim='in']{animation:dsh-modal-slide-in 300ms cubic-bezier(.2,.8,.2,1)}
 .psh-card[data-mode='sheet'][data-anim='out']{animation:dsh-modal-slide-out ${MODAL_ANIM_MS}ms cubic-bezier(.4,0,.2,1) both}
 /* ── modal：居中弹窗卡片（连接器页） ─────────────────────────────────
-   尺寸：桌面 1040×860 上限，随视口夹紧；窄屏走上面的 sheet 全屏。
+   尺寸：桌面 880×700 上限，随视口夹紧；窄屏走上面的 sheet 全屏。
    z-index 必须高过 Personal Agent 的 .pa-root（2147483000）——Bot 模式下
    胶囊也能打开它，否则卡片会被全屏 Bot 应用盖在下面。
    居中用 left/top 50% + translate(-50%,-50%)；开合动画把 translate 写进
    keyframes 里，动画结束回落到这条 transform，避免「动画结束跳位」。 */
 .psh-card[data-mode='modal']{left:50%;top:50%;transform:translate(-50%,-50%);
-  width:min(1040px,calc(100vw - 48px));height:min(860px,calc(100vh - 72px));
+  width:min(880px,calc(100vw - 64px));height:min(700px,calc(100vh - 96px));
   z-index:2147483600;transition:none}
 .psh-mask[data-modal]{z-index:2147483500}
 .psh-mask[data-modal][data-anim='in']{animation:dsh-modal-mask-in 300ms ease both}
@@ -114,6 +114,8 @@ html[data-dsh-glass] body[data-ds-dark-theme] .psh-card[data-solid]{
 /* ── 通用卡片头部：标题 + 关闭（对齐 auto-card-head 规格）── */
 .psh-head{flex:none;display:flex;align-items:center;gap:8px;padding:12px 16px 10px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.08))}
 .psh-title{flex:1;min-width:0;font-size:15px;font-weight:600;line-height:22px;color:var(--dsw-alias-label-primary,#eee)}
+/* 关闭钮左侧的附加区（连接器：计数 + 安装状态分段） */
+.psh-head-extra{display:inline-flex;align-items:center;flex:none;min-width:0}
 .psh-close{flex:none;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:8px;padding:0;background:transparent;cursor:pointer;color:var(--dsw-alias-label-secondary,#bbb)}
 .psh-close:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.06));color:var(--dsw-alias-label-primary,#eee)}
 /* 卡片主体滚动区 */
@@ -153,10 +155,19 @@ html[data-dsh-glass] body[data-ds-dark-theme] .psh-card[data-solid]{
 }
 `
 
-/** 注入外壳样式（幂等）。 */
+/**
+ * 注入外壳样式（幂等）。
+ *
+ * 已存在时必须**按内容比对更新**：热重载后旧样式表仍留在 head 里，只判「有没有」
+ * 会让尺寸/配色改动要用户手动刷新一次页面才生效（2026-11-05 缩小弹窗时实测）。
+ */
 export function ensureShellStyles(): void {
   if (typeof document === 'undefined') return
-  if (document.getElementById(STYLE_ID) !== null) return
+  const existing = document.getElementById(STYLE_ID)
+  if (existing !== null) {
+    if (existing.textContent !== SHEET) existing.textContent = SHEET
+    return
+  }
   const tag = document.createElement('style')
   tag.id = STYLE_ID
   tag.dataset.plugin = 'dsh-triad'
@@ -402,13 +413,16 @@ export interface PshHeadProps {
   title: string
   closeLabel: string
   onClose: () => void
+  /** 关闭钮左侧的附加内容（连接器弹窗把计数与筛选分段放在这里）。 */
+  extra?: ReactNode
 }
 
-/** 通用卡片头部（标题 + 关闭钮）。 */
-export function PshHead({ title, closeLabel, onClose }: PshHeadProps): JSX.Element {
+/** 通用卡片头部（标题 + 可选附加区 + 关闭钮）。 */
+export function PshHead({ title, closeLabel, onClose, extra }: PshHeadProps): JSX.Element {
   return (
     <div className="psh-head">
       <span className="psh-title">{title}</span>
+      {extra}
       <button type="button" className="psh-close" aria-label={closeLabel} onClick={onClose}>
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />

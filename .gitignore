@@ -24,3 +24,7 @@ lib/client.js.map
 # Personal Agent 独立演示页是构建产物（npm run build:personal-demo 生成，
 # 单文件 770KB 内联了全部样式与脚本），按「产物可重建」原则不入库。
 dist/
+
+# 头像动图生成时的灰度原始像素中转文件（160×160 单通道，正好 25600 字节），
+# 仅用于转图/调试，代码与打包都不引用，不入库。
+assets/avatar/*.webp.gray

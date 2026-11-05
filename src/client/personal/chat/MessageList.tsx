@@ -21,8 +21,8 @@
  */
 import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
-import { IconChevronDown, IconQuote, IconSparkles, IconStop, IconUndo, IconVolume } from '../icons.tsx'
-import { formatClock, type Bot, type Message, type MessageBlock } from '../types.ts'
+import { IconBell, IconBellOff, IconChevronDown, IconQuote, IconSparkles, IconStop, IconUndo, IconVolume, IconX } from '../icons.tsx'
+import { formatClock, type Bot, type Message, type MessageBlock, type ProactiveMarkKind } from '../types.ts'
 import { usePersonal } from '../store.tsx'
 import { getSpeechState, speakText, speechTextOf, stopSpeech, useSpeechState } from '../speech.ts'
 import { MessageBlockView } from './MessageBlockView.tsx'
@@ -198,6 +198,96 @@ function SpeakToolButton({ message, bot, onError }: {
     >
       {active ? <IconStop size={16} /> : <IconVolume size={18} strokeWidth={2} />}
     </button>
+  )
+}
+
+/* ───────────────────────── 主动消息的提醒标记 ───────────────────────── */
+
+/**
+ * 「主动消息」标签后的提醒标记控件。
+ *
+ * 默认收起成一枚低对比小胶囊（小铃铛 +「标记」），不抢「主动消息」标签的注意力；
+ * 已标记时直接显示当前状态（「继续提醒」/「不再提醒」），不点开也能看出结论。
+ * 点开后的菜单用 absolute 定位挂在控件上，不参与「标签行」的布局。
+ *
+ * 关闭路径两条：点击控件外部（mousedown）与 Esc。菜单项点完即收起——这个动作
+ * 轻、可逆，不需要二次确认。
+ */
+function ProactiveMarkButton({ message }: { message: Message }): JSX.Element {
+  const { actions } = usePersonal()
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLSpanElement>(null)
+  const mark = message.proactiveMark
+  const label = mark === 'keep' ? '继续提醒' : mark === 'mute' ? '不再提醒' : '标记'
+  const title = mark === undefined ? '标记这条主动消息的提醒方式' : '修改提醒标记'
+
+  useEffect(() => {
+    if (!open) return undefined
+    const onPointerDown = (event: MouseEvent): void => {
+      if (rootRef.current !== null && event.target instanceof Node && rootRef.current.contains(event.target)) return
+      setOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      setOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open])
+
+  const choose = (kind: ProactiveMarkKind | null): void => {
+    setOpen(false)
+    actions.setProactiveMark(message.id, kind)
+  }
+
+  return (
+    <span className="pa-msg__mark" data-mark={mark ?? 'none'} data-open={open ? 'true' : 'false'} ref={rootRef}>
+      <button
+        className="pa-msg__mark-btn"
+        type="button"
+        title={title}
+        aria-label={title}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {mark === 'mute' ? <IconBellOff size={11} /> : <IconBell size={11} />}
+        <span>{label}</span>
+        <IconChevronDown size={9} className="pa-msg__mark-caret" />
+      </button>
+      {open ? (
+        <span className="pa-msg__mark-menu" role="menu">
+          <button
+            type="button"
+            role="menuitem"
+            data-active={mark === 'keep' ? 'true' : undefined}
+            onClick={() => choose('keep')}
+          >
+            <IconBell size={12} />
+            继续提醒
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            data-active={mark === 'mute' ? 'true' : undefined}
+            onClick={() => choose('mute')}
+          >
+            <IconBellOff size={12} />
+            不再提醒
+          </button>
+          {mark !== undefined ? (
+            <button type="button" role="menuitem" className="pa-msg__mark-clear" onClick={() => choose(null)}>
+              <IconX size={11} />
+              清除标记
+            </button>
+          ) : null}
+        </span>
+      ) : null}
+    </span>
   )
 }
 
@@ -608,7 +698,7 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
       <div className="pa-chat__scroll" ref={scrollRef} onScroll={onScroll}>
         <div className="pa-chat-empty">
           <div className="pa-chat-empty__avatar">
-            <BotAvatar avatar={bot.avatar} size={64} online={bot.status === 'online'} />
+            <BotAvatar avatar={bot.avatar} size={64} motionState={bot.isMain ? 'idle' : undefined} />
           </div>
           <div className="pa-chat-empty__title">{room !== null ? room.name : bot.name}</div>
           <div className="pa-chat-empty__desc">
@@ -784,6 +874,7 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
                       {room !== null ? <span className="pa-msg__sender-name">{senderName}</span> : null}
                       {kindLabel !== null ? <span className={`pa-msg__kind pa-msg__kind--${message.kind}`}>{kindLabel}</span> : null}
                       {tag !== null && kindLabel === null ? <span className="pa-msg__tag">{tag}</span> : null}
+                      {message.role === 'bot' && message.source === 'proactive' ? <ProactiveMarkButton message={message} /> : null}
                     </div>
                   ) : null}
                   {/*

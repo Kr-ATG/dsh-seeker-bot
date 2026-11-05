@@ -2,8 +2,16 @@
  * Personal Agent — Bot 头像（参考图中的「小墨」blob 造型）。
  *
  * 用纯 SVG 生成：底色 + 高光 + 两个斜眼缝。同一套形状在不同 Bot 上只换颜色。
+ *
+ * 2026-11-05 起支持**三态透明 WebP 动图**（motionState）：Bot 右栏资料区传
+ * motionState 时优先渲染动图（与 Work 操作面板同一套 assets/avatar/*，走 host
+ * 路由 /api/chat-flow/avatars/*），加载失败退回品牌内联 PNG。左栏 / 会话头 /
+ * 消息列表等不传 motionState 的调用点保持原来的 SVG / 上传图片分支。
  */
+import { useEffect, useState } from 'react'
 import type { Avatar } from './types.ts'
+import { BRAND_AVATAR_SRC, brandAvatarSrc } from '../kr-chat/brand-avatar.ts'
+import type { SeekerAvatarState } from '../../shared/avatar-assets.ts'
 
 export interface BotAvatarProps {
   avatar: Avatar
@@ -11,6 +19,13 @@ export interface BotAvatarProps {
   online?: boolean
   className?: string
   muted?: boolean
+  /**
+   * 三态动图状态（2026-11-05）。
+   *
+   * 传了就用透明底 WebP 动图（idle / generating / executing）盖住 SVG / 上传
+   * 图片分支；不传则完全保持原行为。目前只有 Bot 右栏资料区传它。
+   */
+  motionState?: SeekerAvatarState
 }
 
 function Eyes({ variant }: { variant: Avatar['shape'] }): JSX.Element {
@@ -46,7 +61,41 @@ function Shape({ shape }: { shape: Avatar['shape'] }): JSX.Element {
   }
 }
 
-export function BotAvatar({ avatar, size = 34, online = false, className, muted = false }: BotAvatarProps): JSX.Element {
+export function BotAvatar({ avatar, size = 34, online = false, className, muted = false, motionState }: BotAvatarProps): JSX.Element {
+  /*
+   * 动图加载失败 → 退回 BRAND_AVATAR_SRC 的内联 PNG。
+   *
+   * hooks 必须放在所有分支之前：组件下面有三条渲染路径（动图 / 上传图片 / SVG），
+   * 条件调用 useState 会让切换 Bot 时的 hook 顺序错位、直接崩。
+   * 按 motionState 重置失败标记：旧宿主没有 avatar 路由时第一次会 404；如果一直
+   * 记着失败，之后切到别的状态也不会再试。
+   */
+  const [avatarFailed, setAvatarFailed] = useState(false)
+  useEffect(() => { setAvatarFailed(false) }, [motionState])
+
+  /*
+   * 三态动图优先（2026-11-05）：Bot 右栏资料区传了 motionState 时，头像位就是
+   * 那三张透明 WebP 动图，不再看用户上传的图片 / SVG 造型。
+   */
+  if (motionState !== undefined) {
+    return (
+      <span
+        className={`pa-avatar pa-avatar--motion ${className ?? ''}`}
+        style={{ width: size, height: size, opacity: muted ? 0.55 : 1 }}
+      >
+        <img
+          className="pa-avatar__motion"
+          src={avatarFailed ? BRAND_AVATAR_SRC : brandAvatarSrc(motionState)}
+          data-avatar-state={motionState}
+          alt=""
+          draggable={false}
+          onError={() => setAvatarFailed(true)}
+        />
+        {online ? <i className="pa-avatar__online" /> : null}
+      </span>
+    )
+  }
+
   const gradientId = `pa-av-${avatar.color.replace('#', '')}-${avatar.shape}`
   /*
    * 本地导入的图片优先：它盖住整块头像（圆形裁切），SVG 造型与渐变只作为

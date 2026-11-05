@@ -447,6 +447,42 @@ body[data-pa-sidebar-resizing='true'] {
   object-fit: cover;
   display: block;
 }
+/*
+ * 三态透明 WebP 动图（2026-11-05，Bot 右栏资料区）。
+ *
+ * 动图是透明底，不能再套圆形裁切 / 矩形底色：那会在人物周围露出一个圆角方块
+ * （与 Work 卡头同一个坑）。用 contain 保住完整构图，投影改用 filter: drop-shadow
+ * ——它按像素 alpha 描边，只给人物轮廓一层柔光，透明区仍透出侧栏背景。
+ */
+.pa-avatar--motion {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.pa-avatar__motion {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  user-select: none;
+  -webkit-user-drag: none;
+  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, .28));
+}
+.pa-root[data-pa-theme='light'] .pa-avatar__motion {
+  filter: drop-shadow(0 4px 10px rgba(60, 110, 170, .22));
+}
+/*
+ * 深色主题：透明底动图直接贴在深色侧栏上时，深蓝头发 / 藏青裙装会融进底色，
+ * 看起来像人物被调成了半透明（2026-11-05 用户反馈）。给一个到 72% 就全透明的
+ * 冷色径向光托底 + 轻微提亮，既保住透明背景，也让人物从深底里立起来。
+ */
+.pa-root[data-pa-theme='dark'] .pa-avatar--motion {
+  background: radial-gradient(circle at 50% 56%, rgba(206, 230, 255, .20) 0%, rgba(206, 230, 255, .07) 48%, rgba(206, 230, 255, 0) 72%);
+  border-radius: 50%;
+}
+.pa-root[data-pa-theme='dark'] .pa-avatar__motion {
+  filter: brightness(1.12) saturate(1.06) contrast(1.03) drop-shadow(0 4px 12px rgba(0, 0, 0, .5));
+}
 
 /* ---------- 头像选择器（新建 Bot / 群聊、设置卡共用） ---------- */
 .pa-avatar-picker {

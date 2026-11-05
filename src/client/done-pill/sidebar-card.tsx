@@ -26,6 +26,7 @@ import { IdleRobot } from './idle-robot'
 import { RunningArc } from './status-orbit'
 import { RecButton, RecStatusChip } from './rec-button'
 import { BriefCard } from './brief-card'
+import { FestivalCard } from './festival-card'
 import { FeatureGate } from '../features/gate.tsx'
 import { MODAL_ANIM_MS } from '../modal-animation.ts'
 
@@ -988,7 +989,7 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
         // 情报卡是绝对定位的子节点，鼠标滑过它也会冒泡到这里。不拦的话，
         // 「悬停看情报卡」会同时弹出「对话动态」面板，两层浮层叠在一起。
         const target = event.target as HTMLElement | null
-        if (target !== null && typeof target.closest === 'function' && target.closest('.dsh-daily-brief') !== null) return
+        if (target !== null && typeof target.closest === 'function' && (target.closest('.dsh-daily-brief') !== null || target.closest('.dsh-festival-card') !== null)) return
         showPop()
       }}
       onMouseLeave={scheduleHide}
@@ -999,6 +1000,11 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
           开关独立于胶囊（view.daily-brief）：关掉时组件整块卸载，轮询一起停。 */}
       <FeatureGate feature="view.daily-brief">
         <BriefCard scale={scale} ratio={fontRatio} wide={wide} />
+      </FeatureGate>
+      {/* 节日卡：斜插在胶囊左侧的节气 / 节日小纸片，与右侧的情报卡一左一右。
+          开关独立（view.festival-card）：关掉时组件整块卸载，轮询一起停。 */}
+      <FeatureGate feature="view.festival-card">
+        <FestivalCard scale={scale} ratio={fontRatio} wide={wide} />
       </FeatureGate>
       {wide ? (
         <>

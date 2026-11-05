@@ -895,7 +895,7 @@ export function BotSettingsCard(): JSX.Element | null {
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="pa-sheet__head">
-          <BotAvatar avatar={bot.avatar} size={34} online={bot.status === 'online'} muted={!bot.enabled} />
+          <BotAvatar avatar={bot.avatar} size={34} muted={!bot.enabled} motionState={bot.isMain ? 'idle' : undefined} />
           <div className="pa-sheet__head-text">
             <div className="pa-sheet__title">{bot.name}</div>
             <div className="pa-sheet__sub">Bot 设置 · {bot.role}</div>
@@ -1318,7 +1318,7 @@ export function BotSettingsCard(): JSX.Element | null {
               ) : subBots.map((item) => (
                 <div className="pa-bset-subrow" key={item.id}>
                   <div className="pa-bset-subrow__top">
-                    <BotAvatar avatar={item.avatar} size={30} online={item.status === 'online'} muted={!item.enabled} />
+                    <BotAvatar avatar={item.avatar} size={30} muted={!item.enabled} />
                     <div className="pa-bset-subrow__main">
                       {editingSub !== null && editingSub.id === item.id ? (
                         <input

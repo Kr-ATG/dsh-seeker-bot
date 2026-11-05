@@ -140,6 +140,28 @@ export function IconVolumeOff({ size, className }: IconProps): JSX.Element {
   return <Svg size={size} className={className}><path d="M4 9.5h3.2L12 5.5v13L7.2 14.5H4z" /><path d="m16 9.5 5 5M21 9.5l-5 5" /></Svg>
 }
 
+/** 铃铛：主动消息的「继续提醒」标记。 */
+export function IconBell({ size, className }: IconProps): JSX.Element {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M18 9a6 6 0 1 0-12 0c0 3.2-.8 5.2-1.7 6.5-.3.4 0 1 .5 1h14.4c.5 0 .8-.6.5-1C18.8 14.2 18 12.2 18 9Z" />
+      <path d="M9.6 19.2a2.5 2.5 0 0 0 4.8 0" />
+    </Svg>
+  )
+}
+
+/** 划掉的铃铛：主动消息的「不再提醒」标记。 */
+export function IconBellOff({ size, className }: IconProps): JSX.Element {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M18 9a6 6 0 0 0-7.1-5.9" />
+      <path d="M6.2 6.8A6 6 0 0 0 6 9c0 3.2-.8 5.2-1.7 6.5-.3.4 0 1 .5 1h10.6" />
+      <path d="M9.6 19.2a2.5 2.5 0 0 0 4.8 0" />
+      <path d="m4 4 16 16" />
+    </Svg>
+  )
+}
+
 export function IconVideo({ size, className }: IconProps): JSX.Element {
   return <Svg size={size} className={className}><rect x="3" y="6" width="13" height="12" rx="3" /><path d="m16 10 5-3v10l-5-3" /></Svg>
 }

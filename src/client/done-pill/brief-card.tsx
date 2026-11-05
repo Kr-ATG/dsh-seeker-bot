@@ -3,9 +3,10 @@
  *
  * ## 形态（两段式，不是一个会撑大的卡）
  *
- * 1. **半截态 = 小标签**：绝对定位在胶囊左上角，宽度只有胶囊的 1/5（约 50px）、
- *    露出约 28px，旋转 -7deg，只写一个栏目短标签（AI / 世界 / 国内）和一个
- *    状态小圆点。它是一张「斜插的纸片书签」，不是阅读面。
+ * 1. **半截态 = 白色小卡**：绝对定位在胶囊上沿中段，宽度随内容自适应（约
+ *    70px）、高 36px，底边压进胶囊 15px（只露出 21px），旋转 -6°（后卡 -10°）。
+ *    里面横排「标签文字 + 圆形数字徽标」：单卡写「日报」，两张卡时写栏目短名
+ *    （AI / 世界 / 国内），徽标显示该卡的条目数。它是入口，不是阅读面。
  * 2. **点一下 = 弹出浮层**：portal 到 document.body 的 fixed 浮层（320px 宽、
  *    最多 420px 高、内部滚动），里面才是完整日报卡：栏目 / 大标题 / 导语 /
  *    3–5 条编号条目 / 来源外链 / 1–2 张翻页。
@@ -112,10 +113,10 @@ function rootStyle(scale: number, ratio: number, index: number): CSSProperties {
   return {
     '--dps': String(scale),
     '--dpt': String(ratio),
-    // 两张卡两个角度：前卡 -30°、后卡 -44°（夹角 14°）。角度不同才有
-    // 「两张纸片各插各的」错落感；同角度叠放看起来只是一张厚纸。
-    // 整体偏左（逆时针）——角度再小就只是「歪了一点的方块」，不像插进去。
-    transform: index === 0 ? 'rotate(-30deg)' : 'rotate(-44deg)',
+    // 两张卡两个角度：前卡 -6°、后卡 -10°。角度只比水平歪一点——
+    // 这是「白色小卡轻轻插在胶囊上沿」的观感；-30° 那种陡角会像一张
+    // 竖着插的窄书签，与用户给的参考不一致。
+    transform: index === 0 ? 'rotate(-6deg)' : 'rotate(-10deg)',
   } as unknown as CSSProperties
 }
 
@@ -375,10 +376,20 @@ export function BriefCard(props: BriefCardProps): JSX.Element | null {
     ? cards.map((item, index) => ({
       key: item.id,
       index,
-      label: (item.kicker.split('·')[0]?.trim() || '情报').slice(0, 3),
+      // 单卡时统一写「日报」（与用户参考图一致）；两张卡时写栏目短名，
+      // 否则两张标签都叫「日报」就分不清点哪张。
+      label: cards.length === 1 ? '日报' : (item.kicker.split('·')[0]?.trim() || '情报').slice(0, 3),
+      // 圆形徽标显示这张卡的条目数（3–5），生成中 / 空态用「·」占位。
+      badge: String(item.entries.length),
       ariaLabel: briefCardAriaLabel(item),
     }))
-    : [{ key: 'placeholder', index: 0, label: '情报', ariaLabel }]
+    : [{
+      key: 'placeholder',
+      index: 0,
+      label: '日报',
+      badge: '·',
+      ariaLabel,
+    }]
 
   /**
    * 点标签 / 回车 / 空格：打开浮层（不是「原位撑大」）。
@@ -584,14 +595,15 @@ export function BriefCard(props: BriefCardProps): JSX.Element | null {
           }}
         >
           <span className="db-tab">{tab.label}</span>
-          {tab.index === 0 && (
-            <span
-              className="db-pip"
-              data-live={view === 'generating' ? '1' : undefined}
-              data-empty={view === 'empty' || view === 'error' ? '1' : undefined}
-              aria-hidden
-            />
-          )}
+          <span
+            className="db-count"
+            data-live={view === 'generating' ? '1' : undefined}
+            data-empty={view === 'empty' || view === 'error' || view === 'skeleton' ? '1' : undefined}
+            aria-hidden
+          >
+            {tab.badge}
+          </span>
+
         </button>
       ))}
       {/*

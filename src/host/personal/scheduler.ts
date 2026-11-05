@@ -147,6 +147,30 @@ export interface HostProactive {
   lastAt?: number
 }
 
+/**
+ * 主动消息的一条「提醒标记」。
+ *
+ * 用户在主动消息的标签旁选了「继续提醒 / 不再提醒」，前端把结果回传宿主，
+ * 宿主落盘并在下一次主动询问时注入提示词——否则用户表过的态只留在当前页面，
+ * 刷新（或换设备）就全忘了。
+ */
+export interface ProactiveMark {
+  /** 消息 id（与前端消息的 hostId 对齐）。 */
+  messageId: string
+  /** 提醒正文摘要（最多 200 字），注入提示词时用。 */
+  text: string
+  /** keep = 以后继续提醒；mute = 以后不再提醒。 */
+  kind: 'keep' | 'mute'
+  /** 标记时间（毫秒时间戳）。 */
+  at: number
+}
+
+/** proactive-marks.json 的一个元素：按 bot 分组存放。 */
+export interface HostProactiveMarkStore {
+  botId: string
+  marks: ProactiveMark[]
+}
+
 /** 主动询问的提示词（与前端 `proactiveNow` 逐字一致，避免换个入口就换语气）。 */
 const PROACTIVE_PROMPT = [
   '现在轮到你主动找用户说话。',
@@ -158,6 +182,10 @@ const PROACTIVE_PROMPT = [
 const TICK_MS = 30_000
 /** 每个 bot 保留多少条服务端消息。这是补发窗口，不是消息库。 */
 const MESSAGE_LIMIT = 50
+/** 每个 bot 最多保留多少条提醒标记：再多就不是「记住偏好」而是攒日志。 */
+const PROACTIVE_MARK_LIMIT = 100
+/** 注入提示词时每条提醒正文的最大字数。 */
+const PROACTIVE_MARK_TEXT_LIMIT = 200
 
 function dataDir(): string {
   const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
@@ -176,6 +204,10 @@ function messagesFile(): string {
 
 function proactiveFile(): string {
   return join(dataDir(), 'proactive.json')
+}
+
+function proactiveMarksFile(): string {
+  return join(dataDir(), 'proactive-marks.json')
 }
 
 /** 稳定字符串散列：用作「同一天同一 bot 的随机时间」的种子。 */
@@ -348,6 +380,160 @@ export function nextProactiveAt(config: HostProactive, now = Date.now()): number
   return at(1, startMinutes + tomorrowOffset)
 }
 
+/* ───────────────────── 主动消息的提醒标记 ───────────────────── */
+
+/** 正文摘要截断：按字符数（中文一个字算一个），超长直接截断不加省略号。 */
+function clipProactiveText(value: unknown, max = PROACTIVE_MARK_TEXT_LIMIT): string {
+  if (typeof value !== 'string') return ''
+  const text = value.trim()
+  return text.length > max ? text.slice(0, max) : text
+}
+
+/** 把任意来源的一条标记收敛成合法值；结构不对返回 null。 */
+function normalizeProactiveMark(value: unknown): ProactiveMark | null {
+  if (value === null || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const messageId = typeof record.messageId === 'string' ? record.messageId.trim() : ''
+  const kind = record.kind === 'keep' || record.kind === 'mute' ? record.kind : null
+  const at = Number(record.at)
+  if (messageId === '' || kind === null || !Number.isFinite(at)) return null
+  return { messageId, text: clipProactiveText(record.text), kind, at }
+}
+
+/**
+ * 规范化一组标记：坏数据剔除、同 messageId 后写覆盖、超过上限丢最旧。
+ *
+ * 「丢最旧」按 `at` 而不是数组下标判断：前端可能整批补报历史标记，顺序不一定
+ * 是时间顺序；按时间戳才能稳定保留最近的选择。
+ */
+function normalizeProactiveMarks(input: unknown): ProactiveMark[] {
+  if (!Array.isArray(input)) return []
+  const byId = new Map<string, { mark: ProactiveMark; order: number }>()
+  let order = 0
+  for (const item of input) {
+    const mark = normalizeProactiveMark(item)
+    if (mark === null) continue
+    byId.set(mark.messageId, { mark, order })
+    order += 1
+  }
+  let values = [...byId.values()]
+  if (values.length > PROACTIVE_MARK_LIMIT) {
+    const keep = new Set(
+      [...values]
+        .sort((left, right) => left.mark.at - right.mark.at || left.order - right.order)
+        .slice(values.length - PROACTIVE_MARK_LIMIT)
+        .map((item) => item.mark.messageId),
+    )
+    values = values.filter((item) => keep.has(item.mark.messageId))
+  }
+  return values.sort((left, right) => left.order - right.order).map((item) => item.mark)
+}
+
+/** 读取某个 bot 的提醒标记（无记录 / 文件损坏时返回空数组）。 */
+export function readProactiveMarks(botId: string): ProactiveMark[] {
+  const id = String(botId ?? '').trim()
+  if (id === '') return []
+  const raw = readJson<unknown>(proactiveMarksFile(), [])
+  if (!Array.isArray(raw)) return []
+  const store = raw.find((item) => {
+    if (item === null || typeof item !== 'object') return false
+    return String((item as Record<string, unknown>).botId ?? '').trim() === id
+  }) as Record<string, unknown> | undefined
+  return normalizeProactiveMarks(store?.marks)
+}
+
+/** 全量覆盖某个 bot 的提醒标记（空数组 = 清空该 bot 的记录）。 */
+export function writeProactiveMarks(botId: string, marks: ProactiveMark[]): void {
+  const id = String(botId ?? '').trim()
+  if (id === '') return
+  const raw = readJson<unknown>(proactiveMarksFile(), [])
+  const stores: HostProactiveMarkStore[] = []
+  let existed = false
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (item === null || typeof item !== 'object') continue
+      const record = item as Record<string, unknown>
+      const storeBotId = typeof record.botId === 'string' ? record.botId.trim() : ''
+      if (storeBotId === '') continue
+      if (storeBotId === id) {
+        // 记下「这个 bot 本来就有一组标记」：清空时保留空壳，方便排查也符合全量覆盖语义
+        existed = true
+        continue
+      }
+      // 其它 bot 的记录原样保留：写 A 的标记不能顺手改 B 的数据
+      stores.push({
+        botId: storeBotId,
+        marks: Array.isArray(record.marks) ? record.marks as ProactiveMark[] : [],
+      })
+    }
+  }
+  const normalized = normalizeProactiveMarks(marks)
+  if (normalized.length > 0 || existed) stores.push({ botId: id, marks: normalized })
+  writeJson(proactiveMarksFile(), stores)
+}
+
+/**
+ * 新增 / 覆盖 / 清除一条提醒标记。
+ *
+ * - `kind = null`：删除该 messageId 的标记；
+ * - 同 messageId 再次标记：覆盖旧值（不新增第二条）；
+ * - `text` 缺省时沿用旧标记的正文——前端「改主意」只传 kind，不该把摘要抹空。
+ */
+export function upsertProactiveMark(
+  botId: string,
+  input: { messageId: string; text?: string; kind: 'keep' | 'mute' | null },
+): ProactiveMark[] {
+  const id = String(botId ?? '').trim()
+  const messageId = String(input?.messageId ?? '').trim()
+  if (id === '') return []
+  if (messageId === '') return readProactiveMarks(id)
+  const current = readProactiveMarks(id)
+  const previous = current.find((mark) => mark.messageId === messageId)
+  const next = current.filter((mark) => mark.messageId !== messageId)
+  if (input.kind === 'keep' || input.kind === 'mute') {
+    next.push({
+      messageId,
+      text: input.text !== undefined ? clipProactiveText(input.text) : (previous?.text ?? ''),
+      kind: input.kind,
+      at: Date.now(),
+    })
+  }
+  const normalized = normalizeProactiveMarks(next)
+  writeProactiveMarks(id, normalized)
+  return normalized
+}
+
+/**
+ * 生成注入主动询问提示词的「提醒标记」说明块。
+ *
+ * 没有标记时返回空串（调用方据此决定不拼，避免给提示词加一段空话）。
+ * 最多各列最近 10 条、正文截 200 字：偏好只需要近期样本，全量注入会随历史
+ * 线性膨胀，最终把提示词预算吃光。
+ */
+export function buildProactiveMarksBlock(botId: string): string {
+  const marks = readProactiveMarks(botId)
+  const recent = (kind: ProactiveMark['kind']): ProactiveMark[] => marks
+    .filter((mark) => mark.kind === kind)
+    .sort((left, right) => right.at - left.at)
+    .slice(0, 10)
+  const keep = recent('keep')
+  const mute = recent('mute')
+  if (keep.length === 0 && mute.length === 0) return ''
+  const lines = [
+    '【用户对提醒的标记】',
+    '用户对之前的主动提醒表过态，请按下面的偏好处理：',
+  ]
+  if (keep.length > 0) {
+    lines.push('· 用户选择「继续提醒」的（不要当成已解决，可以在这次主动消息里再次提起）：')
+    for (const mark of keep) lines.push(`  - ${mark.text === '' ? '（无摘要）' : mark.text}`)
+  }
+  if (mute.length > 0) {
+    lines.push('· 用户选择「不再提醒」的（不要再提起）：')
+    for (const mark of mute) lines.push(`  - ${mark.text === '' ? '（无摘要）' : mark.text}`)
+  }
+  return lines.join('\n')
+}
+
 /** 把一轮 turn 的消息落到服务端快照（离线补发用）。 */
 function recordMessages(botId: string, messages: BotMessage[], source: string): void {
   for (const message of messages) {
@@ -478,10 +664,17 @@ export async function runProactiveNow(ctx: any, config: HostProactive): Promise<
   try {
     await injectWorkingMemoryForTurn(ctx, spec)
     /*
+     * 用户对历史提醒的标记：拼在 PROACTIVE_PROMPT 之后。
+     * 没有标记时 buildProactiveMarksBlock(config.botId) 返回空串，不拼——
+     * 空段落会占掉模型的注意力，还可能让它以为有额外上下文。
+     */
+    const marksBlock = buildProactiveMarksBlock(config.botId)
+    const prompt = marksBlock === '' ? PROACTIVE_PROMPT : `${PROACTIVE_PROMPT}\n\n${marksBlock}`
+    /*
      * 包成「后台来源」：这一轮里发生的审批套用 30 分钟超时（而不是聊天内
      * 的永不过期）——后台任务不能无限占着会话等用户。
      */
-    const turn = await runAsBackgroundApproval(() => runBotTurn(ctx, spec, PROACTIVE_PROMPT, (event) => {
+    const turn = await runAsBackgroundApproval(() => runBotTurn(ctx, spec, prompt, (event) => {
       if (event.type === 'message') {
         publish(config.botId, { type: 'message', message: event.message, source: 'proactive' })
       } else if (event.type === 'message-update') {

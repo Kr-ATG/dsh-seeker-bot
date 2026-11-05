@@ -826,6 +826,98 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
   flex: none;
 }
 /*
+ * 主动消息标签后的「提醒标记」控件。
+ *
+ * 未标记时是一枚低对比小胶囊（小铃铛 +「标记」），与「主动消息」标签同一行、
+ * 同字号，安静地跟在后面；已标记时 keep 用绿色、mute 用红色系，让「以后继续提 /
+ * 不再提」不点开也能一眼看出。
+ *
+ * 菜单 absolute 挂在控件上，不占「标签行」的布局；浮层配色沿用 .pa-chat__menu
+ * 的语言（深色 #232427 / 亮色白底 + --pa-shadow-pop），深浅主题都可读。
+ */
+.pa-msg__mark {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+button.pa-msg__mark-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: calc(16px + var(--pa-font-delta));
+  padding: 0 4px 0 3px;
+  border-radius: 4px;
+  color: var(--pa-text-3);
+  background: transparent;
+  font-size: calc(9.5px + var(--pa-font-delta));
+  line-height: calc(14px + var(--pa-font-delta));
+  transition: background 110ms ease, color 110ms ease;
+}
+button.pa-msg__mark-btn:hover { background: var(--pa-chat-glass-2); color: var(--pa-text-2); }
+button.pa-msg__mark-btn:focus-visible { outline: 2px solid var(--pa-accent); outline-offset: 1px; }
+button.pa-msg__mark-btn svg { flex: none; }
+.pa-msg__mark-caret { opacity: 0.7; transition: transform 120ms ease; }
+.pa-msg__mark[data-open='true'] .pa-msg__mark-caret { transform: rotate(180deg); }
+/* 已标记：keep 绿色（继续提醒），mute 红色（不再提醒）。 */
+.pa-msg__mark[data-mark='keep'] button.pa-msg__mark-btn {
+  color: var(--pa-green);
+  background: color-mix(in srgb, var(--pa-green) 12%, transparent);
+}
+.pa-msg__mark[data-mark='keep'] button.pa-msg__mark-btn:hover {
+  background: color-mix(in srgb, var(--pa-green) 20%, transparent);
+}
+.pa-msg__mark[data-mark='mute'] button.pa-msg__mark-btn {
+  color: var(--pa-red);
+  background: color-mix(in srgb, var(--pa-red) 11%, transparent);
+}
+.pa-msg__mark[data-mark='mute'] button.pa-msg__mark-btn:hover {
+  background: color-mix(in srgb, var(--pa-red) 18%, transparent);
+}
+/* 亮色主题下 --pa-green / --pa-red 偏亮，换成加重的文字色保证对比度。 */
+.pa-root[data-pa-theme='light'] .pa-msg__mark[data-mark='keep'] button.pa-msg__mark-btn { color: #17803d; background: rgba(48, 209, 88, 0.16); }
+.pa-root[data-pa-theme='light'] .pa-msg__mark[data-mark='mute'] button.pa-msg__mark-btn { color: #c0271d; background: rgba(255, 69, 58, 0.12); }
+.pa-msg__mark-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  min-width: 132px;
+  padding: 4px;
+  border-radius: 10px;
+  background: #232427;
+  border: 1px solid var(--pa-line-2);
+  box-shadow: var(--pa-shadow-pop);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  white-space: nowrap;
+  animation: pa-pop 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.pa-root[data-pa-theme='light'] .pa-msg__mark-menu { background: #ffffff; }
+.pa-msg__mark-menu button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 7px;
+  text-align: left;
+  font-size: calc(11.5px + var(--pa-font-delta));
+  color: var(--pa-text-2);
+  transition: background 110ms ease, color 110ms ease;
+}
+.pa-msg__mark-menu button:hover { background: var(--pa-chat-hover); color: var(--pa-text); }
+.pa-msg__mark-menu button[data-active='true'] { background: var(--pa-chat-glass-2); color: var(--pa-text); }
+.pa-msg__mark-menu button svg { flex: none; }
+.pa-msg__mark-menu .pa-msg__mark-clear { color: var(--pa-text-3); }
+.pa-msg__mark-menu .pa-msg__mark-clear:hover { color: var(--pa-red); background: rgba(255, 69, 58, 0.1); }
+@media (prefers-reduced-motion: reduce) {
+  .pa-msg__mark-menu { animation: none; }
+  .pa-msg__mark-caret { transition: none; }
+}
+/*
  * 多消息类别（DOST 形态）：
  *   finding    —— 左侧一道橙线 + 淡底，扫一眼就知道「这条要注意」
  *   need-input —— 整块换成卡片，问题要显眼，因为等用户回答

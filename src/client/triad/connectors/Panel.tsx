@@ -24,6 +24,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   ensureModalAnimStyles,
   modalDrawerAnimClass,
@@ -38,11 +39,16 @@ export interface ConnectorsPanelProps {
   embedded?: boolean
   /**
    * 嵌在弹窗卡片里（2026-11-03 用户要求「MCP页面变成弹窗卡片」）。
-   * 卡片外壳已经给了标题栏（MCP 服务器 + 关闭钮），这里把页内的大标题块
-   * （eyebrow / h1 / 副句）让位，只保留计数、搜索与分类条——否则一张弹窗里
+   * 卡片外壳已经给了标题栏（MCP 连接器 + 关闭钮），这里把页内的大标题块
+   * （eyebrow / h1 / 副句）让位，只保留搜索与分类条——否则一张弹窗里
    * 会出现两层「连接器」标题。
    */
   inCard?: boolean
+  /**
+   * 标题栏「关闭」左侧的 DOM 插槽（2026-11-05 用户要求把计数与安装状态分段
+   * 挪到关闭按钮左边）。传了就 portal 过去；首帧还没拿到时原位渲染，避免闪。
+   */
+  headerExtraSlot?: HTMLElement | null
 }
 
 /** 目录条目（与宿主 catalog 字段对齐）。 */
@@ -271,7 +277,7 @@ function categoryGroupLabel(category: string | undefined): string {
   return CATEGORY_LABEL_OF.get(category) ?? '其它'
 }
 
-export function ConnectorsPanel({ embedded = false, inCard = false }: ConnectorsPanelProps): JSX.Element {
+export function ConnectorsPanel({ embedded = false, inCard = false, headerExtraSlot = null }: ConnectorsPanelProps): JSX.Element {
   ensureConnectorsStyles()
   // 详情抽屉的入场退场用的是 triad 的共享 keyframes，这里保证它已注入（幂等）。
   ensureModalAnimStyles()
@@ -470,35 +476,47 @@ export function ConnectorsPanel({ embedded = false, inCard = false }: Connectors
     return true
   }, [detail, envDraft])
 
+  /*
+   * 计数 + 安装状态分段。原来一直住在内容区顶部（headTop）。
+   * 2026-11-05 用户要求把它挪到弹窗标题栏「关闭」的左侧：弹窗里通过
+   * headerExtraSlot portal 过去；独立页形态或插槽还没就绪时原位渲染。
+   */
+  const headRight = (
+    <div className={css.headRight}>
+      <span className={css.count}>
+        {catalog === null ? '' : String(filtered.length) + ' / ' + String(catalog.counts.total)}
+      </span>
+      <div className={css.segmented} role="group" aria-label="按安装状态筛选">
+        {SEGMENTS.map((item) => (
+          <button
+            key={item.key}
+            type="button"
+            className={item.key === installFilter ? css.segBtn + ' ' + css.segBtnOn : css.segBtn}
+            onClick={() => { setInstallFilter(item.key) }}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+
   return (
     <div className={css.root + (inCard ? ' ' + css.root + '--card' : '')} onWheel={onRootWheel}>
+      {inCard && headerExtraSlot !== null ? createPortal(headRight, headerExtraSlot) : null}
       <div className={css.head}>
-        <div className={css.headTop}>
-          {inCard ? null : (
-            <div>
-              <span className={css.eyebrow}><i />Connectors</span>
-              <h1 className={css.title}>连接器 <em>/ 能接什么</em></h1>
-              <p className={css.sub}>精选 MCP 连接器，装一个就能让模型用上它。国内国外都有。</p>
-            </div>
-          )}
-          <div className={css.headRight}>
-            <span className={css.count}>
-              {catalog === null ? '' : String(filtered.length) + ' / ' + String(catalog.counts.total)}
-            </span>
-            <div className={css.segmented} role="group" aria-label="按安装状态筛选">
-              {SEGMENTS.map((item) => (
-                <button
-                  key={item.key}
-                  type="button"
-                  className={item.key === installFilter ? css.segBtn + ' ' + css.segBtnOn : css.segBtn}
-                  onClick={() => { setInstallFilter(item.key) }}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
+        {(!inCard || headerExtraSlot === null) && (
+          <div className={css.headTop}>
+            {inCard ? null : (
+              <div>
+                <span className={css.eyebrow}><i />Connectors</span>
+                <h1 className={css.title}>连接器 <em>/ 能接什么</em></h1>
+                <p className={css.sub}>精选 MCP 连接器，装一个就能让模型用上它。国内国外都有。</p>
+              </div>
+            )}
+            {headRight}
           </div>
-        </div>
+        )}
 
         <div className={css.search}>
           <SearchIcon />

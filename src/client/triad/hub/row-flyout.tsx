@@ -17,7 +17,7 @@
  * 逐条调 navMenuItem（id = workbench-<tab>、order = 10 + index * 10）生成
  * 「操作间」里的菜单行。所以**加一个分类 = 在这张表里加一行**，侧栏那一行会
  * 自动出现、滚轮顺序与 ⌘N 直切自动跟上。
- * 连接器（connectors）不在表里：2026-11-03 起它是侧栏底部「MCP服务器」胶囊
+ * 连接器（connectors）不在表里：2026-11-03 起它是侧栏底部「MCP 连接器」胶囊
  * 弹出的居中弹窗卡片（../connectors/ConnectorModal.tsx），不占工作台分类。
  * ⚠ 千万不要为了加菜单另外手动 navMenuItem 一次 —— 那会出现两行同名菜单。
  *
@@ -64,7 +64,7 @@ export interface WorkbenchTabMeta {
 export const WORKBENCH_TABS: readonly WorkbenchTabMeta[] = [
   // order 由本表下标推导（10 + index * 10），顺序即侧栏顺序。
   // 注意：连接器（connectors）**不在工作台分类里**——2026-11-03 用户要求
-  // 「MCP页面变成弹窗卡片」，它由侧栏底部「MCP服务器」胶囊直接弹出
+  // 「MCP页面变成弹窗卡片」，它由侧栏底部「MCP 连接器」胶囊直接弹出
   // （见 ../connectors/ConnectorModal.tsx），不再占工作台页与侧栏条目。
   { id: 'memory', label: '记忆', desc: '条目 · 变更 · 修订' },
   { id: 'skills', label: 'SKILL', desc: '技能包与技能开关' },

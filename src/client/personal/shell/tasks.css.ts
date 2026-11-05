@@ -245,6 +245,81 @@ export const PERSONAL_TASK_CSS = `
   .pa-taskrec__group-caret { transition: none; }
 }
 
+/* ═══════════════ 运行中任务 · 实时动作（2026-11-05） ═══════════════
+ * 用户口径：「发完消息后，动态里要能实时看到任务的动作进行到哪里」。
+ * 数据源是 state.tasks 的 steps（流式事件逐条追加），这里只做展示；
+ * 动作一律说人话，原始参数 / 源码默认收起，点开才看。
+ * 时长曲线按 S/M 档局部展开 220ms cubic-bezier(0.2, 0.8, 0.2, 1)；
+ * 进行中只用低调的呼吸点表达状态，不做虚假完成、不抢高频操作的注意力。 */
+.pa-taskrec__item { display: flex; flex-direction: column; min-width: 0; }
+.pa-taskrec__item + .pa-taskrec__item { margin-top: 1px; }
+
+.pa-taskrec__live {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: calc(10.5px + var(--pa-font-delta));
+  line-height: 1.45;
+  color: var(--pa-accent);
+}
+.pa-taskrec__live-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pa-taskrec-pulse 1.6s ease-in-out infinite;
+}
+.pa-taskrec__live-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.pa-taskrec__live-meta {
+  flex: none;
+  color: var(--pa-text-4);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+@keyframes pa-taskrec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* 进度：已完成一段实色，末端一枚呼吸点标明「现在在这里」。 */
+.pa-taskrec__progress {
+  display: block;
+  height: 3px;
+  margin: 3px 0 1px;
+  border-radius: 2px;
+  background: var(--pa-card-2);
+}
+.pa-taskrec__progress-fill {
+  position: relative;
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--pa-accent);
+  transition: width 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.pa-taskrec__progress-fill::after {
+  content: '';
+  position: absolute;
+  right: -3px;
+  top: -2.5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--pa-accent);
+  animation: pa-taskrec-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pa-taskrec__live-dot, .pa-taskrec__progress-fill::after { animation: none; }
+  .pa-taskrec__progress-fill { transition: none; }
+}
+
 /* ═══════════════════════ 任务详情卡（Work 模式过程时间线） ═══════════════════════ */
 
 /* 固定遮罩：盖住整个视口，点击空白处关闭（由组件判断 target === currentTarget）。 */
@@ -625,6 +700,187 @@ export const PERSONAL_TASK_CSS = `
     animation: none;
   }
 }
+
+/* ═══════════════ 任务动作面板 · 左右两栏（2026-11-05） ═══════════════
+ * 用户口径：「跟我发你的截图一样，左右两栏布局」——左边动作时间线，
+ * 右边「正在运行：xxx」或收工后的摘要与产出物。两栏各自己滚动，
+ * 中间只画一条发丝线；原始参数 / 命令 / JSON 默认收起，点开才看。
+ * 时长曲线沿用 S/M 档局部展开 220ms cubic-bezier(0.2, 0.8, 0.2, 1)。 */
+.pa-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 0.86fr) minmax(0, 1.4fr);
+  min-height: 0;
+}
+.pa-actions__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  max-height: 56vh;
+  overflow-y: auto;
+  padding: 2px 16px 14px 0;
+  border-right: 1px solid var(--pa-line);
+}
+.pa-actions__detail {
+  min-width: 0;
+  max-height: 56vh;
+  overflow-y: auto;
+  padding: 2px 4px 14px 22px;
+}
+.pa-actions__empty {
+  padding: 12px 6px;
+  font-size: calc(11px + var(--pa-font-delta));
+  color: var(--pa-text-4);
+}
+
+/* 左栏一条动作：图标 + 人话标题 + 可选的一句短对象（文件名 / 命令）。 */
+.pa-root .pa-actions__step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  text-align: left;
+  border-radius: 9px;
+  color: var(--pa-text-3);
+  transition: background 120ms ease;
+}
+.pa-root .pa-actions__step:hover { background: var(--pa-card-2); }
+.pa-actions__step[data-active='true'] { background: var(--pa-card-2); }
+.pa-actions__step[data-state='running'] .pa-actions__step-label { color: var(--pa-accent); font-weight: 600; }
+.pa-actions__step[data-state='error'] .pa-actions__step-label { color: var(--pa-red); }
+.pa-actions__step-glyph {
+  flex: none;
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  color: var(--pa-text-4);
+}
+.pa-actions__step-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.pa-actions__step-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(11.5px + var(--pa-font-delta));
+  line-height: 1.45;
+}
+.pa-actions__step-brief {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(9.5px + var(--pa-font-delta));
+  color: var(--pa-text-4);
+}
+.pa-actions__step-now {
+  flex: none;
+  font-size: calc(9px + var(--pa-font-delta));
+  color: var(--pa-accent);
+}
+
+/* 右栏：大标题 + 进度 + 说明。 */
+.pa-actions__kicker {
+  font-size: calc(10px + var(--pa-font-delta));
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--pa-text-4);
+}
+.pa-actions__title {
+  margin-top: 6px;
+  font-size: calc(17px + var(--pa-font-delta));
+  font-weight: 650;
+  line-height: 1.4;
+  color: var(--pa-text);
+  word-break: break-word;
+}
+.pa-actions__meta {
+  margin-top: 8px;
+  font-size: calc(10.5px + var(--pa-font-delta));
+  color: var(--pa-text-3);
+  font-variant-numeric: tabular-nums;
+}
+.pa-actions__progress {
+  height: 4px;
+  margin-top: 10px;
+  border-radius: 3px;
+  background: var(--pa-card-2);
+  overflow: hidden;
+}
+.pa-actions__progress > span {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--pa-accent);
+  transition: width 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.pa-actions__desc {
+  margin: 14px 0 0;
+  font-size: calc(12.5px + var(--pa-font-delta));
+  line-height: 1.8;
+  color: var(--pa-text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 收工后的产出物格子。 */
+.pa-actions__outputs { margin-top: 18px; }
+.pa-actions__outputs-title {
+  margin-bottom: 8px;
+  font-size: calc(10.5px + var(--pa-font-delta));
+  color: var(--pa-text-4);
+}
+.pa-actions__outputs-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+}
+.pa-actions__output {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--pa-card-2);
+  font-size: calc(10.5px + var(--pa-font-delta));
+  color: var(--pa-text-2);
+}
+.pa-actions__output > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pa-actions__output-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: var(--pa-card-2);
+  color: var(--pa-text-3);
+  font-size: calc(12px + var(--pa-font-delta));
+}
+
+/* 视口太窄时上下排：桌面视口（>700px）始终是左右两栏。 */
+@media (max-width: 700px) {
+  .pa-actions { grid-template-columns: minmax(0, 1fr); }
+  .pa-actions__list {
+    border-right: 0;
+    border-bottom: 1px solid var(--pa-line);
+    padding: 2px 0 10px;
+    max-height: 34vh;
+  }
+  .pa-actions__detail { padding: 12px 0 10px; max-height: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pa-actions__progress > span { transition: none; }
+}
+
 `
 
 let injected = false

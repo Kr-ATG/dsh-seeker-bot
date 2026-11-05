@@ -241,7 +241,7 @@ export const PERSONAL_SHELL_CSS = `
   justify-content: center;
 }
 /*
- * 底部「设置」行 + 右侧 MCP 服务器胶囊（2026-11-03 用户要求「bot模式下也要这个」）。
+ * 底部「设置」行 + 右侧 MCP 连接器胶囊（2026-11-03 用户要求「bot模式下也要这个」）。
  * 设置按钮让出右侧空间（flex:1 可收缩），胶囊自己 margin-left:auto 贴右缘；
  * 与 Work 模式账号行的布局语义一致：左边是原有入口，右边是连接器胶囊。
  */

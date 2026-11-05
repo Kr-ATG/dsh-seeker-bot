@@ -4,7 +4,7 @@
  * 结构（参考 ref-left.png / ref-top.png）：
  *   顶部图标行（折叠 / 搜索 / +）
  *   Work | Bot 分段控件（Bot 高亮，点 Work 回到官方工作台）
- *   主 Bot（56px 头像 + 名称 + 在线橙点）
+ *   主 Bot（48px 无动作动图头像 + 名称）
  *   按 groups 顺序渲染的子 Bot 列表（34px 头像 / 名称 / 角色 / 最近消息 / 未读）
  *   群聊分组（成员头像叠加）
  *   底部：期刊日记 / 设置
@@ -775,7 +775,7 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
         data-selected={ui.selectedBotId === mainBot.id && ui.selectedRoomId === null ? 'true' : 'false'}
         onClick={() => pickFromRail(() => actions.selectBot(mainBot.id))}
       >
-        <BotAvatar avatar={mainBot.avatar} size={32} online={mainBot.status === 'online'} />
+        <BotAvatar avatar={mainBot.avatar} size={32} motionState="idle" />
       </button>
 
       {subBots.length > 0 || rooms.length > 0 ? <div className="pa-rail-sep" /> : null}
@@ -911,7 +911,7 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
             onClick={() => actions.selectBot(mainBot.id)}
             onKeyDown={rowKeyHandler(() => actions.selectBot(mainBot.id))}
           >
-            <BotAvatar avatar={mainBot.avatar} size={48} online={mainBot.status === 'online'} />
+            <BotAvatar avatar={mainBot.avatar} size={48} motionState="idle" />
             <span className="pa-mainbot__name">{mainBot.name}</span>
             {/*
              * 新建入口：用户要求从顶部挪到主 Bot 卡片的右下角（2026-11-02）。
@@ -1003,7 +1003,7 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
               <IconBook size={18} />
               <span>期刊日记</span>
             </button>
-            {/* 最下面一行 = 设置 + 右侧「MCP服务器」胶囊（与 Work 侧栏账号行同款入口）。
+            {/* 最下面一行 = 设置 + 右侧「MCP 连接器」胶囊（与 Work 侧栏账号行同款入口）。
                 Bot 侧栏有自己的 64px 折叠态（collapsed 分支只画图标），所以这里
                 传 checkRail={false}——rail 判据只属于 Work 的官方侧栏。 */}
             <div className="pa-sidebar__bottom-row">

@@ -7,7 +7,7 @@
  * 同步设置；点这一行 → 工作区回来、那些条目收起。以后加新菜单要方便。
  *
  * 注：**连接器不在操作间里**（2026-11-03 用户要求）——它的入口是侧栏最下面
- * 账号行右侧的「MCP服务器」胶囊，见 ../connectors/sidebar-pill.tsx。
+ * 账号行右侧的「MCP 连接器」胶囊，见 ../connectors/sidebar-pill.tsx。
  *
  * ── 实现方式：一张注册表 + 一个切换行 ─────────────────────────────────
  * 侧栏不再有「横滑分类条」这种一次性写死的入口，全部收敛成
@@ -531,7 +531,7 @@ function branchFields(tab: (typeof WORKBENCH_TABS)[number]['id']): BranchFields 
  */
 function registerDefaultEntries(): Array<() => void> {
   return WORKBENCH_TABS.flatMap((tab, index) => {
-    // 连接器（2026-11-03 用户要求）：入口已收成侧栏最下面那行右侧的「MCP服务器」
+    // 连接器（2026-11-03 用户要求）：入口已收成侧栏最下面那行右侧的「MCP 连接器」
     // 胶囊（见 ../connectors/sidebar-pill.tsx），操作间不再保留同名菜单行——
     // 否则同一个页面会有两个入口，而且胶囊是用户点名的唯一形态。
     // 注意只是不注册**菜单行**：WORKBENCH_TABS 里的 categories 仍在，

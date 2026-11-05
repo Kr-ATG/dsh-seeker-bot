@@ -111,7 +111,7 @@ const CSS_TEXT = [
   '.dsh-mc-section:first-child{margin-top:2px;}',
   '.dsh-mc-section-head{display:flex;align-items:center;gap:8px;margin-bottom:10px;}',
   '.dsh-mc-section-title{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary,#1a1a1a);}',
-  '.dsh-mc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;}',
+  '.dsh-mc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(265px,1fr));gap:10px;}',
   '.dsh-mc-card{display:flex;align-items:center;gap:11px;padding:11px 12px;border-radius:13px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.14));background:var(--dsw-alias-bg-base,#fff);cursor:pointer;transition:border-color .15s,transform .15s,box-shadow .15s;text-align:left;font:inherit;}',
   '.dsh-mc-card:hover{border-color:var(--dsw-alias-border-l2,rgba(127,127,127,.3));transform:translateY(-1px);box-shadow:0 3px 12px rgba(0,0,0,.06);}',
   '.dsh-mc-card-icon{flex:none;width:40px;height:40px;border-radius:10px;object-fit:contain;background:var(--dsw-alias-bg-l2,rgba(127,127,127,.07));padding:3px;}',
@@ -176,10 +176,19 @@ const CSS_TEXT = [
   '@media (prefers-reduced-motion:reduce){.dsh-mc-mask,.dsh-mc-drawer{animation:none!important;}}',
 ].join('')
 
-/** 注入样式（幂等：同一份文档只插一次）。 */
+/**
+ * 注入样式（幂等）。
+ *
+ * 已存在时按内容比对更新：插件热重载不会清空 head 里的旧 <style>，只判「有没有」
+ * 会让列宽/间距改动必须刷新页面才生效（2026-11-05 缩弹窗时一并修）。
+ */
 export function ensureConnectorsStyles(): void {
   if (typeof document === 'undefined') return
-  if (document.getElementById(STYLE_ID) !== null) return
+  const existing = document.getElementById(STYLE_ID)
+  if (existing !== null) {
+    if (existing.textContent !== CSS_TEXT) existing.textContent = CSS_TEXT
+    return
+  }
   const el = document.createElement('style')
   el.id = STYLE_ID
   el.textContent = CSS_TEXT

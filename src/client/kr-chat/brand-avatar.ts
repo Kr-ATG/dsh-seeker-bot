@@ -1,5 +1,5 @@
 /**
- * dsh-seeker-bot — 插件头像（卡头唯一的身份图形）。
+ * dsh-seeker-bot — 插件头像（卡头身份位的取图入口）。
  *
  * 2026-10-31 用户两次点名，最终口径是「新对话的也换上，之前那个人物彻底删除」：
  *
@@ -9,21 +9,42 @@
  * 于是卡头原来那 9 段任务动画（SeekerStage 的透明底 WebM）连同它的整条链路
  * ——SeekerStage / motion-clips / stage-mode / WhalePortrait / whale-portrait-assets、
  * assets/motion 那 18 个素材、host 的 /api/chat-flow/motion 路由、两个特性开关
- * （view.task-motion / host.motion）——全部删除。**右栏操作面板卡与新对话页 Hero
- * 现在都只用这一张图**，尺寸差异由 CSS 给（Hero 96×96、紧凑骨架 64×64）。
+ * （view.task-motion / host.motion）——全部删除。卡头从此只有一个身份图形位，
+ * 尺寸差异由 CSS 给（Hero 96×96、紧凑骨架 64×64）。
  *
- * ## 为什么是内联 base64
+ * ## 2026-11-05：三态透明 WebP 动图（默认取图）
+ *
+ * 用户要求把静态插件头像换成三张透明底 WebP 动图，按「此刻在做什么」切换：
+ *
+ *   · idle       —— 无动作（本轮没在跑）；
+ *   · generating —— 正在调用生成类能力（生成视频 / 图片 / IU / HTML 等）；
+ *   · executing  —— 其余执行中（工具调用、思考中）。
+ *
+ * 三张图随包放在 assets/avatar/，由 host 的 /api/chat-flow/avatars/* 路由提供；
+ * 状态与 URL 的约定在 src/shared/avatar-assets.ts，卡头取图走本文件的
+ * {@link brandAvatarSrc}。
+ *
+ * 为什么不再内联：三张动图合计约 2.5MB，内联进 client.js 会让每个用户冷启动
+ * 多下载一份巨大的 JS 字符串；走 host 路由后浏览器只在需要时按状态取图，并靠
+ * immutable 缓存命中。
+ *
+ * ## BRAND_AVATAR_SRC 的定位：降级内联 PNG
+ *
+ * 下面这份 128×128 内联 PNG 仍然保留 —— 它是**路由不可用时的降级图**：旧宿主
+ * 没有 avatar 路由（/api/chat-flow/avatars/* 404）或动图加载失败（img.onError）
+ * 时，卡头退回这张静态图，身份位不会变成一个破图 / 空白。正常路径永远优先走
+ * {@link brandAvatarSrc}。
+ *
+ * ## 降级 PNG 是怎么来的（只在换降级图时要看）
  *
  * 图源就是仓库根目录的 `icon.png`（256×256，即插件图标本身），这里存的是压到
- * 128×128 的版本（41KB）。理由：
+ * 128×128 的版本（41KB）。压小的理由：
  *
  *  1. **尺寸够用**：最大显示 96px，128px 覆盖 1.33× DPI，再大只是白占体积；
- *  2. **不必开路由**：原来那 9 段 WebM 走 host 路由是因为合计 2.57MB，而这张图
- *     base64 后只有约 55KB —— 塞进 client 产物对冷启动的影响可以忽略；
- *  3. **改完立刻可见**：host 半身改动要重启 DSH 才生效，client 改动热重载即可。
- *     卡头身份位不该出现「代码改了、界面上还是个白框」这种排错体验。
+ *  2. **只当降级用**：正常路径是 host 路由的动图，这份静态图只在失败时兜底，
+ *     55KB 的 base64 留在 client 产物里对冷启动的影响可以忽略。
  *
- * ## 换图怎么做
+ * ## 换降级图怎么做
  *
  * 把新的 `icon.png` 压成 128×128 PNG 放到 `_tmp/avatar/avatar-128.png`，再跑
  * `node _tmp/make-brand-avatar.mjs` 重新生成本文件（脚本已随 _tmp 一起被清理，
@@ -32,8 +53,23 @@
  * @module
  */
 
+import { avatarUrl, type SeekerAvatarState } from '../../shared/avatar-assets.ts'
+
 /** 头像位图边长（px）。CSS 里按 64px 显示，2× DPI 正好取满。 */
 export const BRAND_AVATAR_PX = 128
+
+/**
+ * 某一状态的头像动图 URL（卡头默认取图入口）。
+ *
+ * 只是 {@link avatarUrl} 的薄封装：host 与 client 共用 src/shared/avatar-assets.ts
+ * 里的文件名表与版本号，两处不会各写一份、升级换图时漏改一处。
+ *
+ * @param state - 卡头当前的三态之一（idle / generating / executing）。
+ * @returns 可直接塞给 img.src 的同源相对 URL。
+ */
+export function brandAvatarSrc(state: SeekerAvatarState): string {
+  return avatarUrl(state)
+}
 
 /**
  * 头像的 data URL（PNG / base64）。

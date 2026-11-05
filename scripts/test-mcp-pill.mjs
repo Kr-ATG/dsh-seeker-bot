@@ -1,5 +1,5 @@
 /**
- * dsh-seeker-bot — 侧栏「MCP服务器」胶囊的回归测试（scripts/test-mcp-pill.mjs）。
+ * dsh-seeker-bot — 侧栏「MCP 连接器」胶囊的回归测试（scripts/test-mcp-pill.mjs）。
  *
  * 不启动浏览器：用 esbuild 把纯模型模块打包到临时目录后直接 import 断言；
  * 胶囊的 DOM 挂载与视觉部分由 build + 真机截图验证（依赖官方侧栏结构，
@@ -9,7 +9,7 @@
  *  1. 目录 id → serverName 换算与宿主 toServerName 一致（点号换短横线、截 32 位）；
  *  2. 已装清单合并：图标 URL / 中文名 / disabled / 首字母回落 / 去重；
  *  3. 源码守卫：操作间不再注册 workbench-connectors、seat 挂了胶囊、胶囊组件含关键文案；
- *  4. 构建产物守卫：lib/client.js 含 dmp-pill / MCP服务器 / 状态与目录两个接口路径。
+ *  4. 构建产物守卫：lib/client.js 含 dmp-pill / MCP 连接器 / 状态与目录两个接口路径。
  *
  * Usage: node scripts/test-mcp-pill.mjs
  */
@@ -96,12 +96,12 @@ check('工作台座位挂载了胶囊', seat.includes('attachConnectorPill'))
 check('工作台座位挂载了弹窗宿主', seat.includes('attachConnectorModalHost'))
 
 const pill = read('src/client/triad/connectors/sidebar-pill.tsx')
-// 源码守卫必须看**代码**，不能看注释：文件头注释本身就提到「MCP服务器」和两个
+// 源码守卫必须看**代码**，不能看注释：文件头注释本身就提到「MCP 连接器」和两个
 // 接口路径，直接 includes 会让「删掉渲染代码测试仍绿」。
 const pillCode = pill
   .replace(/\/\*[\s\S]*?\*\//g, ' ')
   .replace(/(^|[^:])\/\/.*$/gm, '$1')
-check('胶囊：左侧文案是「MCP服务器」', pillCode.includes('MCP服务器'))
+check('胶囊：左侧文案是「MCP 连接器」', pillCode.includes('MCP 连接器'))
 check('胶囊：渲染标记 data-mcp-pill', pillCode.includes('data-mcp-pill'))
 check('胶囊：最多 3 个圆形图标', /MAX_AVATARS = 3/.test(pillCode))
 check('胶囊：状态接口 /api/triad/mcp-status', pillCode.includes('/api/triad/mcp-status'))
@@ -121,6 +121,8 @@ const tabsBlock = flyoutSrc.slice(flyoutSrc.indexOf('export const WORKBENCH_TABS
 check('工作台分类不再包含连接器（MCP 只以弹窗出现）', !/id: 'connectors'/.test(tabsBlock))
 
 const panelSrc = read('src/client/triad/connectors/Panel.tsx')
+check('弹窗：计数与筛选经标题栏插槽渲染（关闭钮左侧）',
+  modalSrc.includes('headerExtraSlot') && panelSrc.includes('createPortal(headRight, headerExtraSlot)'))
 check('分类精简：18 个细分类合并为 6 个大组',
   ['系统能力', '办公协作', '开发工具', '内容设计', '搜索与数据', '生活出行']
     .every((label) => panelSrc.includes(`label: '${label}'`)))
@@ -135,8 +137,8 @@ check('Bot 侧栏：设置行包在 pa-sidebar__bottom-row', botSidebar.includes
 const bundlePath = resolve(ROOT, 'lib/client.js')
 const bundle = readFileSync(bundlePath, 'utf8')
 check('产物：含胶囊样式类 dmp-pill', bundle.includes('dmp-pill'))
-// esbuild 默认 charset=ascii，中文会写成 \u670D\u52A1\u5668 转义序列。
-check('产物：含胶囊文案', /MCP(?:服务器|\\u670D\\u52A1\\u5668)/.test(bundle))
+// esbuild 默认 charset=ascii，中文会写成 \u8FDE\u63A5\u5668 转义序列（「连接器」）。
+check('产物：含胶囊文案', /MCP (?:连接器|\\u8FDE\\u63A5\\u5668)/.test(bundle))
 check('产物：含样式表 id', bundle.includes('dsh-mcp-pill-styles'))
 check('产物：含状态接口路径', bundle.includes('/api/triad/mcp-status'))
 check('产物：含 Bot 侧栏底部行', bundle.includes('pa-sidebar__bottom-row'))

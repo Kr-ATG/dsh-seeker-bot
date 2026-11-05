@@ -87,6 +87,7 @@ export const FEATURES: ReadonlyArray<FeatureDef> = [
   { id: 'view.browser-flag', group: 'view', label: '浏览器操作标志', desc: '该会话正在操作浏览器时亮起的呼吸小图标（可点击拉窗口到前台）。', default: true, apply: 'live' },
   { id: 'view.done-pill', group: 'view', label: '对话完成胶囊', desc: '回合完成提醒小横条 / 顶部悬浮胶囊（含录屏与待机机器人）。', default: true, apply: 'live' },
   { id: 'view.daily-brief', group: 'view', label: '每日情报卡', desc: '胶囊上方斜插的半截日报卡：每天联网搜索 + 模型整理 AI / 世界 / 国内要闻。', default: true, apply: 'live' },
+  { id: 'view.festival-card', group: 'view', label: '节日卡', desc: '胶囊左侧斜插的节气 / 节日小卡：临近节气自动生成，配一张从网上找来的高清实拍图。', default: true, apply: 'live' },
   { id: 'view.stats-ttft', group: 'view', label: '首 token 平铺', desc: '输入框下状态栏显示首 token 平均耗时；关掉后只在官方统计卡里看。', default: true, apply: 'live' },
 
   // ── 正文卡片 ──────────────────────────────────────────────────────────
@@ -136,6 +137,7 @@ export const FEATURES: ReadonlyArray<FeatureDef> = [
   { id: 'host.open-path', group: 'host', label: '资源管理器打开修复', desc: '修官方在 Windows 上被 windowsHide 吞掉窗口的问题。', default: true, apply: 'host' },
   { id: 'host.open-file', group: 'host', label: '系统默认应用打开', desc: '产出物 / 画廊 / 弹窗里点一下用系统默认应用打开。', default: true, apply: 'host' },
   { id: 'host.fonts', group: 'host', label: '字体资产', desc: '/api/chat-flow/fonts/*：霞鹜文楷 / 霞鹜新致宋 woff2、HarmonyOS Sans TTF 与许可原文。', default: true, apply: 'host' },
+  { id: 'host.avatars', group: 'host', label: '头像动图资产', desc: '/api/chat-flow/avatars/*：卡头三态透明 WebP 动图（无动作 / 生成中 / 执行中）。', default: true, apply: 'host' },
   { id: 'host.done-pill-media', group: 'host', label: '胶囊录屏 / 音效', desc: '录屏窗口枚举、逐帧抓取与提示音静态资源。', default: true, apply: 'host' },
   { id: 'host.office-preview', group: 'host', label: 'Office / PDF 预览', desc: 'ppt/word/pdf 的页图渲染与侧栏接管。', default: true, apply: 'host' },
   { id: 'host.running-apps', group: 'host', label: '运行中程序采集器', desc: '常驻 PowerShell 子进程，枚举可见窗口（@ 菜单与浏览器窗口激活共用）。', default: true, apply: 'host' },

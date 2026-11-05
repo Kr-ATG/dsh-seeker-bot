@@ -191,10 +191,12 @@ console.log('[personal-shell] Bot 右栏分类 tab')
   check('TaskRecordCard 支持 activity 变体（无卡头、按天分组可折叠）',
     taskCard.includes("variant?: 'card' | 'activity'") && taskCard.includes('pa-taskrec--activity')
     && taskCard.includes('pa-taskrec__group-head'))
-  check('Bot 资料区把 tab 顶到面板约 1/3 高度（头像/名称/状态/编辑）',
+  check('Bot 资料区把 tab 顶到面板约 1/3 高度（头像/名称/编辑；已连接状态已删）',
     right.includes('pa-right__profile') && right.includes('<BotAvatar')
-    && right.includes('pa-right__profile-name') && right.includes('pa-right__profile-status')
+    && right.includes('pa-right__profile-name')
     && right.includes('pa-right__edit-btn')
+    && !right.includes('pa-right__profile-status')
+    && !outputsCss.includes('pa-right__profile-status')
     && /min-height:\s*clamp\(230px, 30vh, 340px\)/.test(profileBlock))
   check('tab 条改为接近内容区全宽的分段控件（浅色 track + 独立滑块）',
     /margin:\s*0 16px/.test(tabsBlock) && /border-radius:\s*12px/.test(tabsBlock)
@@ -215,6 +217,45 @@ console.log('[personal-shell] Bot 右栏分类 tab')
     && !outputsCss.includes('.pa-right__tab-label'))
   check('动态任务记录有独立样式（不套卡片外框）',
     tasksCss.includes('.pa-taskrec--activity') && tasksCss.includes('.pa-taskrec__group-head'))
+}
+
+/* ── 4.7b Bot 右栏群成员网格（2026-11-05） ───────────────────────────── */
+console.log('[personal-shell] Bot 右栏群成员网格')
+{
+  const right = read('src/client/personal/shell/RightPanel.tsx')
+  const outputsCss = read('src/client/personal/shell/outputs.css.ts')
+  const membersBlock = /\.pa-right \.pa-right__members \{([^}]*)\}/.exec(outputsCss)?.[1] ?? ''
+  const cardBlock = /\.pa-right \.pa-right__members-card \{([^}]*)\}/.exec(outputsCss)?.[1] ?? ''
+  const avatarBlock = /\.pa-right \.pa-right__member-avatar \{([^}]*)\}/.exec(outputsCss)?.[1] ?? ''
+  check('群聊时在资料区渲染成员网格（私聊不渲染）',
+    right.includes('data-room={activeRoom === null ? undefined : \'true\'}')
+    && right.includes('activeRoom === null ? null : (')
+    && right.includes('className="pa-right__members"')
+    && right.includes('群成员（'))
+  check('成员区有独立区域感（圆角底色卡 + 群成员标题）',
+    /background:\s*var\(--pa-card-2\)/.test(cardBlock)
+      && /border-radius:\s*14px/.test(cardBlock)
+      && right.includes('className="pa-right__members-card"')
+      && right.includes('className="pa-right__members-head"')
+      && right.includes('<b>群成员</b>'))
+  check('成员网格 5 列等分、两行封顶后内部滚动（高度随字号联动）',
+    /grid-template-columns:\s*repeat\(5, minmax\(0, 1fr\)\)/.test(membersBlock)
+      && /max-height:\s*calc\(112px \+ 2\.6em\)/.test(membersBlock)
+      && /font-size:\s*calc\(10\.5px \+ var\(--pa-font-delta\)\)/.test(membersBlock)
+      && /overflow-y:\s*auto/.test(membersBlock))
+  check('成员头像是圆形（圆形裁切 + 兜底圆底）',
+    /border-radius:\s*50%/.test(avatarBlock)
+      && /overflow:\s*hidden/.test(avatarBlock)
+      && /aspect-ratio:\s*1 \/ 1/.test(avatarBlock))
+  check('最后一格是「+」并打开群聊设置',
+    right.includes('pa-right__member--add')
+      && right.includes('aria-label="添加成员"')
+      && right.includes('openGroupSettings(activeRoom.id)'))
+  check('点头像打开该 Bot 资料卡（与侧栏同一条入口）',
+    right.includes('openBotSettings(member.id)'))
+  check('群聊资料区从顶部排且避开关闭按钮（44px 顶距）',
+    /\.pa-right \.pa-right__profile\[data-room='true'\] \{([^}]*)\}/.exec(outputsCss)?.[1]?.includes('padding-top: 44px') === true
+      && /\.pa-right \.pa-right__profile\[data-room='true'\] \{([^}]*)\}/.exec(outputsCss)?.[1]?.includes('justify-content: flex-start') === true)
 }
 
 /* ── 4.8 产出物分类选择器（2026-11-04） ─────────────────────────────── */

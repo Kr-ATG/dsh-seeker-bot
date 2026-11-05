@@ -3,9 +3,9 @@
  *
  * ## 两种形态，两个节点
  *
- *   · 半截态（本文件 .dsh-daily-brief）：斜插在对话完成胶囊左上角的**小标签**，
- *     宽度只有胶囊的 1/5（约 50px）、露出约 28px，只写一个栏目短标签
- *     （AI / 世界 / 国内）+ 一个状态小圆点。它的作用是「入口」，不是阅读面。
+ *   · 半截态（本文件 .dsh-daily-brief）：插在对话完成胶囊上沿中段的**白色
+ *     小卡**——宽度随内容自适应（约 70px）、高 36px、底边压进胶囊 15px，
+ *     轻微逆时针 -6°；里面横排「标签文字 + 圆形数字徽标」。它是「入口」，不是阅读面。
  *   · 划出层（本文件 .db-modal + .db-sheet）：点标签后 portal 到 body 的
  *     **期刊式大卡**，860px 宽、82vh 高、左右两栏，从屏幕正中划出；关闭时
  *     反向缩小淡出（260ms 加速曲线），不是直接卸载。
@@ -51,75 +51,104 @@ export const BRIEF_CSS = `
    旋转角由组件内联 style 驱动：第一张 -23°、第二张 -34°，两张半叠放——
    后卡往左下错开 10px、角度更陡，只从前卡边缘露出一点，像两张纸片一起插着。
    z-index 三档：后卡 0 / 前卡 1 / 胶囊 2，层叠关系就是「纸片插进胶囊」。 */
+/* 标签本体：白色圆角小卡，轻微逆时针（-6°）「插」在胶囊上沿，底边压进
+   胶囊 9px、露出上面 27px（文字与徽标完整可见）。宽度随内容自适应（约 70px）：横排「名称 +
+   圆形数字徽标」。旋转原点在底边中点，左右两端都压在胶囊下面。
+   内联 style 只给旋转角（前卡 -6° / 后卡 -10°），其余全在这里。 */
 .dsh-daily-brief{
+  --db-accent:rgb(47 125 116);
   position:absolute;
-  left:63%;
+  left:calc(30% + 80px * var(--dps, 1));
   right:auto;
-  width:17%;
-  min-width:calc(38px * var(--dps, 1));
-  height:calc(40px * var(--dps, 1) * var(--dpt, 1));
+  width:auto;
+  max-width:44%;
+  height:calc(36px * var(--dps, 1) * var(--dpt, 1));
   bottom:calc(100% - 9px * var(--dps, 1));
   z-index:1;
   box-sizing:border-box;
   display:flex;
   align-items:center;
-  justify-content:center;
-  gap:calc(4px * var(--dps, 1));
-  padding:0 calc(4px * var(--dps, 1));
+  justify-content:flex-start;
+  gap:calc(5px * var(--dps, 1));
+  padding:0 calc(8px * var(--dps, 1));
   overflow:hidden;
-  border:1px solid var(--dpl-panel-border);
-  border-radius:calc(8px * var(--dps, 1));
-  background:var(--dpl-panel-bg);
-  color:var(--dpl-fg-dim);
-  box-shadow:var(--dpl-panel-shadow);
-  transform-origin:bottom left;
-  transition:transform .24s cubic-bezier(.32,.72,0,1),box-shadow .24s ease,color .2s ease;
+  border:1px solid rgba(47,52,55,.14);
+  border-radius:calc(9px * var(--dps, 1));
+  /* 斜插小卡换回纯白：纸纹只铺在展开大卡上。暗色主题下也不跟着变深，
+     否则会和深色胶囊糊在一起「看不到了」。 */
+  --paper-base:rgb(255 255 255);
+  background-color:var(--paper-base);
+  /* 文字用固定的中性深灰，不跟 --dpl-fg（暗色下会变浅）走。 */
+  color:rgb(47 52 55);
+  box-shadow:0 calc(3px * var(--dps, 1)) calc(10px * var(--dps, 1)) rgba(0,0,0,.22),0 1px 2px rgba(0,0,0,.10);
+  /* 旋转原点放在底边中点：标签绕自己底边中点轻歪，左右两端都压在胶囊顶边
+     下面，不会只有左端插进去、右端翘在空气里。 */
+  transform-origin:bottom center;
+  transition:box-shadow .24s ease,color .2s ease,background-color .2s ease;
   cursor:pointer;
   font-family:inherit;
-  text-align:center;
+  text-align:left;
   outline:none;
   -webkit-tap-highlight-color:transparent;
 }
 .dsh-daily-brief:hover{
-  color:var(--dpl-fg);
-  box-shadow:var(--dpl-shell-shadow-hover);
+  color:rgb(28 32 36);
+  box-shadow:0 calc(4px * var(--dps, 1)) calc(14px * var(--dps, 1)) rgba(0,0,0,.26);
 }
 
 /* 后卡（第二张）：往左下错开、角度更陡（内联给 -34deg），压在前卡后面。
    它不承载文字——只露出一条斜边，作用是「这里还有一张」的暗示。 */
 .dsh-daily-brief[data-stack="back"]{
-  left:calc(63% + 19px * var(--dps, 1));
-  bottom:calc(100% - 16px * var(--dps, 1));
+  left:calc(30% + 90px * var(--dps, 1));
+  bottom:calc(100% - 14px * var(--dps, 1));
   z-index:0;
-  color:var(--dpl-fg-weak);
+  color:rgb(124 128 131);
 }
-.dsh-daily-brief[data-stack="back"] .db-tab{opacity:.72}
-.dsh-daily-brief:focus-visible{outline:2px solid var(--dpl-fg);outline-offset:2px}
+.dsh-daily-brief[data-stack="back"] .db-tab{opacity:.78}
+.dsh-daily-brief:focus-visible{outline:2px solid rgb(47 125 116);outline-offset:2px}
 .dsh-daily-brief[data-state="skeleton"]{cursor:default}
-.dsh-daily-brief[data-state="error"]{color:var(--dpl-warn)}
+.dsh-daily-brief[data-state="error"]{color:rgb(150 74 24)}
 
-/* 标签文字：两个字（AI / 世界 / 国内），字距拉开一点才像标签而不是缩写。 */
+/* 标签文字：单卡时写「日报」，两张卡时写栏目短名（AI / 世界 / 国内）。 */
 .db-tab{
   min-width:0;
-  font-size:calc(9.5px * var(--dps, 1) * var(--dpt, 1));
-  line-height:calc(13px * var(--dps, 1) * var(--dpt, 1));
-  font-weight:600;
-  letter-spacing:.06em;
+  flex:0 1 auto;
+  font-size:calc(13px * var(--dps, 1) * var(--dpt, 1));
+  line-height:calc(18px * var(--dps, 1) * var(--dpt, 1));
+  font-weight:700;
+  letter-spacing:.04em;
   white-space:nowrap;
   overflow:hidden;
   text-overflow:ellipsis;
 }
 
-/* 状态小圆点：有卡且未读时实心；生成中呼吸。 */
-.db-pip{
+/* 圆形数字徽标：青底白字，显示这张卡的条目数（生成中 / 空态用「·」）。 */
+.db-count{
   flex:none;
-  width:calc(4px * var(--dps, 1));
-  height:calc(4px * var(--dps, 1));
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:calc(19px * var(--dps, 1));
+  height:calc(19px * var(--dps, 1));
   border-radius:50%;
-  background:currentColor;
+  background:var(--db-accent);
+  color:rgb(255 255 255);
+  font-size:calc(11px * var(--dps, 1) * var(--dpt, 1));
+  font-weight:700;
+  line-height:1;
+  font-variant-numeric:tabular-nums;
 }
-.db-pip[data-live="1"]{animation:dbPipBreath 1.3s ease-in-out infinite}
-@keyframes dbPipBreath{0%,100%{opacity:.28}50%{opacity:1}}
+.db-count[data-empty="1"]{
+  background:color-mix(in srgb,var(--db-accent) 30%,transparent);
+  color:rgb(124 128 131);
+}
+.db-count[data-live="1"]{animation:dbCountBreath 1.3s ease-in-out infinite}
+
+@keyframes dbCountBreath{0%,100%{opacity:.35}50%{opacity:1}}
+
+/* 深色主题：斜插小卡的配色恒定（纯白 + 深青徽标），不再提亮；
+   只有展开大卡换深灰纸面。 */
+body[data-ds-dark-theme] .db-sheet{--paper-base:rgb(38 37 35)}
 
 /* ───────────────────────────────────────────────────────────────────────
    二、划出层：点标签后从屏幕正中划出的「期刊式」大卡
@@ -172,7 +201,17 @@ export const BRIEF_CSS = `
   overflow:hidden;
   border:1px solid var(--dpl-panel-border);
   border-radius:calc(18px * var(--dps, 1));
-  background:var(--dpl-panel-bg);
+  /*
+   * 纸面：暖白底 + 一层内联 SVG 纤维噪点 + 极淡横纹。
+   * 噪点是 data URI 的 feTurbulence（不引外链、不打包图片），亮色下几乎
+   * 只让白面「不塑料」；暗色主题换成深灰纸底（见文件末尾的 dark 规则）。
+   */
+  --paper-base:rgb(251 246 236);
+  background-color:var(--paper-base);
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='p'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='220' height='220' filter='url(%23p)' opacity='0.065'/%3E%3C/svg%3E"),
+    repeating-linear-gradient(0deg,rgba(120,96,64,.016) 0 1px,transparent 1px 4px);
+  background-size:auto,auto;
   color:var(--dpl-fg);
   box-shadow:var(--dpl-panel-shadow),0 24px 64px rgba(0,0,0,.18);
   /* 同 .db-modal：backwards 而非 both，避免残留 transform 改变包含块。 */

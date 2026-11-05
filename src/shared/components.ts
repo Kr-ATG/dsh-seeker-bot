@@ -61,7 +61,7 @@ export const COMPONENTS: ReadonlyArray<ComponentDef> = [
   { id: 'core', rowId: 'dsh-seeker-bot', title: '对话增强', description: '思考过程、工具调用聚合、正文路径链接与每会话首步的提示词通道。', defaultEnabled: true },
   { id: 'cards', rowId: 'dsh-seeker-bot-cards', title: '正文卡片', description: '把 html / iu / diagram / proto 围栏渲染成能点的卡片，外加下载进度、对话截图、生图画廊与侧栏预览。', defaultEnabled: true },
   { id: 'seeker', rowId: 'dsh-seeker-bot-seeker', title: 'Seeker 双栏大盘', description: '会话里的 Seeker 视图：右栏子智能体 / 操作面板 / 任务 / 产出物 / 记忆卡，左栏思考过程与提问卡。', defaultEnabled: true },
-  { id: 'done-pill', rowId: 'dsh-seeker-bot-done-pill', title: '对话完成胶囊', description: '回合完成提醒：左下角小横条 / 顶部悬浮胶囊、录屏、待机机器人、健康提醒与上方斜插的每日情报卡。', defaultEnabled: true },
+  { id: 'done-pill', rowId: 'dsh-seeker-bot-done-pill', title: '对话完成胶囊', description: '回合完成提醒：左下角小横条 / 顶部悬浮胶囊、录屏、待机机器人、健康提醒与上方斜插的每日情报卡、左侧的节气节日卡。', defaultEnabled: true },
   { id: 'memory', rowId: 'dsh-seeker-bot-memory', title: '记忆工作台', description: '自动沉淀的长期记忆：按项目 / 全局分层、检索、置顶与按工作区开关。', defaultEnabled: true },
   { id: 'skills', rowId: 'dsh-seeker-bot-skills', title: 'SKILL 工作台', description: '技能（Skill）安装、停用、分类、查看说明与技能包管理。', defaultEnabled: true },
   { id: 'connectors', rowId: 'dsh-seeker-bot-connectors', title: '连接器', description: 'MCP 连接器市场：精选目录、搜索分类与一键安装（写 cordis.patch.yml）。', defaultEnabled: true },
@@ -134,6 +134,7 @@ export const FEATURE_COMPONENT: Readonly<Record<string, ComponentId>> = {
   // ── 对话完成胶囊（done-pill）────────────────────────────────────────
   'view.done-pill': 'done-pill',
   'view.daily-brief': 'done-pill',
+  'view.festival-card': 'done-pill',
   'host.done-pill-media': 'done-pill',
 
   // ── 工作台（七个独立行）────────────────────────────────────────────
@@ -167,6 +168,7 @@ export const FEATURE_COMPONENT: Readonly<Record<string, ComponentId>> = {
   'host.open-path': 'host',
   'host.open-file': 'host',
   'host.fonts': 'host',
+  'host.avatars': 'host',
   'host.office-preview': 'host',
   'host.browser-activity': 'host',
   'host.browser-on-demand': 'host',

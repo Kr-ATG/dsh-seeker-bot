@@ -814,3 +814,59 @@ export function toPlainStep(input: PlainStepInput): PlainStep {
 export function isMetaTool(toolName: string): boolean {
   return plainToolName(toolName) === 'todo_write'
 }
+
+/**
+ * 「生成类」动作的判定（2026-11-05，用户口径：「调用生成视频图片IUhtml等」）。
+ *
+ * 卡头头像要在**生成类**动作进行中切到 generating 那张动图，其余执行中的动作
+ * 仍是 executing。这条判定刻意不塞进 EXACT 规则表：规则表回答的是「这一步
+ * 怎么显示」（动词 / 图标 / 影响面），而这里只回答「这一步是不是在生成东西」。
+ * 混在一起的话，后来改文案的人会误以为顺手改了头像状态。
+ *
+ * 判据按优先级：
+ *  1. 工具名（plainToolName 归一后的小写）落在生成工具集合里；
+ *  2. 规则表已经把它翻成「生成图片 / 生成视频」的动词（覆盖兄弟工具改名的情况）；
+ *  3. 产出文件以 .html / .htm / .svg 结尾 —— write 一个 HTML 文件也算生成类
+ *     （用户口径里的「html」；SVG 同属可直接展示的图形产物）。
+ *
+ * 任何字段缺失都返回 false、绝不抛：它跑在卡头每次重渲染里（面板 250ms 一刷），
+ * 一条畸形步骤不能把整张操作面板卡带崩。
+ */
+const GENERATING_TOOLS: ReadonlySet<string> = new Set([
+  'generate_image',
+  'generate_video',
+  'generateimage',
+  'generatevideo',
+  'present',
+  'html_card',
+  'iu_card',
+  'render_html',
+])
+
+/** 规则表已经把动作写成「生成图片 / 生成视频」时同样算生成类。 */
+const GENERATING_VERBS: ReadonlySet<string> = new Set(['生成图片', '生成视频'])
+
+/**
+ * 工具名是否属于「生成类」能力（生成图片 / 视频、交付文件、HTML / IU 卡片等）。
+ *
+ * 2026-11-05 从 {@link isGeneratingStep} 里抽出来单独导出：Bot 右栏头像也要按
+ * 同一条口径判断「这一轮是不是在生成东西」，但它手里只有 `ToolRun.name`（没有
+ * PlainStep）。两处必须共用同一份集合 —— 否则 Work 卡头显示 generating、Bot
+ * 右栏却显示 executing，同一次生成在两个界面各说各话。
+ *
+ * 工具名先经 {@link plainToolName} 归一（剥 MCP 命名空间前缀 + 转小写）。
+ * 非字符串入参一律返回 false，绝不抛。
+ */
+export function isGeneratingToolName(toolName: string | undefined | null): boolean {
+  return GENERATING_TOOLS.has(plainToolName(toolName))
+}
+
+export function isGeneratingStep(step: PlainStep): boolean {
+  // 整个 step 缺失也保护一下（调用方理论上只传非空，但这条函数不允许抛）。
+  if (step === null || step === undefined) return false
+  if (isGeneratingToolName(step.tech?.name)) return true
+  if (GENERATING_VERBS.has(step.verb)) return true
+  const filePath = step.filePath
+  if (typeof filePath === 'string' && /\.(?:html?|svg)$/i.test(filePath)) return true
+  return false
+}

@@ -7,7 +7,7 @@
  * 我们的插件头像」—— 那张 64×114 的任务动画在这张卡里撤掉了，见 brand-avatar.ts）：
  *
  *     ┌ 头像  ┐  Seeker                [Git][齿轮]
- *     │ 64×64 │  观月中 / ▶ 打开网页 携程旅行网 · 机票   ← 只有这一行，新动作把它顶掉
+ *     │ 64×64 │  Seeker / ▶ 打开网页 携程旅行网 · 机票   ← 只有这一行，新动作把它顶掉
  *     └───────┘  ──────────────────────────────────────
  *                33 个动作                    展开时间线 ⌄
  *
@@ -31,21 +31,25 @@
  *     本身就是事实，折叠成一行会把它抹掉；
  *  3. 不自己算进度百分比——进行中 / 已完成 / 失败三个计数已经够了。
  *
- * 头像位是**插件头像**（brand-avatar.ts 内联的 128×128 PNG，2026-10-31 起）；
- * 原来那套 9 段透明底 WebM 人物动画已随「之前那个人物彻底删除」整条移除。
+ * 头像位是**插件头像**（2026-10-31 起）。2026-11-05 起默认取三态透明 WebP
+ * 动图（idle / generating / executing，由 brand-avatar.ts 的 brandAvatarSrc
+ * 拼 host 路由 URL），加载失败时降级为内联 PNG；原来那套 9 段透明底 WebM
+ * 人物动画已随「之前那个人物彻底删除」整条移除。
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
 import { useHeightAnimation, useMotionAllowed, useSteppedFollow } from '../motion-utils.ts'
 import { formatDuration } from '../tool-summary/tool-stats.ts'
+import { isGeneratingStep } from './plain-language.ts'
 import type { PlainIconKey, PlainStep } from './plain-language.ts'
+import type { SeekerAvatarState } from '../../shared/avatar-assets.ts'
 import type { PlainTimeline } from './plain-timeline.ts'
 import type { SubagentCatalogView } from './subagent-catalog.ts'
 import { workspaceCwdOf } from '../client-ctx.ts'
 import { tryOpenInSidebar } from '../open-preview.ts'
 import { SeekerHead } from './SeekerHead.tsx'
-import { idlePhraseFor, THINKING_PHRASE, VIEWING_PHRASE } from './idle-phrase.ts'
+import { THINKING_PHRASE, VIEWING_PHRASE } from './idle-phrase.ts'
 import { getBrowserFlagEntry, sessionSeenBrowser, subscribeBrowserFlag } from '../browser-flag/store.ts'
 
 /**
@@ -346,22 +350,6 @@ export const KrPlainTimelineCard = memo(function KrPlainTimelineCard({
    * 收起态也是右栏最省高度的那一档，能给上面的子智能体与下面的任务概览让位。
    */
   const [open, setOpen] = useState(false)
-  /*
-   * 分钟级时钟滴答：只服务卡头那句按时间段变化的空闲文案。
-   *
-   * 为什么需要它：空闲文案按钟点选（见 IDLE_SLOTS），而组件不会因为时间流逝
-   * 自己重渲染 —— 用户在 19:59 打开页面、挂到 20:30，卡头会一直停在「小憩中」。
-   * 一分钟一次重算足够（时段边界都是整点），而且**只在没在跑时才需要**：
-   * 运行中卡头显示的是动作，与钟点无关。
-   *
-   * 60s 一次 setState 的代价可以忽略（这一个组件，一次极轻的重渲染）。
-   */
-  const [clockTick, setClockTick] = useState(() => Date.now())
-  useEffect(() => {
-    if (running) return undefined
-    const timer = window.setInterval(() => { setClockTick(Date.now()) }, 60_000)
-    return () => { window.clearInterval(timer) }
-  }, [running])
   const motion = useMotionAllowed(true)
   const { ref: bodyRef, present: bodyPresent } = useHeightAnimation(open, motion)
 
@@ -480,7 +468,7 @@ export const KrPlainTimelineCard = memo(function KrPlainTimelineCard({
    * 取值口径（两条，顺序即优先级）：
    *  1. 有一条 running → 就是它（同时只可能有一条，模型是串行执行的）；
    *  2. 没有 running 但**本轮还在跑** → 取最后一条（刚做完、正在起下一步）；
-   *  3. **本轮已收口 → null**，卡头回到空闲文案（观月中 / 吃饭中 / 小憩中，按钟点）。
+   *  3. **本轮已收口 → null**，卡头不显示状态文字（只留名字与摘要行）。
    *
    * 第 3 条是 2026-10-25 用户点名改的：「结束之后怎么不[变]回去呢」。原先收口后
    * 卡头会一直挂着**最后一条动作**（截图里那句「收口任务清单」），读起来像"她还在
@@ -502,32 +490,44 @@ export const KrPlainTimelineCard = memo(function KrPlainTimelineCard({
     if (!running) return null
     return all[all.length - 1] ?? null
   }, [timeline.steps, running])
+
   /*
-   * 卡头「没在干活」时显示哪一句（见文件顶部的 IDLE_SLOTS 说明）。
+   * 卡头头像三态（2026-11-05）。
    *
-   * 两档按顺序判：
-   *  1. **正在跑但一个动作都还没有** → 「在思考中」。
-   *     消息发出去、模型在思考、还没调工具，卡头不能还挂着「休息中」——
-   *     她明明已经在处理了。判据 running && empty。
-   *  2. **没在跑** → 按**真实时间**选一句（观月中 / 吃饭中 / 小憩中）。
+   * 口径与「卡头此刻在干嘛」完全一致，直接复用 currentAction，不另算一套：
+   *  · 没有当前动作：本轮没在跑 → idle（无动作）；本轮在跑但还没调工具 →
+   *    executing（对应卡头的「在思考中」——她已经在处理了）；
+   *  · 当前动作 running 且属于生成类（生成视频 / 图片 / IU / HTML 等，
+   *    判定见 plain-language.ts 的 isGeneratingStep）→ generating；
+   *  · 其余（包括已完成 / 失败的最后一条）→ executing。
    *
-   * 时间来自 clockTick：跨时段时文案要自己换掉（18:59 → 19:00 从小憩中
-   * 变观月中），否则用户得刷新页面才看到对的钟点。分钟级滴答足够 ——
-   * 时段边界全是整点，一分钟的误差看不出来。
+   * 为什么只在 status === 'running' 时给 generating：generating 表示「正在调
+   * 生成能力」，一步已经 done 就不该再播生成动画；而卡头本来就不会把 done 的
+   * 步骤当作「当前动作」（收口后 currentAction 为 null，running 时取最后一条
+   * 可能是刚 done 的），所以这里显式带上 running 判定。
+   */
+  const avatarState = useMemo<SeekerAvatarState>(() => {
+    if (currentAction === null) return running ? 'executing' : 'idle'
+    if (currentAction.status === 'running' && isGeneratingStep(currentAction)) return 'generating'
+    return 'executing'
+  }, [currentAction, running])
+
+  /*
+   * 卡头「没在干活」时显示哪一句。
    *
-   * 时段表与那句话本身在 idle-phrase.ts（新对话页的卡头读同一份）。
+   * 2026-11-05 用户要求「操作面板的观月中字样删除」：操作面板空闲时不再显示
+   * 任何拟人化空闲文案（观月中 / 吃饭中 / 小憩中），只保留名字与摘要行。
+   * 新对话页 Hero 的空闲文案不受影响（那里仍读 idle-phrase.ts）。
+   *
+   * 唯一保留的是**正在跑但一个动作都还没有**这一档：「在思考中」或带图时的
+   * 「查看照片中」—— 它表达的是「她已经在处理了」，不是空闲状态。
    */
   const idleLine = useMemo(() => {
-    /*
-     * 「还没动工具」这一档又分两半（2026-10-26）：本轮输入里带图 → 「查看照片中」，
-     * 否则才是「在思考中」。判据与动画共用同一个信号（inputImageCount），
-     * 保证文字与动画说的是同一件事。
-     */
     if (running && empty) {
       return inputImageCount > 0 ? VIEWING_PHRASE : THINKING_PHRASE
     }
-    return idlePhraseFor(new Date(clockTick))
-  }, [running, empty, clockTick, inputImageCount])
+    return ''
+  }, [running, empty, inputImageCount])
 
   return (
     <div className="kr-card kr-card--plain" data-empty={empty || undefined}>
@@ -542,12 +542,14 @@ export const KrPlainTimelineCard = memo(function KrPlainTimelineCard({
        *    半截，我需要双行显示」，所以动作仍允许折两排（首排与名字同高）；
        *  · 底部摘要行显示动作条数与「展开 / 收起时间线」，把可点击的暗示说清楚；
        *  · **头像位是插件头像**（2026-10-31 起）：原来那 9 段任务动画在这里撤掉了，
-       *    换成 64×64 的方形头像（brand-avatar.ts 的内联 PNG），卡头再省 60px；
+       *    换成 64×64 的方形头像（2026-11-05 起是三态透明 WebP 动图，失败时降级
+       *    内联 PNG，见 brand-avatar.ts），卡头再省 60px；
        *  · 动作行只显示一条（当前进行中优先），新动作把它顶掉；本轮收口后回到
-       *    空闲文案（观月中 / 吃饭中 / 小憩中，按钟点选）。
+       *    不显示任何状态文字（2026-11-05 用户要求删除「观月中」字样）。
        */}
       <SeekerHead
         compact
+        avatarState={avatarState}
         stepCount={timeline.steps.length}
         line={currentAction === null ? null : {
           icon: currentAction.icon,

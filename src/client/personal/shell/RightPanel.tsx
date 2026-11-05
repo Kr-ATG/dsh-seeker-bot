@@ -3,7 +3,7 @@
  *
  * 用户口径（2026-11-04 澄清）：「三分之一」指的是 tab 条落在面板约 1/3 高度处，
  * 不是 tab 条宽度。参考图的右栏自上而下是：
- *   1. Bot 资料区 —— 圆形头像 + 右下编辑铅笔 + 居中的名称 + 绿色「已连接」；
+ *   1. Bot 资料区 —— 圆形头像 + 右下编辑铅笔 + 居中的名称；
  *   2. 分段式 tab 条 —— 接近内容区全宽，两段「动态」「产出物」，选中段是一枚
  *      独立滑块（左右滑动 240ms，与 Work ⇄ Bot 分段同一套手感）；
  *   3. 分类内容 —— 动态：定时任务区 + 任务记录；产出物：页面卡 + 产出物卡。
@@ -13,7 +13,8 @@
  *
  * 最终结构（自上而下）：
  *   1. 通话收起条 —— 仅在通话最小化时出现；
- *   2. Bot 资料区 —— 头像 / 编辑 / 名称 / 状态，右上角关闭右栏；
+ *   2. Bot 资料区 —— 群聊时先排一块 5 列成员网格（圆形头像 + 名字 + 添加），
+ *      下面仍是群主头像 / 编辑 / 名称；私聊时只有头像 / 编辑 / 名称。右上角关闭右栏；
  *   3. 分类 tab —— 「动态」（默认）/「产出物」，分段控件；
  *   4. 分类面板 —— 动态：ActivityTab（定时任务区 + 任务记录）；
  *      产出物：PagesCard + BotOutputsCard。
@@ -22,9 +23,10 @@
  * 任务卡样式在 tasks.css.ts，两者都由 index.tsx / standalone.tsx 统一注入。
  */
 import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react'
+import { botAvatarStateOf } from '../avatar-state.ts'
 import { BotAvatar } from '../Avatar.tsx'
 import { PAGE_MOTION_IN, PAGE_MOTION_STAGGER } from '../../motion/overlay-motion.ts'
-import { IconEdit, IconExpand, IconFolder, IconListTodo, IconPhoneOff, IconX } from '../icons.tsx'
+import { IconEdit, IconExpand, IconFolder, IconListTodo, IconPhoneOff, IconPlus, IconX } from '../icons.tsx'
 import { usePersonal } from '../store.tsx'
 import { formatDuration, type Bot } from '../types.ts'
 import { ActivityTab } from './ActivityTab.tsx'
@@ -52,19 +54,8 @@ const RIGHT_TABS: ReadonlyArray<{ id: RightTabId; label: string; icon: JSX.Eleme
   { id: 'outputs', label: '产出物', icon: <IconFolder size={17} /> },
 ]
 
-/** 资料区状态：文案 + 色调（在线绿 / 忙碌橙 / 停用灰）。 */
-function profileStatusOf(bot: Bot): { label: string; tone: 'online' | 'busy' | 'off' } {
-  if (!bot.enabled) return { label: '已停用', tone: 'off' }
-  if (bot.status === 'busy') return { label: '忙碌中', tone: 'busy' }
-  /*
-   * online 与 idle 都算「已连接」：idle 只是当前没有活动，不是连接断了。
-   * 旧映射把 idle 写成「未连接」会让一个正常工作的 Bot 看起来掉线。
-   */
-  return { label: '已连接', tone: 'online' }
-}
-
 export function RightPanel(): JSX.Element {
-  const { state, ui, actions, activeBot, activeRoom } = usePersonal()
+  const { state, ui, actions, activeBot, activeRoom, activeMessages } = usePersonal()
   /** 当前分类；默认「动态」，不落盘（每次拉开右栏都从动态开始）。 */
   const [tab, setTab] = useState<RightTabId>('activity')
   /**
@@ -149,8 +140,28 @@ export function RightPanel(): JSX.Element {
     document.getElementById(`pa-right-tab-${target.id}`)?.focus()
   }
 
-  /** 资料区状态只需算一次：文案与色点都由它派生。 */
-  const profileStatus = profileStatusOf(activeBot)
+  /*
+   * 资料区头像的三态（2026-11-05）：与 Work 操作面板同一套透明 WebP 动图。
+   *
+   * 作用域交给 botAvatarStateOf：群聊看整场群聊（activeBot 只是当前选中的成员），
+   * 私聊看该 Bot。切换 Bot / 群聊时 activeBot / activeRoom / activeMessages 一起
+   * 变化，头像状态与取图 URL 也跟着重算，不需要额外的同步逻辑。
+   */
+  const avatarState = botAvatarStateOf(activeBot, activeMessages, state.tasks, activeRoom?.id)
+
+  /*
+   * 群聊成员（2026-11-05）：用户要求「bot 群聊在右侧侧边栏的动图上面增加类似
+   * 微信这种，但是头像是圆形的」。
+   *
+   * 数据口径与 ChatPanel / Sidebar 的群成员完全一致：按 room.memberIds 的顺序取
+   * state.bots，找不到的（成员已被删除的脏数据）直接跳过，不在界面上留空位。
+   * 只有群聊会渲染这块网格，私聊保持原来的「大头像 + 名称」。
+   */
+  const roomMembers: Bot[] = activeRoom === null
+    ? []
+    : activeRoom.memberIds
+      .map((id) => state.bots.find((bot) => bot.id === id))
+      .filter((bot): bot is Bot => bot !== undefined)
 
   const callBot = ui.call.botId !== null
     ? state.bots.find((bot) => bot.id === ui.call.botId)
@@ -176,7 +187,7 @@ export function RightPanel(): JSX.Element {
       {/* 通话收起条：通话最小化时给一个回到通话的入口。 */}
       {ui.call.status !== 'idle' && ui.call.minimized ? (
         <div className="pa-call-bar">
-          {callBot !== undefined ? <BotAvatar avatar={callBot.avatar} size={28} online /> : null}
+          {callBot !== undefined ? <BotAvatar avatar={callBot.avatar} size={28} /> : null}
           <div className="pa-call-bar__text">
             <b>通话中 · {formatDuration(now - ui.call.startedAt)}</b>
             {callBot?.name ?? '语音通话'}
@@ -204,9 +215,14 @@ export function RightPanel(): JSX.Element {
 
       {/*
        * Bot 资料区：高度约面板 30%（tab 条顶部落在约 1/3 高度处）。
-       * 参考图：居中头像 + 右下编辑铅笔 + 名称 + 绿色「已连接」；关闭钮仍在右上。
+       * 参考图：居中头像 + 右下编辑铅笔 + 名称；关闭钮仍在右上。2026-11-05 按用户
+       * 要求删掉了「已连接」文字与状态指示灯。
+       *
+       * 群聊时在头像动图**上面**多排一块成员网格（微信聊天信息页的 5 列排法，
+       * 但头像做成圆形）：它是「这个群有谁」的入口，所以跟在大头像同一块资料区里，
+       * 而不是另起一张卡。data-room 只负责切换资料区的纵向排布，私聊样式不动。
        */}
-      <div className="pa-right__profile">
+      <div className="pa-right__profile" data-room={activeRoom === null ? undefined : 'true'}>
         <button
           className="pa-right__profile-close"
           type="button"
@@ -216,9 +232,63 @@ export function RightPanel(): JSX.Element {
         >
           <IconX size={15} />
         </button>
+        {activeRoom === null ? null : (
+          /*
+           * 群成员网格：5 列，每格「圆形头像 + 名字」，最后一格是「+」。
+           *
+           * · 头像用 BotAvatar（用户上传的照片会自带圆形裁切；SVG 造型则压在
+           *   中性的圆底上，外圈始终是一个正圆，符合「头像是圆形的」）；
+           * · 点某个成员 → 打开该 Bot 的资料卡（与侧栏点头像同一套 BotSettingsCard，
+           *   相当于微信点群成员看资料）；
+           * · 「+」直接打开群设置：添加成员就在那张卡的「成员」区，不再另造一个
+           *   只有两个输入框的小弹层。
+           * · 只读成员名字 / 角色，不改任何数据；成员按 memberIds 原顺序展示，
+           *   群主（第一个成员）排在最前，和右栏资料区的大头像同一个人。
+           */
+          <div className="pa-right__members-card">
+            <div className="pa-right__members-head">
+              <b>群成员</b>
+              <span>{roomMembers.length} 个</span>
+            </div>
+            <div
+              className="pa-right__members"
+              role="group"
+              aria-label={`群成员（${String(roomMembers.length)} 个）`}
+            >
+              {roomMembers.map((member) => (
+                <button
+                  key={member.id}
+                  className="pa-right__member"
+                  type="button"
+                  title={`${member.name} · ${member.role}`}
+                  aria-label={`${member.name} · ${member.role}`}
+                  onClick={() => actions.openBotSettings(member.id)}
+                >
+                  <span className="pa-right__member-avatar">
+                    <BotAvatar avatar={member.avatar} size={44} muted={!member.enabled} />
+                  </span>
+                  <span className="pa-right__member-name">{member.name}</span>
+                </button>
+              ))}
+              <button
+                className="pa-right__member pa-right__member--add"
+                type="button"
+                title="添加成员"
+                aria-label="添加成员"
+                onClick={() => actions.openGroupSettings(activeRoom.id)}
+              >
+                <span className="pa-right__member-avatar pa-right__member-avatar--add">
+                  <IconPlus size={19} />
+                </span>
+                {/* 占位：让「+」和上面各格的名字行同高，网格底边不会缺一截。 */}
+                <span className="pa-right__member-name" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        )}
         <div className="pa-right__profile-main">
           <div className="pa-right__avatar-wrap">
-            <BotAvatar avatar={activeBot.avatar} size={92} muted={!activeBot.enabled} />
+            <BotAvatar avatar={activeBot.avatar} size={92} muted={!activeBot.enabled} motionState={avatarState} />
             <button
               className="pa-right__edit-btn"
               type="button"
@@ -231,10 +301,6 @@ export function RightPanel(): JSX.Element {
           </div>
           <div className="pa-right__profile-name" title={`${activeBot.name} · ${activeBot.role}`}>
             {activeBot.name}
-          </div>
-          <div className="pa-right__profile-status" data-tone={profileStatus.tone}>
-            <span className="pa-right__status-dot" aria-hidden="true" />
-            <span>{profileStatus.label}</span>
           </div>
         </div>
       </div>

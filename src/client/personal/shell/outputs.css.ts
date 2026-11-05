@@ -19,17 +19,148 @@ export const PERSONAL_OUTPUTS_CSS = `
 /* ── 右栏顶部：Bot 资料区 ─────────────────────────────────────────────
  * 用户口径（2026-11-04 澄清）：分类 tab 的「三分之一」是高度位置，不是宽度。
  * 资料区撑到面板约 30%（tab 条顶部因此落在 1/3 高度附近），自上而下是：
- * 居中头像 + 右下编辑铅笔 + 名称 + 绿色状态点。「关闭右栏」仍在右上角。 */
+ * 居中头像 + 右下编辑铅笔 + 名称。「关闭右栏」仍在右上角。 */
 .pa-right .pa-right__profile {
   position: relative;
   flex: none;
   min-height: clamp(230px, 30vh, 340px);
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   min-width: 0;
   padding: 34px 16px 16px;
   overflow: hidden;
+}
+/* 群聊：成员网格在上、大头像在下，从顶部往下排。
+ * 私聊不挂 data-room，仍是原来的居中「大头像 + 名称」。
+ * padding-top 44px 而不是 34px：右上角「关闭右栏」按钮占 10–38px，第一行头像
+ * 从 34px 起会被按钮压住右上角 4px，抬高 10px 让两者彻底分开。 */
+.pa-right .pa-right__profile[data-room='true'] {
+  justify-content: flex-start;
+  gap: 18px;
+  padding-top: 44px;
+}
+/* ── 群聊成员网格（2026-11-05） ─────────────────────────────────────
+ * 用户要求「bot 群聊在右侧侧边栏的动图上面增加类似微信这种，但是头像是圆形的」。
+ * 5 列等分、头像圆形、名字在下方，最后一格是添加按钮。
+ *
+ * **区域感**（2026-11-05 用户反馈「有一个巨大的问题没有区域感」）：成员网格不能
+ * 裸铺在面板上，否则会和下方的大头像糊成一片。这里给它一块独立的圆角浅色底
+ * （--pa-card-2，深浅主题各自适配）+ 一行「群成员 / N 个」小标题，和下面的
+ * Bot 资料区用 18px 间距隔开——一眼就能看出「这是群成员，那是当前 Bot」。
+ *
+ * 高度只留两行（64 × 2 + 14 = 142px）：成员再多就在网格内部滚动，不把资料区
+ * 撑高、也不把下面的头像动图与分类 tab 推出面板。右栏最窄 240px 时列宽约 39px，
+ * 头像用 width:100% + max-width 跟着列宽缩小，不会挤破格子。 */
+.pa-right .pa-right__members-card {
+  width: 100%;
+  max-width: 284px;
+  flex: none;
+  padding: 10px 10px 8px;
+  border-radius: 14px;
+  background: var(--pa-card-2);
+}
+.pa-right .pa-right__members-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px 8px;
+  font-size: calc(11px + var(--pa-font-delta));
+  line-height: 1.2;
+  color: var(--pa-text-3);
+  user-select: none;
+}
+.pa-right .pa-right__members-head b {
+  font-weight: 600;
+  color: var(--pa-text-2);
+}
+.pa-right .pa-right__members {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 14px 6px;
+  /* 统一成员格的字号（名字行高由它决定）；两行封顶的高度用 em 联动字号设置，
+   * 用户把通用字号调大时不会出现「第二行被裁一半」。默认字号下：
+   * 单格 49px + 1.3em(≈15px) = 64px，两行 64×2 + 14 = 142px。 */
+  font-size: calc(10.5px + var(--pa-font-delta));
+  max-height: calc(112px + 2.6em);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0;
+  scrollbar-width: thin;
+}
+.pa-right .pa-right__members::-webkit-scrollbar { width: 4px; }
+.pa-right .pa-right__members::-webkit-scrollbar-thumb {
+  background: rgba(128, 132, 140, 0.3);
+  border: 0;
+  border-radius: 4px;
+}
+.pa-root .pa-right__member {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: calc(49px + 1.3em);
+  min-width: 0;
+  padding: 0;
+  border-radius: 10px;
+  color: var(--pa-text-2);
+  transition: background 120ms ease;
+}
+.pa-root .pa-right__member:hover { background: rgba(128, 132, 140, 0.1); }
+.pa-root .pa-right__member:focus-visible {
+  outline: 2px solid var(--pa-accent);
+  outline-offset: 1px;
+}
+.pa-right .pa-right__member-avatar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  max-width: 44px;
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  overflow: hidden;
+  /* 圆底用 --pa-card（浅色纯白 / 深色更深一档）：与成员卡的 --pa-card-2 形成
+   * 一亮一暗的层次，没有上传头像的 Bot 也能看出「这是一个圆形头像位」。 */
+  background: var(--pa-card);
+  box-shadow: inset 0 0 0 1px rgba(128, 132, 140, 0.18);
+  color: var(--pa-text-2);
+}
+/* BotAvatar 自带固定 px 尺寸（inline style），这里让它填满圆形底：
+ * 上传照片会自带 50% 圆角，SVG 造型则缩小到圆内，外圈始终是一个正圆。 */
+.pa-right .pa-right__member-avatar > .pa-avatar {
+  width: 100% !important;
+  height: 100% !important;
+}
+.pa-right .pa-right__member-name {
+  display: block;
+  width: 100%;
+  min-height: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+  font-size: inherit;
+  line-height: 1.3;
+  color: var(--pa-text-3);
+}
+.pa-right .pa-right__member-avatar--add {
+  background: transparent;
+  border: 1.4px dashed rgba(128, 132, 140, 0.46);
+  box-shadow: none;
+  color: var(--pa-text-3);
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+}
+.pa-root .pa-right__member--add:hover .pa-right__member-avatar--add {
+  border-color: var(--pa-accent);
+  background: rgba(255, 159, 10, 0.08);
+  color: var(--pa-accent);
 }
 .pa-right .pa-right__profile-main {
   display: flex;
@@ -111,38 +242,6 @@ export const PERSONAL_OUTPUTS_CSS = `
   line-height: 1.3;
   letter-spacing: 0.01em;
   color: var(--pa-text);
-}
-.pa-right .pa-right__profile-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  font-size: calc(10.5px + var(--pa-font-delta));
-  line-height: 1.5;
-  color: var(--pa-text-3);
-  user-select: none;
-}
-.pa-right .pa-right__status-dot {
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--pa-text-4);
-  box-shadow: 0 0 0 3px rgba(128, 132, 140, 0.14);
-}
-.pa-right .pa-right__profile-status[data-tone='online'] { color: var(--pa-text-2); }
-.pa-right .pa-right__profile-status[data-tone='online'] .pa-right__status-dot {
-  background: var(--pa-green);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pa-green) 18%, transparent);
-}
-.pa-right .pa-right__profile-status[data-tone='busy'] { color: var(--pa-text-2); }
-.pa-right .pa-right__profile-status[data-tone='busy'] .pa-right__status-dot {
-  background: var(--pa-accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pa-accent) 18%, transparent);
-}
-.pa-right .pa-right__profile-status[data-tone='off'] .pa-right__status-dot {
-  background: var(--pa-text-4);
-  box-shadow: 0 0 0 3px rgba(128, 132, 140, 0.14);
 }
 /* 右栏滚动区沿用 shell.css.ts 的块级布局（padding: 2px 16px 26px）；
  * 卡间距由两张卡各自的 margin-top 负责 —— 产出物卡与任务记录卡统一 10px，

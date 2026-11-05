@@ -170,6 +170,13 @@ export type MessageRole = 'user' | 'bot' | 'system'
 export type MessageSource = 'chat' | 'call' | 'routine' | 'proactive' | 'system' | 'control' | 'compaction'
 
 /**
+ * 主动消息的提醒标记。
+ *
+ * keep = 用户希望以后继续提醒这条；mute = 以后不要再提醒。缺省 = 未标记。
+ */
+export type ProactiveMarkKind = 'keep' | 'mute'
+
+/**
  * 一条「引用回复」的载荷。
  *
  * 界面上只需要 preview（引用条那一行小字），但模型需要被引用消息的完整内容：
@@ -925,6 +932,15 @@ export interface Message {
    * 普通气泡渲染——它们本身就是普通消息，只是被标记了归属。
    */
   callSegment?: string
+  /**
+   * 主动消息的提醒标记（只有 source='proactive' 的 bot 消息会用到）。
+   *
+   * 由「主动消息」标签后的标记控件写入：keep = 以后继续提醒这条，
+   * mute = 以后不再提醒。缺省 = 未标记。宿主侧同步持久化，刷新后仍保留。
+   */
+  proactiveMark?: ProactiveMarkKind
+  /** 标记时间（Unix ms）；未标记时没有这个字段。 */
+  proactiveMarkAt?: number
 }
 
 /**

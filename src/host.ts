@@ -49,6 +49,7 @@ import { applyOpenPathRoutes } from './open-path/index.ts'
 import { applyOpenFileRoutes } from './open-file/index.ts'
 import { applyOfficePreview } from './office/index.ts'
 import { applyFontRoutes } from './fonts/index.ts'
+import { applyAvatarRoutes } from './avatar/index.ts'
 import { applyTriadHost } from './triad/host.ts'
 import { isPluginInstalled } from './triad/mcp-catalog.ts'
 import { applyProviderHub, providerHubServices } from './provider/index.ts'
@@ -76,6 +77,7 @@ export { RecallConfig, RecallDefaults } from './recall/host/index.ts'
 export { applyPersonalAgentHost } from './host/personal/index.ts'
 export { applyDownloadRoutes, downloadTool, readDownloadState, watchShellDownload } from './download/index.ts'
 export { applyFontRoutes, FONT_ROUTE } from './fonts/index.ts'
+export { applyAvatarRoutes, AVATAR_ROUTE } from './avatar/index.ts'
 // 「用默认浏览器 / 默认应用打开文件」（2026-10-21）：纯判定面导出给冒烟。
 // 这三条（路径绝对化基准 / 可执行类型拒绝 / 浏览器命令解析）判错了都不会抛错，
 // 只会表现为「点了没反应」或「打开了不相干的东西」，只能断言。
@@ -354,6 +356,10 @@ export function apply(ctx: Record<string, any>, config?: { toolsGate?: Record<st
     //
     // 2026-10-14 曾随「界面字体」整块下线，2026-10-25 按用户要求装回来。
     if (hostFeatureEnabled('host.fonts')) applyFontRoutes(webCtx)
+    // 卡头头像动图（/api/chat-flow/avatars/*）：三张透明底 WebP（无动作 / 生成中 /
+    // 执行中）合计约 2.5MB，同样不内联进 client 产物，按状态懒加载。2026-11-05
+    // 按用户要求把操作面板卡头的静态插件头像换成这套动图。
+    if (hostFeatureEnabled('host.avatars')) applyAvatarRoutes(webCtx)
     // 对话完成胶囊的辅助路由（2026-10-28 自 dsh-companion 移植）：
     //   · 录屏窗口枚举 / 逐帧抓取（Win32 PrintWindow，免遮挡、支持子窗口）；
     //   · 提示音静态资源（胶囊通知的提示音，壳页面与本页共用一个 URL）。

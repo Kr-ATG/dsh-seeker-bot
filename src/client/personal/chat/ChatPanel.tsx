@@ -535,7 +535,7 @@ export function ChatPanel(): JSX.Element {
               </div>
             )
           ) : (
-            <BotAvatar avatar={activeBot.avatar} size={28} online={activeBot.status === 'online'} />
+            <BotAvatar avatar={activeBot.avatar} size={28} motionState={activeBot.isMain ? 'idle' : undefined} />
           )}
         </div>
         <div className="pa-chat__head-text">

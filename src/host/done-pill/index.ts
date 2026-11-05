@@ -22,6 +22,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { applyBriefHost } from './brief.ts'
+import { applyFestivalHost } from './festival.ts'
 
 const ROUTE = '/api/dsh-done-pill'
 /** 热区状态上报路由（client POST → host 经壳子 CDP 注入壳页面）。 */
@@ -944,6 +945,19 @@ export function applyDonePillHost(ctx: Record<string, any>): void {
   } catch (error) {
     ctx.logger?.warn?.(
       `[dsh-seeker-bot] daily-brief host failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+    )
+  }
+
+  /*
+   * 节日卡（/api/dsh-done-pill/festival/*）：与情报卡同级的独立模块，
+   * 自带功能开关（view.festival-card）。起不来最多是「胶囊左侧少一张卡」，
+   * 不该连累胶囊或情报卡。
+   */
+  try {
+    applyFestivalHost(ctx)
+  } catch (error) {
+    ctx.logger?.warn?.(
+      `[dsh-seeker-bot] festival-card host failed to mount: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
     )
   }
 }

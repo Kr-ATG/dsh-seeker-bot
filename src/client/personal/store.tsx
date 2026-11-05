@@ -73,6 +73,7 @@ import {
   type PagesResponse,
   type PersonalCallUi,
   type PersonalUi,
+  type ProactiveMarkKind,
   type QuoteRef,
   type RealtimeVendorsResponse,
   type Routine,
@@ -806,6 +807,13 @@ export interface PersonalActions {
    * 并尽力通知宿主把模型上下文也遮蔽掉（失败静默，不影响本地结果）。
    */
   recallMessage(messageId: string): void
+  /**
+   * 给一条主动消息打 / 改 / 清提醒标记。
+   *
+   * kind=null 表示清除标记。本地立即生效；非演示模式下再尽力同步给宿主，
+   * 宿主失败只 toast 提示「仅保存在本地」，不回滚本地状态。
+   */
+  setProactiveMark(messageId: string, kind: ProactiveMarkKind | null): void
   addMemory(botId: string, text: string, tags?: string[]): void
   deleteMemory(id: string): void
   createRoutine(input: { botId: string; name: string; instruction: string; schedule: Routine['schedule'] }): void
@@ -2075,7 +2083,20 @@ async function hostReplyStream(
       const decoder = new TextDecoder()
       let buffer = ''
       try {
-        while (true) {
+        /*
+         * 读到 done 就主动退出，不干等连接自然关闭。
+         *
+         * done 是宿主明确的收口信号：runBotTurn 发完最后一帧就 return，路由随后
+         * res.end()。此时再等 EOF 没有意义，却会把「宿主已经收口、连接却没断」
+         * 变成前端永远挂着——实测（2026-11-05 19:33 那一轮）：14 个工具跑完、
+         * 宿主 turn/end 已经发生，右栏任务卡却一直停在「正在整理回复…」，直到
+         * 页面刷新才被 settleStaleTask 兜底标成「任务已中断」。用户因此以为
+         * 「它还在跑、我还能插话」，补的那句变成了新的一轮。
+         *
+         * done 之后的帧（重复 done / 收尾 message-update）仍在下面 buffer 收尾里
+         * 解析，不会丢。
+         */
+        while (!doneSeen) {
           const chunk = await reader.read()
           if (chunk.done) break
           buffer += decoder.decode(chunk.value, { stream: true })
@@ -4107,7 +4128,23 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     }
 
     // 保留「正在输入」的手感：稍等一下再开流，避免 pending 气泡一闪而过
-    later(300 + Math.random() * 300, () => { void finish() })
+    later(300 + Math.random() * 300, () => {
+      /*
+       * 最外层兜底：finish 内部已经有 try/catch，能走到这里说明**收口本身**抛了
+       * （例如 applyFinish 处理某条坏 block 时崩掉）。此时任务卡会永远停在
+       * 「正在整理回复…」——右栏显示与宿主真实状态脱节，用户会误判「它还在跑、
+       * 我还能插话」（2026-11-05 19:33 那一轮就是这么误导用户的）。再兜一次，
+       * 至少把任务收成 failed，并留下可排查的日志。
+       */
+      void finish().catch((error: unknown) => {
+        try {
+          console.warn('[personal-agent] 收口失败', error)
+          finishTaskRecord(taskId, 'failed', [], '这一轮没能完成：收口时出错（详见控制台）')
+        } catch {
+          /* 兜底再失败：保持现状，不能在这里再抛一次 */
+        }
+      })
+    })
   }, [appendMessage, createTaskRecord, finishTaskRecord, later, mergeMessageBlocks, replaceMessage, updateMessageBlocks, upsertTaskToolStep, upsertTaskTextStep])
 
   /**
@@ -4968,6 +5005,65 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       void hostRecallTurn(botId, plan.text, plan.at, botsById.get(botId), plan.hostMessageId)
     }
   }, [])
+
+  /**
+   * 给一条主动消息打 / 改 / 清「继续提醒 / 不再提醒」标记。
+   *
+   * 契约是「先本地、后宿主」：本地消息字段立即更新（界面不必等网络），非演示
+   * 模式下再尽力 POST 给宿主持久化。宿主失败时**不回滚**——用户刚点的标记不该
+   * 因为一次网络抖动从界面上消失；只额外 toast 说明「仅保存在本地」。
+   */
+  const setProactiveMark = useCallback((messageId: string, kind: ProactiveMarkKind | null): void => {
+    const message = stateRef.current.messages.find((item) => item.id === messageId)
+    // 消息已经被清理 / 换了会话：没有可标记的对象
+    if (message === undefined) return
+    const at = Date.now()
+    setState((prev) => ({
+      ...prev,
+      messages: prev.messages.map((item) => {
+        if (item.id !== messageId) return item
+        if (kind === null) {
+          const next = { ...item }
+          delete next.proactiveMark
+          delete next.proactiveMarkAt
+          return next
+        }
+        return { ...item, proactiveMark: kind, proactiveMarkAt: at }
+      }),
+    }))
+    const successText = kind === 'keep' ? '已标记：以后继续提醒' : kind === 'mute' ? '已标记：以后不再提醒' : '已清除提醒标记'
+    if (isDemoMode()) {
+      toast(successText)
+      return
+    }
+    /* 正文摘要只取 text 块：工具流水 / 卡片不是「提醒内容」，宿主提示词里也用不上。 */
+    const text = truncate(
+      message.blocks
+        .map((block) => (block.type === 'text' ? block.text : ''))
+        .filter((part) => part !== '')
+        .join(' '),
+      200,
+    )
+    void (async () => {
+      try {
+        const response = await fetch('/api/personal-agent/proactive/marks', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            botId: message.botId,
+            messageId: message.hostId ?? message.id,
+            text,
+            kind,
+          }),
+        })
+        const payload = (await response.json().catch(() => null)) as { ok?: boolean } | null
+        if (!response.ok || payload?.ok !== true) throw new Error(`HTTP ${response.status}`)
+        toast(successText)
+      } catch {
+        toast('标记仅保存在本地，宿主未同步')
+      }
+    })()
+  }, [toast])
 
   const addMemory = useCallback((botId: string, text: string, tags: string[] = ['手动']): void => {
     const value = text.trim()
@@ -6443,6 +6539,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     deleteRoom,
     answerInteractive,
     recallMessage,
+    setProactiveMark,
     /*
      * 补漏：接口里有、依赖数组里也有，但这个对象漏了它——ChatPanel 的「清空对话」
      * 直接调 `actions.clearConversation`，不补就是点击必崩（tsc 也会报 TS2741）。
@@ -6478,6 +6575,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     selectBot, selectRoom, setTheme, sendMessage, stopReply, createBot, updateBot, deleteBot, setBotEnabled, setBotPinned, moveBot,
     createGroup, renameGroup, deleteGroup, createRoom, updateRoom, setRoomPinned, deleteRoom, answerInteractive,
     recallMessage,
+    setProactiveMark,
     addMemory, deleteMemory, createRoutine, toggleRoutine, runRoutine, deleteRoutine, proactiveNow, prepareRelay, clearConversation, deleteArchivedSession,
     refreshPages, refreshAssignments,
     generateJournal, runJournalCheck, startCall, endCall, callUserTurn, interruptCall, retryCallMicrophone,

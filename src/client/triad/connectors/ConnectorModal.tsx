@@ -2,10 +2,10 @@
  * dsh-seeker-bot — 「连接器」弹窗卡片（MCP 页面）。
  *
  * 用户要求（2026-11-03）：「MCP页面变成弹窗卡片」。
- * 以前点「MCP服务器」胶囊会走 openWorkbench('connectors')，整个主区变成连接器
+ * 以前点「MCP 连接器」胶囊会走 openWorkbench('connectors')，整个主区变成连接器
  * 工作台页；现在改成 portal 到 body 的居中弹窗卡片：
- *   · 遮罩 + 居中卡片（桌面 1040×860 上限，随视口夹紧；窄屏走全屏 sheet）；
- *   · 卡片顶部是 MCP 服务器标题 + 关闭按钮，内容复用 ConnectorsPanel 的
+ *   · 遮罩 + 居中卡片（桌面 880×700 上限，随视口夹紧；窄屏走全屏 sheet）；
+ *   · 卡片顶部是 MCP 连接器标题 + 关闭按钮，内容复用 ConnectorsPanel 的
  *     搜索 / 分类 / 卡片网格 / 详情抽屉（inCard 模式隐藏页内大标题，避免双层标题）；
  *   · 点遮罩、按 Esc、点关闭都能关；打开时焦点移进卡片，关闭后还给胶囊。
  *   · z-index 高过 Personal Agent 的 .pa-root，Bot 模式下也能正常盖在 Bot 上。
@@ -36,6 +36,13 @@ export function ConnectorModal({ open, onClose }: ConnectorModalProps): JSX.Elem
   ensureShellStyles()
   ensureModalAnimStyles()
   const { closing, requestClose } = useModalClose(open, onClose)
+  /*
+   * 标题栏「关闭」左侧的插槽：计数（61 / 61）与「全部 / 未安装 / 已安装」
+   * 分段原来占着内容区顶部一整行，用户 2026-11-05 要求挪到关闭钮左侧。
+   * 状态（installFilter）住在 ConnectorsPanel 里，所以这里只给一个空容器，
+   * 由面板用 portal 把那一块渲染进来——不搬状态、不重渲染整棵面板。
+   */
+  const [headExtra, setHeadExtra] = useState<HTMLSpanElement | null>(null)
   if (!open) return null
   return (
     <PopoverShell
@@ -43,11 +50,16 @@ export function ConnectorModal({ open, onClose }: ConnectorModalProps): JSX.Elem
       solid
       closing={closing}
       onClose={requestClose}
-      ariaLabel="MCP 服务器"
+      ariaLabel="MCP 连接器"
     >
-      <PshHead title="MCP 服务器" closeLabel="关闭" onClose={requestClose} />
+      <PshHead
+        title="MCP 连接器"
+        closeLabel="关闭"
+        onClose={requestClose}
+        extra={<span className="psh-head-extra" ref={setHeadExtra} />}
+      />
       <PshBody>
-        <ConnectorsPanel embedded inCard onClose={requestClose} />
+        <ConnectorsPanel embedded inCard onClose={requestClose} headerExtraSlot={headExtra} />
       </PshBody>
     </PopoverShell>
   )

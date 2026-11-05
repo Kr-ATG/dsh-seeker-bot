@@ -1,10 +1,12 @@
 /**
- * dsh-seeker-bot — 侧栏底部「MCP 服务器」胶囊（连接器的常驻入口）。
+ * dsh-seeker-bot — 侧栏底部「MCP 连接器」胶囊（连接器的常驻入口）。
  *
  * 用户要求（2026-11-03）：
  * 「把操作间的连接器的菜单变成一个胶囊卡片放在左侧侧边栏最下面的右侧位置，
  *   胶囊里左侧是文字『MCP服务器』右侧是已经安装的几个 mcp 图标圆形半叠放，
  *   超过 3 个后面就显示 ... 代表更多」。
+ * 2026-11-05：胶囊与弹窗标题由「MCP服务器」统一改为「MCP 连接器」——
+ * 与弹窗内的「连接器」面板、安装按钮、功能开关同名，不再用「服务器」。
  *
  * ── 为什么挂在官方设置行里，而不是注册一个 slot ──────────────────────
  * 官方 ui-sidebar 的底部（footArea）只有两条纵向排列的槽位：
@@ -137,7 +139,7 @@ export interface ConnectorPillProps {
    * 是否用**官方侧栏**的 rail 折叠态作为消失判据。
    *
    * Work 侧栏（独立 root，挂在官方 settings 行）默认 true：折叠态连账号行都只剩
-   * 一个头像，塞不下「MCP服务器」五个字，胶囊整颗让位。
+   * 一个头像，塞不下「MCP 连接器」这几个字，胶囊整颗让位。
    * Bot 侧栏（Personal App 的 64px 图标轨道）有自己的 collapsed 状态，整行不渲染
    * 胶囊即可；此时传 false——否则官方侧栏恰好被折叠时，Bot 里的胶囊会被误藏。
    */
@@ -148,7 +150,7 @@ export interface ConnectorPillProps {
  * 胶囊本体。
  *
  * rail（56px 折叠态）下整颗让位：折叠态连账号行都只剩一个头像，塞不下
- * 「MCP服务器」五个字；展开侧栏后点胶囊即可。
+ * 「MCP 连接器」这几个字；展开侧栏后点胶囊即可。
  * @returns 胶囊按钮；rail 时 null。
  */
 export function ConnectorPill({ checkRail = true }: ConnectorPillProps = {}): JSX.Element | null {
@@ -163,7 +165,7 @@ export function ConnectorPill({ checkRail = true }: ConnectorPillProps = {}): JS
   const names = items.map((item) => item.name)
   const nameList = names.slice(0, 5).join('、') + (names.length > 5 ? ' 等 ' + String(names.length) + ' 个' : '')
   const summary = items.length === 0
-    ? '还没有已安装的 MCP 服务器，点击打开连接器'
+    ? '还没有已安装的 MCP 连接器，点击打开连接器'
     : '已安装 ' + String(items.length) + ' 个 MCP：' + nameList
   const visible = items.slice(0, MAX_AVATARS)
   return (
@@ -172,10 +174,10 @@ export function ConnectorPill({ checkRail = true }: ConnectorPillProps = {}): JS
       className="dmp-pill"
       data-mcp-pill="true"
       title={summary}
-      aria-label={'MCP服务器：' + summary}
+      aria-label={'MCP 连接器：' + summary}
       onClick={openConnectorModal}
     >
-      <span className="dmp-label">MCP服务器</span>
+      <span className="dmp-label">MCP 连接器</span>
       {items.length > 0 && (
         <span className="dmp-stack" aria-hidden="true">
           {visible.map((item) => <AvatarIcon key={item.key} item={item} />)}

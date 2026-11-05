@@ -436,7 +436,7 @@ const expectedStyles = [
   // apply 时随 attachSidebarSections 注入。横滑分类条（strip.tsx）已于 2026-10-25
   // 删除——四个入口收进「操作间」屏，不再平铺在侧栏。
   'dsh-sidebar-nav-sections-styles',
-  // 侧栏底部「MCP服务器」胶囊（src/client/triad/connectors/sidebar-pill.tsx）：
+  // 侧栏底部「MCP 连接器」胶囊（src/client/triad/connectors/sidebar-pill.tsx）：
   // apply 时随 attachConnectorPill 注入。连接器入口从操作间菜单行改成这颗胶囊。
   'dsh-mcp-pill-styles',
   // 界面字体覆盖（src/client/ui-font/font.ts）：把 --dsh-font-family-text/-code
@@ -1833,19 +1833,46 @@ if (krEnabled) {
     const idleSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/idle-phrase.ts'), 'utf8')
     // 「这一轮的输入里有没有图」的判据（2026-10-26 新增，卡头据此先说「查看照片中」）。
     const turnImgSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/turn-input-images.ts'), 'utf8')
+    // 三态头像动图的取图入口与生成类判定（2026-11-05）。
+    const brandAvatarSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/brand-avatar.ts'), 'utf8')
+    const plainLangSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/plain-language.ts'), 'utf8')
     if (!/className="kr-plain-head__name">Seeker</.test(seekerHeadSrc)) {
       fail('操作面板卡头必须显示名字（Seeker）')
-    } else if (!/<img className="kr-plain-head__avatar" src=\{BRAND_AVATAR_SRC\}/.test(seekerHeadSrc)
+    } else if (!/className="kr-plain-head__avatar"/.test(seekerHeadSrc)
+      || !/data-avatar-state=\{resolvedAvatarState\}/.test(seekerHeadSrc)
+      || !/src=\{avatarFailed \? BRAND_AVATAR_SRC : brandAvatarSrc\(resolvedAvatarState\)\}/.test(seekerHeadSrc)
+      || !/onError=/.test(seekerHeadSrc)
       || /<SeekerStage/.test(seekerHeadSrc)) {
       /*
-       * 身份位 2026-10-31 换成**插件头像**（用户：「操作面板的这个人物删除替换为
-       * 我们的插件头像」→「新对话的也换上，之前那个人物彻底删除」）。
+       * 身份位 2026-10-31 换成**插件头像**；2026-11-05 再换成**三态透明 WebP 动图**
+       * （用户：「操作面板卡头头像换成三张透明底 WebP 动图，按动作切换」）。
        *
-       * 两条一起钉：卡头里必须**有**那个 img，且**不能再有** SeekerStage 分支 ——
-       * 只加 img 不删旧分支的话，页面上照样是动画在动（或者两样叠着），
-       * 而这种"多挂了一个"的错在界面上不会报错，只能靠断言。
+       * 五条一起钉：img 的类名、data-avatar-state（当前状态暴露到 DOM）、
+       * brandAvatarSrc(resolvedAvatarState) 的动态取图、加载失败退回 BRAND_AVATAR_SRC
+       * 的 onError 分支；且**不能再有** SeekerStage 分支 —— 只加 img 不删旧分支的话，
+       * 页面上照样是动画在动（或者两样叠着），这种"多挂了一个"的错在界面上不会报错，
+       * 只能靠断言。
        */
-      fail('卡头身份位必须是插件头像 img，且不得再有 SeekerStage 分支')
+      fail('卡头身份位必须是三态头像 img（data-avatar-state / brandAvatarSrc / avatarFailed 回退 / onError），且不得再有 SeekerStage 分支')
+    } else if (!/export function brandAvatarSrc\s*\(/.test(brandAvatarSrc)
+      || !/export function isGeneratingStep\s*\(/.test(plainLangSrc)) {
+      /*
+       * 三态切换的两块拼图（2026-11-05）：取图入口必须是 brand-avatar.ts 的
+       * brandAvatarSrc()（薄封装 shared/avatar-assets.ts 的 avatarUrl，host / client
+       * 共用文件名表）；「生成类」判定必须由 plain-language.ts 的 isGeneratingStep()
+       * 提供 —— 没有它，generate_image / generate_video / .html 这些动作不会切到
+       * generating，头像永远停在 idle / executing。
+       */
+      fail('头像取图必须走 brand-avatar.ts 的 brandAvatarSrc()，生成类判定必须由 plain-language.ts 的 isGeneratingStep() 提供')
+    } else if (!/const avatarState = useMemo<SeekerAvatarState>\(/.test(cardSrc)
+      || !/<SeekerHead[\s\S]{0,1200}?avatarState=\{avatarState\}/.test(cardSrc)) {
+      /*
+       * 状态推导与传参（2026-11-05）：KrPlainTimelineCard 用 useMemo 按
+       * currentAction + running 算出 avatarState（idle / generating / executing），
+       * 并传给 SeekerHead。只改组件不传参 = 生成类动作不会切到 generating，
+       * 头像永远走组件兜底；界面上不报错，只是"动画不对"。
+       */
+      fail('KrPlainTimelineCard 必须用 useMemo<SeekerAvatarState> 计算 avatarState 并传给 SeekerHead（avatarState={avatarState}）')
     } else if (!/className="kr-plain-head__name-row"/.test(seekerHeadSrc)
       || !/<button[\s\S]{0,120}className="kr-plain-head__browser"/.test(seekerHeadSrc)) {
       /*
@@ -2004,18 +2031,14 @@ if (krEnabled) {
       fail('卡头必须有「当前动作」这一行')
     } else if (/\.kr-plain-view\b/.test(cardSrc)) {
       fail('卡头不该再挂简要/详细按钮（点击整块卡头就是展开详细）')
-    } else if (!/IDLE_SLOTS/.test(cardSrc) || !/idlePhraseFor\(new Date\(clockTick\)\)/.test(cardSrc)) {
+    } else if (/\bIDLE_SLOTS\b|\bidlePhraseFor\b|\bclockTick\b/.test(cardSrc)) {
       /*
-       * 空闲文案必须**按真实时间**选（2026-10-25 用户：「这几个状态要根据时间来」）。
-       *
-       * 2026-10-26 改词：删掉「休息中 / 晒太阳」，改成夜里的「观月中」+ 白天的
-       * 「小憩中」+ 11–13 点的「吃饭中」。时段表本身搬进了 idle-phrase.ts
-       * （右栏与新对话页共用一份，两处各抄一遍必然分叉），所以这里改为断言
-       * 「卡片确实用了那张表」：引用 IDLE_SLOTS 的模块 + 按 clockTick 现算。
+       * 2026-11-05 用户要求「操作面板的观月中字样删除」：操作面板空闲时不再显示
+       * 任何拟人化空闲文案（观月中 / 吃饭中 / 小憩中），只保留名字与摘要行。
+       * IDLE_SLOTS / idlePhraseFor / clockTick 只服务那张按钟点轮换的表 ——
+       * 操作面板里残留任何一处，观月中就可能又冒出来。Hero 的空闲文案仍在。
        */
-      fail('空闲文案必须按时间段选（引用 idle-phrase.ts 的 IDLE_SLOTS，并按 clockTick 现算）')
-    } else if (!/idlePhraseFor\(new Date\(clockTick\)\)/.test(cardSrc)) {
-      fail('空闲文案必须随分钟级 clockTick 重算（否则跨时段后用户得刷新页面才看到对的钟点）')
+      fail('操作面板空闲时不得再显示观月中 / 吃饭中 / 小憩中（不得引用 IDLE_SLOTS / idlePhraseFor / clockTick）')
     } else if (!/if \(!running\) return null/.test(cardSrc)) {
       /*
        * 收口后必须回到空闲文案（2026-10-25 用户：「结束之后怎么不[变]回去呢」）。
