@@ -65,6 +65,16 @@ export function Composer(): JSX.Element {
     : activeRoom.memberIds
       .map((id) => state.bots.find((bot) => bot.id === id))
       .filter((bot): bot is Bot => bot !== undefined)
+  /*
+   * 可被 @ 的人。
+   *
+   * 群聊里是群成员；私聊里是「除当前对话对象以外的 Bot」——语义不同：群里的 @
+   * 决定谁接话，私聊里的 @ 是给主管的一条派活指令（「这件事交给它」），所以名单
+   * 里不包含正在对话的这个 Bot，@ 它自己等于没说。
+   */
+  const mentionTargets: Bot[] = activeRoom === null
+    ? state.bots.filter((bot) => bot.id !== activeBot.id)
+    : members
 
   /*
    * 用 layout effect：发送后立刻回到单行高度，避免下一帧还闪一下高框。
@@ -101,7 +111,8 @@ export function Composer(): JSX.Element {
 
   /** 收起 @ 气泡：先播退场，240ms 后再真正卸载。 */
   const closeMention = useCallback((): void => {
-    // 气泡本来就没开（例如单聊里直接发送）：不能起退场，否则会凭空渲染一个空气泡。
+    // 气泡本来就没开（例如私聊里直接发送、或没有可点名的 Bot）：不能起退场，
+    // 否则会凭空渲染一个空气泡。
     if (!mentionOpen) return
     if (mentionTimerRef.current !== null) return
     setMentionClosing(true)
@@ -159,7 +170,7 @@ export function Composer(): JSX.Element {
     /*
      * 发送是一次用户手势：顺手把朗读的 AudioContext 建好并恢复。
      * 自动朗读发生在「消息到达」那一刻（非手势），浏览器会拦掉那时新建的上下文；
-     * 在这里预热之后，打开「自动朗读回复」的用户才会真的听见声音。
+     * 在这里预热之后，打开会话头「自动播报」的用户才会真的听见声音。
      */
     primeSpeech()
     actions.sendMessage(value, {
@@ -348,9 +359,9 @@ export function Composer(): JSX.Element {
           </button>
         </div>
       ) : null}
-      {activeRoom !== null || attachments.length > 0 ? (
+      {mentionTargets.length > 0 || attachments.length > 0 ? (
         <div className="pa-composer__chips">
-          {activeRoom !== null ? (
+          {mentionTargets.length > 0 ? (
             <button
               className="pa-composer__chip pa-composer__chip--at"
               type="button"
@@ -452,10 +463,12 @@ export function Composer(): JSX.Element {
             )}
           </div>
 
-          {(mentionOpen || mentionClosing) && activeRoom !== null ? (
+          {(mentionOpen || mentionClosing) && mentionTargets.length > 0 ? (
             <div className="pa-composer__mention" data-closing={mentionClosing ? '1' : undefined}>
-              {members.length === 0 ? <div className="pa-chat-empty__desc">这个群还没有成员</div> : null}
-              {members.map((member) => (
+              {activeRoom === null ? (
+                <div className="pa-chat-empty__desc">点名让它去做：消息会交给它，主 Bot 负责转派和验收</div>
+              ) : null}
+              {mentionTargets.map((member) => (
                 <button type="button" key={member.id} onClick={() => insertMention(member.name)}>
                   <BotAvatar avatar={member.avatar} size={22} />
                   <span className="pa-composer__mention-name">{member.name}</span>

@@ -337,12 +337,26 @@ Bot 复用宿主的 agent loop，但输出形态必须按**对话**设计，不�
   播放中换成停止图标 + `data-speaking='true'`（`--pa-accent` 常亮 + 1.6s 脉冲，
   `prefers-reduced-motion` 下关动画）。只对**有可朗读正文的 bot 消息**渲染；
   用户消息不给入口（自己的话不需要听，也容易让人以为在放语音输入）。
-- **入口 2（自动）**：Bot 设置卡「语音通话」分区的 **「自动朗读回复」** 开关
-  （`Bot.autoSpeak`，默认关；`normalizeState` 只认显式 `true`）。
+- **入口 2（自动）**：**会话头**通话按钮**左侧**的喇叭按钮（`AutoSpeakButton.tsx`），
+  **唯一入口**（2026-11-05 起，Bot 设置卡语音页里那个重复开关已撤掉；那一页只留音色与
+  Live 供应商）。拨的是 `Bot.autoSpeak`（默认关；`normalizeState` 只认显式 `true`）；
+  群聊不渲染——群里自动播报不生效，摆一个拨了没用的入口比不摆更糟。打开态
+  `data-on='true'`（`--pa-accent`），图标在 `IconVolume` / `IconVolumeOff` 之间切换。
   生效条件：单聊（`room === null`）+ 开关打开 + `ui.call.status === 'idle'`。
   触发：messages 变化后 debounce 250ms，取**最后一条** bot 消息，`pending` 不播；
   `spokenRef` 记录已播消息，首次挂载 / 切会话 / 拨开关时把现有消息全部标记为已播
   （刷新不重播历史）。切会话、通话开始、消息流卸载都会 `stopSpeech()`。
+- **朗读音量**：会话头开关 **hover / 键盘聚焦** 浮出音量浮层（移开 160ms 后收起，
+  面板与按钮之间有透明桥接，见 `AutoSpeakButton.tsx` 文件头）：0–100% 滑条即时写
+  `speech.ts` 的 `setSpeechVolume`——两条播放路径一起变（整段 WAV 主增益 / 流式
+  PcmPlayer 增益），并落 `pa:speech-volume:v1`；滑块拖到 0 显示「静音」。
+  它与通话弹层那条通话音量（`pa:call-volume:v1`）是**两个独立的值**。
+- **音量滑条（两处共用）**：`shared/VolumeSlider.tsx` + base.css 的 `.pa-vs*`。
+  用**粗细**表达音量：已选段 10px 粗、未选段 4px 细（悬停 / 聚焦 / 拖动时两段
+  一起加到 13 / 6，粗细对比保留），两段都单色；圆点 14px，轨道左右各内缩 7px
+  与原生 thumb 的可移动区间对齐。`input[type=range]` 叠在上层当透明交互层，
+  键盘 / 触摸 / 读屏语义仍在。通话弹层与会话头浮层只各自指定
+  `--pa-vs-color / --pa-vs-rest / --pa-vs-surface`，不再各写一套轨道样式。
 - **语音来源 = 通话已设置的模型**：请求带该消息发送者 Bot 的 `voice` / `liveVendor`，
   宿主缺省回落到全局默认。**没有第二套 TTS 配置**。
 - 链路（**流式**）：`POST REALTIME_TTS_PATH`（`/api/personal-agent/tts`，见 shared 契约）

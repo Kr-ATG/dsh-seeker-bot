@@ -44,11 +44,43 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
-/** 动效时长（ms）：CSS 与 hook 计时必须一致，改这里一处即可。 */
-export const OVERLAY_MOTION_MS = 240
-
-/** 浮层形态：决定入场/退场用哪条 keyframes。 */
+/** 浮层形态：决定入场/退场用哪条 keyframes 及对应的体量阶梯。 */
 export type OverlayMotionKind = 'modal' | 'popover' | 'drawer' | 'sheet' | 'toast'
+
+/**
+ * 动效体量阶梯配置（Motion Tier）：
+ *  - S 档（popover / toast）：小面积贴身浮层，响应极快（入场 160ms，退场 120ms）
+ *  - M 档（drawer / sheet）：中型面板 / 侧滑抽屉，干脆利落（入场 240ms，退场 200ms）
+ *  - L 档（modal / page）：大模态弹窗 / 全屏卡片 / 页面切换，平稳舒缓（入场 300ms，退场 260ms）
+ */
+export const MOTION_TIERS = {
+  sm: { in: 160, out: 120 },
+  md: { in: 240, out: 200 },
+  lg: { in: 300, out: 260 },
+} as const
+
+export const KIND_TO_TIER: Record<OverlayMotionKind, 'sm' | 'md' | 'lg'> = {
+  popover: 'sm',
+  toast: 'sm',
+  drawer: 'md',
+  sheet: 'md',
+  modal: 'lg',
+}
+
+/** 读某个形态默认对应的退场时长（ms），供状态机精准对齐。 */
+export function getMotionExitDuration(kind: OverlayMotionKind): number {
+  const tier = KIND_TO_TIER[kind] ?? 'lg'
+  return MOTION_TIERS[tier].out
+}
+
+/** 全局大模态默认入场时长（ms）：300ms 柔和减速进场。 */
+export const OVERLAY_MOTION_IN_MS = MOTION_TIERS.lg.in
+
+/** 全局大模态默认退场时长（ms）：260ms 加速收起。 */
+export const OVERLAY_MOTION_OUT_MS = MOTION_TIERS.lg.out
+
+/** 兼容历史常量：默认等于大模态退场时长（260ms）。 */
+export const OVERLAY_MOTION_MS = OVERLAY_MOTION_OUT_MS
 
 const STYLE_ID = 'dsh-overlay-motion-styles'
 
@@ -61,8 +93,8 @@ const STYLE_ID = 'dsh-overlay-motion-styles'
  */
 const CSS = `
 /* ── 入场 ────────────────────────────────────────────────────────────── */
-@keyframes dsh-modal-slide-in { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes dsh-motion-modal-in { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: none; } }
+@keyframes dsh-modal-slide-in { from { opacity: 0; transform: translateY(24px) scale(.95); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes dsh-motion-modal-in { from { opacity: 0; transform: translateY(24px) scale(.95); } to { opacity: 1; transform: none; } }
 @keyframes dsh-motion-popover-in { from { opacity: 0; transform: translateY(8px) scale(.97); } to { opacity: 1; transform: none; } }
 @keyframes dsh-motion-drawer-in { from { opacity: 0; transform: translateX(56px); } to { opacity: 1; transform: none; } }
 @keyframes dsh-motion-sheet-in { from { opacity: 0; transform: translateY(64px); } to { opacity: 1; transform: none; } }
@@ -93,46 +125,76 @@ const CSS = `
    只位移时上层始终不透明，透不出任何东西。 */
 @keyframes dsh-page-slide { from { transform: translateY(10px); } to { transform: none; } }
 [data-page-motion='in'] {
-  animation: dsh-page-in 240ms cubic-bezier(.2,.8,.2,1) backwards;
+  animation: dsh-page-in 300ms cubic-bezier(.2,.8,.2,1) backwards;
 }
 [data-page-motion='slide'] {
-  animation: dsh-page-slide 240ms cubic-bezier(.2,.8,.2,1) backwards;
+  animation: dsh-page-slide 300ms cubic-bezier(.2,.8,.2,1) backwards;
 }
 [data-page-motion='stagger'] > * {
-  animation: dsh-page-rise 240ms cubic-bezier(.2,.8,.2,1) backwards;
-  animation-delay: calc(var(--i, 0) * 22ms);
+  animation: dsh-page-rise 300ms cubic-bezier(.2,.8,.2,1) backwards;
+  animation-delay: calc(var(--i, 0) * 24ms);
 }
 
 /* ── 老 API：class 驱动（已有组件在用，行为保持不变） ────────────────── */
-.dsh-modal-slide-in { animation: dsh-modal-slide-in 240ms cubic-bezier(.2,.8,.2,1) backwards; }
-.dsh-modal-slide-out { animation: dsh-modal-slide-out 240ms cubic-bezier(.4,0,.2,1) both; }
-.dsh-modal-side-in { animation: dsh-motion-popover-in 240ms cubic-bezier(.2,.8,.2,1) backwards; }
-.dsh-modal-side-out { animation: dsh-motion-popover-out 240ms cubic-bezier(.4,0,.2,1) both; }
+/* L 档：大模态弹窗（300ms / 260ms） */
+.dsh-modal-slide-in { animation: dsh-modal-slide-in 300ms cubic-bezier(.16,1,.3,1) backwards; }
+.dsh-modal-slide-out { animation: dsh-modal-slide-out 260ms cubic-bezier(.4,0,.2,1) both; }
+/* S 档：贴身小浮层（160ms / 120ms） */
+.dsh-modal-side-in { animation: dsh-motion-popover-in 160ms cubic-bezier(.2,.8,.2,1) backwards; }
+.dsh-modal-side-out { animation: dsh-motion-popover-out 120ms cubic-bezier(.4,0,.2,1) both; }
+/* M 档：侧滑抽屉（240ms / 200ms） */
 .dsh-modal-drawer-in { animation: dsh-motion-drawer-in 240ms cubic-bezier(.2,.8,.2,1) backwards; }
-.dsh-modal-drawer-out { animation: dsh-motion-drawer-out 240ms cubic-bezier(.4,0,.2,1) both; }
-.dsh-modal-mask-in { animation: dsh-modal-mask-in 240ms ease backwards; }
-.dsh-modal-mask-out { animation: dsh-modal-mask-out 240ms ease both; }
+.dsh-modal-drawer-out { animation: dsh-motion-drawer-out 200ms cubic-bezier(.4,0,.2,1) both; }
+/* 遮罩入场与退场 */
+.dsh-modal-mask-in { animation: dsh-modal-mask-in 300ms ease backwards; }
+.dsh-modal-mask-out { animation: dsh-modal-mask-out 260ms ease both; }
 .dsh-modal-slide-in .dsh-modal-stagger,
 .dsh-modal-side-in .dsh-modal-stagger,
 .dsh-modal-drawer-in .dsh-modal-stagger {
-  animation: dsh-motion-popover-in 240ms cubic-bezier(.2,.8,.2,1) backwards;
+  animation: dsh-motion-popover-in 300ms cubic-bezier(.2,.8,.2,1) backwards;
   animation-delay: 60ms;
 }
 
-/* ── 新 API：属性驱动（新增浮层零 keyframes） ──────────────────────────
+/* ── 新 API：属性驱动（根据形态自动匹配 S / M / L 动效阶梯） ───────────
    根节点挂 data-motion="in|out" + data-motion-kind="modal|popover|drawer|sheet|toast"；
-   遮罩挂 data-motion-mask="in|out"。时长/曲线/填充由下面三条统一给，
-   各形态只覆盖 animation-name —— 这就是「未来新增不用再写一份」的实现。 */
+   遮罩挂 data-motion-mask="in|out"。由属性直接匹配对应体量的时长与关键帧。 */
 [data-motion='in'] {
-  animation-duration: 240ms;
-  animation-timing-function: cubic-bezier(.2,.8,.2,1);
+  animation-timing-function: cubic-bezier(.16,1,.3,1);
   animation-fill-mode: backwards;
 }
 [data-motion='out'] {
-  animation-duration: 240ms;
   animation-timing-function: cubic-bezier(.4,0,.2,1);
   animation-fill-mode: both;
 }
+
+/* S 档：贴身小浮层（popover / toast）── 160ms 入场 / 120ms 退场 */
+[data-motion-kind='popover'][data-motion='in'],
+[data-motion-kind='toast'][data-motion='in'] {
+  animation-duration: 160ms;
+}
+[data-motion-kind='popover'][data-motion='out'],
+[data-motion-kind='toast'][data-motion='out'] {
+  animation-duration: 120ms;
+}
+
+/* M 档：中型抽屉 / 全屏 sheet ── 240ms 入场 / 200ms 退场 */
+[data-motion-kind='drawer'][data-motion='in'],
+[data-motion-kind='sheet'][data-motion='in'] {
+  animation-duration: 240ms;
+}
+[data-motion-kind='drawer'][data-motion='out'],
+[data-motion-kind='sheet'][data-motion='out'] {
+  animation-duration: 200ms;
+}
+
+/* L 档：大模态弹窗（modal）── 300ms 柔和进场 / 260ms 加速收起 */
+[data-motion-kind='modal'][data-motion='in'] {
+  animation-duration: 300ms;
+}
+[data-motion-kind='modal'][data-motion='out'] {
+  animation-duration: 260ms;
+}
+
 [data-motion-kind='modal'][data-motion='in'] { animation-name: dsh-motion-modal-in; }
 [data-motion-kind='modal'][data-motion='out'] { animation-name: dsh-motion-modal-out; }
 [data-motion-kind='popover'][data-motion='in'] { animation-name: dsh-motion-popover-in; }
@@ -143,8 +205,8 @@ const CSS = `
 [data-motion-kind='sheet'][data-motion='out'] { animation-name: dsh-motion-sheet-out; }
 [data-motion-kind='toast'][data-motion='in'] { animation-name: dsh-motion-toast-in; }
 [data-motion-kind='toast'][data-motion='out'] { animation-name: dsh-motion-toast-out; }
-[data-motion-mask='in'] { animation: dsh-modal-mask-in 240ms ease backwards; }
-[data-motion-mask='out'] { animation: dsh-modal-mask-out 240ms ease both; }
+[data-motion-mask='in'] { animation: dsh-modal-mask-in 300ms ease backwards; }
+[data-motion-mask='out'] { animation: dsh-modal-mask-out 260ms ease both; }
 
 /* ── 减弱动效：属性驱动与 class 驱动一起关掉 ────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
@@ -209,7 +271,7 @@ export function useOverlayMotion(
   open: boolean,
   onClose: () => void,
   kind: OverlayMotionKind = 'modal',
-  durationMs = OVERLAY_MOTION_MS,
+  customDurationMs?: number,
 ): {
   closing: boolean
   requestClose: () => void
@@ -217,6 +279,7 @@ export function useOverlayMotion(
   cardAttrs: OverlayMotionAttrs
   maskAttrs: OverlayMaskAttrs
 } {
+  const durationMs = customDurationMs ?? getMotionExitDuration(kind)
   const [closing, setClosing] = useState(false)
   const timerRef = useRef<number | null>(null)
   const closingRef = useRef(false)

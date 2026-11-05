@@ -148,6 +148,10 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
   /** 递增令牌：只接受最后一次渲染的结果（快速改选项时防串图）。 */
   const tokenRef = useRef(0)
   const editorRef = useRef<HTMLIFrameElement | null>(null)
+  /** 在途最新渲染 Promise（复制/保存时等待它完成，确保拿到改动后的最新尺寸图）。 */
+  const pendingPromiseRef = useRef<Promise<RenderResult | null> | null>(null)
+  const latestResultRef = useRef<RenderResult | null>(null)
+  latestResultRef.current = result
 
   const scale = qualityScale(quality, cardWidth)
   const viewportWidth = cardWidth + canvasPad(cardWidth) * 2
@@ -160,40 +164,43 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
    * 官方「设置 → 字号」），截图端也不再读任何本地缩放档位——所见即所得，卡片
    * 在对话流里多大，截出来就多大。
    */
-  const run = useCallback((): void => {
+  const run = useCallback((overrideWidth?: number): Promise<RenderResult | null> => {
     const token = tokenRef.current + 1
     tokenRef.current = token
+    const effectiveWidth = typeof overrideWidth === 'number' ? overrideWidth : cardWidth
     if (messages.length === 0) {
-      // 收口必须完整：这条分支已经把 tokenRef 推进了，在途的那个旧请求在
-      // .finally 里必然因 token 不匹配而跳过 setBusy(false)。若这里也不置
-      // false，busy 就永久停在 true —— 面板一直转「正在渲染…」、error 被
-      // `!busy &&` 挡住看不见、保存/复制/重新渲染/下载全部 disabled，用户
-      // 只能关掉重开。触发路径：打开即自动渲染时点范围/宽度/画质，而新范围
-      // 的 collect() 返回空（纯 steering 轮次、reply 命中不到 tail 等）。
       setBusy(false)
       setResult(null)
       setError('这个范围里没有可截图的文本内容')
       setToast(null)
-      return
+      pendingPromiseRef.current = null
+      return Promise.resolve(null)
     }
     setBusy(true)
     setError(null)
     setSavedPath(null)
     setToast(null)
-    render({ messages, theme, width: cardWidth, quality, title: titleText, label: labelText, cwd })
+    const p = render({ messages, theme, width: effectiveWidth, quality, title: titleText, label: labelText, cwd })
       .then((next) => {
-        if (tokenRef.current !== token) return
+        if (tokenRef.current !== token) return null
         setResult(next)
+        latestResultRef.current = next
+        return next
       })
       .catch((cause: unknown) => {
-        if (tokenRef.current !== token) return
+        if (tokenRef.current !== token) return null
         setResult(null)
+        latestResultRef.current = null
         setError(cause instanceof Error ? cause.message : String(cause))
+        return null
       })
       .finally(() => {
         if (tokenRef.current !== token) return
         setBusy(false)
+        pendingPromiseRef.current = null
       })
+    pendingPromiseRef.current = p
+    return p
   }, [messages, theme, cardWidth, quality, titleText, labelText, cwd])
 
   // 打开时渲染一次，之后任一选项变化都重渲染。
@@ -449,23 +456,79 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
     patchShotPrefs({ quality: next })
   }, [])
 
+  // 自定义宽度输入防抖：用户输入完成后无需特意点回车或失焦，400ms 自动应用生效
+  useEffect(() => {
+    const parsed = parseInt(widthDraft, 10)
+    if (!Number.isNaN(parsed) && parsed >= WIDTH_MIN && parsed <= WIDTH_MAX && parsed !== cardWidth) {
+      const timer = window.setTimeout(() => {
+        applyWidth(parsed)
+      }, 400)
+      return () => { window.clearTimeout(timer) }
+    }
+  }, [widthDraft, cardWidth, applyWidth])
+
+  /** 确保拿到用户修改尺寸后的最新结果（如有在途渲染或草稿未提交，同步等待并以最新尺寸出图）。 */
+  const ensureLatestResult = useCallback(async (): Promise<RenderResult | null> => {
+    // 1. 若自定义宽度输入框有未提交的改动，立即应用并触发渲染
+    const parsedDraft = parseInt(widthDraft, 10)
+    let p = pendingPromiseRef.current
+    if (!Number.isNaN(parsedDraft)) {
+      const clamped = Math.max(WIDTH_MIN, Math.min(WIDTH_MAX, parsedDraft))
+      if (clamped !== cardWidth) {
+        applyWidth(clamped)
+        p = run(clamped)
+      }
+    }
+    // 2. 若渲染在途中，等待最新渲染完成，绝不复制修改前的旧尺寸图
+    if (p !== null || busy) {
+      setToast('正在按最新尺寸生成…')
+      const targetP = p ?? pendingPromiseRef.current
+      if (targetP !== null) {
+        const next = await targetP
+        if (next !== null) return next
+      }
+    }
+    return latestResultRef.current ?? result
+  }, [widthDraft, cardWidth, applyWidth, run, busy, result])
+
   const onSave = useCallback((): void => {
-    if (result === null) return
-    save(result.id)
-      .then((saved) => { setSavedPath(saved.path); setToast('已保存到本地') })
-      .catch((cause: unknown) => { setError(cause instanceof Error ? cause.message : String(cause)) })
-  }, [result])
+    void (async () => {
+      const target = await ensureLatestResult()
+      if (target === null) return
+      save(target.id)
+        .then((saved) => { setSavedPath(saved.path); setToast('已保存到本地') })
+        .catch((cause: unknown) => { setError(cause instanceof Error ? cause.message : String(cause)) })
+    })()
+  }, [ensureLatestResult])
 
   const onCopy = useCallback((): void => {
-    if (result === null) return
-    const write = async (): Promise<void> => {
-      const blob = await (await fetch(result.imageUrl, { cache: 'no-store' })).blob()
-      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
-    }
-    write()
-      .then(() => { setToast('图片已复制到剪贴板') })
-      .catch(() => { setError('复制失败：浏览器拒绝了剪贴板写入，请改用「下载 PNG」') })
-  }, [result])
+    void (async () => {
+      const target = await ensureLatestResult()
+      if (target === null) return
+      try {
+        const blob = await (await fetch(target.imageUrl, { cache: 'no-store' })).blob()
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+        setToast(`图片已复制 (${target.width} × ${target.height} px)`)
+      } catch {
+        setError('复制失败：浏览器拒绝了剪贴板写入，请改用「下载 PNG」')
+      }
+    })()
+  }, [ensureLatestResult])
+
+  const onDownload = useCallback((event: { preventDefault: () => void }): void => {
+    event.preventDefault()
+    void (async () => {
+      const target = await ensureLatestResult()
+      if (target === null) return
+      const a = document.createElement('a')
+      a.href = target.imageUrl
+      a.download = `dsh-screenshot-${target.width}x${target.height}.png`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setToast(`已开始下载 (${target.width} × ${target.height} px)`)
+    })()
+  }, [ensureLatestResult])
 
   const onCopyPath = useCallback((): void => {
     if (savedPath === null) return
@@ -712,18 +775,10 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
             {savedPath !== null && (
               <button type="button" className={cls.action} onClick={onCopyPath}>复制路径</button>
             )}
-            <button type="button" className={cls.action} disabled={result === null} onClick={onCopy}>复制图片</button>
-            <a
-              className={cls.action}
-              href={result?.imageUrl ?? '#'}
-              download="dsh-screenshot.png"
-              aria-disabled={result === null}
-              onClick={(event) => { if (result === null) event.preventDefault() }}
-            >
-              下载 PNG
-            </a>
+            <button type="button" className={cls.action} disabled={result === null && !busy} onClick={onCopy}>{busy ? '生成并复制' : '复制图片'}</button>
+            <button type="button" className={cls.action} disabled={result === null && !busy} onClick={onDownload}>下载 PNG</button>
             <button type="button" className={cls.action} onClick={() => { void reveal() }}>打开目录</button>
-            <button type="button" className={cls.primary} disabled={result === null} onClick={onSave}>保存</button>
+            <button type="button" className={cls.primary} disabled={result === null && !busy} onClick={onSave}>{busy ? '生成并保存' : '保存'}</button>
           </div>
         </div>
       </div>

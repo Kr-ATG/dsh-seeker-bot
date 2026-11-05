@@ -42,6 +42,7 @@ import {
   IconX,
 } from '../icons.tsx'
 import { PaSelect, type PaSelectOption } from '../shared/PaSelect.tsx'
+import { VolumeSlider } from '../shared/VolumeSlider.tsx'
 import { usePersonal } from '../store.tsx'
 import { formatDuration, voiceLabel as voiceLabelOf } from '../types.ts'
 import {
@@ -490,16 +491,12 @@ export function CallOverlay(): JSX.Element | null {
               <span className="pa-call__volume-icon" aria-hidden="true">
                 {volumePercent === 0 ? <IconVolumeOff size={14} /> : <IconVolume size={14} />}
               </span>
-              <input
-                className="pa-call__volume-range"
-                type="range"
-                min={0}
-                max={100}
-                step={1}
+              {/* 与会话头朗读音量共用同一个滑条：粗细表达音量（已选段粗 / 未选段细）。 */}
+              <VolumeSlider
                 value={volumePercent}
-                onChange={(event) => actions.setCallVolume(Number(event.target.value) / 100)}
-                aria-label="通话音量"
-                aria-valuetext={volumePercent === 0 ? '静音' : `${volumePercent}%`}
+                onChange={(next) => actions.setCallVolume(next / 100)}
+                ariaLabel="通话音量"
+                valueText={volumePercent === 0 ? '静音' : `${volumePercent}%`}
               />
               <span className="pa-call__volume-value">
                 {volumePercent === 0 ? '静音' : `${volumePercent}%`}

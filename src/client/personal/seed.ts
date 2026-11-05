@@ -56,6 +56,7 @@ export function createMainBot(at = now): Bot {
     model: MODEL_FALLBACK,
     skills: [],
     permission: 'full',
+    eli5Mode: true,
     proactive: { enabled: true, freq: 'daily', from: '09:00', to: '22:00' },
     createdAt: at,
     createdBy: null,

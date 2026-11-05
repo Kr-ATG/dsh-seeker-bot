@@ -59,14 +59,14 @@ body[data-ds-dark-theme]{--tsh-control-surface:var(--dsw-static-neutral-bluish-8
 .tsh-btn-busy{color:var(--dsw-alias-state-business-primary,#4176e6);cursor:default;pointer-events:none}
 
 /* ── 遮罩 + 面板 ── */
-.tsh-mask{position:fixed;inset:0;z-index:1399;background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.45))}
+.tsh-mask{position:fixed;inset:0;z-index:2147483640;background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.45))}
 /* 遮罩淡入淡出：只动 opacity，且用 ease（遮罩不是被「甩走」的对象，只是跟着面板退场）。
    时长与 .tsh-panel 的 240ms 对齐，两条动画同时开始、同时结束，中间不会有断层。 */
 .tsh-mask[data-anim='in']{animation:tsh-mask-in 240ms ease}
 .tsh-mask[data-anim='out']{animation:tsh-mask-out 240ms ease forwards}
 @keyframes tsh-mask-in{from{opacity:0}to{opacity:1}}
 @keyframes tsh-mask-out{from{opacity:1}to{opacity:0}}
-.tsh-panel{position:fixed;z-index:1400;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;flex-direction:column;box-sizing:border-box;width:min(calc(100vw - 48px),2160px);height:min(calc(100vh - 40px),1720px);border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));border-radius:14px;background:var(--tsh-panel-surface);box-shadow:var(--dsw-shadow-lv3,0 8px 40px rgba(0,0,0,.5));overflow:hidden}
+.tsh-panel{position:fixed;z-index:2147483641;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;flex-direction:column;box-sizing:border-box;width:min(calc(100vw - 48px),2160px);height:min(calc(100vh - 40px),1720px);border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));border-radius:14px;background:var(--tsh-panel-surface);box-shadow:var(--dsw-shadow-lv3,0 8px 40px rgba(0,0,0,.5));overflow:hidden}
 html[data-dsh-glass] .tsh-panel{background:var(--tsh-panel-surface);backdrop-filter:none;-webkit-backdrop-filter:none}
 /* 居中面板的开合动画自带 translate(-50%,-50%)，不能复用通用滑入类（会覆盖定位）。 */
 .tsh-panel[data-anim='in']{animation:tsh-panel-in 240ms cubic-bezier(.2,.8,.2,1)}

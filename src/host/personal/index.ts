@@ -37,6 +37,7 @@ import { withQuoteHints } from './quote-hints.ts'
 import { scanBotOutputs } from './outputs.ts'
 import { recallBotTurn } from './recall.ts'
 import { botRoomOf, buildRoomContextBlock, setBotRoom } from './room-context.ts'
+import { buildMentionContextBlock, normalizeMentionList } from './mentions.ts'
 import { addApprovalRule, approvalRulesFile, decideApproval, pendingApprovalCount, readApprovalRules, removeApprovalRule, type ApprovalChoice, type ApprovalRisk } from './approval.ts'
 import { answerQuestion, pendingQuestionCount } from './questions.ts'
 import { currentSeq, parseSinceByBot, publish, subscribe, subscribeAll } from './events.ts'
@@ -71,6 +72,7 @@ import { __test as officeInternals, officeEngineAvailable, renderOfficePages, re
 import { applyPersonalAgentRealtime, type PersonalRealtimeConfig } from './realtime/mount.ts'
 import { rememberBotSpec, startPersonalRuntime } from './runtime/host.ts'
 import { knownBots, personalRuntime } from './runtime/registry.ts'
+import { captureDesktopScreen } from './desktop-screen.ts'
 
 const ROUTE = '/api/personal-agent'
 const MAX_BODY = 32 * 1024 * 1024
@@ -479,6 +481,8 @@ interface ReplyBody {
      * 缺省按 `false`——宁可少给一个工具，也不能把全局权限发错人。
      */
     isMain?: boolean
+    /** 通俗解释（ELI5 模式）；默认开启，显式传 false 时关闭。 */
+    eli5Mode?: boolean
   }
   text?: string
   /**
@@ -509,6 +513,7 @@ interface ReplyBody {
     instructions?: string
     model?: { provider?: string; model?: string; effort?: string }
     isMain?: boolean
+    eli5Mode?: boolean
   }>
   /**
    * 本轮用户附带的图片（前端先走 /upload 落盘，这里只带相对路径）。
@@ -527,6 +532,13 @@ interface ReplyBody {
    * `room-context`，卡片发布时再取回。
    */
   roomId?: string
+  /**
+   * 本轮用户点名了哪些 Bot（前端解析私聊里的 `@名字` 得到）。
+   *
+   * 群聊回合不带：@ 在那里已经是路由信号，前端据此决定谁接话；再注入一段
+   * 「你该派活了」的上下文，会让被点名的那位自己也跑去派活，绕出一圈。
+   */
+  mentions?: Array<{ id?: string; name?: string }>
 }
 
 /**
@@ -548,6 +560,7 @@ function toBotSpec(body: ReplyBody): BotAgentSpec {
     model: bot.model,
     permission: body.permission === 'approval' ? 'approval' : 'full',
     isMain: bot.isMain === true,
+    eli5Mode: bot.eli5Mode !== false,
     memories: Array.isArray(body.memories)
       ? body.memories.filter((item): item is string => typeof item === 'string')
       : undefined,
@@ -573,6 +586,7 @@ function rememberRoster(roster: ReplyBody['roster']): void {
       instructions: String(item?.instructions ?? ''),
       ...(item?.model === undefined ? {} : { model: item.model }),
       isMain: item?.isMain === true,
+      eli5Mode: item?.eli5Mode !== false,
     })
   }
 }
@@ -735,6 +749,35 @@ async function injectRoomContextForReply(ctx: any, spec: BotAgentSpec, body: Rep
     agent.inject(createWorkingMemoryMessage(text))
   } catch {
     /* 群上下文是增强项：注入失败不影响这一轮对话 */
+  }
+}
+
+/**
+ * 私聊回合：把「用户这轮 @ 了谁」作为 developer 消息投给 agent。
+ *
+ * 与群聊正好相反——群里 @ 是前端的路由信号（谁接话），宿主不需要知道；私聊里
+ * 只有一个 Bot 在跑一轮，@ 是**给主管的派活指令**，不告诉模型它就只是一段文本。
+ *
+ * 只认私聊（`body.roomId` 缺省）：群聊回合若也注入，被点名的那位会看到「用户
+ * 让我把活派出去」，而它手上根本没有 coordinate_bots 的上下文——结果是把一句
+ * 本该自己做的事又转述一遍。
+ *
+ * 失败一律吞掉：点名是增强项，注入失败最多是模型没派活，不能让这一轮回复崩掉。
+ */
+async function injectMentionContextForReply(ctx: any, spec: BotAgentSpec, body: ReplyBody): Promise<void> {
+  try {
+    const roomId = typeof body.roomId === 'string' ? body.roomId.trim() : ''
+    if (roomId !== '') return
+    const mentions = normalizeMentionList(body.mentions)
+    if (mentions.length === 0) return
+    const text = buildMentionContextBlock(mentions)
+    if (text === '') return
+    const agent = await ensureBotAgent(ctx, spec)
+    if (agent === null || typeof agent !== 'object' || typeof agent.inject !== 'function') return
+    // section 名单独给一个：注入消息会落进会话日志，「工作记忆」会把排查的人引错方向
+    agent.inject(createWorkingMemoryMessage(text, '点名派活'))
+  } catch {
+    /* 点名上下文是增强项：注入失败不影响这一轮对话 */
   }
 }
 
@@ -1224,7 +1267,7 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
               'journal/list', 'journal/status', 'journal/generate', 'journal/check', 'journal/rule', 'journal/feed',
               'asr',
               'realtime', 'realtime/diagnose',
-              'file', 'upload', 'outputs',
+              'file', 'desktop-screen', 'upload', 'outputs',
               'office/info', 'office/page', 'office/pdf',
               'memory/remember',
               'working-memory',
@@ -2161,6 +2204,8 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
           await injectWorkingMemoryForReply(webCtx, spec, text)
           // 群聊回合把本群之前的对话也投进去（成员只有一条终身会话，不注入就互相看不见）；私聊回合内部直接返回
           await injectRoomContextForReply(webCtx, spec, body)
+          // 私聊里用户 @ 了某个 Bot：把「该派给谁」告诉模型（群聊由前端路由，不需要）
+          await injectMentionContextForReply(webCtx, spec, body)
 
           /*
            * 首选：把这个 bot 接到宿主的真 agent 会话上（能读文件 / 跑命令 / 搜索…）。
@@ -2229,6 +2274,8 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
           await injectWorkingMemoryForReply(webCtx, spec, text)
           // 群聊历史注入：与 /reply 同一口径，同样放在开 SSE 之前
           await injectRoomContextForReply(webCtx, spec, body)
+          // 用户点名：与 /reply 同一口径（只认私聊回合）
+          await injectMentionContextForReply(webCtx, spec, body)
 
           res.statusCode = 200
           res.setHeader('content-type', 'text/event-stream; charset=utf-8')
@@ -2492,6 +2539,28 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
          * **Range 支持是视频的硬需求**：Chromium 的 `<video>` 靠 206 才能 seek 与
          * 拖进度条；只回 200 全量时播放器只能从头播到底。
          */
+        /*
+         * 桌面实时画面流（JPEG）：供 Bot 桌面控制 MCP（如 computer-use / desktop-control）
+         * 运行时前端实时渲染当前屏幕画面，带 400ms 内存防抖缓存，绝不污染 LLM 上下文。
+         */
+        if (tail === '/desktop-screen' && method === 'GET') {
+          const widthParam = Number(url.searchParams.get('w'))
+          const maxWidth = Number.isFinite(widthParam) && widthParam > 100 && widthParam <= 1920 ? Math.round(widthParam) : undefined
+          const buf = await captureDesktopScreen({ maxWidth })
+          if (buf === null || buf.length === 0) {
+            return sendJson(res, 503, { ok: false, error: 'desktop screen capture unavailable' })
+          }
+          res.writeHead(200, {
+            'content-type': 'image/jpeg',
+            'content-length': buf.length,
+            'cache-control': 'no-cache, no-store, must-revalidate',
+            'pragma': 'no-cache',
+            'expires': '0',
+            'access-control-allow-origin': '*',
+          })
+          return res.end(buf)
+        }
+
         if (tail === '/file' && method === 'GET') {
           const admitted = admitWorkspaceFile(url.searchParams.get('path') ?? '')
           if (!admitted.ok) return sendJson(res, admitted.status, { ok: false, error: admitted.error })

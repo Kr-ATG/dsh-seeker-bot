@@ -1341,19 +1341,39 @@ async function checkSources(body) {
  * 「要么变新，要么立刻告诉我已经最新」。比对失败（网络抖动 / ref 临时不可解析）
  * 不阻塞真正的 clone，退回原流程，让错误在 clone 阶段以更完整的信息报出。
  */
+/**
+ * 校验来源所属的技能目录与主文件在本地是否完整存在。
+ * 若磁盘上的技能丢失（用户误删或文件损坏），即使 commit 未变也不得短路，必须重新 clone 恢复。
+ */
+async function areSkillsIntact(root, skillNames) {
+  if (!Array.isArray(skillNames) || skillNames.length === 0) return false;
+  for (const name of skillNames) {
+    try {
+      const s = await stat(join(root, name, SKILL_FILE));
+      if (!s.isFile()) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 async function updateSource(id, options) {
   const wantedId = typeof id === "string" ? id.trim() : "";
   const opts = typeof options === "object" && options !== null ? options : {};
   const before = await readSourceLedger();
   const existing = before.sources.find((item) => item.id === wantedId);
   if (existing === void 0) throw new Error(`source ${JSON.stringify(wantedId)} not found`);
-  if (opts.skipRemoteCheck !== true && existing.commit !== "") {
+  const root = managedRoot();
+  const intact = await areSkillsIntact(root, existing.skills);
+  if (opts.force !== true && opts.skipRemoteCheck !== true && existing.commit !== "" && intact) {
     try {
       const remoteCommit = await remoteCommitOf(existing.url, existing.ref ?? "");
       const checked = await readSourceLedger();
       const checkedRecord = checked.sources.find((item) => item.id === wantedId);
       if (checkedRecord !== void 0) {
         checkedRecord.lastCheck = nowMs();
+        checkedRecord.lastUpdate = nowMs();
         checkedRecord.lastError = null;
         await writeSourceLedger(checked);
       }
@@ -1393,10 +1413,11 @@ async function updateSource(id, options) {
     }
     throw error;
   }
-  // importGitSkills 内部已经 upsert 了来源记录，这里补 lastUpdate 并读回最新状态。
+  // importGitSkills 内部已经 upsert 了来源记录，这里补 lastUpdate/lastCheck 并读回最新状态。
   const ledger = await readSourceLedger();
   const record = ledger.sources.find((item) => item.id === wantedId);
   if (record !== void 0) {
+    record.lastCheck = nowMs();
     record.lastUpdate = nowMs();
     record.lastError = null;
     await writeSourceLedger(ledger);
@@ -1424,9 +1445,11 @@ async function updateAllSources() {
   const check = await checkSources({});
   const byId = new Map((check.updates ?? []).map((entry) => [entry.id, entry]));
   const ledger = await readSourceLedger();
+  const root = managedRoot();
   const updated = [];
   const failed = [];
   const skipped = [];
+  let ledgerChanged = false;
   for (const record of ledger.sources) {
     if (record.auto !== true) continue;
     const entry = byId.get(record.id);
@@ -1434,16 +1457,27 @@ async function updateAllSources() {
       failed.push({ id: record.id, url: record.url, error: entry.error });
       continue;
     }
-    if (entry !== void 0 && entry.hasUpdate !== true) {
+    const intact = await areSkillsIntact(root, record.skills);
+    if (entry !== void 0 && entry.hasUpdate !== true && intact) {
+      record.lastCheck = nowMs();
+      record.lastUpdate = nowMs();
+      record.lastError = null;
+      ledgerChanged = true;
       skipped.push(record.id);
       continue;
     }
     try {
-      // checkSources 刚比对过远端，这里不必再 ls-remote 一次。
-      const result = await updateSource(record.id, { skipRemoteCheck: true });
+      // checkSources 刚比对过远端，这里不必再 ls-remote 一次；本地文件缺损时强制重装。
+      const result = await updateSource(record.id, { skipRemoteCheck: true, force: !intact });
       updated.push({ id: result.id, url: result.url, commit: result.commit, skills: result.skills });
     } catch (error) {
       failed.push({ id: record.id, url: record.url, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  if (ledgerChanged) {
+    try {
+      await writeSourceLedger(ledger);
+    } catch {
     }
   }
   return { updated, failed, skipped };
@@ -1759,7 +1793,8 @@ async function handle(ctx, req, res) {
     }
     const matchSourceUpdate = /^\/sources\/([^/]+)\/update$/.exec(rest);
     if (method === "POST" && matchSourceUpdate !== null) {
-      json(res, 200, await updateSource(decodeURIComponent(matchSourceUpdate[1])));
+      const body = await readBody(req);
+      json(res, 200, await updateSource(decodeURIComponent(matchSourceUpdate[1]), body));
       return;
     }
     const matchSource = /^\/sources\/([^/]+)$/.exec(rest);

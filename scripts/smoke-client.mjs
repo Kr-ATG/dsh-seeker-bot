@@ -5527,6 +5527,9 @@ if (krEnabled) {
         tree: { kind: 'tree', title: EVIL, root: { label: EVIL, children: [{ label: EVIL }] } },
         gauge: { kind: 'gauge', title: EVIL, desc: EVIL, gauges: [{ label: EVIL, value: 50, unit: EVIL }] },
         quiz: { kind: 'quiz', title: EVIL, desc: EVIL, questions: [{ q: EVIL, options: [EVIL, 'b'], answer: 0, explain: EVIL }] },
+        weather: { kind: 'weather', title: EVIL, city: EVIL, temp: EVIL, condition: EVIL, range: EVIL, aqi: EVIL, wind: EVIL, humidity: EVIL, uv: EVIL, tips: EVIL, forecast: [{ day: EVIL, condition: EVIL, temp: EVIL, rain: EVIL }] },
+        quote: { kind: 'quote', title: EVIL, name: EVIL, code: EVIL, price: EVIL, change: EVIL, changePct: EVIL, unit: EVIL, metrics: [{ label: EVIL, value: EVIL }], series: [1, 2, 3], note: EVIL },
+        link: { kind: 'link', title: EVIL, url: 'https://example.com/?q=' + encodeURIComponent(EVIL), source: EVIL, summary: EVIL, meta: EVIL, badge: EVIL },
       }
       const sample = samples[kind]
       if (sample === undefined) { reasons.push(kind + '：新增 kind 必须在转义探针里补样本（否则它的快照没人守）'); continue }
@@ -5538,7 +5541,7 @@ if (krEnabled) {
       // 那是纯文本、安全，查它只会全员误报（实测过）。
       // 我们自己的标签都是已知白名单，模型文本一旦逃逸就会出现陌生的标签名。
       const tags = [...html.matchAll(/<\/?([a-zA-Z][a-zA-Z0-9-]*)/g)].map(m => m[1].toLowerCase())
-      const ALLOWED = new Set(['div','span','b','i','small','p','ul','li','svg','path','br','em','strong','code','pre','table','tr','td','th','thead','tbody','a','h1','h2','h3','h4','h5','h6','blockquote','hr','button','input','textarea','select','option','label','figure','g','line','circle','rect','text','tspan','defs','marker','polygon','polyline','use','title','desc','ellipse'])
+      const ALLOWED = new Set(['div','span','b','i','small','p','ul','li','svg','path','br','em','strong','code','pre','table','tr','td','th','thead','tbody','a','h1','h2','h3','h4','h5','h6','blockquote','hr','button','input','textarea','select','option','label','figure','g','line','circle','rect','text','tspan','defs','marker','polygon','polyline','use','title','desc','ellipse','lineargradient','radialgradient','stop','clippath','mask','filter','fegaussianblur','fecomposite'])
       const stray = tags.filter(t => !ALLOWED.has(t))
       if (stray.length > 0) {
         reasons.push(kind + '：snapshot() 漏转义（出现未转义标签：' + [...new Set(stray)].join(',') + '）')
@@ -5554,7 +5557,7 @@ if (krEnabled) {
     }
   }
   if (reasons.length > 0) fail('iu 快照转义：' + reasons.join('；'))
-  else pass('iu 快照转义：12 个 kind 的模型文本全部以实体形式进 HTML（运行期探针）')
+  else pass(`iu 快照转义：${mod.IU_KIND_MAP.size} 个 kind 的模型文本全部以实体形式进 HTML（运行期探针）`)
 }
 
 // ── 提示词与实现的一致性 ──────────────────────────────────────────────
@@ -5741,28 +5744,14 @@ if (krEnabled) {
     const hostWriters = [
       'setZhInjectState', 'setHtmlInjectState',
       'setTeamInjectState', 'setTodoRuleInjectState', 'setTodoClosureState',
-      'setMotionInjectState',
+      'setMotionInjectState', 'setEli5InjectState',
     ]
     const missingWriter = hostWriters.filter(name => !src.includes(name))
     const rowCount = (src.match(/<SettingsRow\b/g) ?? []).length
-    // 7 处 = 3（中文 / 交互卡片 / 团队）+ 1（任务清单纪律）+ 1（自动收口）+ 2（展示组）。
-    // 灵魂注入那一行 2026-10-21 随灵魂模块整块删除：通道没了，闸门也就没有意义。
-    // 2026-11-01「Agent 邮箱」整条功能移除，那一行（源码里两个分支）一并删掉 ——
-    // 源码计数与渲染行数从此一一对应。
-    // 「工作区记忆」那一组 2026-10-18 改成了**逐工作区列表**（不再是固定的 SettingsRow），
-    // 因此不计入这个数字 —— 它的判据在下面 6c。
-    // 2026-11-03：新增「动效技能强制加载」行（提示词通道组第 4 行），由 7 变 8。
-    const expectedRows = 8
-    // 7 个行序号（0..6）。
-    // 2026-10-25 由 9 变 10：step 纪律从提示词通道组挪进「任务清单」组，与
-    // 「回合结束自动收口」并列 —— 用户要求「任务清单相关的全部归到一个组」。
-    // 2026-10-28：step 纪律整条退役（用户要求「step 去掉，任务清单保留」），原先挂在
-    // 它第五节的任务清单纪律独立成通道、占同一个行位。
-    // 2026-11-01：邮箱行删除后由 10 变 8。
-    // 2026-11-03：操作面板开关整条移除（不允许关闭），由 8 变 7。
-    // 开关**没有合并**：两者作用机理相反（一个写提示词、一个改状态），绑成一个
-    // 开关会强迫用户做无意义的交易（想关"末项转圈"就得连带关掉"少往返"）。
-    const expectedIndexes = 8
+    // 9 处 = 4（中文 / 交互卡片 / 团队 / 动效）+ 1（通俗解释）+ 1（任务清单纪律）+ 1（自动收口）+ 2（展示组）。
+    // 2026-11-05：新增「通俗解释 (ELI5)」行（提示词通道组第 5 行），由 8 变 9。
+    const expectedRows = 9
+    const expectedIndexes = 9
     const rowIndexes = [...src.matchAll(/index=\{(\d+)\}/g)].map(m => Number(m[1]))
     const distinctIndexes = [...new Set(rowIndexes)].sort((a, b) => a - b)
     const consecutive = distinctIndexes.length === expectedIndexes
@@ -5776,11 +5765,11 @@ if (krEnabled) {
     } else if (!/busy/.test(src)) {
       fail('host 写入缺少 busy 门控（写盘期间连点会出竞态，开关状态弹来弹去）')
     } else if (rowCount !== expectedRows) {
-      fail(`大盘设置应有 ${expectedRows} 处 <SettingsRow>（4 注入 + 任务清单纪律 + 自动收口 + 展示 2），实得 ${rowCount}`)
+      fail(`大盘设置应有 ${expectedRows} 处 <SettingsRow>（5 注入 + 任务清单纪律 + 自动收口 + 展示 2），实得 ${rowCount}`)
     } else if (!consecutive) {
       fail(`行序号 --row-i 必须从 0 起连续到 ${expectedIndexes - 1}（新增行要顺延后面的序号，否则两行同时浮现）：实得 ${JSON.stringify(distinctIndexes)}`)
     } else {
-      pass(`大盘设置：${expectedRows} 个开关行接线完整（5 条 host 通道 + 2 条外观偏好；--row-i 0..${expectedIndexes - 1} 连续，含 busy 门控）`)
+      pass(`大盘设置：${expectedRows} 个开关行接线完整（6 条 host 通道 + 2 条外观偏好；--row-i 0..${expectedIndexes - 1} 连续，含 busy 门控）`)
     }
 
     // 6c) 「工作区记忆」组（2026-10-18 改成逐工作区列表）：用户要求「显示出来所有工作区

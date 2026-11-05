@@ -25,6 +25,7 @@ import {
   IconChevronRight,
   IconCircleCheck,
   IconCpu,
+  IconMonitor,
   IconPause,
   IconPhone,
   IconPlay,
@@ -55,7 +56,7 @@ import {
   pathKeyOf,
   pathOfFileUrl,
 } from './media.ts'
-import { isExecutionToolName, isStandaloneToolRun } from './message-visibility.ts'
+import { isDesktopControlTool, isExecutionToolName, isStandaloneToolRun } from './message-visibility.ts'
 import { ImageGenerationCard, DotMatrix } from '../../generated-images/ImageGenerationCard.tsx'
 import { textHasMarkdownImage } from '../../generated-images/layout.ts'
 /*
@@ -543,24 +544,27 @@ function ImageGenerationBlock({ block }: { block: Extract<MessageBlock, { type: 
 /* ───────────────────────── 执行态块（2.7） ───────────────────────── */
 
 /** 执行态卡的动作描述（中文人话，不把工具名当标题）。 */
-function executionActionOf(name: string): string {
+function executionActionOf(name: string, status?: string): string {
   const key = name.toLowerCase()
-  if (/computer/.test(key)) return '操作电脑'
-  if (/browser/.test(key)) return '操作浏览器'
+  if (isDesktopControlTool(name)) {
+    return status === 'running' ? '正在控制电脑' : status === 'error' ? '电脑控制失败' : '控制电脑'
+  }
+  if (/computer/.test(key)) return status === 'running' ? '正在操作电脑' : '操作电脑'
+  if (/browser/.test(key)) return status === 'running' ? '正在操作浏览器' : '操作浏览器'
   if (/screenshot/.test(key)) return '截屏'
-  if (/playwright|puppeteer/.test(key)) return '用浏览器自动化操作'
-  return '执行界面操作'
+  if (/playwright|puppeteer/.test(key)) return status === 'running' ? '正在自动化操作浏览器' : '用浏览器自动化操作'
+  return status === 'running' ? '正在执行界面操作' : '执行界面操作'
 }
 
 /**
  * 工具块 → 执行态块。
  *
- * computer / browser 类调用的「点哪、输什么」对用户没有审计价值，有价值的是
- * 「它正在屏幕上做什么」——所以这类调用不进军工具流水，而是渲染成一张执行态卡：
- * 动作 + 状态 + 可展开步骤 + 截图。与工具卡的分工见 types.ts 里 execution 的注释。
+ * computer / browser / 桌面控制 MCP 类调用的「点哪、输什么」对用户没有审计价值，
+ * 有价值的是「它正在屏幕上做什么」——所以这类调用不进工具流水，而是渲染成一张执行态卡：
+ * 动作 + 状态 + 可展开步骤 + 实时/结果截图。与工具卡的分工见 types.ts 里 execution 的注释。
  */
 function toolRunToExecution(run: ToolRun): MessageBlock {
-  const action = executionActionOf(run.name)
+  const action = executionActionOf(run.name, run.status)
   const detail = summarizeToolArgs(run.args ?? '')
   const shot = run.images !== undefined && run.images.length > 0 ? run.images[0] : undefined
   const failure = run.status === 'error' ? errorMessageOf(run.result) : null
@@ -580,19 +584,127 @@ function toolRunToExecution(run: ToolRun): MessageBlock {
 }
 
 /**
- * 执行态块：状态图标 + 中文动作 + 可展开步骤 + 可选截图。
+ * 执行态块：状态图标 + 中文动作 + 可展开步骤 + 实时/完成画面。
  *
- * 外观比工具卡重一档（card 底 + 圆角），因为它回答的是「Bot 此刻在替你做什么」，
- * 属于正文级信息；工具卡是审计信息，故意做得更轻。
+ * 当 Bot 正在调用桌面控制 MCP 时：
+ *  - 头部明确显示「正在控制电脑」与动态呼吸灯；
+ *  - 实时显示屏幕画面流（低频按需抓屏，不存历史回放，零性能浪费，不污染 Token）；
+ *  - 执行完成后冻结在最后画面或工具返回的媒体帧。
  */
 function ExecutionBlock({ block }: { block: Extract<MessageBlock, { type: 'execution' }> }): JSX.Element {
   const [open, setOpen] = useState(false)
   const [mediaFailed, setMediaFailed] = useState(false)
+  const [liveScreenUrl, setLiveScreenUrl] = useState<string>('')
+
+  const isDesktop = isDesktopControlTool(block.tool ?? '') || /电脑|桌面/i.test(block.label)
+  const isRunning = block.status === 'running'
   const media = block.media ?? ''
+
   useEffect(() => { setMediaFailed(false) }, [media])
+
+  // 当处于桌面控制且正在执行 (running) 时，按需温和轮询宿主实时桌面画面帧（每 1000ms 一次）
+  useEffect(() => {
+    if (!isDesktop || !isRunning) return
+
+    let canceled = false
+    let timer: any = null
+
+    const fetchNextFrame = (): void => {
+      if (canceled) return
+      const img = new Image()
+      const url = `/api/personal-agent/desktop-screen?t=${Date.now()}`
+      img.onload = () => {
+        if (canceled) return
+        setLiveScreenUrl(url)
+        // 成功加载后延迟 1000ms 拉下一帧，避免网络请求堆积
+        timer = setTimeout(fetchNextFrame, 1000)
+      }
+      img.onerror = () => {
+        if (canceled) return
+        // 失败（如暂无权限）时延长至 2500ms 重试
+        timer = setTimeout(fetchNextFrame, 2500)
+      }
+      img.src = url
+    }
+
+    fetchNextFrame()
+
+    return () => {
+      canceled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [isDesktop, isRunning])
+
   const steps = block.steps ?? []
   const expandable = steps.length > 0
-  const mediaKind = media === '' ? null : artifactKindOf(pathOfFileUrl(media) ?? media)
+
+  // 优先级：MCP 返回的高清媒体帧优先；若无，且属于桌面控制，则展示实时桌面画面帧
+  const displayMedia = (media !== '' && !mediaFailed) ? media : (isDesktop && liveScreenUrl !== '' ? liveScreenUrl : '')
+  const isLiveStream = displayMedia === liveScreenUrl && liveScreenUrl !== '' && isRunning
+  const mediaKind = displayMedia === '' ? null : artifactKindOf(pathOfFileUrl(displayMedia) ?? displayMedia)
+  // 桌面控制 MCP：用户要求极致简要，严格保持「一句话 + 画面」，不展示冗杂的步骤与工具名
+  if (isDesktop) {
+    const label = isRunning
+      ? '正在控制电脑...'
+      : block.status === 'error'
+        ? '电脑控制中断'
+        : '已完成电脑控制'
+    return (
+      <div className="pa-exec pa-exec--desktop" data-status={block.status}>
+        <div className="pa-exec__head pa-exec__head--simple">
+          <span className="pa-exec__glyph" aria-hidden="true">
+            <IconMonitor size={15} />
+          </span>
+          <span className="pa-exec__label">{label}</span>
+          {isRunning ? (
+            <span className="pa-exec__spinner" aria-label="控制中" />
+          ) : block.status === 'error' ? (
+            <span className="pa-exec__icon" data-state="error"><IconX size={13} /></span>
+          ) : (
+            <span className="pa-exec__icon" data-state="ok"><IconCheck size={13} /></span>
+          )}
+        </div>
+        {displayMedia !== '' && (mediaKind === 'image' || mediaKind === 'video') ? (
+          <div className="pa-exec__media">
+            <div className="pa-exec__viewport">
+              {isRunning ? (
+                <span className="pa-exec__live-tag" title="当前桌面实时画面">
+                  <span className="pa-exec__live-dot" />
+                  <span>实时画面</span>
+                </span>
+              ) : null}
+              {mediaKind === 'video' ? (
+                <video className="pa-exec__shot" src={displayMedia} controls playsInline preload="metadata" />
+              ) : (
+                <a href={displayMedia} target="_blank" rel="noreferrer" title="查看大图">
+                  <img
+                    className="pa-exec__shot"
+                    src={displayMedia}
+                    alt="桌面画面"
+                    loading="lazy"
+                    decoding="async"
+                    onError={() => {
+                      if (displayMedia === media) setMediaFailed(true)
+                    }}
+                  />
+                </a>
+              )}
+            </div>
+          </div>
+        ) : isRunning ? (
+          <div className="pa-exec__media">
+            <div className="pa-exec__viewport pa-exec__viewport--loading">
+              <span className="pa-exec__loading-text">正在连接桌面画面...</span>
+            </div>
+          </div>
+        ) : null}
+        {block.status === 'error' && block.error !== undefined && block.error !== '' ? (
+          <div className="pa-exec__error">{block.error}</div>
+        ) : null}
+      </div>
+    )
+  }
+
   const statusText = block.status === 'running' ? '执行中' : block.status === 'error' ? '失败' : '已完成'
   const toggle = (): void => {
     if (expandable) setOpen((value) => !value)
@@ -603,6 +715,7 @@ function ExecutionBlock({ block }: { block: Extract<MessageBlock, { type: 'execu
       data-status={block.status}
       data-open={open ? 'true' : 'false'}
       data-expandable={expandable ? 'true' : 'false'}
+      data-kind="generic"
     >
       <div
         className="pa-exec__head"
@@ -618,7 +731,9 @@ function ExecutionBlock({ block }: { block: Extract<MessageBlock, { type: 'execu
           }
         }}
       >
-        <span className="pa-exec__glyph" aria-hidden="true"><IconCpu size={15} /></span>
+        <span className="pa-exec__glyph" aria-hidden="true">
+          {isDesktop ? <IconMonitor size={15} /> : <IconCpu size={15} />}
+        </span>
         <span className="pa-exec__main">
           <span className="pa-exec__label">{block.label}</span>
           <span className="pa-exec__meta">
@@ -637,22 +752,32 @@ function ExecutionBlock({ block }: { block: Extract<MessageBlock, { type: 'execu
       {block.status === 'error' && block.error !== undefined && block.error !== ''
         ? <div className="pa-exec__error">{block.error}</div>
         : null}
-      {media !== '' && !mediaFailed && (mediaKind === 'image' || mediaKind === 'video') ? (
+      {displayMedia !== '' && (mediaKind === 'image' || mediaKind === 'video') ? (
         <div className="pa-exec__media">
-          {mediaKind === 'video' ? (
-            <video className="pa-exec__shot" src={media} controls playsInline preload="metadata" />
-          ) : (
-            <a href={media} target="_blank" rel="noreferrer" title="查看大图">
-              <img
-                className="pa-exec__shot"
-                src={media}
-                alt="执行截图"
-                loading="lazy"
-                decoding="async"
-                onError={() => setMediaFailed(true)}
-              />
-            </a>
-          )}
+          <div className="pa-exec__viewport">
+            {isLiveStream ? (
+              <span className="pa-exec__live-tag" title="当前桌面实时画面">
+                <span className="pa-exec__live-dot" />
+                <span>实时画面</span>
+              </span>
+            ) : null}
+            {mediaKind === 'video' ? (
+              <video className="pa-exec__shot" src={displayMedia} controls playsInline preload="metadata" />
+            ) : (
+              <a href={displayMedia} target="_blank" rel="noreferrer" title="查看大图">
+                <img
+                  className="pa-exec__shot"
+                  src={displayMedia}
+                  alt={isLiveStream ? '当前屏幕实时画面' : '执行截图'}
+                  loading="lazy"
+                  decoding="async"
+                  onError={() => {
+                    if (displayMedia === media) setMediaFailed(true)
+                  }}
+                />
+              </a>
+            )}
+          </div>
         </div>
       ) : null}
       <div className="pa-exec__body">

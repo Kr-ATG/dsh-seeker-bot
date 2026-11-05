@@ -1025,6 +1025,25 @@ export function BotSettingsCard(): JSX.Element | null {
                 rows={3}
               />
             </div>
+            <div className="pa-bset-row" style={{ marginTop: 14, marginBottom: 8 }}>
+              <div className="pa-bset-row__main">
+                <b>通俗解释 (ELI5 模式)</b>
+                <span>像跟5岁小孩或非专业朋友聊天一样，用生活化比喻和大白话解释复杂抽象概念；专业或编程类 Bot 可随时关闭</span>
+              </div>
+              <button
+                className="pa-bset-switch"
+                type="button"
+                data-on={bot.eli5Mode !== false ? 'true' : 'false'}
+                aria-label={bot.eli5Mode !== false ? '关闭通俗解释模式' : '开启通俗解释模式'}
+                onClick={() => {
+                  const next = bot.eli5Mode === false ? true : false
+                  actions.updateBot(bot.id, { eli5Mode: next })
+                  actions.toast(next ? '已开启通俗解释 (ELI5)' : '已关闭通俗解释 (ELI5)')
+                }}
+              >
+                <i />
+              </button>
+            </div>
             <div className="pa-sheet-inline-actions">
               <button className="pa-btn pa-btn--primary pa-btn--sm" type="button" onClick={saveProfile}>
                 保存资料
@@ -1081,7 +1100,7 @@ export function BotSettingsCard(): JSX.Element | null {
                 onChange={(next) => actions.updateBot(bot.id, { voice: next })}
               />
               <p className="pa-sheet-hint">
-                语音通话与「自动朗读」共用这套音色，下一通电话 / 下一次朗读生效。
+                语音通话与「自动朗读」共用这套音色，下一通电话 / 下一次朗读生效。自动播报开关在聊天会话头（通话按钮左侧）。
               </p>
             </div>
             <div className="pa-sheet-field-row">
@@ -1104,24 +1123,11 @@ export function BotSettingsCard(): JSX.Element | null {
               </p>
             </div>
             {/*
-             * 自动朗读：朗读走的就是上面这套「音色 + Live 供应商」，所以开关放在
-             * 同一个分区里 —— 用户不该为了「让它念出来」再去别处配第二套 TTS。
+             * 「自动朗读回复」的开关不在这一页（2026-11-05 撤掉）：它已经挪到聊天
+             * 会话头——通话按钮左侧的喇叭按钮，悬停还能调朗读音量。这一页只留音色
+             * 与供应商：「配声音」是长期设置，「拨开关」是天天要做的动作，后者该在
+             * 一眼就能看到的地方。同一份字段只由 AutoSpeakButton 维护，这里不再重复。
              */}
-            <div className="pa-bset-row">
-              <div className="pa-bset-row__main">
-                <b>自动朗读回复</b>
-                <span>打开后新回复会自动用通话里设置的音色与供应商朗读；气泡右侧的喇叭按钮可以随时点播</span>
-              </div>
-              <button
-                className="pa-bset-switch"
-                type="button"
-                data-on={bot.autoSpeak === true ? 'true' : 'false'}
-                aria-label={bot.autoSpeak === true ? '关闭自动朗读回复' : '开启自动朗读回复'}
-                onClick={() => actions.updateBot(bot.id, { autoSpeak: bot.autoSpeak !== true })}
-              >
-                <i />
-              </button>
-            </div>
           </SheetSection>
           ) : null}
 

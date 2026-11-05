@@ -271,3 +271,21 @@ export function IconSun({ size, className }: IconProps): JSX.Element {
 export function IconMoon({ size, className }: IconProps): JSX.Element {
   return <Svg size={size} className={className}><path d="M20.5 14.5A8.5 8.5 0 0 1 9.5 3.5a8.5 8.5 0 1 0 11 11Z" /></Svg>
 }
+
+export function IconMonitor({ size, className }: IconProps): JSX.Element {
+  return (
+    <Svg size={size} className={className}>
+      <rect x="2" y="3" width="20" height="14" rx="2" />
+      <path d="M8 21h8M12 17v4" />
+    </Svg>
+  )
+}
+
+export function IconCamera({ size, className }: IconProps): JSX.Element {
+  return (
+    <Svg size={size} className={className}>
+      <path d="M14.5 4h-5L7.5 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3.5l-2-3Z" />
+      <circle cx="12" cy="13" r="3.5" />
+    </Svg>
+  )
+}

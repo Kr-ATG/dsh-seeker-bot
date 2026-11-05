@@ -9,7 +9,7 @@
  *  · 整段 WAV 路径（旧宿主）走真实的 decodeAudioData 分支；
  *  · 流式路径（新宿主）用 mock PcmPlayer 断言「边收边播」的逐块入队语义。
  *
- * 另加一批源码断言，保证界面接线（喇叭按钮 / 自动朗读开关 / 播放中样式）与
+ * 另加一批源码断言，保证界面接线（喇叭按钮 / 会话头自动播报开关 / 音量滑条 / 播放中样式）与
  * 流式契约（stream: true、MIME / 采样率响应头）没有被后续改动悄悄拆掉。
  *
  * 用法：node scripts/test-speech-client.mjs
@@ -88,6 +88,7 @@ const mock = {
   sources: [],
   players: [],
   enqueued: [],
+  gains: [],
   decoded: 0,
   ensureRunning: 0,
   interrupts: 0,
@@ -114,7 +115,9 @@ class FakeAudioContext {
   }
 
   createGain() {
-    return { gain: { value: 1 }, connect: () => {}, disconnect: () => {} }
+    const node = { gain: { value: 1 }, connect: () => {}, disconnect: () => {} }
+    mock.gains.push(node)
+    return node
   }
 
   createBufferSource() {
@@ -147,6 +150,22 @@ class FakeAudioContext {
 }
 
 globalThis.AudioContext = FakeAudioContext
+
+/*
+ * localStorage mock：朗读音量在模块加载时就要从它读回上次的值（真实浏览器里
+ * 当然有）。没有它，speech.ts 会走 `typeof localStorage === 'undefined'` 的
+ * 兜底分支，音量相关断言就测不到持久化这条路径。
+ */
+const storage = new Map()
+globalThis.localStorage = {
+  getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+  setItem: (key, value) => {
+    storage.set(key, String(value))
+  },
+  removeItem: (key) => {
+    storage.delete(key)
+  },
+}
 
 const defaultHandler = async () => new Response(new Uint8Array([1, 2, 3, 4]), {
   status: 200,
@@ -182,6 +201,8 @@ const {
   SPEECH_MAX_CHARS,
   SPEECH_CHUNK_CHARS,
   splitSpeechChunks,
+  getSpeechVolume,
+  setSpeechVolume,
 } = await import(pathToFileURL(outfile).href)
 
 /** 造一段 PCM16 字节（小端），长度 = samples 个采样。 */
@@ -577,7 +598,43 @@ check('多段 text 块拼接', speechTextOf({
 }) === '第一段 第二段')
 
 /* ------------------------------------------------------------------ */
-/* 17. 源码接线断言（防止后续改动把界面入口 / 流式契约悄悄拆掉）          */
+/* 17. 朗读音量（会话头音量浮层控制的就是这个值）                        */
+/* ------------------------------------------------------------------ */
+
+check('没存过音量 → 满音量', getSpeechVolume() === 1, String(getSpeechVolume()))
+setSpeechVolume(0.35)
+check('setSpeechVolume 立即生效', Math.abs(getSpeechVolume() - 0.35) < 1e-9, String(getSpeechVolume()))
+check('音量写进 localStorage', storage.get('pa:speech-volume:v1') === '0.35', String(storage.get('pa:speech-volume:v1')))
+setSpeechVolume(2)
+check('音量上界钳到 1', getSpeechVolume() === 1, String(getSpeechVolume()))
+setSpeechVolume(-3)
+check('音量下界钳到 0', getSpeechVolume() === 0, String(getSpeechVolume()))
+setSpeechVolume(Number.NaN)
+check('非数字音量回满音量', getSpeechVolume() === 1, String(getSpeechVolume()))
+
+// 流式路径：PcmPlayer 重建后必须沿用当前音量（新实例默认满音量）
+const volumePlayer = mock.players.at(-1)
+check('存在流式播放器（primeSpeech / 播放过）', volumePlayer !== undefined)
+setSpeechVolume(0.42)
+check('音量实时写进 PcmPlayer', volumePlayer !== undefined && Math.abs(volumePlayer.volume - 0.42) < 1e-9, String(volumePlayer?.volume))
+
+// 整段 WAV 路径：主增益是模块级缓存，同样要跟着变
+const volumeGain = mock.gains.at(-1)
+check('存在 WAV 主增益（播放过）', volumeGain !== undefined)
+setSpeechVolume(0.66)
+check('音量实时写进 WAV 主增益', volumeGain !== undefined && Math.abs(volumeGain.gain.value - 0.66) < 1e-9, String(volumeGain?.gain.value))
+
+// 重建上下文（浏览器休眠后旧 context 会 closed）时要沿用已存的音量，不能回落满音量
+await tick(10)
+for (const context of mock.contexts) context.state = 'closed'
+setSpeechVolume(0.25)
+primeSpeech()
+await tick(10)
+const rebuiltGain = mock.gains.at(-1)
+check('重建上下文沿用音量', rebuiltGain !== undefined && Math.abs(rebuiltGain.gain.value - 0.25) < 1e-9, String(rebuiltGain?.gain.value))
+
+/* ------------------------------------------------------------------ */
+/* 18. 源码接线断言（防止后续改动把界面入口 / 流式契约悄悄拆掉）          */
 /* ------------------------------------------------------------------ */
 
 const read = (rel) => readFileSync(resolve(ROOT, rel), 'utf8')
@@ -619,8 +676,14 @@ check('MessageList 记录已播消息（首次挂载不重播历史）', message
 check('MessageList pending 消息不自动播', messageListSrc.includes('last.pending === true'))
 
 const settingsSrc = read('src/client/personal/shell/BotSettingsCard.tsx')
-check('设置卡有自动朗读开关', settingsSrc.includes('自动朗读回复') && settingsSrc.includes('autoSpeak'))
-check('设置卡开关复用 pa-bset-switch', settingsSrc.includes('pa-bset-switch'))
+/*
+ * 2026-11-05：设置卡里那个重复的「自动朗读回复」开关已撤掉，入口统一到会话头。
+ * 三条断言一起盯：设置卡不得再出现该字段 / 开关按钮，但音色与 Live 供应商必须
+ * 还在（撤的是入口，不是语音配置），设置卡的其它开关也不能被连带删掉。
+ */
+check('设置卡不再有自动朗读开关（唯一入口在会话头）', !settingsSrc.includes('autoSpeak') && !settingsSrc.includes('关闭自动朗读回复'))
+check('设置卡语音页仍保留音色 / Live 供应商', settingsSrc.includes('通话音色') && settingsSrc.includes('通话供应商'))
+check('设置卡仍有其它开关（pa-bset-switch 未被整块带走）', settingsSrc.includes('pa-bset-switch'))
 
 const typesSrc = read('src/client/personal/types.ts')
 check('Bot 类型有 autoSpeak 可选字段', typesSrc.includes('autoSpeak?: boolean'))
@@ -632,6 +695,48 @@ const chatCssSrc = read('src/client/personal/chat/chat.css.ts')
 check('CSS 有播放中态选择器', chatCssSrc.includes("button.pa-msg__tool[data-speaking='true']"))
 check('CSS 有脉冲关键帧', chatCssSrc.includes('@keyframes pa-msg-speaking'))
 check('CSS 播放中态遵守 reduced-motion', chatCssSrc.includes('button.pa-msg__tool[data-speaking=\'true\'] { animation: none; }'))
+
+/*
+ * 自动播报开关（2026-11-05）：从设置卡挪到会话头、放在通话按钮左侧，悬停出
+ * 音量条，并成为**唯一入口**（设置卡那个重复开关已删）。下面几条盯住「入口在
+ * 通话按钮左侧」「读写的是 Bot 数据里的那一份字段」「群聊不出现无效果入口」这
+ * 三件容易被后续重构悄悄拆掉的事。
+ */
+const chatPanelSrc = read('src/client/personal/chat/ChatPanel.tsx')
+check('ChatPanel 引入自动播报按钮', chatPanelSrc.includes("from './AutoSpeakButton.tsx'"))
+check(
+  '自动播报按钮在通话按钮左侧',
+  chatPanelSrc.includes('<AutoSpeakButton />')
+    && chatPanelSrc.indexOf('<AutoSpeakButton />') < chatPanelSrc.indexOf('onClick={handleCall}'),
+)
+const autoSpeakSrc = read('src/client/personal/chat/AutoSpeakButton.tsx')
+check('自动播报读写 bot.autoSpeak（Bot 数据里唯一的那份）', autoSpeakSrc.includes('activeBot.autoSpeak') && autoSpeakSrc.includes('actions.updateBot'))
+check('自动播报悬停展开音量浮层', autoSpeakSrc.includes('onMouseEnter') && autoSpeakSrc.includes('onMouseLeave') && autoSpeakSrc.includes('closeSoon'))
+check('音量浮层用共用 VolumeSlider 接 setSpeechVolume', autoSpeakSrc.includes('VolumeSlider') && autoSpeakSrc.includes('setSpeechVolume'))
+check('群聊不渲染自动播报', autoSpeakSrc.includes('activeRoom !== null') && autoSpeakSrc.includes('return null'))
+check('CSS 有自动播报浮层', chatCssSrc.includes('.pa-autospeak__panel'))
+check('自动播报浮层遵守 reduced-motion', chatCssSrc.includes('.pa-autospeak__panel { animation: none; }'))
+
+/*
+ * 音量滑条（2026-11-05）：用户要求「拖动条要有明显的粗细变化」，落地为
+ * 「已选段粗 / 未选段细」；通话弹层与会话头浮层共用同一个组件与同一套样式。
+ * 这几条把「两段粗细差」「两处共用」「原生交互仍在」三件事钉住——它们都是
+ * 纯视觉约定，没有渲染测试会在改样式时报警。
+ */
+const baseCssSrc = read('src/client/personal/base.css.ts')
+const vsSrc = read('src/client/personal/shared/VolumeSlider.tsx')
+const callOverlaySrc = read('src/client/personal/call/CallOverlay.tsx')
+const callCssSrc = read('src/client/personal/call/call.css.ts')
+check(
+  '音量滑条已选段明显比未选段粗',
+  /\.pa-vs__fill[\s\S]{0,400}height: 10px/.test(baseCssSrc)
+    && /\.pa-vs__rest[\s\S]{0,400}height: 4px/.test(baseCssSrc),
+)
+check('悬停 / 拖动时两段一起加粗一档', baseCssSrc.includes('.pa-vs:hover .pa-vs__fill') && baseCssSrc.includes('.pa-vs:hover .pa-vs__rest'))
+check('共用滑条保留原生 range 语义（键盘 / 读屏）', vsSrc.includes('type="range"') && vsSrc.includes('aria-valuetext') && vsSrc.includes('--pa-vs-fill'))
+check('通话弹层与自动播报共用同一音量滑条', callOverlaySrc.includes('VolumeSlider') && autoSpeakSrc.includes('VolumeSlider'))
+check('两处各自只指定颜色 / 底色变量', callCssSrc.includes('--pa-vs-color') && chatCssSrc.includes('--pa-vs-color'))
+check('旧的两套单条 range 样式已删除', !callCssSrc.includes('.pa-call__volume-range') && !chatCssSrc.includes('.pa-autospeak__range'))
 
 const protocolSrc = read('src/shared/realtime-protocol.ts')
 check('契约里有 TTS 端点常量', protocolSrc.includes('REALTIME_TTS_PATH'))

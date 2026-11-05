@@ -47,6 +47,7 @@ import {
 } from '../../spill/materialize.ts'
 import { admitSpillPath, spillRoots } from '../../spill/index.ts'
 import { archiveArtifactFile, ensureBotOutputDirs, sanitizeBotFolderName } from './outputs.ts'
+import { iuKindOf } from '../../client/iu/kinds/registry.ts'
 import { installBotApproval } from './approval.ts'
 import { installBotQuestions, requestApprovalPick, requestPick } from './questions.ts'
 import { clearWorkingRecallMarks, isWorkingMessageRecalled, isWorkingTurnRecalled, readWorkingTasks, upsertWorkingTask, type WorkingTask, type WorkingTaskStep } from './working-memory.ts'
@@ -115,6 +116,11 @@ export interface BotAgentSpec {
    * 可选：同样由 `ensureBotAgent` 回填，提示词据此列出 9 个分类目录。
    */
   outputRoot?: string
+  /**
+   * 通俗解释（ELI5 模式）：像跟朋友聊天或给五岁小孩解释一样，多打生活比喻、不说黑话、直截了当。
+   * 缺省或 true 为开启，显式为 false 时关闭。
+   */
+  eli5Mode?: boolean
 }
 
 /** 工具产出的可预览文件类型（按扩展名归族，决定卡片图标与预览方式）。 */
@@ -551,10 +557,50 @@ export const BOT_REPLY_CONTRACT: string = [
   '- 要在几个方案里挑一个 → ```iu 的 tabs（轻量二选一也可以走 bot_emit 的 options）；',
   '- 要逐项打勾 / 分列跟进 / 排时间线 → ```iu 的 checklist / kanban / timeline；',
   '- 要用户填几项再提交 → ```iu 的 form；',
+  '- 查天气预报 / 气温气象 / 生活出行建议 → ```iu 的 weather（绝不要正文罗列一堆天气数字）；',
+  '- 查行情 / 股价 / 汇率 / 基金 / 体重这类「数值 + 走势」→ ```iu 的 quote（series 传一段数值，卡里会画迷你走势线）；',
+  '- 用户要链接、原文出处、参考资料地址 → ```iu 的 link（链接必须是可点的卡片，不要贴裸 URL，也不要让用户自己去搜）；',
   '- 要看比例、趋势、结构、流程、架构 → ```html 手写内联 SVG（绝不要用文字节点凑图）。',
   '解释、结论、判断、寒暄、一句话能说清的事 → 纯文字，不要为了出卡而出卡。',
   '写法：卡是论据不是结论——一句引出 → 围栏 → 一句落点，别让卡片成为回复的最后一段；卡里不要复述正文；一条回复最多 1–2 张。',
   '围栏语言标记必须正好是 iu 或 html；iu 围栏里只写一行合法 JSON（不要注释、不要示例值）。',
+].join('\n')
+
+/**
+ * Bot 高频出卡的 kind 白名单（按 Bot 对话里最可能用到的顺序）。
+ *
+ * 只取这几个，不是全部 13 种：Bot 的提示词本来就比 Work 精简（正文 1–3 句、
+ * 不写汇报腔），把整套 kind 文档塞进去会把 4.3k 字符的提示词直接翻倍，而
+ * 「钢琴 / 自测题」这类 kind 在聊天场景里几乎不会出现。
+ */
+const BOT_CARD_KINDS = ['weather', 'quote', 'link', 'table', 'tabs', 'checklist', 'timeline', 'kanban', 'form'] as const
+
+/**
+ * Bot 的卡片字段速查（**从 kind 注册表取，不手写第二份**）。
+ *
+ * ## 为什么必须有这一段（真实事故）
+ *
+ * 2026-11-05 用户问「今天深圳天气」，Bot 回了两段纯文字（气温、体感、紫外线
+ * 全对），**一张卡都没出**。查下来不是模型不听话，是提示词只说了一句
+ * 「查天气 → ```iu 的 weather」，却**从没给过 weather 的 JSON 长什么样** ——
+ * 模型知道该用哪个 kind，但不知道字段名（city / temp / condition / forecast…），
+ * 猜不中的时候宁可写一段漂亮文字，也不愿意吐一个大概率被判定非法而回退成
+ * 代码块的围栏。**只给 kind 名、不给字段 = 等于没给。**
+ *
+ * ## 为什么从注册表取而不是在这里手写
+ *
+ * kind 的字段定义在 `kinds/<kind>.ts` 的 `doc` 里，渲染实现也在同一个文件。
+ * 手写第二份的结果必然是漂移：改了字段名、注入文档还写着旧名，模型照着旧名
+ * 写，卡片静默降级成代码块——而这**不报错、也不打日志**，只能靠用户截图发现。
+ * （同仓踩过：piano 的 `showNotes` 实现了，手写文档从没提过，模型永远不知道
+ * 能用它。）
+ *
+ * 注册表是**纯逻辑半边**（零 React），host 半身可以安全 import —— 既有先例是
+ * `src/shot/card.ts`，它同样在 host 侧消费 registry 的 snapshot / css / doc。
+ */
+export const BOT_CARD_CHEATSHEET: string = [
+  '## 出卡的 JSON 长什么样（照字段写，别自己起名）',
+  ...BOT_CARD_KINDS.map((kind) => iuKindOf(kind)?.doc ?? '').filter((line) => line !== ''),
 ].join('\n')
 
 /**
@@ -601,6 +647,40 @@ export const BOT_SKILL_CONTRACT: string = [
   '- 一件**以后还会重复**的事跑顺了（同一套步骤、同一批数据源、同一种产出），收尾时主动问一句：「这套流程要不要存成 skill / 例行任务？」',
   '- 用 bot_emit(kind=need-input) 带上 options（如 ["存成 skill","设成例行任务","先不用"]），用户点一下就行。',
   '- 只问一次；一次性的事、纯问答不要问。',
+].join('\n')
+
+/**
+ * 点名派活契约：用户 @ 了某个 Bot 时，这件事该交给它，而不是自己做。
+ *
+ * 为什么必须写进提示词：私聊里 @ 只是一段文本，模型默认会自己把活干完，然后
+ * 回一句「我已经让采集去做了」——活其实没派出去，用户以为派了。宿主那层注入
+ * （见 ./mentions.ts）只负责「谁被点名、它的 bot id 是什么」，**要不要真的派**
+ * 仍然由模型决定，所以这一条要和它配套出现。
+ *
+ * 「一句话能答、或它做不了」这两个例外必须写：不写的话，用户只是随口 @ 一下，
+ * 模型也会为一件两秒钟的事起一次完整推理。
+ */
+export const BOT_ASSIGN_CONTRACT: string = [
+  '## 用户 @ 了某个 Bot（点名派活）',
+  '- 用户正文里 @ 了某个 Bot，意思就是「这件事交给它」：用 coordinate_bots 派出去，不要自己做完再转述。',
+  '- message 写清「做什么、交付什么」——它看不到你和用户的对话。',
+  '- 派完用一句话回用户（「已经交给采集了，等它回来我转给你」），不要照着任务再复述一遍。',
+  '- 一句话能答、或那个 Bot 明显做不了时，自己处理并说明为什么不派。',
+].join('\n')
+
+/**
+ * 通俗解释契约（ELI5 模式）：像跟5岁小孩或零基础朋友聊天一样通俗易懂。
+ *
+ * 默认对所有 Bot 开启，只有当 spec.eli5Mode === false 时关闭。
+ * 与 BOT_REPLY_CONTRACT 配合，确保解答概念、说明原理时绝不堆砌晦涩专业黑话，
+ * 遇到复杂/抽象概念一律先打生动的日常比喻，用最平实的生活常识拆解。
+ */
+export const BOT_ELI5_CONTRACT: string = [
+  '## 通俗表达约定（ELI5 模式，默认启用）',
+  '- 像跟非专业朋友或给五岁小孩解释一样说话：语言平易近人，绝不堆砌晦涩艰深的学术术语、工程黑话或抽象大词。',
+  '- 善用生活比喻：遇到抽象机制、复杂流程或技术概念，必须打一个贴近日常生活的生动比喻来类比说明，先让对方在脑海中建立直观画面。',
+  '- 拆解本质：把复杂问题拆成最朴素直白的常识（它是什么、解决了什么现实麻烦、像生活中的什么）。',
+  '- 如果必须出现专业术语或英文缩写，紧接着在括号里或下一句用大白话解释，不要默认对方懂。',
 ].join('\n')
 
 /**
@@ -669,6 +749,10 @@ function buildBotPrompt(spec: BotAgentSpec): string {
     // 回复形态（正文精炼 + 出卡）走共享常量：两个出口必须用同一份措辞
     BOT_REPLY_CONTRACT,
     '',
+    // 卡片的**字段结构**紧跟其后：上面只说「该出哪种卡」，这里说「字段怎么填」。
+    // 两段必须连着出现——中间隔开别的内容，模型容易只读到前一段就动笔。
+    BOT_CARD_CHEATSHEET,
+    '',
     '## 什么时候单独播报（bot_emit）',
     '你的每段正文都会成为一条独立消息，所以**普通进度不需要调用任何工具**。',
     '执行过程中不要每做一步就说一句。工具调用之间不要输出正文；只有真正值得用户立刻知道的发现才用 `bot_emit(kind=finding)` 播报一条。',
@@ -691,6 +775,10 @@ function buildBotPrompt(spec: BotAgentSpec): string {
     BOT_MEMORY_CONTRACT,
     '',
     BOT_SKILL_CONTRACT,
+    '',
+    BOT_ASSIGN_CONTRACT,
+    '',
+    spec.eli5Mode !== false ? BOT_ELI5_CONTRACT : '',
   ].filter((line) => line !== '').join('\n')
 }
 

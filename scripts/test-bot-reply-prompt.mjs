@@ -161,6 +161,69 @@ try {
     assert.ok(agent.BOT_SKILL_CONTRACT.includes('顺手把流程留下来'))
   })
 
+  /* ───────────────── BOT_ELI5_CONTRACT 与 eli5Mode 开关 ───────────────── */
+
+  console.log('\n[契约 · BOT_ELI5_CONTRACT 与开关]')
+
+  check('导出 BOT_ELI5_CONTRACT 字符串且含核心要求', () => {
+    assert.equal(typeof agent.BOT_ELI5_CONTRACT, 'string')
+    assert.ok(agent.BOT_ELI5_CONTRACT.includes('通俗表达约定（ELI5 模式，默认启用）'))
+    assert.ok(agent.BOT_ELI5_CONTRACT.includes('善用生活比喻'))
+    assert.ok(agent.BOT_ELI5_CONTRACT.includes('拆解本质'))
+  })
+
+  check('buildBotPrompt 源码按 spec.eli5Mode !== false 条件拼接 BOT_ELI5_CONTRACT', () => {
+    assert.ok(agentSource.includes("spec.eli5Mode !== false ? BOT_ELI5_CONTRACT : ''"))
+  })
+
+  /* ───────────────── 出卡字段速查（2026-11-05 用户实测「问天气不出卡」）───────────────── */
+
+  console.log('\n[契约 · 出卡字段速查]')
+
+  check('导出 BOT 卡片字段速查表且含 weather 完整字段', () => {
+    const text = agent.BOT_CARD_CHEATSHEET
+    assert.equal(typeof text, 'string')
+    // 一句「查天气 → weather」不够：模型必须知道 JSON 长什么样才写得出来。
+    assert.ok(text.includes('出卡的 JSON 长什么样'), '缺少速查表标题')
+    assert.ok(text.includes('"kind":"weather"'), '速查表缺 weather 示例 JSON')
+    assert.ok(text.includes('"city"'), '速查表缺 city 字段')
+    assert.ok(text.includes('"temp"'), '速查表缺 temp 字段')
+    assert.ok(text.includes('"forecast"'), '速查表缺 forecast 字段')
+  })
+
+  check('速查表覆盖 Bot 高频 kind（table / tabs / checklist）', () => {
+    const text = agent.BOT_CARD_CHEATSHEET
+    assert.ok(text.includes('"kind":"table"'), '缺 table')
+    assert.ok(text.includes('"kind":"tabs"'), '缺 tabs')
+    assert.ok(text.includes('"kind":"checklist"'), '缺 checklist')
+  })
+
+  check('速查表覆盖行情与链接（quote / link）', () => {
+    const text = agent.BOT_CARD_CHEATSHEET
+    assert.ok(text.includes('"kind":"quote"'), '缺 quote 示例 JSON')
+    assert.ok(text.includes('"series"'), 'quote 缺 series 字段（不写就没走势线）')
+    assert.ok(text.includes('"kind":"link"'), '缺 link 示例 JSON')
+    assert.ok(text.includes('"url"'), 'link 缺 url 字段')
+  })
+
+  check('claude 速查表**从注册表取**，不在 agent.ts 里手写第二份', () => {
+    // 手写第二份必然漂移：改了 kind 字段、文档还写旧名，卡片静默降级成代码块。
+    assert.ok(agentSource.includes("import { iuKindOf } from '../../client/iu/kinds/registry.ts'"), '没 import kind 注册表')
+    assert.ok(agentSource.includes("iuKindOf(kind)?.doc"), '速查表必须取注册表的 doc 字段')
+    // 反向确认：agent.ts 里不该出现手抄的 weather 示例 JSON 字面量。
+    assert.ok(!agentSource.includes('"kind":"weather","city":"北京"'), 'agent.ts 不许手写 weather 示例（会漂移）')
+  })
+
+  check('buildBotPrompt 把速查表紧跟在回复契约之后', () => {
+    const reply = agentSource.indexOf('BOT_REPLY_CONTRACT,', agentSource.indexOf('function buildBotPrompt('))
+    const cheat = agentSource.indexOf('BOT_CARD_CHEATSHEET,', agentSource.indexOf('function buildBotPrompt('))
+    assert.ok(reply > 0, 'buildBotPrompt 没接 BOT_REPLY_CONTRACT')
+    assert.ok(cheat > reply, '速查表必须排在回复契约之后（先讲该不该出卡，再讲字段怎么填）')
+    // 两者之间不该隔进别的契约常量：间隔太远模型容易只读前一段就动笔。
+    const between = agentSource.slice(reply, cheat)
+    assert.ok(!between.includes('BOT_SAFETY_CONTRACT'), '速查表被安全契约挤到后面去了')
+  })
+
   /* ───────────────── esbuild 冒烟 ───────────────── */
 
   console.log('\n[esbuild 冒烟]')

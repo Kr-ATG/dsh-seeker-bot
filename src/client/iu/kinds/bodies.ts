@@ -31,6 +31,9 @@ import { TimelineBody } from './timeline.body.tsx'
 import { TreeBody } from './tree.body.tsx'
 import { GaugeBody } from './gauge.body.tsx'
 import { QuizBody } from './quiz.body.tsx'
+import { WeatherBody } from './weather.body.tsx'
+import { QuoteBody } from './quote.body.tsx'
+import { LinkBody } from './link.body.tsx'
 
 /** Body 组件的统一 props。 */
 export interface IuBodyProps<S extends IuState, Spec extends IuSpecBase> {
@@ -79,4 +82,7 @@ export const IU_BODIES: ReadonlyMap<string, IuKindBody> = new Map<string, IuKind
   ['tree', { kind: 'tree', Body: TreeBody }],
   ['gauge', { kind: 'gauge', Body: GaugeBody }],
   ['quiz', { kind: 'quiz', Body: QuizBody }],
+  ['weather', { kind: 'weather', Body: WeatherBody }],
+  ['quote', { kind: 'quote', Body: QuoteBody }],
+  ['link', { kind: 'link', Body: LinkBody }],
 ])

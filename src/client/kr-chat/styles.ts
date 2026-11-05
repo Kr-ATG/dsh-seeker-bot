@@ -2659,7 +2659,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
 }
 
 @keyframes kr-git-modal-scale-in {
-  from { opacity: 0; transform: scale(0.96) translateY(6px); }
+  from { opacity: 0; transform: scale(0.95) translateY(18px); }
   to { opacity: 1; transform: scale(1) translateY(0); }
 }
 
@@ -2669,11 +2669,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
 }
 
 /*
- * ══ 工作区与自制插件 Git 工作台大盘（宽幅优雅现代版，840px 低饱和列式布局）════
- */
-/*
-/*
- * ══ 工作区与自制插件 Git 工作台大盘（宽幅优雅现代版，840px 低饱和列式布局）════
+ * ══ 工作区与自制插件 Git 工作台大盘与能力调用大盘（宽幅优雅现代版，840px 低饱和列式布局）════
  */
 .kr-git-roster-overlay {
   position: fixed;
@@ -2685,7 +2681,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  animation: kr-git-modal-fade-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation: kr-git-modal-fade-in 300ms ease;
 }
 
 .kr-git-roster-modal {
@@ -2700,7 +2696,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  animation: kr-git-modal-scale-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation: kr-git-modal-scale-in 300ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 /*
@@ -2723,12 +2719,12 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
 
 .kr-git-roster-overlay[data-closing='1'] {
   /* 遮罩淡出用 ease：它不是「被加速甩走」的对象，只是跟着退场。 */
-  animation: kr-git-modal-fade-out 240ms ease forwards;
+  animation: kr-git-modal-fade-out 260ms ease forwards;
 }
 
 .kr-git-roster-overlay[data-closing='1'] .kr-git-roster-modal {
   /* 加速语义曲线：收起比展开更「果断」，不需要入场那种减速收尾。 */
-  animation: kr-git-modal-scale-out 240ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  animation: kr-git-modal-scale-out 260ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
 
 /* 顶部 Header */

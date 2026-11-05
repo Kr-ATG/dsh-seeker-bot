@@ -247,7 +247,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
    * 路由时会静默丢弃写入，回滚会让 UI 显示一个它并不具备的能力，回读拿到的是真实状态。
    */
   const pushChannel = useCallback((
-    key: 'zhEnabled' | 'htmlEnabled' | 'teamEnabled' | 'todoClosureEnabled' | 'todoRuleEnabled' | 'motionEnabled',
+    key: 'zhEnabled' | 'htmlEnabled' | 'teamEnabled' | 'todoClosureEnabled' | 'todoRuleEnabled' | 'motionEnabled' | 'eli5Enabled',
     next: boolean,
   ): void => {
     setBusy(true)
@@ -262,13 +262,15 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
             ? api.setTodoRuleInjectState(next)
             : key === 'motionEnabled'
               ? api.setMotionInjectState(next)
-              : api.setTodoClosureState(next)
+              : key === 'eli5Enabled'
+                ? api.setEli5InjectState(next)
+                : api.setTodoClosureState(next)
     void write
       .then(res => {
-        // 中文 / 自动收口缺字段按开兜底（默认开的内置能力）；html / team 缺字段按
+        // 中文 / 自动收口缺字段按开兜底（默认开的内置能力）；html / team / motion / eli5 缺字段按
         // 关兜底（旧 host 根本没有这个能力，显示「开」是假阳性）—— 与 normalizeInjectState
         // 的口径逐条一致，改这里必须同步改那里。
-        const enabled = key === 'htmlEnabled' || key === 'teamEnabled' || key === 'motionEnabled' ? res.enabled === true : res.enabled !== false
+        const enabled = key === 'htmlEnabled' || key === 'teamEnabled' || key === 'motionEnabled' || key === 'eli5Enabled' ? res.enabled === true : res.enabled !== false
         setState(prev => ({ ...prev, [key]: enabled }))
       })
       .catch(reload)
@@ -357,6 +359,8 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
   const todoRuleOn = state.todoRuleEnabled !== false
   // 动效技能通道与 html / team 同口径（默认关）：缺字段按关。
   const motionOn = state.motionEnabled === true
+  // 通俗解释（ELI5）通道与 motion 同口径（默认关）：缺字段按关。
+  const eli5On = state.eli5Enabled === true
 
   /*
    * 展示组两条：纯呈现偏好，状态在 localStorage（见 reply-card-chrome / tool-calls-visible）。
@@ -457,6 +461,15 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               busy={busy}
               onToggle={() => { pushChannel('motionEnabled', !motionOn) }}
             />
+            <SettingsRow
+              index={4}
+              label="通俗解释 (ELI5)"
+              hint="用生活比喻和大白话解释复杂概念"
+              title="开启后每会话首步注入规则：用通俗平实的语言、生动日常比喻解释抽象概念和技术机制，不堆专业黑话。工程实操部分（代码/命令/配置）保持精准专业。"
+              on={eli5On}
+              busy={busy}
+              onToggle={() => { pushChannel('eli5Enabled', !eli5On) }}
+            />
           </div>
           </div>
 
@@ -472,8 +485,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
                   `D:\AI\E…`，而路径恰恰是「哪个工作区」的唯一无歧义标识；
                 · 它和左栏「提示词通道」是**写入侧 vs 读取侧**的相反语义，并排
                   读起来像同一种能力的两半。
-              搬下去之后左栏 3 行 / 右栏 5 行（「回合结束自动收口」已挪到右栏的
-              「任务清单」组，见下面那段注释），两栏高度差收到约 37px —— 设置面板不是
+              搬下去之后左栏 5 行 / 右栏 4 行，两栏高度均衡 —— 设置面板不是
               表格，剩下的那点差不值得再为它调结构。 */}
           <div className="kr-settings__col kr-settings__col--aside">
 
@@ -490,7 +502,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               <span className="kr-settings__group-scope">本机浏览器 · 不进提示词</span>
             </div>
             <SettingsRow
-              index={4}
+              index={5}
               lead
               label="总结卡外框"
               hint="关掉后不留边框与阴影，退回纯正文"
@@ -503,7 +515,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               onToggle={() => { setReplyCardChromeEnabled(!chromeOn) }}
             />
             <SettingsRow
-              index={5}
+              index={6}
               label="工具调用卡"
               hint="关掉后右栏不显示技术台账"
               title="关掉后 Seeker 右栏不再显示技术向的「工具调用」台账（默认 5 行滚动窗口那张）；人话行动流不受影响。"
@@ -538,7 +550,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               <span className="kr-settings__group-scope">纪律 + 兜底</span>
             </div>
             <SettingsRow
-              index={6}
+              index={7}
               lead
               label="任务清单纪律"
               hint="开工先列、收尾清零"
@@ -548,7 +560,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               onToggle={() => { pushChannel('todoRuleEnabled', !todoRuleOn) }}
             />
             <SettingsRow
-              index={7}
+              index={8}
               label="回合结束自动收口"
               hint="兜底：残留的改回「未完成」"
               title="回合结束时把残留的「进行中」任务项改回「未完成」，右栏任务卡不再挂着没收尾的项。它不进提示词，由 host 在回合结束时直接改清单状态 —— 是上面那条纪律的兜底：模型没自己收拾干净时，这里替它收。"

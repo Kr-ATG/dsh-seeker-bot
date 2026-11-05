@@ -104,6 +104,7 @@ export const FEATURE_COMPONENT: Readonly<Record<string, ComponentId>> = {
   'prompt.todo-rule': 'core',
   'prompt.auto-close': 'core',
   'prompt.motion': 'core',
+  'prompt.eli5': 'core',
 
   // ── 正文卡片（cards）───────────────────────────────────────────────
   'card.html': 'cards',

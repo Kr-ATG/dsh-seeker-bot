@@ -141,7 +141,8 @@ const SKILL_ZH: Record<string, string> = {
   srcUpdateAllPartial: '更新 {ok} 个来源，{failed} 个失败',
   srcUpdateAllEmpty: '没有可更新的来源',
   // 更新进度：「全部更新」改成前端逐条跑，得让用户看见跑到第几条、单条跑了多久
-  srcUpToDate: '已是最新（{commit}）',
+  srcUpToDate: '已是最新（{commit}），已同步',
+  srcForceUpdateTip: '按住 Shift 点击可强制重新克隆安装',
   srcUpdatingSeconds: '更新中… {n}s',
   srcUpdateAllProgress: '正在更新 {i}/{n}：{name}',
   srcUpdateAllChecking: '检查中…',
@@ -371,9 +372,9 @@ const skillApi = {
   /** 检查远端有没有新 commit：只比对不落盘，updates[].hasUpdate 决定要不要提示。 */
   checkSources: (input?: { id?: string }): Promise<{ checked: number; updates: Array<{ id: string; url: string; currentCommit: string; remoteCommit: string; hasUpdate: boolean; error?: string }> }> =>
     skillRequest('/sources/check', { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(input ?? {}) }),
-  /** 更新单条来源（重新 clone 并覆盖落盘的技能）；远端没有新 commit 时 host 秒回 upToDate，不重装。 */
-  updateSource: (id: string): Promise<{ ok: true; upToDate?: boolean; installed: Array<{ name: string }>; skipped: Array<{ path: string; reason: string }>; commit: string }> =>
-    skillRequest(`/sources/${encodeURIComponent(id)}/update`, { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify({}) }),
+  /** 更新单条来源（重新 clone 并覆盖落盘的技能）；远端没有新 commit 且本地文件健全时 host 秒回 upToDate。传 force 可强制重装。 */
+  updateSource: (id: string, options?: { force?: boolean }): Promise<{ ok: true; upToDate?: boolean; installed: Array<{ name: string }>; skipped: Array<{ path: string; reason: string }>; commit: string }> =>
+    skillRequest(`/sources/${encodeURIComponent(id)}/update`, { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(options ?? {}) }),
   /** 全部更新：host 逐条跑，失败的单条进 failed，不打断整批。 */
   updateAllSources: (): Promise<{ updated: Array<{ id: string; installed: number; commit: string }>; failed: Array<{ id: string; error: string }> }> =>
     skillRequest('/sources/update-all', { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify({}) }),
@@ -2302,14 +2303,14 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
    * 单条更新：远端没有新 commit 时 host 秒回 upToDate（不 clone、不重装），
    * 这时只说「已是最新」，别报成「更新了 N 个技能」，也别重载技能列表（会白闪一下）。
    */
-  const updateOneSource = async (source: GitSource): Promise<void> => {
+  const updateOneSource = async (source: GitSource, force = false): Promise<void> => {
     if (updatingId !== null || sourcesBusy) return
     setUpdatingId(source.id)
     try {
-      const result = await skillApi.updateSource(source.id)
+      const result = await skillApi.updateSource(source.id, { force })
       if (result.upToDate === true) {
         pushToast('ok', t('srcUpToDate', { commit: result.commit.slice(0, 7) }))
-        // 只刷新来源列表（commit / 上次检查时间），技能列表一个字节都没变。
+        // 刷新来源列表（commit / 上次检查与更新时间）
         void skillApi.listSources().then((snapshot) => { setSources(snapshot) }, () => { /* 保持当前显示 */ })
         return
       }
@@ -2969,7 +2970,8 @@ export function SkillsPanel({ onClose, embedded = false }: { onClose: () => void
                           <div className={css.srcActions}>
                             <button type="button" className={css.srcBtn}
                               disabled={sourcesBusy || updatingId !== null}
-                              onClick={() => { void updateOneSource(source) }}>
+                              title={t('srcForceUpdateTip')}
+                              onClick={(event) => { void updateOneSource(source, event.shiftKey) }}>
                               {updatingThis
                                 ? (updateElapsed > 0 ? t('srcUpdatingSeconds', { n: updateElapsed }) : t('srcUpdating'))
                                 : t('srcUpdate')}

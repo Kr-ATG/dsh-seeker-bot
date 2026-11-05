@@ -15,9 +15,13 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { ensureOverlayMotionStyles, OVERLAY_MOTION_MS } from './motion/overlay-motion'
+import { ensureOverlayMotionStyles, OVERLAY_MOTION_MS, OVERLAY_MOTION_IN_MS, OVERLAY_MOTION_OUT_MS } from './motion/overlay-motion'
 
-/** 动画时长（ms）：与全局动效层同源，改那边一处即可。 */
+/** 全局入场时长（ms）：300ms。 */
+export const MODAL_ANIM_IN_MS = OVERLAY_MOTION_IN_MS
+/** 全局退场时长（ms）：260ms。 */
+export const MODAL_ANIM_OUT_MS = OVERLAY_MOTION_OUT_MS
+/** 动画时长（ms）：与退场计时一致（260ms），改全局动效层一处即可。 */
 export const MODAL_ANIM_MS = OVERLAY_MOTION_MS
 
 /** 注入弹窗动画样式（幂等）——样式表已收敛到 motion/overlay-motion.ts。 */

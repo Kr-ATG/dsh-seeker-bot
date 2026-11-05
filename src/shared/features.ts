@@ -127,6 +127,7 @@ export const FEATURES: ReadonlyArray<FeatureDef> = [
   { id: 'prompt.todo-rule', group: 'prompt', label: '任务清单纪律', desc: '每会话首步注入：清单怎么列、怎么推进、怎么收尾。', default: true, apply: 'live' },
   { id: 'prompt.auto-close', group: 'prompt', label: '回合结束自动收口', desc: '回合收口时把残留的「进行中」清单项降级为「待办」（不进提示词）。', default: true, apply: 'live' },
   { id: 'prompt.motion', group: 'prompt', label: '动效技能强制加载', desc: '涉及 UI 动效时先加载 harmonyos-motion 技能，不靠模型自己想起来。', default: false, apply: 'live' },
+  { id: 'prompt.eli5', group: 'prompt', label: '通俗解释 (ELI5)', desc: '每会话首步注入：像给5岁小孩或零基础朋友解释一样，多打生活比喻、不说黑话、直截了当。', default: false, apply: 'live' },
 
   // ── 宿主支撑能力（需重启 DSH）────────────────────────────────────────
   { id: 'host.generated-images', group: 'host', label: '生图读取 / 落盘', desc: '把 spill 里的生图结果读出来并落成真实文件，供画廊与侧栏使用。', default: true, apply: 'host' },

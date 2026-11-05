@@ -16,15 +16,51 @@
 import type { Message, ToolRun } from '../types.ts'
 
 /**
- * 工具名 → 是否属于「在屏幕上操作」这一类。
+ * 解析 MCP 工具名：`mcp__<service>__<tool>`。
+ */
+export function parseMcpToolName(name: string): { service: string; tool: string } | null {
+  if (typeof name !== 'string' || !name.startsWith('mcp__')) return null
+  const parts = name.split('__')
+  if (parts.length < 3) return null
+  return {
+    service: parts[1].trim().toLowerCase(),
+    tool: parts.slice(2).join('__').trim().toLowerCase(),
+  }
+}
+
+/**
+ * 判断是否属于「桌面控制/电脑操作」工具（含 MCP 工具与原生工具）。
  *
- * 只有工具名本身就是 computer / browser 一族时才转成执行态卡。ego-browser 在本
- * 项目里是通过 pwsh 跑脚本用的，工具名仍是 pwsh —— 那种留在可审计流水里（展开
- * 能看到具体命令），不在这里按参数猜：猜错会让一次普通命令执行变成一张「电脑在
- * 操作」的假卡，而真正的审计信息反而被藏起来了。
+ * 涵盖：desktop-control、computer-use、mouse、keyboard、screen_capture、
+ * pyautogui、robotjs、nutjs、osworld 等桌面控制 MCP 工具。
+ */
+export function isDesktopControlTool(name: string): boolean {
+  if (typeof name !== 'string' || name.trim() === '') return false
+  const trimmed = name.trim().toLowerCase()
+  const mcp = parseMcpToolName(trimmed)
+  if (mcp !== null) {
+    const combined = `${mcp.service}_${mcp.tool}`
+    return /(?:desktop|computer|mouse|keyboard|screen|pyautogui|nutjs|robotjs|osworld|windows[-_]control|system[-_]control|cua)/i.test(combined)
+  }
+  return /(?:desktop|computer|mouse_|keyboard_|screenshot)/i.test(trimmed)
+}
+
+/**
+ * 工具名 → 是否属于「在屏幕上操作（电脑桌面或浏览器）」这一类执行态工具。
+ *
+ * computer / browser / 桌面控制 MCP 等转成执行态卡，回答「Bot 此刻在替你做什么」。
+ * 普通工具（run_code / pwsh / read …）不在此列。
  */
 export function isExecutionToolName(name: string): boolean {
-  return /^(?:computer|browser|screenshot|playwright|puppeteer|chrome|devtools|cdp)/i.test(name.trim())
+  if (typeof name !== 'string' || name.trim() === '') return false
+  const trimmed = name.trim().toLowerCase()
+  if (isDesktopControlTool(trimmed)) return true
+  const mcp = parseMcpToolName(trimmed)
+  if (mcp !== null) {
+    const combined = `${mcp.service}_${mcp.tool}`
+    return /(?:browser|playwright|puppeteer|chrome|devtools|cdp|stagehand|ego)/i.test(combined)
+  }
+  return /^(?:computer|browser|screenshot|playwright|puppeteer|chrome|devtools|cdp)/i.test(trimmed)
 }
 
 /**
@@ -43,7 +79,7 @@ export function isStandaloneToolRun(run: ToolRun): boolean {
  *
  * 与 MessageBlockView 的渲染规则一一对应：
  *  · text：trim 后非空才算（纯空白气泡是空气泡）；
- *  · tool：只有会转成执行态卡的 computer / browser 一族、以及生图 / 生视频 /
+ *  · tool：只有会转成执行态卡的 computer / browser / 桌面控制 MCP 一族、以及生图 / 生视频 /
  *    文档生成占位卡算可见；其余普通工具（run_code / pwsh / read …）不渲染；
  *  · 其余块类型（image / execution / task / interactive / journal / voice /
  *    compaction / call / call-segment / connectors …）都是显式可见的块。

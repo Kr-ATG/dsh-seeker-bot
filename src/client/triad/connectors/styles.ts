@@ -126,8 +126,8 @@ const CSS_TEXT = [
   '.dsh-mc-empty{padding:48px 16px;text-align:center;color:var(--dsw-alias-label-tertiary,#8a8a8a);font-size:13px;}',
   '.dsh-mc-notice{margin:0 0 12px;padding:9px 12px;border-radius:10px;font-size:12.5px;line-height:19px;background:var(--dsw-alias-bg-l2,rgba(127,127,127,.08));color:var(--dsw-alias-label-secondary,#5c5c5c);}',
   '.dsh-mc-error{color:var(--dsw-alias-state-error-primary,#d14343);}',
-  '.dsh-mc-mask{position:fixed;inset:0;z-index:1200;background:rgba(0,0,0,.28);display:flex;align-items:center;justify-content:center;padding:24px;animation:dsh-mc-fade .16s ease;}',
-  '.dsh-mc-drawer{width:min(520px,100%);max-height:min(620px,86vh);display:flex;flex-direction:column;border-radius:16px;background:var(--dsw-alias-bg-base,#fff);border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.16));box-shadow:0 18px 50px rgba(0,0,0,.24);overflow:hidden;animation:dsh-mc-pop .18s cubic-bezier(.2,.9,.3,1);}',
+  '.dsh-mc-mask{position:fixed;inset:0;z-index:1200;background:rgba(0,0,0,.28);display:flex;align-items:center;justify-content:center;padding:24px;animation:dsh-mc-fade 300ms ease;}',
+  '.dsh-mc-drawer{width:min(520px,100%);max-height:min(620px,86vh);display:flex;flex-direction:column;border-radius:16px;background:var(--dsw-alias-bg-base,#fff);border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.16));box-shadow:0 18px 50px rgba(0,0,0,.24);overflow:hidden;animation:dsh-mc-pop 300ms cubic-bezier(.16,1,.3,1);}',
   '.dsh-mc-drawer-head{flex:none;display:flex;align-items:center;gap:12px;padding:16px 16px 12px;}',
   '.dsh-mc-drawer-icon{flex:none;width:48px;height:48px;border-radius:12px;object-fit:contain;background:var(--dsw-alias-bg-l2,rgba(127,127,127,.07));padding:4px;}',
   '.dsh-mc-drawer-titles{flex:1;min-width:0;}',
@@ -162,19 +162,16 @@ const CSS_TEXT = [
   '.dsh-mc-ghost{height:34px;padding:0 16px;border-radius:9px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.26));background:transparent;color:var(--dsw-alias-label-secondary,#5c5c5c);font:inherit;font-size:13px;cursor:pointer;}',
   '@media (max-width:760px){.dsh-mc{padding:16px 14px 0;}}',
   '@keyframes dsh-mc-fade{from{opacity:0}to{opacity:1}}',
-  '@keyframes dsh-mc-pop{from{opacity:0;transform:translateY(10px) scale(.985)}to{opacity:1;transform:none}}',
-  // ── 退场动效（2026-11-04）──────────────────────────────────────────
-  // 抽屉原来只有入场（dsh-mc-fade / dsh-mc-pop），关闭时组件直接卸载，
-  // 卡片是「啪」地消失的。现在入场退场统一交给 triad-modal-animation 的共享
-  // keyframes（dsh-modal-mask-in/out、dsh-modal-drawer-in/out），时长 240ms：
-  // 遮罩淡出用 ease，抽屉滑出用 cubic-bezier(0.4,0,0.2,1)（加速收走）。
-  // 两张样式表都在 head 里、注入顺序由首屏先打开哪个面板决定，所以用双类名
-  // 提高 specificity，保证这几条压过上面 .dsh-mc-mask / .dsh-mc-drawer 自带的
-  // animation，不依赖先后。
-  '.dsh-mc-mask.dsh-modal-mask-in{animation:dsh-modal-mask-in 240ms ease;}',
-  '.dsh-mc-mask.dsh-modal-mask-out{animation:dsh-modal-mask-out 240ms ease forwards;}',
-  '.dsh-mc-drawer.dsh-modal-drawer-in{animation:dsh-modal-drawer-in 240ms cubic-bezier(0.2,0.8,0.2,1);}',
-  '.dsh-mc-drawer.dsh-modal-drawer-out{animation:dsh-modal-drawer-out 240ms cubic-bezier(0.4,0,0.2,1) forwards;}',
+  '@keyframes dsh-mc-fade-out{from{opacity:1}to{opacity:0}}',
+  '@keyframes dsh-mc-pop{from{opacity:0;transform:translateY(20px) scale(.95)}to{opacity:1;transform:none}}',
+  '@keyframes dsh-mc-pop-out{from{opacity:1;transform:none}to{opacity:0;transform:translateY(12px) scale(.975)}}',
+  // ── 入场与退场动效（300ms 柔和入场 + 260ms 利落收走）─────────────────
+  // 入场使用 300ms 减速平滑浮现，避免极速闪烁；退场使用 260ms 加速收走。
+  // 双类名提高优先级，保证入场退场动画准确执行。
+  '.dsh-mc-mask.dsh-modal-mask-in{animation:dsh-mc-fade 300ms ease;}',
+  '.dsh-mc-mask.dsh-modal-mask-out{animation:dsh-mc-fade-out 260ms ease forwards;}',
+  '.dsh-mc-drawer.dsh-modal-drawer-in{animation:dsh-mc-pop 300ms cubic-bezier(.16,1,.3,1);}',
+  '.dsh-mc-drawer.dsh-modal-drawer-out{animation:dsh-mc-pop-out 260ms cubic-bezier(0.4,0,0.2,1) forwards;}',
   // 减少动态偏好：抽屉与遮罩的入场退场一律关掉（含上面自带的 dsh-mc-fade/pop）。
   '@media (prefers-reduced-motion:reduce){.dsh-mc-mask,.dsh-mc-drawer{animation:none!important;}}',
 ].join('')

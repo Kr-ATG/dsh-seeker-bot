@@ -38,7 +38,7 @@ await build({
   logLevel: 'silent',
 })
 
-const { isExecutionToolName, isStandaloneToolRun, hasRenderableContent } = await import(pathToFileURL(outfile).href)
+const { isExecutionToolName, isDesktopControlTool, isStandaloneToolRun, hasRenderableContent } = await import(pathToFileURL(outfile).href)
 
 const failures = []
 const check = (name, condition, extra) => {
@@ -99,6 +99,15 @@ check('chrome 工具 → 可见', hasRenderableContent(msg([tool('chrome')])) ==
 check('devtools 工具 → 可见', hasRenderableContent(msg([tool('devtools')])) === true)
 check('cdp 工具 → 可见', hasRenderableContent(msg([tool('cdp')])) === true)
 check('大写的 Browser 工具 → 可见', hasRenderableContent(msg([tool('Browser.open')])) === true)
+check('桌面控制 MCP 工具（mcp__desktop-control__click）→ 可见',
+  hasRenderableContent(msg([tool('mcp__desktop-control__click')])) === true)
+check('电脑操作 MCP 工具（mcp__computer-use__action）→ 可见',
+  hasRenderableContent(msg([tool('mcp__computer-use__action')])) === true)
+check('Windows 控制 MCP 工具（mcp__windows-control__type）→ 可见',
+  hasRenderableContent(msg([tool('mcp__windows-control__type')])) === true)
+check('浏览器控制 MCP 工具（mcp__playwright-mcp__browser_click）→ 可见',
+  hasRenderableContent(msg([tool('mcp__playwright-mcp__browser_click')])) === true)
+
 check('带前后空格的 computer 工具 → 可见', hasRenderableContent(msg([tool('  computer  ')])) === true)
 
 /* ------------------------------------------------------------------ */
@@ -150,6 +159,17 @@ check('isExecutionToolName(run_code) → false', isExecutionToolName('run_code')
 check('isExecutionToolName(generate_image) → false', isExecutionToolName('generate_image') === false)
 check('isExecutionToolName(pwsh) → false', isExecutionToolName('pwsh') === false)
 check('isExecutionToolName(空串) → false', isExecutionToolName('') === false)
+check('isDesktopControlTool(mcp__desktop-control__click) → true',
+  isDesktopControlTool('mcp__desktop-control__click') === true)
+check('isDesktopControlTool(mcp__computer-use__action) → true',
+  isDesktopControlTool('mcp__computer-use__action') === true)
+check('isDesktopControlTool(computer) → true',
+  isDesktopControlTool('computer') === true)
+check('isDesktopControlTool(mcp__playwright-mcp__browser_click) → false',
+  isDesktopControlTool('mcp__playwright-mcp__browser_click') === false)
+check('isDesktopControlTool(run_code) → false',
+  isDesktopControlTool('run_code') === false)
+
 
 check('isStandaloneToolRun(generate_image) → true',
   isStandaloneToolRun({ id: 'r1', name: 'generate_image', status: 'ok', startedAt: 0 }) === true)
@@ -181,7 +201,7 @@ check('MessageList 的 visible 过滤调用 hasRenderableContent', messageListSr
 
 const messageBlockViewSrc = read('src/client/personal/chat/MessageBlockView.tsx')
 check('MessageBlockView 从共享模块引入判据',
-  messageBlockViewSrc.includes("import { isExecutionToolName, isStandaloneToolRun } from './message-visibility.ts'"))
+  messageBlockViewSrc.includes("from './message-visibility.ts'") && messageBlockViewSrc.includes("isExecutionToolName"))
 check('MessageBlockView 不再定义本地 isExecutionTool', !messageBlockViewSrc.includes('function isExecutionTool('))
 check('MessageBlockView 不再定义本地 isStandaloneTool', !messageBlockViewSrc.includes('function isStandaloneTool('))
 

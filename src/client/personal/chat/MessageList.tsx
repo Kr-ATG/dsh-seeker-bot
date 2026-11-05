@@ -16,7 +16,7 @@
  * 段内消息本来就是普通气泡，不额外包卡片。
  *
  * 朗读（见 speech.ts）：bot 消息的气泡侧边、引用按钮之后有一枚喇叭按钮，点一下
- * 就用「通话里设置的音色与供应商」把这条念出来；Bot 设置里打开「自动朗读回复」后
+ * 就用「通话里设置的音色与供应商」把这条念出来；会话头打开「自动播报」后
  * 新回复也会自动念（只在单聊、且没有通话进行时，理由见自动播放那段注释）。
  */
 import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react'
@@ -28,11 +28,19 @@ import { getSpeechState, speakText, speechTextOf, stopSpeech, useSpeechState } f
 import { MessageBlockView } from './MessageBlockView.tsx'
 import { hasRenderableContent } from './message-visibility.ts'
 import { pendingTasksOf } from './pending.ts'
+import { dispatchLabel, isDispatchOpen, type DispatchView } from './dispatch.ts'
 
 export interface MessageListProps {
   messages: Message[]
   bot: Bot
   room: { id: string; name: string; memberIds: string[] } | null
+  /**
+   * 投递回执（「已交给采集」那一行）。
+   *
+   * 不进 messages：它不是一条消息，没有正文、不参与轮次统计、也不进模型上下文。
+   * 数据源与右栏委派面板同一条 GET /assignments（见 dispatch.ts）。
+   */
+  dispatches?: DispatchView[]
 }
 
 function dayStart(at: number): number {
@@ -240,6 +248,33 @@ function CompactionMark({ block }: { block: Extract<MessageBlock, { type: 'compa
   )
 }
 
+/* ───────────────────────── 投递回执 ───────────────────────── */
+
+/**
+ * 「已交给采集」这一行。
+ *
+ * 它回答的是派活之后用户最先冒出来的那个疑问：**活到底出没出去、现在到哪了**。
+ * 之前这件事只有右栏委派面板知道，对话流里主 Bot 说一句「交给它了」就没了下文，
+ * 用户只能盯着空气等。
+ *
+ * 刻意做成一行小字而不是气泡：它不是任何一方说的话，是系统状态。data-status
+ * 让失败态能单独染成告警色。
+ */
+function DispatchRow({ view }: { view: DispatchView }): JSX.Element {
+  const open = isDispatchOpen(view)
+  return (
+    <div
+      className="pa-dispatch-row"
+      data-state={open ? 'open' : 'done'}
+      data-status={view.status}
+      title={view.brief !== '' ? `任务：${view.brief}` : undefined}
+    >
+      <span className="pa-dispatch__dot" aria-hidden="true" />
+      <span className="pa-dispatch__label">{dispatchLabel(view)}</span>
+    </div>
+  )
+}
+
 /* ───────────────────────── 轮次容器（2.8） ───────────────────────── */
 
 /** 一个渲染组：同一轮的 bot 消息聚在一起；没有 turnId 的消息各自成组。 */
@@ -260,6 +295,7 @@ interface MessageGroup {
  */
 type RenderItem =
   | { kind: 'message'; key: string; message: Message; hideSeparator?: boolean }
+  | { kind: 'dispatch'; key: string; dispatch: DispatchView }
   | { kind: 'turn-head'; key: string; turnId: string; startLabel: string; running: boolean; collapsible: boolean }
   | { kind: 'turn-foot'; key: string; turnId: string; stats: { messages: number; outputs: number; pending: number } }
   | { kind: 'turn-collapsed'; key: string; turnId: string; count: number }
@@ -318,7 +354,7 @@ function turnStatsOf(messages: readonly Message[]): { messages: number; outputs:
   }
 }
 
-export function MessageList({ messages, bot, room }: MessageListProps): JSX.Element {
+export function MessageList({ messages, bot, room, dispatches = [] }: MessageListProps): JSX.Element {
   const { state, ui, actions } = usePersonal()
   const scrollRef = useRef<HTMLDivElement>(null)
   const stickRef = useRef(true)
@@ -394,7 +430,7 @@ export function MessageList({ messages, bot, room }: MessageListProps): JSX.Elem
   }, [messages])
 
   /*
-   * 自动朗读（Bot 设置里的「自动朗读回复」）。
+   * 自动朗读（会话头的「自动播报」开关，唯一入口）。
    *
    * 只在单聊里生效：群聊是多个 Bot 轮流说话，自动念会变成抢话；通话进行中也不念
    * ——那条链路本来就在播语音，再叠一层会撞在一起。
@@ -555,8 +591,17 @@ export function MessageList({ messages, bot, room }: MessageListProps): JSX.Elem
       })
       out.push({ kind: 'turn-foot', key: `foot:${turnId}`, turnId, stats })
     }
+    /*
+     * 投递回执按时间插进对话流：派活发生在主管那一轮中间，回执就该出现在它被
+     * 派出去的那一刻，而不是永远追加在末尾（主 Bot 后面再回几句，回执会被顶到
+     * 最后，看起来像「刚刚才派」）。dispatches 已按 at 升序（见 dispatch.ts）。
+     */
+    for (const view of dispatches) {
+      const index = out.findIndex((item) => item.kind === 'message' && item.message.at > view.at)
+      out.splice(index < 0 ? out.length : index, 0, { kind: 'dispatch', key: `dispatch:${view.id}`, dispatch: view })
+    }
     return out
-  }, [groups, collapsedTurns, visible, visibleIndex])
+  }, [groups, collapsedTurns, visible, visibleIndex, dispatches])
 
   if (messages.length === 0) {
     return (
@@ -597,6 +642,9 @@ export function MessageList({ messages, bot, room }: MessageListProps): JSX.Elem
            * 轮次头 / 尾 / 收起提示：都不包消息，各自是一条独立元素（理由见
            * RenderItem 的注释）。头尾各一条发丝线，中间就是普通消息。
            */
+          if (item.kind === 'dispatch') {
+            return <DispatchRow key={item.key} view={item.dispatch} />
+          }
           if (item.kind === 'turn-head') {
             return (
               <div className="pa-turn__head" key={item.key} data-state={item.running ? 'running' : 'done'}>

@@ -34,6 +34,7 @@ import {
 } from './engine.ts'
 import { buildQuoteRef, historyTextOf } from './model-text.ts'
 import { resolveRoomTrigger } from './room-trigger.ts'
+import { parseMentions, type MentionTarget } from './chat/mentions.ts'
 import { shouldStartNext } from './room-queue.ts'
 import { normalizeRelayAuto } from './relay-trigger.ts'
 import { BOT_ROSTER_EVENT } from '../triad/hub/memory-bot-source.tsx'
@@ -1749,6 +1750,7 @@ function botFromCreatedRecord(record: CreatedBotRecord): Bot {
     model: MODEL_FALLBACK,
     skills: [],
     permission: 'full',
+    eli5Mode: true,
     proactive: { enabled: true, freq: 'daily', from: '09:00', to: '22:00' },
     createdAt: record.createdAt,
     createdBy: record.createdBy,
@@ -1838,6 +1840,14 @@ export interface ReplyRequestOptions {
    * 模型看到的仍然只有一句「1」——这正是「引用了却答非所问」的成因。
    */
   quote?: QuoteRef
+  /**
+   * 本轮用户 @ 了哪些 Bot（私聊里由输入框正文解析出来）。
+   *
+   * 为什么走请求体而不是前端拼进 text：宿主需要的是「哪个 bot id」，而正文里的
+   * 「@采集」只有名字。群聊回合也会带（解析不受场地限制），宿主侧只认私聊——
+   * 群里的 @ 已经是前端路由信号，再注入一次会让接话的人跑去派活。
+   */
+  mentions?: MentionTarget[]
 }
 
 /**
@@ -1871,6 +1881,7 @@ function replyRequestBody(
       description: bot.description,
       instructions: bot.instructions,
       model,
+      eli5Mode: bot.eli5Mode !== false,
       /*
        * 主 Bot 标记：宿主据此决定给谁挂 `bot_create`（只有主 Bot 能建子 Bot）。
        *
@@ -1891,6 +1902,8 @@ function replyRequestBody(
      * 没引用时整个字段不出现，老宿主 / 老前端互不影响。
      */
     ...(opts.quote !== undefined ? { quote: opts.quote } : {}),
+    // 用户 @ 了谁：宿主在用户消息前注入「这件事该派给 X」，模型据此调 coordinate_bots
+    ...(opts.mentions !== undefined && opts.mentions.length > 0 ? { mentions: opts.mentions } : {}),
     /*
      * 全量 Bot 花名册：宿主派活时需要知道「子 Bot 是谁」。
      *
@@ -1905,6 +1918,7 @@ function replyRequestBody(
       description: item.description,
       instructions: item.instructions,
       model: item.model,
+      eli5Mode: item.eli5Mode !== false,
       // 同上：宿主建子 Bot 时要靠花名册认出「谁是主 Bot」，其余成员一律不是
       isMain: item.isMain === true,
     })),
@@ -3671,7 +3685,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
 
   const botById = useCallback((id: string): Bot | undefined => stateRef.current.bots.find((bot) => bot.id === id), [])
 
-  const replyAsBot = useCallback((bot: Bot, text: string, target: { roomId?: string; source?: Message['source']; quote?: QuoteRef } = {}, images: ChatImage[] = [], userMessageId?: string): void => {
+  const replyAsBot = useCallback((bot: Bot, text: string, target: { roomId?: string; source?: Message['source']; quote?: QuoteRef; mentions?: MentionTarget[] } = {}, images: ChatImage[] = [], userMessageId?: string): void => {
     const pendingId = shortId('msg')
     /*
      * 本轮请求的「场地」参数：群 id，以及群设置要求的统一模型。
@@ -3685,6 +3699,8 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       ...(userMessageId !== undefined ? { userMessageId } : {}),
       // 引用回复：被引用消息的完整内容随请求投给宿主（界面展示仍用 preview）
       ...(target.quote !== undefined ? { quote: target.quote } : {}),
+      // 点名派活：正文里 @ 了谁（宿主据此注入「该交给它」的上下文）
+      ...(target.mentions !== undefined && target.mentions.length > 0 ? { mentions: target.mentions } : {}),
       ...((): { unifiedModel?: BotModel } => {
         if (target.roomId === undefined) return {}
         const room = stateRef.current.rooms.find((item) => item.id === target.roomId)
@@ -4482,7 +4498,17 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       })
       return
     }
-    replyAsBot(bot, value, { ...(quote !== undefined ? { quote } : {}) }, images, userMessageId)
+    /*
+     * 私聊里的 @ 交给宿主去理解：解析成 { id, name } 随请求带上，宿主注入一段
+     * 「用户点名要交给 X」的上下文，主 Bot 再决定用 coordinate_bots 派出去。
+     * 群聊那一支已经由 room-trigger 判定谁接话，这里不掺和（多带一份反而会让
+     * 接话的人以为自己也该再派一次）。
+     */
+    const mentions = parseMentions(value, current.bots.filter((item) => item.id !== bot.id))
+    replyAsBot(bot, value, {
+      ...(quote !== undefined ? { quote } : {}),
+      ...(mentions.length > 0 ? { mentions } : {}),
+    }, images, userMessageId)
   }, [appendMessage, later, replyAsBot, toast])
 
   /**
@@ -4638,6 +4664,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       // 通话用的 Live 供应商同理：空串 = 跟随全局默认，不落字段
       ...(input.liveVendor !== undefined && input.liveVendor !== '' ? { liveVendor: input.liveVendor } : {}),
       permission: 'full',
+      eli5Mode: input.eli5Mode ?? true,
       proactive: { enabled: true, freq: 'daily', from: '09:00', to: '22:00' },
       createdAt: Date.now(),
       createdBy: MAIN_BOT_ID,

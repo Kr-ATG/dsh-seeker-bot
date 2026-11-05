@@ -318,11 +318,11 @@ const HTML_INJECTION_RULE = [
   '',
   '【/iu 前缀 · 用户强制出卡】用户在输入框以 `/iu` 开头时，这条消息会**连 `/iu` 一起原样发给你**（客户端不做任何转换，别把它当未知命令或笔误）。',
   '看到以 `/iu` 开头的消息 = 用户**明确要求**用卡片回答（不是建议，是指令）：必须用 ```iu 或 ```html 围栏出卡，不要用纯文字或 Markdown 表格替代。',
-   'kind 由你按内容判断：取值换算→slider、数据行列→table、待办检查→checklist、方案对比→tabs、任务分列→kanban、收集输入→form、时间安排→timeline、前后修改→diff、层级结构→tree、完成度指标→gauge、考察理解→quiz、乐器→piano、**任何图形/图表/示意图（含柱状图、折线图、流程图、架构图、时序图）→html**、复杂页面→html。',
+   'kind 由你按内容判断：取值换算→slider、数据行列→table、待办检查→checklist、方案对比→tabs、任务分列→kanban、收集输入→form、时间安排→timeline、前后修改→diff、层级结构→tree、完成度指标→gauge、考察理解→quiz、乐器→piano、天气预报/气象生活指数→weather、**任何图形/图表/示意图（含柱状图、折线图、流程图、架构图、时序图）→html**、复杂页面→html。',
   '若消息里没说清要什么，就用最贴合其意图的那种卡片，不要反问。',
   '',
   '【先定要不要出卡，再定用哪个】顺序反过来就会变成「有卡就用」。',
-  '  · **该出**：要在若干取值里挑一个、要拖着看联动、要逐项打勾、要按行列比数字、要看结构关系、要动手试。',
+  '  · **该出**：要在若干取值里挑一个、要拖着看联动、要逐项打勾、要按行列比数字、要看结构关系、要动手试、查天气预报。',
   '    一句话判据：**只用文字说完，用户还得自己在脑子里换算 / 比对 / 记住一堆数**。',
   '  · **不该出**：解释概念、给结论、给判断、讲因果、回答「为什么 / 该不该 / 怎么做 / 哪个好」。',
   '    这些文字本来就够，塞卡等于把话说半截。',
@@ -410,6 +410,24 @@ const MOTION_INJECTION_RULE = [
   '不适用：纯视频剪辑、镜头叙事、生成式视频，以及不涉及动效的普通 UI 改动。',
 ].join('\n')
 
+/**
+ * 通俗解释（ELI5 模式）能力规范注入文本。
+ *
+ * 开启后每会话首步注入一条规则：解答概念、说明原理时像给5岁小孩或零基础朋友
+ * 解释一样，语言通俗平实，善用生动生活比喻，拆解本质常识，不堆砌晦涩专业黑话。
+ *
+ * 默认关：Work 模式下为纯工程模式，属于用户主动打开的表达风格偏好。
+ */
+const ELI5_INJECTION_RULE = [
+  '【通俗解释 · 内置通道】像给5岁小孩或零基础朋友解释一样回答问题（ELI5 模式）。',
+  '',
+  '1. 语言通俗平易：绝不堆砌晦涩艰深的学术术语、工程黑话或抽象大词。',
+  '2. 善用生活比喻：遇到抽象机制、复杂流程或技术概念，必须打一个贴近日常生活的生动比喻（如把 API 比作餐馆服务员、把缓存比作桌子上的零食盘），先在脑海中建立直观画面。',
+  '3. 拆解本质常识：把复杂问题拆成最朴素直白的常识因果（它是什么、解决了什么现实麻烦、像生活中的什么）。',
+  '4. 术语紧跟解释：若必须出现专业技术名词或英文缩写，紧接着在括号里或下一句用大白话解释清楚。',
+  '（注：代码编写、终端命令、配置文件修改等具体工程实操，其代码与命令原文保持精准专业；叙述、分析与解释部分严格遵循本通俗约定。）',
+].join('\n')
+
 /** 创建注入器。 */
 export function createMemoryInjector(
   store: MemoryStore,
@@ -450,6 +468,11 @@ export function createMemoryInjector(
    * 会互相抢占首步名额。
    */
   const motionStepCounters = new Map<string, number>()
+
+  /**
+   * 通俗解释（ELI5）通道的每会话 step 计数，理由同上——各通道各记各的。
+   */
+  const eli5StepCounters = new Map<string, number>()
 
   /**
    * 每会话「上次注入时」的记忆内容版本号（store.revision）。
@@ -785,6 +808,33 @@ export function createMemoryInjector(
         } catch (error) {
           // 失败绝不能影响主注入与其它通道。
           logger?.warn?.(`[dsh-memory] motion injection failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+    }
+
+    // ── 通俗解释（ELI5 模式）注入（内置通道） ─────────────────────────
+    // 位置同 zh / html / team / todo-rule / motion：两道闸门之前。
+    // 它回答的是「解释概念与回答时怎么表达」，与「记忆库要不要进上下文」正交。
+    if (!eli5StepCounters.has(sessionId)) {
+      const eli5Enabled = hostFeatureEnabled('prompt.eli5') && await store.isEli5InjectEnabled(config.eli5InjectDefaultEnabled !== false)
+      if (!eli5Enabled) {
+        logger?.debug?.('[dsh-memory] eli5 injection off (switch disabled)')
+      } else {
+        eli5StepCounters.set(sessionId, 1)
+        try {
+          messages = [...messages, createUserMessage({
+            content: [{ type: 'text', text: ELI5_INJECTION_RULE }],
+            source: {
+              kind: 'plugin:dsh-memory',
+              plugin: 'dsh-memory',
+              form: 'snapshot',
+              sections: [{ name: '通俗解释', text: ELI5_INJECTION_RULE }],
+            },
+          })]
+          logger?.debug?.('[dsh-memory] eli5 injection ok')
+        } catch (error) {
+          // 失败绝不能影响主注入与其它通道。
+          logger?.warn?.(`[dsh-memory] eli5 injection failed: ${error instanceof Error ? error.message : String(error)}`)
         }
       }
     }

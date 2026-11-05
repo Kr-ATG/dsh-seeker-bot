@@ -51,13 +51,13 @@ function readMainLeft(): number {
 
 const SHEET = `
 /* ── page：官方 main 槽位里的整页视图（与自动化任务页同座位） ── */
-.psh-page{position:relative;flex:1 1 auto;width:100%;min-width:0;height:100%;min-height:0;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;background:var(--dsw-alias-bg-base,var(--dsw-alias-bg-layer-1,#fff));color:var(--dsw-alias-label-primary,#eee);animation:dsh-page-in 240ms cubic-bezier(.2,.8,.2,1) backwards}
-/* 整页视图入场用全局的 dsh-page-in（240ms 减速 + 上浮 10px，定义在
+.psh-page{position:relative;flex:1 1 auto;width:100%;min-width:0;height:100%;min-height:0;box-sizing:border-box;display:flex;flex-direction:column;overflow:hidden;background:var(--dsw-alias-bg-base,var(--dsw-alias-bg-layer-1,#fff));color:var(--dsw-alias-label-primary,#eee);animation:dsh-page-in 300ms cubic-bezier(.2,.8,.2,1) backwards}
+/* 整页视图入场用全局的 dsh-page-in（300ms 减速 + 上浮 10px，定义在
    motion/overlay-motion.ts）：原来只有 140ms 纯 opacity 淡入，切页像瞬间换图。 */
 /* ── 遮罩：淡入淡出（compact 卡片用透明遮罩，只吃点击不遮视野） ── */
 .psh-mask{position:fixed;inset:0;z-index:999;background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.45))}
 .psh-mask[data-plain]{background:transparent}
-.psh-mask[data-anim='in']{animation:dsh-modal-mask-in ${MODAL_ANIM_MS}ms ease both}
+.psh-mask[data-anim='in']{animation:dsh-modal-mask-in 300ms ease both}
 .psh-mask[data-anim='out']{animation:dsh-modal-mask-out ${MODAL_ANIM_MS}ms ease both}
 /* ── 卡片：compact 定尺寸小卡片 / 底部 sheet 回退 ── */
 .psh-card{position:fixed;z-index:1000;display:flex;flex-direction:column;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));border-radius:14px;background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-2,#1b1b1c));box-shadow:var(--dsw-shadow-lv3,0 8px 40px rgba(0,0,0,.5));overflow:hidden;transition:width ${MODAL_ANIM_MS}ms cubic-bezier(.2,.8,.2,1),height ${MODAL_ANIM_MS}ms cubic-bezier(.2,.8,.2,1)}
@@ -73,11 +73,11 @@ const SHEET = `
 /* sheet（窄屏全屏）是固定 100dvh 的，内容再长也长不出屏幕，只能让主体滚——
    这是「卡片自适应」在窄屏唯一可行的兜底（桌面端 compact 永远不滚）。 */
 .psh-card[data-mode='sheet'] .psh-body{overflow-y:auto}
-.psh-card[data-mode='compact'][data-anim='in']{animation:dsh-psh-pop-in 240ms cubic-bezier(.2,.8,.2,1)}
-.psh-card[data-mode='compact'][data-anim='out']{animation:dsh-psh-pop-out 180ms cubic-bezier(.4,0,.2,1) both}
-@keyframes dsh-psh-pop-in{from{opacity:0;transform:translateY(10px) scale(.975)}to{opacity:1;transform:translateY(0) scale(1)}}
-@keyframes dsh-psh-pop-out{from{opacity:1;transform:translateY(0) scale(1)}to{opacity:0;transform:translateY(6px) scale(.985)}}
-.psh-card[data-mode='compact'][data-anim='in'] .dsh-modal-stagger{animation:dsh-modal-rise-in ${MODAL_ANIM_MS}ms cubic-bezier(.2,.8,.2,1) backwards;animation-delay:60ms}
+.psh-card[data-mode='compact'][data-anim='in']{animation:dsh-psh-pop-in 300ms cubic-bezier(.2,.8,.2,1)}
+.psh-card[data-mode='compact'][data-anim='out']{animation:dsh-psh-pop-out ${MODAL_ANIM_MS}ms cubic-bezier(.4,0,.2,1) both}
+@keyframes dsh-psh-pop-in{from{opacity:0;transform:translateY(12px) scale(.96)}to{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes dsh-psh-pop-out{from{opacity:1;transform:translateY(0) scale(1)}to{opacity:0;transform:translateY(8px) scale(.98)}}
+.psh-card[data-mode='compact'][data-anim='in'] .dsh-modal-stagger{animation:dsh-modal-rise-in 300ms cubic-bezier(.2,.8,.2,1) backwards;animation-delay:60ms}
 .psh-card[data-mode='sheet']{left:12px !important;right:12px;bottom:12px;top:auto !important}
 /* 实底卡片（solid 模式）：玻璃质感开启时也保持不透明表面。
    两条必要条件——
@@ -94,7 +94,7 @@ html[data-dsh-glass] body[data-ds-dark-theme] .psh-card[data-solid]{
      「不喜欢深色模式下这个灰灰的背景色」。MCP 弹窗在深色下应该是深底卡片，
      与官方对话区 / Bot 侧栏同一色温。 */
   background:var(--dsw-alias-bg-base,#151517)}
-.psh-card[data-mode='sheet'][data-anim='in']{animation:dsh-modal-slide-in ${MODAL_ANIM_MS}ms cubic-bezier(.2,.8,.2,1)}
+.psh-card[data-mode='sheet'][data-anim='in']{animation:dsh-modal-slide-in 300ms cubic-bezier(.2,.8,.2,1)}
 .psh-card[data-mode='sheet'][data-anim='out']{animation:dsh-modal-slide-out ${MODAL_ANIM_MS}ms cubic-bezier(.4,0,.2,1) both}
 /* ── modal：居中弹窗卡片（连接器页） ─────────────────────────────────
    尺寸：桌面 1040×860 上限，随视口夹紧；窄屏走上面的 sheet 全屏。
@@ -106,10 +106,11 @@ html[data-dsh-glass] body[data-ds-dark-theme] .psh-card[data-solid]{
   width:min(1040px,calc(100vw - 48px));height:min(860px,calc(100vh - 72px));
   z-index:2147483600;transition:none}
 .psh-mask[data-modal]{z-index:2147483500}
-.psh-card[data-mode='modal'][data-anim='in']{animation:dsh-psh-modal-in ${MODAL_ANIM_MS}ms cubic-bezier(.2,.8,.2,1)}
+.psh-mask[data-modal][data-anim='in']{animation:dsh-modal-mask-in 300ms ease both}
+.psh-card[data-mode='modal'][data-anim='in']{animation:dsh-psh-modal-in 300ms cubic-bezier(.16,1,.3,1)}
 .psh-card[data-mode='modal'][data-anim='out']{animation:dsh-psh-modal-out ${MODAL_ANIM_MS}ms cubic-bezier(.4,0,.2,1) both}
-@keyframes dsh-psh-modal-in{from{opacity:0;transform:translate(-50%,-48%) scale(.985)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
-@keyframes dsh-psh-modal-out{from{opacity:1;transform:translate(-50%,-50%) scale(1)}to{opacity:0;transform:translate(-50%,-46%) scale(.99)}}
+@keyframes dsh-psh-modal-in{from{opacity:0;transform:translate(-50%,calc(-50% + 24px)) scale(.95)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+@keyframes dsh-psh-modal-out{from{opacity:1;transform:translate(-50%,-50%) scale(1)}to{opacity:0;transform:translate(-50%,calc(-50% + 14px)) scale(.975)}}
 /* ── 通用卡片头部：标题 + 关闭（对齐 auto-card-head 规格）── */
 .psh-head{flex:none;display:flex;align-items:center;gap:8px;padding:12px 16px 10px;border-bottom:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.08))}
 .psh-title{flex:1;min-width:0;font-size:15px;font-weight:600;line-height:22px;color:var(--dsw-alias-label-primary,#eee)}

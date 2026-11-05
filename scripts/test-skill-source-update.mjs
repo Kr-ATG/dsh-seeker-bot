@@ -106,9 +106,28 @@ check(readFileSync(skillFile, "utf8").includes("v2"), "落盘内容更新为 v2"
 const ledger = JSON.parse(readFileSync(join(skillsRoot, ".skill-sources.json"), "utf8"))
 check(ledger.sources[0]?.commit === newCommit && ledger.sources[0]?.lastError === null, "账本 commit / lastError 正确")
 
-// ── 5. 更新完再点一次：回到 upToDate（不会每次点都白等一遍 clone）
+// ── 5. 更新完再点一次：回到 upToDate，且 lastUpdate 同步刷新为当前时间
+const ledgerBefore = JSON.parse(readFileSync(join(skillsRoot, ".skill-sources.json"), "utf8"))
+const t0 = Date.now()
 const again = await call("POST", "/api/skill-manager/sources/src-1/update", {})
 check(again.body.upToDate === true, "更新完成后再次 update 返回 upToDate")
+const ledgerAfter = JSON.parse(readFileSync(join(skillsRoot, ".skill-sources.json"), "utf8"))
+check(ledgerAfter.sources[0]?.lastUpdate >= t0, "无新 commit 时 lastUpdate 依然刷新为同步确认时间")
+
+// ── 6. 本地文件缺失自愈：即使 commit 未变，缺失文件也必须重新 clone 恢复
+rmSync(skillFile, { force: true })
+let missingChecked = false
+try { readFileSync(skillFile, "utf8"); } catch { missingChecked = true }
+check(missingChecked, "模拟技能文件丢失")
+const heal = await call("POST", "/api/skill-manager/sources/src-1/update", {})
+check(heal.status === 200 && heal.body.upToDate !== true, "文件缺失时跳过短路，重新 clone 恢复")
+check(readFileSync(skillFile, "utf8").includes("v2"), "丢失的文件已成功恢复落盘")
+
+// ── 7. force: true 强制重新安装
+writeFileSync(skillFile, "corrupted", "utf8")
+const forced = await call("POST", "/api/skill-manager/sources/src-1/update", { force: true })
+check(forced.status === 200 && forced.body.upToDate !== true, "force=true 强制重新安装")
+check(readFileSync(skillFile, "utf8").includes("v2"), "强制安装后内容恢复最新")
 
 rmSync(sandbox, { recursive: true, force: true })
 console.log(failed === 0 ? "\nALL PASS" : `\nFAILED: ${failed}`)

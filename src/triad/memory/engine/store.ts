@@ -1430,6 +1430,26 @@ export class MemoryStore {
     await this.writeState(state)
   }
 
+  // ── 通俗解释（ELI5 模式）规范注入开关（全局单值） ─────────────────
+
+  /**
+   * 通俗解释规范注入是否开启（三态：state 显式值 ?? 调用方给的 fallback）。
+   *
+   * 默认关（由 config.eli5InjectDefaultEnabled 决定）：它不声明工具能力，属于用户
+   * 主动打开的解释风格偏好；开启后每会话首步注入通俗易懂、多打日常比喻的规约。
+   */
+  async isEli5InjectEnabled(fallback: boolean): Promise<boolean> {
+    const state = await this.readState()
+    return typeof state.eli5InjectEnabled === 'boolean' ? state.eli5InjectEnabled : fallback
+  }
+
+  /** 写通俗解释规范注入开关（全局单值；直接落盘，调用频率极低）。 */
+  async setEli5InjectEnabled(enabled: boolean): Promise<void> {
+    const state = await this.readState()
+    state.eli5InjectEnabled = enabled
+    await this.writeState(state)
+  }
+
   /** 写回合结束自动收口开关（全局单值；直接落盘，调用频率极低）。 */
   async setTodoClosureEnabled(enabled: boolean): Promise<void> {
     const state = await this.readState()

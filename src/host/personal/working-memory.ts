@@ -293,7 +293,7 @@ function freezeDeep(value: any): any {
  * user/message 会整轮报错，用户看到「本轮没有产生任何输出」）。
  * source.kind 也必须是 `plugin:<name>`：v4 落盘拒绝旧式 `plugin`。
  */
-export function createWorkingMemoryMessage(text: string): any {
+export function createWorkingMemoryMessage(text: string, section = '工作记忆'): any {
   return freezeDeep({
     id: `pa-wm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
     role: 'user',
@@ -302,7 +302,7 @@ export function createWorkingMemoryMessage(text: string): any {
       kind: 'plugin:dsh-seeker-bot',
       plugin: 'dsh-seeker-bot',
       form: 'snapshot',
-      sections: [{ name: '工作记忆', text }],
+      sections: [{ name: section, text }],
     },
   })
 }

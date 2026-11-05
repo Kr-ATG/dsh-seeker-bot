@@ -234,6 +234,13 @@ export interface StoreState {
    * 缺省 = 跟随 config.motionInjectDefaultEnabled（默认关：升级不改变现状）。
    */
   motionInjectEnabled?: boolean
+  /**
+   * 通俗解释（ELI5 模式）规范注入开关（全局单值，三态缺省）。
+   * 与 zh / html / team / motion 同一范式：投一段静态规范文本，每会话首步一次。
+   * 像给5岁小孩或零基础朋友解释一样，多打生活比喻、不说黑话、直截了当。
+   * 缺省 = 跟随 config.eli5InjectDefaultEnabled（默认关：升级不改变现状）。
+   */
+  eli5InjectEnabled?: boolean
 }
 
 /** 单个会话的 ticker 状态。 */
@@ -398,6 +405,11 @@ export interface MemoryConfig {
    * 开关，不是能力补齐。文本约 300 字，每会话首步一次。
    */
   motionInjectDefaultEnabled: boolean
+  /**
+   * 通俗解释（ELI5 模式）默认开关（内置通道，**默认关**）。
+   * 开启后每会话首步注入规则：用生活比喻和大白话解释复杂抽象概念，绝不堆黑话。
+   */
+  eli5InjectDefaultEnabled: boolean
   /** 注入检索 top-k（当前任务相关记忆注入条数；identity/pinned/长期常驻不占此预算）。 */
   injectTopK: number
   /**
@@ -535,6 +547,7 @@ export const DEFAULT_CONFIG: MemoryConfig = {
   // 默认关：技能加载原本靠语义匹配，这条通道把「想起来用技能」变成确定性行为，
   // 属于用户主动打开的偏好，默认开等于替所有人改了行为（见字段注释）。
   motionInjectDefaultEnabled: false,
+  eli5InjectDefaultEnabled: false,
   injectTopK: 8,
   // 检索层每 5 轮重检索一次并替换旧块：话题通常不会两三轮就跳，而每次替换都会
   // 让 prompt 前缀缓存失效一次（见字段注释）。
@@ -669,7 +682,7 @@ export type ConfigNumberKey = keyof typeof CONFIG_NUMBER_BOUNDS
 
 const CONFIG_NUMBER_KEYS = Object.keys(CONFIG_NUMBER_BOUNDS) as ConfigNumberKey[]
 
-const CONFIG_BOOLEAN_KEYS = ['dailyCompileEnabled', 'consolidateEnabled', 'logApiRequests', 'injectDefaultEnabled', 'zhInjectDefaultEnabled', 'htmlInjectDefaultEnabled', 'teamInjectDefaultEnabled', 'todoClosureDefaultEnabled', 'todoRuleInjectDefaultEnabled', 'motionInjectDefaultEnabled'] as const
+const CONFIG_BOOLEAN_KEYS = ['dailyCompileEnabled', 'consolidateEnabled', 'logApiRequests', 'injectDefaultEnabled', 'zhInjectDefaultEnabled', 'htmlInjectDefaultEnabled', 'teamInjectDefaultEnabled', 'todoClosureDefaultEnabled', 'todoRuleInjectDefaultEnabled', 'motionInjectDefaultEnabled', 'eli5InjectDefaultEnabled'] as const
 
 /** 可调布尔字段名。 */
 export type ConfigBooleanKey = (typeof CONFIG_BOOLEAN_KEYS)[number]

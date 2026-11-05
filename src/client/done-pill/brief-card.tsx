@@ -8,7 +8,7 @@
  *    状态小圆点。它是一张「斜插的纸片书签」，不是阅读面。
  * 2. **点一下 = 弹出浮层**：portal 到 document.body 的 fixed 浮层（320px 宽、
  *    最多 420px 高、内部滚动），里面才是完整日报卡：栏目 / 大标题 / 导语 /
- *    3–5 条编号条目 / 来源外链 / 「继续聊这个」/ 1–2 张翻页。
+ *    3–5 条编号条目 / 来源外链 / 1–2 张翻页。
  *
  * 为什么不做「hover 原位撑大」：第一版就是那样，实测一张纸直接盖住半个侧栏，
  * 太重也太吵。小标签 + 独立浮层才是用户要的形态（点开才看内容）。
@@ -35,7 +35,6 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties } from 're
 import { createPortal } from 'react-dom'
 import {
   briefCardAriaLabel,
-  briefCardChatPrompt,
   briefDateKey,
   type BriefCard,
   type BriefRecord,
@@ -100,8 +99,6 @@ export interface BriefCardProps {
   ratio: number
   /** 宽栏（true）还是 56px 窄轨（false）。 */
   wide: boolean
-  /** 「继续聊这个」：把提示词写进输入框（父组件实现）。 */
-  onChat: (text: string) => void
 }
 
 /**
@@ -294,6 +291,44 @@ export function BriefCard(props: BriefCardProps): JSX.Element | null {
     })
   }, [brief])
 
+  /** 鼠标滚轮切换卡片（防抖冷却 380ms，支持右栏长滚动保护）。 */
+  const wheelLockRef = useRef(false)
+  const wheelTimerRef = useRef<number | null>(null)
+
+  const handleWheel = useCallback((event: React.WheelEvent): void => {
+    const total = brief?.cards.length ?? 0
+    if (total <= 1) return
+
+    const target = event.target as HTMLElement | null
+    const scrollable = target !== null ? target.closest('.db-col-right') as HTMLElement | null : null
+    if (scrollable !== null && scrollable.scrollHeight > scrollable.clientHeight) {
+      const isDown = event.deltaY > 0
+      const atBottom = scrollable.scrollTop + scrollable.clientHeight >= scrollable.scrollHeight - 2
+      const atTop = scrollable.scrollTop <= 2
+      if (isDown && !atBottom) return
+      if (!isDown && !atTop) return
+    }
+
+    if (Math.abs(event.deltaY) < 16) return
+
+    if (wheelLockRef.current) return
+    wheelLockRef.current = true
+    if (wheelTimerRef.current !== null) window.clearTimeout(wheelTimerRef.current)
+    wheelTimerRef.current = window.setTimeout(() => {
+      wheelLockRef.current = false
+    }, 380)
+
+    const step = event.deltaY > 0 ? 1 : -1
+    changeCard(step)
+  }, [brief, changeCard])
+
+  useEffect(() => () => {
+    if (wheelTimerRef.current !== null) {
+      window.clearTimeout(wheelTimerRef.current)
+      wheelTimerRef.current = null
+    }
+  }, [])
+
   // 窄轨没有插卡的位置：hooks 已全部执行（React 规则），这里直接不渲染。
   if (!wide) return null
 
@@ -451,18 +486,6 @@ export function BriefCard(props: BriefCardProps): JSX.Element | null {
     statusSub = truncate(error, ERROR_MAX) + ' · 点此重试'
   }
 
-  /** 浮层头：栏目名 + 未联网角标 + 日期 + 关闭。所有状态共用同一条头。 */
-  const sheetHead = (
-    <div className="db-head">
-      <span className="db-kicker">{card !== null ? card.kicker : '每日情报'}</span>
-      {/* 未联网：模型只凭自身知识写的，用弱色角标提示可信度差异，
-          不用警告色——这不是错误，只是来源不同。 */}
-      {brief !== null && brief.origin === 'model' && <span className="db-offline">未联网</span>}
-      <span className="db-meta">{metaText}</span>
-      <button type="button" className="db-close" aria-label="关闭情报卡" onClick={close}>✕</button>
-    </div>
-  )
-
   let body: JSX.Element
   if (view === 'skeleton') {
     body = (
@@ -472,46 +495,20 @@ export function BriefCard(props: BriefCardProps): JSX.Element | null {
       </div>
     )
   } else if (card !== null && brief !== null) {
-    // 期刊式两栏：左栏主题（大标题 / 导语 / 动作），右栏编号条目。
+    // 期刊式两栏：左栏主题（分类眉标 / 大标题 / 导语 / 翻页），右栏编号条目。
     body = (
       <div className="db-body">
         <div className="db-col-left">
-          <div className="db-title">{card.title}</div>
-          {card.lede !== '' && <div className="db-lede">{card.lede}</div>}
-          <div className="db-actions">
-            <button
-              type="button"
-              className="db-chat"
-              onClick={() => {
-                props.onChat(briefCardChatPrompt(card))
-                close()
-              }}
-            >
-              继续聊这个
-            </button>
-            <span className="db-spacer" />
+          <div className="db-kicker-row">
+            <span className="db-kicker">{card.kicker}</span>
+            {brief.origin === 'model' && <span className="db-offline">未联网</span>}
+            <span className="db-meta">{metaText}</span>
             {cards.length > 1 && (
-              <span className="db-pager">
-                <button
-                  type="button"
-                  className="db-pager-btn"
-                  aria-label="上一张情报卡"
-                  onClick={() => { changeCard(-1) }}
-                >
-                  ‹
-                </button>
-                <span className="db-pager-label">{String(safeIndex + 1) + ' / ' + String(cards.length)}</span>
-                <button
-                  type="button"
-                  className="db-pager-btn"
-                  aria-label="下一张情报卡"
-                  onClick={() => { changeCard(1) }}
-                >
-                  ›
-                </button>
-              </span>
+              <span className="db-page-badge">{String(safeIndex + 1) + ' / ' + String(cards.length)}</span>
             )}
           </div>
+          <div className="db-title">{card.title}</div>
+          {card.lede !== '' && <div className="db-lede">{card.lede}</div>}
         </div>
         <div className="db-col-right">
           {card.entries.length > 0 && (
@@ -622,6 +619,7 @@ export function BriefCard(props: BriefCardProps): JSX.Element | null {
             role="dialog"
             aria-modal="true"
             aria-label={ariaLabel}
+            onWheel={handleWheel}
             onClick={(event) => { event.stopPropagation() }}
             onKeyDown={(event) => {
               if (event.key === 'Escape') {
@@ -630,7 +628,7 @@ export function BriefCard(props: BriefCardProps): JSX.Element | null {
               }
             }}
           >
-            {sheetHead}
+            <button type="button" className="db-close" aria-label="关闭情报卡" onClick={close}>✕</button>
             {body}
           </div>
         </div>,

@@ -453,7 +453,7 @@ async function main() {
      * 这个数字与 smoke-client 里「源码 <SettingsRow> 计数」是两个不同口径，
      * 两边互为印证（源码写了但没渲染出来同样算错）。
      */
-    if (opened.rows !== 8) fail(`卡片里 ${opened.rows} 行固定设置，应为 8 行（源码 8 处 SettingsRow）`)
+    if (opened.rows !== 9) fail(`卡片里 ${opened.rows} 行固定设置，应为 9 行（源码 9 处 SettingsRow）`)
     // 组数 3（2026-10-25 最终形态，2026-10-28 组名恢复「任务清单」）：提示词通道 / 展示 / 任务清单；
     // 工作区记忆是通栏区块（.kr-settings__ws-zone），不计入 group。
     // 任务清单组里的两行**没有合并成一个开关**（用户问过能不能合）：作用机理相反，

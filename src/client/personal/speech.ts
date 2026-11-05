@@ -183,6 +183,39 @@ let context: AudioContext | null = null
 /** 主增益（所有 source 都接它，它接 destination）。保留引用是为了换上下文时能丢掉。 */
 let gain: GainNode | null = null
 
+/**
+ * 朗读音量（0..1）的落盘键。
+ *
+ * 单独存一个键、不并进 Bot 数据：音量是「在这台机器上把声音放多大」的偏好，
+ * 与是哪个 Bot 无关；换 Bot / 开新会话不该把耳朵的音量一起换掉。命名与通话音量
+ * （store 的 `pa:call-volume:v1`）同一套约定。
+ */
+const SPEECH_VOLUME_KEY = 'pa:speech-volume:v1'
+
+/** 读回上次的朗读音量；没存过 / 数据损坏 / 越界一律回落 1（满音量）。 */
+function loadSpeechVolume(): number {
+  // 离线测试（node）里没有 localStorage：整条朗读链路照样要能加载
+  if (typeof localStorage === 'undefined') return 1
+  try {
+    const raw = localStorage.getItem(SPEECH_VOLUME_KEY)
+    if (raw === null) return 1
+    const value = Number(raw)
+    if (!Number.isFinite(value)) return 1
+    return Math.max(0, Math.min(1, value))
+  } catch {
+    return 1
+  }
+}
+
+/**
+ * 当前朗读音量（0..1）。
+ *
+ * 两条播放路径共用一个值：整段 WAV（旧宿主）走本模块的 `gain`，流式 PCM
+ * （新宿主）走 PcmPlayer 自己的增益——不统一的话，同一句话在换宿主机型时
+ * 音量会莫名其妙变一个样。
+ */
+let volume = loadSpeechVolume()
+
 /** 当前正在播放的 WAV 节点（null = 没有在播）。 */
 let source: AudioBufferSourceNode | null = null
 
@@ -247,7 +280,8 @@ function ensureContext(): AudioContext | null {
 function ensureGain(audioContext: AudioContext): GainNode {
   if (gain !== null) return gain
   const node = audioContext.createGain()
-  node.gain.value = 1
+  // 沿用当前音量：重建上下文（页面休眠后被浏览器关掉）不该让音量突然变满
+  node.gain.value = volume
   node.connect(audioContext.destination)
   gain = node
   return node
@@ -320,6 +354,8 @@ function ensurePlayer(sampleRate: number): PcmPlayer {
   }
   player = new PcmPlayer(sampleRate)
   playerSampleRate = sampleRate
+  // 新播放器默认满音量：不在这里套用，用户上次调小的音量会在重连后失效
+  player.setVolume(volume)
   return player
 }
 
@@ -331,6 +367,46 @@ function stopPlayer(): void {
     current.interrupt()
   } catch {
     /* 播放器已释放 */
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* 音量                                                                        */
+/* -------------------------------------------------------------------------- */
+
+/** 读当前朗读音量（0..1）；界面用它初始化滑块的初值。 */
+export function getSpeechVolume(): number {
+  return volume
+}
+
+/**
+ * 设置朗读音量（0..1）：立即作用到两条播放路径，并跨会话记住。
+ *
+ * 对**正在播**的那一条也生效：滑块拖到一半时声音就该跟着变小，而不是
+ * 「下一句才变」——调音量是这个控件唯一的存在理由，延后生效等于没做。
+ * 非数字 / 越界按 1（满音量）处理，与 `loadSpeechVolume` 和通话音量同一口径。
+ */
+export function setSpeechVolume(next: number): void {
+  volume = Number.isFinite(next) ? Math.max(0, Math.min(1, next)) : 1
+  if (gain !== null) {
+    try {
+      gain.gain.value = volume
+    } catch {
+      // 旧上下文已被浏览器关掉：下次 ensureGain 重建时会用新的 volume
+    }
+  }
+  if (player !== null) {
+    try {
+      player.setVolume(volume)
+    } catch {
+      // 播放器已释放：下次 ensurePlayer 重建时会用新的 volume
+    }
+  }
+  if (typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(SPEECH_VOLUME_KEY, String(volume))
+  } catch {
+    /* 配额满 / 隐私模式禁用 localStorage：只影响下次的默认值 */
   }
 }
 

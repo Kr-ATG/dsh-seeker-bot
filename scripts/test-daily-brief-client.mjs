@@ -6,7 +6,7 @@
  * 只会静默显示成错的形态，所以用静态断言把它们钉死。
  *
  * 分五层：
- *   1. 组件契约：BriefCard 导出、props 签名、路由、onChat、翻页存储、aria；
+ *   1. 组件契约：BriefCard 导出、props 签名、路由、翻页存储、aria；
  *   2. 状态规格：骨架 / 空态 / 生成中 / 失败 / 未联网 / 轮询间隔 / 跨日；
  *   3. 样式规格：幂等注入、复用 --dpl-* 变量、半截裁剪、max-height 过渡；
  *   4. 依赖方向：不 import ./pill（防循环依赖）、无白名单外的第三方 import；
@@ -51,14 +51,12 @@ if (propsMatch !== null) {
   check(/scale:\s*number/.test(block), 'props.scale 是 number（--dps 缩放）')
   check(/ratio:\s*number/.test(block), 'props.ratio 是 number（--dpt 字号比例）')
   check(/wide:\s*boolean/.test(block), 'props.wide 是 boolean（宽栏 / 窄轨）')
-  check(/onChat:\s*\(text: string\)\s*=>\s*void/.test(block), 'props.onChat 是 (text: string) => void')
 }
 
 check(cardSrc.includes("const TODAY_ROUTE = '/api/dsh-done-pill/brief/today'"), 'GET 路由常量 /api/dsh-done-pill/brief/today')
 check(cardSrc.includes("const GENERATE_ROUTE = '/api/dsh-done-pill/brief/generate'"), 'POST 路由常量 /api/dsh-done-pill/brief/generate')
 check(/method:\s*'POST'/.test(cardSrc), '触发生成用 POST')
 check(/body:\s*'\{\}'/.test(cardSrc), '生成请求体是空对象 {}')
-check(cardSrc.includes('briefCardChatPrompt(card)'), '「继续聊这个」走共享契约 briefCardChatPrompt')
 check(cardSrc.includes('briefCardAriaLabel(card)'), '无障碍标签走共享契约 briefCardAriaLabel')
 check(cardSrc.includes("const CARD_KEY = 'dsh.dailyBrief.card'"), '翻页位置存 localStorage 键 dsh.dailyBrief.card')
 check(/localStorage\.getItem\(CARD_KEY\)/.test(cardSrc) && /localStorage\.setItem\(CARD_KEY/.test(cardSrc), '翻页位置读写 localStorage')
@@ -122,7 +120,6 @@ check(stylesSrc.includes('--dpl-fg-dim'), '复用 --dpl-fg-dim')
 check(stylesSrc.includes('--dpl-fg-weak'), '复用 --dpl-fg-weak')
 check(stylesSrc.includes('--dpl-row-bg'), '复用 --dpl-row-bg')
 check(stylesSrc.includes('--dpl-divider'), '复用 --dpl-divider')
-check(stylesSrc.includes('--dpl-accent-soft'), '复用 --dpl-accent-soft')
 check(stylesSrc.includes('--dpl-warn'), '复用 --dpl-warn')
 check(stylesSrc.includes('overflow:hidden'), '标签 overflow:hidden（超长栏目名不撑破）')
 check(stylesSrc.includes('cubic-bezier(.32,.72,0,1)'), '过渡曲线与胶囊同一套 .32,.72,0,1')

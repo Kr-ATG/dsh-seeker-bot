@@ -10,13 +10,16 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
-import { IconBook, IconChevronRight, IconListTodo, IconMore, IconPhone, IconSettings, IconTrash, IconUsers, IconX } from '../icons.tsx'
+import { IconBook, IconCamera, IconChevronRight, IconListTodo, IconMore, IconPhone, IconSettings, IconTrash, IconUsers, IconX } from '../icons.tsx'
+import { PaShotModal } from '../shot/PaShotModal.tsx'
 import { blocksToText, usePersonal } from '../store.tsx'
 import type { AssignmentView, Bot, Message, TaskRecordStep } from '../types.ts'
 import type { RelayBrief } from '../../../shared/relay.ts'
+import { AutoSpeakButton } from './AutoSpeakButton.tsx'
 import { Composer } from './Composer.tsx'
 import { MessageList, jumpToMessage } from './MessageList.tsx'
 import { pendingSummaryOf, pendingTasksOf } from './pending.ts'
+import { dispatchViewsOf } from './dispatch.ts'
 import { evaluateRelayTrigger, normalizeRelayAuto, relayHintKey, type RelayTrigger } from '../relay-trigger.ts'
 
 const MIN_CHAT_WIDTH = 520
@@ -63,7 +66,34 @@ interface DispatchItem {
 
 export function ChatPanel(): JSX.Element {
   const { state, ui, actions, activeBot, activeRoom, activeMessages } = usePersonal()
+  /*
+   * 投递回执（对话流里那行「已交给采集」）。
+   *
+   * 只认「当前 Bot 亲手派出去、且是最外层」的那几条（见 dispatch.ts）：子 Bot 的
+   * 孙子任务挂到主管的对话流里，会让用户以为是自己派的。群聊里不显示——多个
+   * Bot 同时在说话，一行系统状态挂在哪条下面都不对。
+   */
+  const dispatches = useMemo(
+    () => (activeRoom !== null ? [] : dispatchViewsOf(state.assignmentsByBot?.[activeBot.id], activeBot.id)),
+    [activeRoom, state.assignmentsByBot, activeBot.id],
+  )
+  /*
+   * 一轮回复结束（pending 从有到无）时补拉一次委派：派活发生在那一轮中间，
+   * 而 3 秒轮询只在该 Bot 已有未结束委派时才启动——不补这一下，第一条回执
+   * 要等到用户切走再切回来才出现。
+   */
+  const anyPending = activeMessages.some((message) => message.role === 'bot' && message.pending === true)
+  const pendingWasRef = useRef(false)
+  const refreshAssignments = actions.refreshAssignments
+  useEffect(() => {
+    const was = pendingWasRef.current
+    pendingWasRef.current = anyPending
+    if (!was || anyPending) return
+    if (activeRoom !== null) return
+    void refreshAssignments(activeBot.id)
+  }, [anyPending, activeRoom, activeBot.id, refreshAssignments])
   const [moreOpen, setMoreOpen] = useState(false)
+  const [shotOpen, setShotOpen] = useState(false)
   const moreRef = useRef<HTMLDivElement>(null)
   /** 待清空对话的目标 bot（非 null 时显示确认卡片）。 */
   const [clearTarget, setClearTarget] = useState<Bot | null>(null)
@@ -513,6 +543,11 @@ export function ChatPanel(): JSX.Element {
           <div className="pa-chat__head-sub">{subtitle}</div>
         </div>
         <div className="pa-chat__head-actions">
+          {/*
+           * 自动播报开关放在通话按钮左侧：两者都是「这个 Bot 的嘴」，并排成一组。
+           * 群聊里组件自己返回 null——自动播报只在单聊生效（见 MessageList）。
+           */}
+          <AutoSpeakButton />
           <button
             className="pa-chat__head-btn"
             type="button"
@@ -522,6 +557,15 @@ export function ChatPanel(): JSX.Element {
             onClick={handleCall}
           >
             <IconPhone size={18} />
+          </button>
+          <button
+            className="pa-chat__head-btn"
+            type="button"
+            title="一键截图（左侧名册 + 右侧会话）"
+            aria-label="一键截图"
+            onClick={() => setShotOpen(true)}
+          >
+            <IconCamera size={18} />
           </button>
           <div className="pa-chat__more" ref={moreRef}>
             <button
@@ -605,6 +649,14 @@ export function ChatPanel(): JSX.Element {
                   <IconBook size={14} />
                   生成今日期刊
                 </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => runMenuAction(() => setShotOpen(true))}
+                >
+                  <IconCamera size={14} />
+                  一键截图
+                </button>
                 {activeRoom === null ? (
                   <button
                     type="button"
@@ -653,7 +705,7 @@ export function ChatPanel(): JSX.Element {
           onMouseDown={(event) => startResize('right', event)}
           onDoubleClick={resetChatWidth}
         />
-        <MessageList messages={activeMessages} bot={activeBot} room={activeRoom} />
+        <MessageList messages={activeMessages} bot={activeBot} room={activeRoom} dispatches={dispatches} />
         <PendingBar messages={activeMessages} />
         {relayHint !== null ? (
           <div className="pa-relay-hint" role="status" data-kind={relayHint.kind}>
@@ -973,6 +1025,7 @@ export function ChatPanel(): JSX.Element {
           </div>
         </div>
       ) : null}
+      <PaShotModal open={shotOpen} onClose={() => setShotOpen(false)} />
       </div>
     </>
   )

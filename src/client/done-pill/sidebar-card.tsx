@@ -49,7 +49,7 @@ interface DoneEntry {
 }
 
 /**
- * 把一段文本写进官方输入框（情报卡「继续聊这个」的出口）。
+ * 把一段文本写进官方输入框（降级回退写剪贴板）。
  *
  * ## 为什么不用官方的 inputActions.setDraft
  *
@@ -998,7 +998,7 @@ export function SidebarBarCard(props: SidebarBarCardProps): JSX.Element | null {
           z-index:1 压在卡片下缘，视觉上就是「卡片插进胶囊」。
           开关独立于胶囊（view.daily-brief）：关掉时组件整块卸载，轮询一起停。 */}
       <FeatureGate feature="view.daily-brief">
-        <BriefCard scale={scale} ratio={fontRatio} wide={wide} onChat={fillComposerDraft} />
+        <BriefCard scale={scale} ratio={fontRatio} wide={wide} />
       </FeatureGate>
       {wide ? (
         <>

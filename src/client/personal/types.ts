@@ -122,6 +122,12 @@ export interface Bot {
    * 只影响「要不要在输入框上方提示整理」，不会自动清空任何会话。
    */
   relayAuto?: RelayAuto
+  /**
+   * 通俗解释（ELI5 模式）：像跟非专业朋友或给五岁小孩解释一样，多打生活比喻、不说黑话、直截了当。
+   *
+   * **默认开**：缺省或为 true 时注入通俗表达契约；显式设为 false 时关闭。
+   */
+  eli5Mode?: boolean
   proactive: ProactiveConfig
   createdAt: number
   createdBy: string | null
@@ -1158,6 +1164,8 @@ export interface NewBotInput {
   voice?: string
   /** 通话用的 Live 供应商 id；留空 = 跟随全局默认（见 `Bot.liveVendor`）。 */
   liveVendor?: string
+  /** 通俗解释（ELI5 模式）；默认开启（true）。 */
+  eli5Mode?: boolean
 }
 
 export const MAIN_BOT_ID = 'bot-main-xiaomo'

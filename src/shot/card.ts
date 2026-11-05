@@ -678,11 +678,8 @@ export async function buildCardHtml(input: ShotCardInput): Promise<ShotCardOutpu
 ${segCss}
 ${hasIuFence ? iuCssFor(theme, input.zoom) : ''}</style></head>
 <body><div class="card">
-<div class="rail"></div>
 <header class="head">
-  <span class="mark">${whale(20, 15)}</span>
-  <span class="brand">DeepSeek Harness</span>
-  <span class="chip">${escapeHtml(chip)}</span>
+  ${chip ? `<span class="chip">${escapeHtml(chip)}</span>` : ''}
   <span class="stamp">${stampNow()}</span>
 </header>
 <h1 class="title">${escapeHtml(title)}</h1>

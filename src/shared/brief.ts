@@ -138,18 +138,24 @@ export interface BriefFeed {
  * 已剔除；将来加源只要往这个数组里塞一行，解析层不用改。
  */
 export const BRIEF_FEEDS: readonly BriefFeed[] = [
+  // ── 国外核心模型与产品首发源（聚焦 OpenAI / Claude / Gemini / Grok 及全球开源） ──
+  { id: 'openai-news', label: 'OpenAI 官方', url: 'https://openai.com/news/rss.xml', lane: 'ai' },
+  { id: 'techcrunch-ai', label: 'TechCrunch AI', url: 'https://techcrunch.com/category/artificial-intelligence/feed/', lane: 'ai' },
+  { id: 'marktechpost', label: 'MarkTechPost AI', url: 'https://www.marktechpost.com/category/technology/artificial-intelligence/feed/', lane: 'ai' },
+  { id: 'arstechnica-ai', label: 'Ars Technica AI', url: 'https://arstechnica.com/tag/ai/feed/', lane: 'ai' },
+  { id: 'infoq-ai', label: 'InfoQ AI', url: 'https://www.infoq.cn/feed', lane: 'ai' },
   { id: 'qbitai', label: '量子位', url: 'https://www.qbitai.com/feed', lane: 'ai' },
-  { id: 'hn', label: 'Hacker News', url: 'https://hnrss.org/frontpage', lane: 'ai' },
+  // ── 世界与重大要闻源 ──
   { id: 'bbc-zh', label: 'BBC 中文', url: 'https://feeds.bbci.co.uk/zhongwen/simp/rss.xml', lane: 'world' },
   { id: 'nyt-zh', label: '纽约时报中文网', url: 'https://cn.nytimes.com/rss/', lane: 'world' },
   { id: 'wsj-world', label: 'WSJ 世界', url: 'https://feeds.a.dj.com/rss/RSSWorldNews.xml', lane: 'world' },
 ]
 
 /** 单个源最多取几条（防止一个源把素材撑爆）。 */
-export const BRIEF_FEED_ITEMS = 8
+export const BRIEF_FEED_ITEMS = 6
 
 /** 素材总量上限（拼进提示词前的硬上限）。 */
-export const BRIEF_SOURCE_LIMIT = 32
+export const BRIEF_SOURCE_LIMIT = 48
 
 /* ───────────────────────────── 宿主 → 前端 ───────────────────────────── */
 
@@ -243,12 +249,11 @@ export function parseBriefDate(date: string): Date {
  * 真正保证时效的是 BRIEF_FEEDS 的 RSS（带 pubDate，可过滤）。
  */
 export function briefQueries(date: Date): string[] {
-  const month = date.getMonth() + 1
   return [
-    `AI 人工智能 今天 新闻 ${month}月`,
-    'AI 大模型 最新发布',
-    '今日 世界 要闻',
-    '今日 国内 要闻',
+    'OpenAI ChatGPT o1 o3 最新发布',
+    'Claude Anthropic Sonnet 新模型',
+    'Gemini Google xAI Grok 最新模型产品',
+    '今日 世界 国内 重大要闻',
   ]
 }
 
@@ -372,7 +377,7 @@ export function briefSystemPrompt(): string {
     '素材不足以支撑某个栏目时，宁可少写条目，也不要补空话套话。',
     '',
     '栏目要求（必须两张卡，顺序固定）：',
-    '1. 第一张卡讲 AI：模型 / 产品 / 研究 / 产业里的当天大事，kicker 用「AI · 前沿」或更贴切的「AI · 某某」；',
+    '1. 第一张卡讲 AI 前沿模型与产品：必须优先聚焦 OpenAI（GPT/o系列/ChatGPT）、Claude（Anthropic）、Gemini（Google）、Grok（xAI）等核心主流模型发布、重大产品功能升级与生态突破；若素材中有上述头部厂商的动态，必须优先采选为条目；kicker 用「AI · 模型」或「AI · 某某」；',
     '2. 第二张卡讲世界或国内重大事件：政治、经济、冲突、灾害、监管、社会事件均可，kicker 用「世界 · 某某」或「国内 · 某某」。',
     '',
     '写作要求：',
@@ -536,7 +541,7 @@ export function sanitizeBriefRecord(
   }
 }
 
-/** 一张卡的「继续聊这个」提示词：把卡里的条目整理成一段可发给模型的话。 */
+/** 一张卡的话题提示词：把卡里的条目整理成一段可发给模型的话。 */
 export function briefCardChatPrompt(card: BriefCard): string {
   const lines = card.entries.map(entry => `${String(entry.order)}. ${entry.title}${entry.source !== undefined ? `（${entry.source}）` : ''}`)
   return [

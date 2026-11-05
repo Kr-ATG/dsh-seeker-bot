@@ -603,6 +603,10 @@ button.pa-call__interrupt {
   align-items: center;
   gap: 8px;
   width: min(100%, 208px);
+  /* 底部的音量条是共用组件（shared/VolumeSlider.tsx）：颜色与挖空环保留在这里 */
+  --pa-vs-color: var(--pa-call-text);
+  --pa-vs-rest: var(--pa-call-line);
+  --pa-vs-surface: var(--pa-call-surface);
   padding: 5px 12px 5px 10px;
   border-radius: 999px;
   background: var(--pa-call-surface);
@@ -614,68 +618,6 @@ button.pa-call__interrupt {
   flex: none;
   display: inline-flex;
   color: var(--pa-call-text-3);
-}
-.pa-call__volume-range {
-  flex: 1;
-  min-width: 0;
-  height: 18px;
-  margin: 0;
-  background: transparent;
-  -webkit-appearance: none;
-  appearance: none;
-  cursor: pointer;
-  outline: none;
-}
-/*
- * 轨道是**单色**的：没有「已填充段」的强调色，也不再有 JS 写进来的填充比例。
- * 用户明确要求「音量条里面的颜色去掉」——胶囊里只留中性灰轨道 + 前景色滑块，
- * 音量由滑块位置和右侧数值表达。这样整颗胶囊在深浅主题下都只有一种颜色，
- * 不会再冒出橙色的短条抢视线。
- */
-.pa-call__volume-range::-webkit-slider-runnable-track {
-  height: 5px;
-  border-radius: 999px;
-  background: var(--pa-call-line);
-}
-/*
- * 滑块：实心圆点 + 一圈「胶囊底色」的挖空环。没有这一环，圆点在浅色主题里就是
- * 一颗浮在轨道上的脏黑点（原来的 1px 硬阴影加深了这个观感）；有了它才像嵌进
- * 轨道，拖动时也不会盖住两端。
- */
-.pa-call__volume-range::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 13px;
-  height: 13px;
-  margin-top: -4px;
-  border-radius: 50%;
-  background: var(--pa-call-text);
-  box-shadow: 0 0 0 2px var(--pa-call-surface), 0 1px 3px rgba(0, 0, 0, 0.28);
-  transition: transform 120ms ease, box-shadow 120ms ease;
-}
-.pa-call__volume-range:hover::-webkit-slider-thumb { transform: scale(1.12); }
-.pa-call__volume-range:focus-visible::-webkit-slider-thumb {
-  box-shadow: 0 0 0 2px var(--pa-call-surface), 0 0 0 4px rgba(255, 159, 10, 0.32);
-}
-/* Firefox：轨道与已填充段是两个伪元素，没有渐变也能对齐观感 */
-.pa-call__volume-range::-moz-range-track {
-  height: 5px;
-  border-radius: 999px;
-  background: var(--pa-call-line);
-}
-/* Firefox 的 progress 默认会用系统高亮色画已填充段：显式改成轨道色，才真的是单色 */
-.pa-call__volume-range::-moz-range-progress {
-  height: 5px;
-  border-radius: 999px;
-  background: var(--pa-call-line);
-}
-.pa-call__volume-range::-moz-range-thumb {
-  width: 13px;
-  height: 13px;
-  border: 0;
-  border-radius: 50%;
-  background: var(--pa-call-text);
-  box-shadow: 0 0 0 2px var(--pa-call-surface), 0 1px 3px rgba(0, 0, 0, 0.28);
 }
 .pa-call__volume-value {
   flex: none;

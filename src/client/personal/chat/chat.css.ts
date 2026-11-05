@@ -232,6 +232,71 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
 .pa-chat__menu button.pa-chat__menu-danger { color: var(--pa-red); }
 .pa-chat__menu button.pa-chat__menu-danger:hover { background: rgba(255, 69, 58, 0.12); color: var(--pa-red); }
 
+/* ---------- 会话头：自动播报开关 + 悬停音量条 ----------
+ * 开关与通话 / 截图 / 更多共用 .pa-chat__head-btn（30px 圆形、hover 变色），
+ * 打开态靠 data-on 用品牌色——四个按钮里只有它和通话按钮有「状态」。
+ * 音量浮层挂在开关自己身上（不是「更多」菜单）：调音量是即时动作，点两层才够到
+ * 就失去意义。交互细节见 AutoSpeakButton.tsx 的文件头。 */
+.pa-autospeak { position: relative; display: flex; align-items: center; }
+.pa-autospeak__panel {
+  position: absolute;
+  top: 33px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 32;
+  width: 216px;
+  /* 底部音量条是共用组件（shared/VolumeSlider.tsx）：颜色与挖空环在这里指定 */
+  --pa-vs-color: var(--pa-text);
+  --pa-vs-rest: var(--pa-line-2);
+  --pa-vs-surface: #232427;
+  padding: 9px 12px 10px;
+  border-radius: 12px;
+  background: #232427;
+  border: 1px solid var(--pa-line-2);
+  box-shadow: var(--pa-shadow-pop);
+  animation: pa-autospeak-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+/* 透明桥：按钮底边与浮层之间留了 3px，光标划过那条缝时正好落在两者之外，
+ * 会触发组件里 160ms 的收起定时器。铺一条看不见的过渡带把它接起来。 */
+.pa-autospeak__panel::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -8px;
+  height: 8px;
+}
+@keyframes pa-autospeak-in {
+  from { opacity: 0; transform: translate(-50%, 6px) scale(0.975); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pa-autospeak__panel { animation: none; }
+}
+.pa-root[data-pa-theme='light'] .pa-autospeak__panel { background: #ffffff; --pa-vs-surface: #ffffff; }
+.pa-autospeak__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 7px;
+  font-size: calc(11px + var(--pa-font-delta));
+  line-height: calc(15px + var(--pa-font-delta));
+  color: var(--pa-text-3);
+}
+.pa-autospeak__value {
+  color: var(--pa-text);
+  font-variant-numeric: tabular-nums;
+}
+.pa-autospeak__row { display: flex; align-items: center; gap: 9px; }
+.pa-autospeak__icon { flex: none; display: inline-flex; color: var(--pa-text-2); }
+.pa-autospeak__hint {
+  margin: 6px 0 0;
+  font-size: calc(10px + var(--pa-font-delta));
+  line-height: calc(14px + var(--pa-font-delta));
+  color: var(--pa-text-3);
+}
+
 /* 清空对话确认卡：自绘，替代 window.confirm（原生对话框会带 dsh-shell 标题、样式脱离界面） */
 .pa-confirm { width: 380px; max-width: calc(100vw - 48px); }
 .pa-confirm__lead {
@@ -826,6 +891,47 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
   text-align: center;
 }
 
+/* ---------- 投递回执（「已交给采集」） ----------
+ * 一行小字 + 状态点，居中。与 system 提示同一档视觉，但**不带玻璃底**：
+ * 派活后这一行会紧挨着出现，带底色的胶囊叠在一起像一串标签。
+ *
+ * 状态点：进行中呼吸（橙），失败红，完成灰。失败态只染点与文字，不整行套红底
+ * ——一条派活的失败不该比主 Bot 那句解释更抢眼。 */
+.pa-dispatch-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 3px 0;
+  animation: pa-rise 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.pa-dispatch__dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--pa-text-4);
+}
+.pa-dispatch-row[data-state='open'] .pa-dispatch__dot {
+  background: var(--pa-accent);
+  animation: pa-dispatch-pulse 1.6s ease-in-out infinite;
+}
+.pa-dispatch-row[data-status='failed'] .pa-dispatch__dot { background: #ff5f57; }
+.pa-dispatch__label {
+  font-size: calc(10.5px + var(--pa-font-delta));
+  line-height: calc(16px + var(--pa-font-delta));
+  color: var(--pa-text-3);
+}
+.pa-dispatch-row[data-status='failed'] .pa-dispatch__label { color: #ff7b72; }
+@keyframes pa-dispatch-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.8); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pa-dispatch-row { animation: none; }
+  .pa-dispatch-row[data-state='open'] .pa-dispatch__dot { animation: none; }
+}
+
 /* ---------- 气泡侧边的操作图标（引用 / 撤回） ----------
  * hover / 键盘聚焦时在气泡**侧面**浮出一排纯图标按钮，不带文字。
  *
@@ -1407,6 +1513,68 @@ button.pa-quote:hover .pa-quote__rule { background: var(--pa-text-4); }
 }
 .pa-exec__media { padding: 0 12px 10px; }
 .pa-exec__media a { display: block; }
+.pa-exec__viewport {
+  position: relative;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #000;
+  aspect-ratio: 16 / 9;
+}
+.pa-exec__head--simple {
+  cursor: default !important;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pa-exec__head--simple .pa-exec__label {
+  flex: 1 1 auto;
+  font-size: calc(13px + var(--pa-font-delta));
+  font-weight: 500;
+  color: var(--pa-text);
+}
+.pa-exec__viewport--loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--pa-chat-glass-2);
+}
+.pa-exec__loading-text {
+  font-size: calc(11.5px + var(--pa-font-delta));
+  color: var(--pa-text-3);
+}
+.pa-exec__live-tag {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #fff;
+  font-size: calc(10px + var(--pa-font-delta));
+  font-weight: 500;
+  line-height: 1;
+  pointer-events: none;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+}
+.pa-exec__live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ff3b30;
+  box-shadow: 0 0 6px #ff3b30;
+  animation: pa-pulse 1.4s ease-in-out infinite;
+}
+@keyframes pa-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
+}
 .pa-exec__shot {
   display: block;
   width: 100%;
@@ -1440,6 +1608,7 @@ button.pa-quote:hover .pa-quote__rule { background: var(--pa-text-4); }
 @media (prefers-reduced-motion: reduce) {
   .pa-exec__spinner { animation: none; }
   .pa-exec__caret { transition: none; }
+  .pa-exec__live-dot { animation: none; }
 }
 
 /* ---------- 工具调用卡 ---------- */

@@ -309,6 +309,8 @@ async function handle(
       const todoRuleEnabled = await store.isTodoRuleInjectEnabled(config.todoRuleInjectDefaultEnabled !== false)
       // 动效技能通道同理并进回包（同一理由：开关浮层一次 hover 要知道全部通道状态）。
       const motionEnabled = await store.isMotionInjectEnabled(config.motionInjectDefaultEnabled !== false)
+      // 通俗解释（ELI5）通道同理并进回包。
+      const eli5Enabled = await store.isEli5InjectEnabled(config.eli5InjectDefaultEnabled !== false)
       /*
        * 工作区「项目记忆记录开关」一并回传（= 项目 meta 的 autoMemory，写入侧闸门）。
        *
@@ -341,6 +343,7 @@ async function handle(
         todoClosureEnabled,
         todoRuleEnabled,
         motionEnabled,
+        eli5Enabled,
       })
       return
     }
@@ -489,6 +492,20 @@ async function handle(
       const body = await readBody(req) as Record<string, unknown>
       const enabled = body.enabled === true
       await store.setMotionInjectEnabled(enabled)
+      json(res, 200, { ok: true, enabled, builtin: true })
+      return
+    }
+
+    // ── 通俗解释（ELI5 模式）规范注入开关（内置能力，全局单值） ─────────
+    if (method === 'GET' && rest === '/eli5-inject-state') {
+      const enabled = await store.isEli5InjectEnabled(config.eli5InjectDefaultEnabled !== false)
+      json(res, 200, { enabled, builtin: true })
+      return
+    }
+    if (method === 'POST' && rest === '/eli5-inject-state') {
+      const body = await readBody(req) as Record<string, unknown>
+      const enabled = body.enabled === true
+      await store.setEli5InjectEnabled(enabled)
       json(res, 200, { ok: true, enabled, builtin: true })
       return
     }

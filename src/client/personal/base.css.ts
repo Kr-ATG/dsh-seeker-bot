@@ -834,6 +834,122 @@ button.pa-select__trigger[data-open='true'] .pa-select__chevron { transform: rot
   box-shadow: 0 10px 30px rgba(15, 17, 21, 0.16);
 }
 
+/* ---------- 音量滑条（通话弹层 / 会话头自动播报浮层共用） ----------
+ * 用**粗细**表达音量：已选段（当前音量）粗 10px、未选段细 4px，两段都保持单色
+ * （此前已按用户要求去掉填充色）。悬停 / 聚焦 / 拖动时两段一起加粗一档
+ * （13 / 6），「正在调音量」这件事也画出来，但粗细对比始终保留。
+ *
+ * 几何对齐：圆点 14px → 中心可移动区间左右各内缩 7px。自绘轨道用同样的内缩
+ * （见 .pa-vs__track 的 left/right），百分比才与 range 数值一一对应。改圆点
+ * 尺寸时三处一起改：thumb 宽高、track 内缩、margin-top。
+ * 颜色 / 底色由使用方通过 --pa-vs-color / --pa-vs-rest / --pa-vs-surface 指定。
+ */
+.pa-vs {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 20px;
+  display: flex;
+  align-items: center;
+}
+.pa-vs__track {
+  position: absolute;
+  left: 7px;
+  right: 7px;
+  top: 50%;
+  height: 20px;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+/* 已选段：粗 */
+.pa-vs__fill {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: var(--pa-vs-fill, 0%);
+  height: 10px;
+  border-radius: 999px;
+  background: var(--pa-vs-color, var(--pa-text));
+  transition: height 140ms ease;
+}
+/* 未选段：细（fill 到 100% 时宽度归零，不会画出半截圆头） */
+.pa-vs__rest {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: calc(100% - var(--pa-vs-fill, 0%));
+  height: 4px;
+  border-radius: 999px;
+  background: var(--pa-vs-rest, var(--pa-line-2));
+  transition: height 140ms ease;
+}
+/* 真 range 叠在上层：轨道透明（视觉在下面两段），只保留圆点 */
+.pa-vs__input {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+  outline: none;
+}
+.pa-vs__input::-webkit-slider-runnable-track {
+  height: 20px;
+  background: transparent;
+}
+/* 圆点：实心 + 一圈所在表面的底色（挖空环），压在粗细交界处不会糊成一块 */
+.pa-vs__input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 3px; /* (20 - 14) / 2 */
+  border-radius: 50%;
+  background: var(--pa-vs-color, var(--pa-text));
+  box-shadow: 0 0 0 2px var(--pa-vs-surface, var(--pa-card)), 0 1px 3px rgba(0, 0, 0, 0.28);
+  transition: transform 120ms ease, box-shadow 140ms ease;
+}
+.pa-vs__input:hover::-webkit-slider-thumb { transform: scale(1.12); }
+.pa-vs__input:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 2px var(--pa-vs-surface, var(--pa-card)), 0 0 0 4px rgba(255, 159, 10, 0.32);
+}
+/* Firefox：track / progress / thumb 三个伪元素都要显式重置，否则冒出系统高亮色 */
+.pa-vs__input::-moz-range-track {
+  height: 20px;
+  background: transparent;
+  border: 0;
+}
+.pa-vs__input::-moz-range-progress {
+  height: 20px;
+  background: transparent;
+}
+.pa-vs__input::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--pa-vs-color, var(--pa-text));
+  box-shadow: 0 0 0 2px var(--pa-vs-surface, var(--pa-card)), 0 1px 3px rgba(0, 0, 0, 0.28);
+}
+/* 悬停 / 键盘聚焦 / 拖动：两段一起加粗一档，粗细对比保留 */
+.pa-vs:hover .pa-vs__fill,
+.pa-vs:focus-within .pa-vs__fill,
+.pa-vs:active .pa-vs__fill { height: 13px; }
+.pa-vs:hover .pa-vs__rest,
+.pa-vs:focus-within .pa-vs__rest,
+.pa-vs:active .pa-vs__rest { height: 6px; }
+@media (prefers-reduced-motion: reduce) {
+  .pa-vs__fill,
+  .pa-vs__rest,
+  .pa-vs__input::-webkit-slider-thumb { transition: none; }
+}
+
 /* ---------- 动画 ---------- */
 @keyframes pa-rise {
   from { opacity: 0; transform: translateY(14px); }
@@ -868,8 +984,8 @@ button.pa-select__trigger[data-open='true'] .pa-select__chevron { transform: rot
   100% { background-position: 400px 0; }
 }
 
-.pa-fade-in { animation: pa-fade 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
-.pa-rise-in { animation: pa-rise 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.pa-fade-in { animation: pa-fade 300ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.pa-rise-in { animation: pa-rise 300ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 
 /* ───────────────────────── 浮层退场（closing 态） ───────────────────────── */
 /*
@@ -899,10 +1015,10 @@ button.pa-select__trigger[data-open='true'] .pa-select__chevron { transform: rot
   from { opacity: 1; transform: translate(-50%, 0) scale(1); }
   to { opacity: 0; transform: translate(-50%, 10px) scale(0.97); }
 }
-.pa-overlay[data-closing='1'] { animation: pa-overlay-out 240ms ease both; }
-.pa-overlay[data-closing='1'] .pa-modal { animation: pa-modal-out 240ms cubic-bezier(0.4, 0, 0.2, 1) both; }
-.pa-select__popup[data-closing='1'] { animation: pa-select-pop-out 240ms cubic-bezier(0.4, 0, 0.2, 1) both; }
-.pa-toast[data-closing='1'] { animation: pa-toast-out 240ms cubic-bezier(0.4, 0, 0.2, 1) both; }
+.pa-overlay[data-closing='1'] { animation: pa-overlay-out 260ms ease both; }
+.pa-overlay[data-closing='1'] .pa-modal { animation: pa-modal-out 260ms cubic-bezier(0.4, 0, 0.2, 1) both; }
+.pa-select__popup[data-closing='1'] { animation: pa-select-pop-out 260ms cubic-bezier(0.4, 0, 0.2, 1) both; }
+.pa-toast[data-closing='1'] { animation: pa-toast-out 260ms cubic-bezier(0.4, 0, 0.2, 1) both; }
 
 @media (prefers-reduced-motion: reduce) {
   /* 退场规则比入场规则更具体，必须连 [data-closing] 一起列进来才压得住。 */

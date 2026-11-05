@@ -272,6 +272,11 @@ export interface InjectStateView {
    */
   motionEnabled?: boolean
   /**
+   * 通俗解释（ELI5 模式）通道是否开启。
+   * 默认关（升级不改变现状），缺字段按 false 兜底。
+   */
+  eli5Enabled?: boolean
+  /**
    * 当前**工作区**（cwd）派生的项目 hash（12 位 hex）；拿不到工作区时为 null。
    *
    * 由 /inject-state 顺带回传，而不是另开一个新 GET。
@@ -473,6 +478,12 @@ export interface MemoryApi {
    */
   getTodoClosureState: () => Promise<ZhInjectStateView>
   setTodoClosureState: (enabled: boolean) => Promise<ZhInjectStateView & { ok: boolean }>
+  getTodoRuleInjectState?: () => Promise<ZhInjectStateView>
+  setTodoRuleInjectState?: (enabled: boolean) => Promise<ZhInjectStateView & { ok: boolean }>
+  getMotionInjectState?: () => Promise<ZhInjectStateView>
+  setMotionInjectState?: (enabled: boolean) => Promise<ZhInjectStateView & { ok: boolean }>
+  getEli5InjectState: () => Promise<ZhInjectStateView>
+  setEli5InjectState: (enabled: boolean) => Promise<ZhInjectStateView & { ok: boolean }>
   /**
    * 整理（LLM 合并/改写/废弃）。
    *
@@ -583,6 +594,8 @@ export function createMemoryApi(): MemoryApi {
     setTodoRuleInjectState: (enabled) => sendJson<ZhInjectStateView & { ok: boolean }>('/todo-rule-inject-state', { enabled }),
     getMotionInjectState: () => getJson<ZhInjectStateView>('/motion-inject-state'),
     setMotionInjectState: (enabled) => sendJson<ZhInjectStateView & { ok: boolean }>('/motion-inject-state', { enabled }),
+    getEli5InjectState: () => getJson<ZhInjectStateView>('/eli5-inject-state'),
+    setEli5InjectState: (enabled) => sendJson<ZhInjectStateView & { ok: boolean }>('/eli5-inject-state', { enabled }),
     consolidate: (scope = 'all', projectHash, owner) => sendJson<{ ok: boolean; results: ConsolidateResultView[] }>('/consolidate', {
       scope,
       projectHash,
