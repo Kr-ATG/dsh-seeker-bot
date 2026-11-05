@@ -503,11 +503,7 @@ blur(10px) 显影、下面一层点阵同步淡出），不是硬切。回合收
 
 退场不是立刻卸载：先置 `data-closing` 让 CSS 播完 190ms，再真正卸载（连点关闭 / 动画中重新打开都有防重入与取消）。系统开「减少动效」时全部关闭。
 
-![每日情报卡退场动效的四帧](docs/shots/daily-brief-exit-frames.png)
-
 > 三版演进：① 整宽半截卡 + hover 原地撑大（盖住半个侧栏，太重）→ ② 小标签 + 贴标签弹出的小卡 → ③ 小标签 + 从正中划出的期刊式大卡。现在这版平时几乎不占地方，点开是一页能读的杂志。
-
-![每日情报卡：斜插在胶囊上方的小便签与展开态](docs/shots/daily-brief-card.png)
 
 **数据怎么来**（这是「每天自动」的关键，不依赖某个难找的 RSS 聚合商）：
 
@@ -701,7 +697,7 @@ Bot 模式是一个覆盖整个 DSH Web 视口的自绘应用：
 - **宿主接口**：`GET /api/personal-agent/outputs?botId=&name=` 返回该 Bot 的产出物清单；
   `bot-output-dirs.json` 持久化 `botId → 文件夹名` 映射（改名不迁移文件夹）。
 
-  ![Bot 设置卡](docs/shots/personal-agent-v3-settings.png)
+  ![Bot 设置卡：居中弹窗 + 左侧分类导航](docs/shots/personal-agent-v3-settings.png)
 
   ![任务记录与详情卡](docs/shots/personal-agent-v3-task-detail.png)
 
@@ -831,9 +827,6 @@ Bot 模式是一个覆盖整个 DSH Web 视口的自绘应用：
   双向实时转写、「在听 / 在想 / 在说」三态、麦克风电平点阵与思考过程。通话界面**没有文字
   输入框**（底部「不方便说话时也可以打字」那一行已移除）；麦克风不可用时只提示重试或挂断。
   最小化收起到右栏顶部。
-
-  ![全双工实时语音通话弹层](docs/shots/personal-agent-call.png)
-
   - **通话音量胶囊**：居中的一颗胶囊（喇叭图标 + 细轨道 + 百分比），与「通话设置」按钮同一套
     底色与圆角，不再是一条横跨整宽的裸滑块。控制 Bot 声音（下行）的播放增益，拖动实时生效（改的是播放器的 master
     gain，正在播的这一句也会立刻变小声）；拖到 0 显示「静音」。值存在本机 localStorage，
@@ -937,9 +930,6 @@ Bot 模式是一个覆盖整个 DSH Web 视口的自绘应用：
     回归：`scripts/test-realtime-tts.mjs`（端到端）、`scripts/test-speech-client.mjs`。
 - **对话内交互 UI**：选项 / 按钮 / 表单卡片可直接操作；提交后追加用户消息、Bot 继续回复，
   部分表单会真实创建例行任务；卡片标记「已提交」防重复。
-
-  ![对话流里的选项卡与连接应用卡](docs/shots/personal-agent-options-card.png)
-
 - **动效**：每条消息上滑入场（`pa-rise` 260ms）、弹窗缩放淡入、通话呼吸波纹、列表选中态 120ms。
 
 ### 回复形态：Bot 是聊天，不是工作台
@@ -1377,10 +1367,6 @@ X（Twitter）用的是 `@mobalab/x-mcp-server`（v2.1.0，27 个工具）：走
 读 $0.005/资源，新账号绑卡首充送 $20，所以得先有 X 开发者账号并充值。只想先试试、不想开开发者账号的，
 可以把 args 换成 `@twitterapis/mcp`（第三方服务商，免费送 $0.50 额度、免绑卡，公共搜索与用户读取
 只填一个 key 就能用；但它发推要关联 X 会话 cookie，有账号风险，116 个工具也会明显拉长会话上下文）。
-
-![连接器弹窗卡片](docs/shots/workbench-connectors.png)
-
-![连接器详情与密钥配置](docs/shots/workbench-connectors-detail.png)
 
 ### 画廊
 
