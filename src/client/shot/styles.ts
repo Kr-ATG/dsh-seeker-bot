@@ -96,7 +96,7 @@ html[data-dsh-glass] .tsh-panel{background:var(--tsh-panel-surface);backdrop-fil
 .tsh-width-input{width:46px;height:24px;border:none;background:transparent;color:var(--dsw-alias-label-primary,#eee);font-size:13px;font-weight:500;text-align:right;padding:0;outline:none;-moz-appearance:textfield}
 .tsh-width-input::-webkit-outer-spin-button,.tsh-width-input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 .tsh-unit{font-size:12px;color:var(--dsw-alias-label-tertiary,#888);user-select:none}
-/* 文本输入（标题/徽章可编辑）：官方输入框规格 32px / 圆角 8 */
+/* 文本输入（仅标题可编辑）：官方输入框规格 32px / 圆角 8 */
 .tsh-input{height:32px;padding:0 10px;font-size:14px;line-height:22px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#333);background-color:var(--tsh-control-surface);color:var(--dsw-alias-label-primary,#eee);min-width:0}
 .tsh-input:focus{outline:none;border-color:var(--dsw-alias-state-business-primary,#4176e6)}
 .tsh-input::placeholder{color:var(--dsw-alias-label-tertiary,#888)}

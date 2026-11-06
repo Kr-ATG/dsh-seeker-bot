@@ -3,7 +3,7 @@
  *
  * ## 为什么是 localStorage 而不是 host settings
  *
- * 截图面板的六项选择（范围 / 宽度 / 画质 / 主题 / 标题 / 徽章）全是**纯呈现
+ * 截图面板的五项选择（范围 / 宽度 / 画质 / 主题 / 标题）全是**纯呈现
  * 偏好**：跟 host 无关、跟会话无关，刷新页面就该记住。按项目既有先例
  * （`dsh.kr_chat.panel_width`），这类偏好一律走 localStorage —— 改完刷新即
  * 生效，不需要重启 DSH、也不需要动 host。
@@ -48,17 +48,15 @@ export interface ShotPrefs {
    * 看起来像 bug。锚定后换消息即回落当前对话标题，同一条消息内则记得住。
    */
   titleFor: string | null
-  /** 页头徽章；null = 用户没编辑过，用默认徽章。 */
-  label: string | null
 }
 
-/** 默认徽章文案。 */
-export const DEFAULT_LABEL = 'Kr'
+/** 页头徽章文案：固定为产品名 Seeker，不再提供输入框、也不读取历史自定义值。 */
+export const DEFAULT_LABEL = 'Seeker'
 
 /** 持久化键。 */
 const KEY = 'dsh.chat_plus.shot_options'
 
-/** 标题 / 徽章的长度上限（与面板输入框的 maxLength 一致）。 */
+/** 标题文本的长度上限（与面板输入框的 maxLength 一致）。 */
 const TEXT_MAX = 80
 
 const RANGES: readonly ShotRange[] = ['reply', 'turn', 'all']
@@ -67,7 +65,7 @@ const QUALITIES: readonly ShotQuality[] = ['1080p', '2k', '4k']
 
 /** 默认偏好（读取失败 / 首访时的起点）。 */
 export function defaultShotPrefs(): ShotPrefs {
-  return { range: 'reply', theme: null, width: DEFAULT_WIDTH, quality: '2k', title: null, titleFor: null, label: null }
+  return { range: 'reply', theme: null, width: DEFAULT_WIDTH, quality: '2k', title: null, titleFor: null }
 }
 
 /** 读一段合法文本（null 表示「没编辑过」，空串表示「编辑后清空」）。 */
@@ -95,7 +93,6 @@ function coerce(raw: unknown): ShotPrefs {
     quality: quality ?? base.quality,
     title: parseText(record.title),
     titleFor: typeof record.titleFor === 'string' ? record.titleFor : null,
-    label: parseText(record.label),
   }
 }
 

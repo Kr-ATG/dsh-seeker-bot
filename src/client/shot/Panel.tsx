@@ -1,13 +1,13 @@
 /**
  * dsh-seeker-bot — 对话截图面板（client 端，自 dsh-webui 移植）。
  *
- * 打开即渲染；改选项（范围 / 主题 / 设备 / 画质）或改完文案（标题 / 徽章）
+ * 打开即渲染；改选项（范围 / 主题 / 设备 / 画质）或改完标题文案
  * 即重渲染。预览在面板中央按容器缩放展示。渲染结果先留在 host 内存，点
  * 「保存」才落盘——不保存就不会在 storages 里堆垃圾。
  *
  * 文案可编辑：
  *  - 标题：默认取会话标题，可改成任意文字（卡片大标题）；
- *  - 徽章：默认「Kr」，可改成任意文字；不随范围切换自动变化。
+ *  - 徽章：页头固定显示「Seeker」，不再提供输入框（也不随范围切换变化）。
  * 输入框 blur 或 Enter 提交（不逐键重渲染，避免打字期间反复起渲染）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -127,8 +127,7 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
   )
   // 用户是否手动编辑过标题：未改动时允许切换范围时在「本次对话」与「会话标题」间自动跟随
   const userEditedTitleRef = useRef(saved.title !== null && saved.titleFor === messageKey)
-  // 徽章固定默认「Kr」（用户要求）；仍可在输入框里随手改，改过就记住。
-  const [labelText, setLabelText] = useState(saved.label ?? DEFAULT_LABEL)
+  // 页头徽章固定用 DEFAULT_LABEL（「Seeker」）：不再暴露输入框，也不读取历史自定义值。
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<RenderResult | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -180,7 +179,7 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
     setError(null)
     setSavedPath(null)
     setToast(null)
-    const p = render({ messages, theme, width: effectiveWidth, quality, title: titleText, label: labelText, cwd })
+    const p = render({ messages, theme, width: effectiveWidth, quality, title: titleText, label: DEFAULT_LABEL, cwd })
       .then((next) => {
         if (tokenRef.current !== token) return null
         setResult(next)
@@ -201,7 +200,7 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
       })
     pendingPromiseRef.current = p
     return p
-  }, [messages, theme, cardWidth, quality, titleText, labelText, cwd])
+  }, [messages, theme, cardWidth, quality, titleText, cwd])
 
   // 打开时渲染一次，之后任一选项变化都重渲染。
   useEffect(() => { run() }, [run])
@@ -251,7 +250,7 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
         width: cardWidth,
         quality,
         title: titleText,
-        label: labelText,
+        label: DEFAULT_LABEL,
         html: baseHtml,
         cwd,
       })
@@ -269,7 +268,7 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
           setBusy(false)
         })
     }
-  }, [baseHtml, result, messages, theme, cardWidth, quality, titleText, labelText, scale, cwd])
+  }, [baseHtml, result, messages, theme, cardWidth, quality, titleText, scale, cwd])
 
   /** 退出编辑：切回 PNG 预览（未应用删除时预览仍是最初渲染图）。 */
   const stopEdit = useCallback((): void => {
@@ -396,7 +395,7 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
       width: cardWidth,
       quality,
       title: titleText,
-      label: labelText,
+      label: DEFAULT_LABEL,
       html: next,
       cwd,
     })
@@ -418,7 +417,7 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
         if (tokenRef.current !== token) return
         setBusy(false)
       })
-  }, [messages, theme, cardWidth, quality, titleText, labelText, scale, cwd])
+  }, [messages, theme, cardWidth, quality, titleText, scale, cwd])
 
   const switchRange = useCallback((next: ShotRange): void => {
     setRange(next)
@@ -674,15 +673,6 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
               userEditedTitleRef.current = true
               setTitleText(val)
               patchShotPrefs({ title: val, titleFor: messageKey })
-            }}
-          />
-          <EditableText
-            label="徽章"
-            value={labelText}
-            placeholder="如：Kr"
-            onCommit={(val) => {
-              setLabelText(val)
-              patchShotPrefs({ label: val })
             }}
           />
           <span className={cls.meta}>输出宽约 {cardWidth * scale} px</span>
