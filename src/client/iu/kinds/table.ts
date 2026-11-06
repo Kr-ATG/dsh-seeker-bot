@@ -1,11 +1,11 @@
 /**
- * iu kind: **table**（可排序数据表）。
+ * iu kind: **table**（现代高质感可排序数据看板与表格）。
  *
  * 结构照抄 slider.ts（纯逻辑半边）：parse / initState / fillText / snapshot /
  * css / doc + export const tableKind；React 体在 table.body.tsx。
  *
- * 排序比较器（sortTableRows）也放在本文件导出给 Body 用——排序语义必须单一
- * 来源，两边各写一份就会漂移（与 chart 的几何共用 geometry.ts 同理）。
+ * 排序比较器（sortTableRows）、徽标判断（getCellBadgeVariant）、
+ * 列最大值换算（calcColMaxValues）导出给 Body 用，保证排序与渲染语义单一来源。
  *
  * ⚠ 本文件零 React、零 DOM（host 半身的截图管线要 import 它）。
  */
@@ -13,10 +13,10 @@
 import type { IuKind, IuSpecBase, IuState } from './contract.ts'
 import { arr, boolOrFalse, boolOrTrue, esc, escAttr, formatNum, oneOf, pickAll, str, strOr } from './core.ts'
 
-/** 列类型：text 按 localeCompare 排、num 按数值排（且右对齐 + tabular-nums）。 */
-export type IuTableColType = 'text' | 'num'
+/** 列类型：text 按字典排、num 按数值排、bar 带迷你占比进度条。 */
+export type IuTableColType = 'text' | 'num' | 'bar'
 
-/** 列对齐（parse 时已把缺省解析成具体值：num→right、text→left）。 */
+/** 列对齐（parse 时已把缺省解析成具体值：num/bar→right、text→left）。 */
 export type IuTableAlign = 'left' | 'right' | 'center'
 
 /** 一列的定义。 */
@@ -32,6 +32,14 @@ export interface IuTableColumn {
 /** 单元格值：字符串或数字（JSON 里就这两种；其余类型 parse 成空串）。 */
 export type IuTableCell = string | number
 
+/** 顶部概览指标项（可选，最多 4 项）。 */
+export interface IuTableMetric {
+  readonly label: string
+  readonly value: string | number
+  readonly sub?: string
+  readonly color?: 'primary' | 'purple' | 'green' | 'amber'
+}
+
 export interface IuTableSpec extends IuSpecBase {
   readonly kind: 'table'
   readonly title: string
@@ -42,36 +50,39 @@ export interface IuTableSpec extends IuSpecBase {
   readonly dense: boolean
   /** 斑马纹（默认 true）。 */
   readonly zebra: boolean
+  /** 顶部概览指标卡（可选，最多 4 项）。 */
+  readonly metrics?: readonly IuTableMetric[]
+  /** 快速分类过滤项（可选，如 ['全部', '系统组件', '开发运行时', ...]）。 */
+  readonly filters?: readonly string[]
 }
 
-/** table 的本地状态（持久化）：当前按哪列、什么方向排。 */
+/** table 的本地状态（持久化）：当前按哪列、什么方向排、以及当前选中的过滤分类。 */
 export interface TableState extends IuState {
   readonly sortKey: string | null
   readonly sortDir: 'asc' | 'desc'
+  readonly filter?: string | null
 }
 
 /** 列数上限。 */
 const MAX_COLS = 8
 /** 行数上限。 */
 const MAX_ROWS = 100
-/** 单元格文本上限（列 label ≤16、标题 ≤40，单元格给宽一点放长名称）。 */
+/** 单元格文本上限。 */
 const MAX_CELL = 60
-/** 快照最多渲染前几行（结构完整即可，截图不必画满百行）。 */
+/** 快照最多渲染前几行。 */
 const SNAPSHOT_ROWS = 8
 
 function parse(raw: Record<string, unknown>): IuTableSpec | undefined {
   const cols = pickAll<IuTableColumn>(raw.columns, MAX_COLS, (it) => {
     const key = str(it.key, 16)
     const label = str(it.label, 16)
-    // key 与 label 全空 = 这列没法用也没法排，跳过（不占额度）；
-    // 只有一个时互相兜底——钳位修复而不是拒绝整卡。
     if (key === '' && label === '') return undefined
-    const type = oneOf(it.type, ['text', 'num'], 'text')
-    const align = oneOf(it.align, ['left', 'right', 'center'], type === 'num' ? 'right' : 'left')
+    const type = oneOf(it.type, ['text', 'num', 'bar'], 'text')
+    const align = oneOf(it.align, ['left', 'right', 'center'], (type === 'num' || type === 'bar') ? 'right' : 'left')
     return { key, label: label !== '' ? label : key, type, align }
   })
   if (cols.length === 0) return undefined
-  // key 补全与去重：排序状态按 key 引用列，空 key / 重复 key 会让排序张冠李戴。
+  // key 补全与去重
   const seen = new Set<string>()
   const columns = cols.map((c, i) => {
     if (c.key !== '' && !seen.has(c.key)) {
@@ -87,17 +98,33 @@ function parse(raw: Record<string, unknown>): IuTableSpec | undefined {
   for (const rawRow of arr(raw.rows)) {
     if (rows.length >= MAX_ROWS) break
     if (!Array.isArray(rawRow)) continue
-    // 每行补齐/截断到 columns.length：缺的补空串，多的丢掉（结构恒整齐，
-    // Body 与 snapshot 都不需要再做越界防御）。
     const cells: IuTableCell[] = []
     for (let j = 0; j < columns.length; j += 1) {
       const cell: unknown = rawRow[j]
-      // JSON 能表达 1e400 这种解析成 Infinity 的数，非有限值一律当坏数据成空串。
       cells.push(typeof cell === 'number' && Number.isFinite(cell) ? cell : str(cell, MAX_CELL))
     }
     rows.push(cells)
   }
   if (rows.length === 0) return undefined
+
+  // 顶部概览指标项
+  const metrics = pickAll<IuTableMetric>(raw.metrics, 4, (it) => {
+    const label = str(it.label, 16)
+    const value = typeof it.value === 'number' ? it.value : str(it.value, 20)
+    if (label === '' && value === '') return undefined
+    const sub = str(it.sub, 24)
+    const color = oneOf(it.color, ['primary', 'purple', 'green', 'amber'], 'primary')
+    return { label, value, sub: sub !== '' ? sub : undefined, color }
+  })
+
+  // 快速分类过滤项
+  const filters: string[] = []
+  for (const item of arr(raw.filters)) {
+    if (filters.length >= 8) break
+    const s = typeof item === 'string' ? str(item, 16) : (typeof item === 'object' && item !== null ? str((item as Record<string, unknown>).label, 16) : '')
+    if (s !== '' && !filters.includes(s)) filters.push(s)
+  }
+
   return {
     kind: 'table',
     title: strOr(raw.title, 40, '数据表'),
@@ -105,24 +132,19 @@ function parse(raw: Record<string, unknown>): IuTableSpec | undefined {
     rows,
     dense: boolOrFalse(raw.dense),
     zebra: boolOrTrue(raw.zebra),
+    metrics: metrics.length > 0 ? metrics : undefined,
+    filters: filters.length > 0 ? filters : undefined,
   }
 }
 
 function initState(): TableState {
-  return { sortKey: null, sortDir: 'asc' }
+  return { sortKey: null, sortDir: 'asc', filter: null }
 }
 
-/**
- * 单元格 → 排序用文本（text 列；数字走 formatNum，与渲染形态一致）。
- */
 function cellText(v: IuTableCell): string {
   return typeof v === 'number' ? formatNum(v) : v
 }
 
-/**
- * 单元格 → 排序用数值（num 列）。
- * 字符串尝试解析；空串与解析失败给 NaN（Number('') === 0 是陷阱，先挡空串）。
- */
 function cellNumber(v: IuTableCell): number {
   if (typeof v === 'number') return v
   if (v.trim() === '') return Number.NaN
@@ -131,11 +153,48 @@ function cellNumber(v: IuTableCell): number {
 }
 
 /**
- * 按列排序 rows（纯函数：返回副本，绝不改入参——spec.rows 是持久 spec）。
- *
- * num 列按数值比（非数值单元格恒沉底、不随方向翻转）；text 列按 localeCompare。
- * sortKey 不在 columns 里（例如持久化层读出旧版本脏数据）时原样返回。
- * 导出给 table.body.tsx 消费，保证排序语义只有一份。
+ * 判断单元格是否应呈现为分类微徽标（Badge），并返回语义变体。
+ */
+export function getCellBadgeVariant(cell: IuTableCell, col: IuTableColumn): string | null {
+  if (typeof cell !== 'string') return null
+  const t = cell.trim()
+  if (t.length < 1 || t.length > 10) return null
+  const isCategoryCol = /(性质|类型|类别|分类|状态|tag|type|status|category|role|kind)/i.test(col.label)
+    || /(性质|类型|类别|分类|状态|tag|type|status|category|role|kind)/i.test(col.key)
+  if (!isCategoryCol && !/(系统|组件|驱动|卸载|工具|开发|运行时|浏览器|输入法|录屏|游戏|平台)/.test(t)) {
+    return null
+  }
+  if (/(系统|组件|驱动)/.test(t)) return 'system'
+  if (/(卸载|危险|警告|清理)/.test(t)) return 'warning'
+  if (/(开发|运行|代码|sdk)/i.test(t)) return 'dev'
+  if (/(工具|小工具|浏览器|输入法|录屏|游戏|平台)/.test(t)) return 'tool'
+  return 'neutral'
+}
+
+/**
+ * 计算各 bar 列的最大有效数值（用于计算占比进度条百分比）。
+ */
+export function calcColMaxValues(
+  rows: readonly (readonly IuTableCell[])[],
+  columns: readonly IuTableColumn[],
+): Record<number, number> {
+  const maxMap: Record<number, number> = {}
+  for (let c = 0; c < columns.length; c++) {
+    if (columns[c].type === 'bar') {
+      let max = 0
+      for (let r = 0; r < rows.length; r++) {
+        const v = rows[r][c]
+        const n = typeof v === 'number' ? v : parseFloat(String(v))
+        if (Number.isFinite(n) && n > max) max = n
+      }
+      maxMap[c] = max > 0 ? max : 1
+    }
+  }
+  return maxMap
+}
+
+/**
+ * 按列排序 rows（num 与 bar 均走数值排序）。
  */
 export function sortTableRows(
   rows: readonly (readonly IuTableCell[])[],
@@ -146,7 +205,7 @@ export function sortTableRows(
   if (sortKey === null) return rows
   const idx = columns.findIndex(c => c.key === sortKey)
   if (idx < 0) return rows
-  const numeric = columns[idx].type === 'num'
+  const numeric = columns[idx].type === 'num' || columns[idx].type === 'bar'
   const dir = sortDir === 'desc' ? -1 : 1
   return rows.slice().sort((a, b) => {
     const av = a[idx] ?? ''
@@ -165,119 +224,298 @@ export function sortTableRows(
   })
 }
 
-/** 回填文本：规模 + 当前排序状态（真实值，不写占位话术）。 */
+/** 回填文本。 */
 function fillText(spec: IuTableSpec, state: TableState): string {
   const base = `${spec.title}：${spec.rows.length} 行 × ${spec.columns.length} 列`
-  // state 可能来自 localStorage 的脏数据：find 不中就当作没排序。
   const col = spec.columns.find(c => c.key === state.sortKey)
-  if (col === undefined) return base
-  return `${base}，按「${col.label}」${state.sortDir === 'desc' ? '降序' : '升序'}`
+  const filterDesc = state.filter ? `，筛选「${state.filter}」` : ''
+  if (col === undefined) return `${base}${filterDesc}`
+  return `${base}${filterDesc}，按「${col.label}」${state.sortDir === 'desc' ? '降序' : '升序'}`
 }
 
 /**
- * 静态快照（截图用）。DOM 结构与 table.body.tsx **逐字对齐**：
- * wrap → table → thead(tr>th) → tbody(tr>td)，按初始无排序定格
- * （aria-sort="none"、无 data-active / data-dir，箭头节点在但透明度 0）。
- * 所有模型文本走 esc，进属性的走 escAttr（type/align 虽已钳成白名单枚举，
- * 也一律过转义，不给「以后有人放宽校验」留雷）。
+ * 静态快照（截图用）。DOM 结构与 table.body.tsx 逐字对齐。
  */
 function snapshot(spec: IuTableSpec): string {
+  let metricsHtml = ''
+  if (spec.metrics && spec.metrics.length > 0) {
+    const items = spec.metrics.map(m => {
+      const sub = m.sub ? `<span class="dtt-iu__metric-sub">${esc(m.sub)}</span>` : ''
+      const color = m.color ? ` data-color="${escAttr(m.color)}"` : ''
+      return `<div class="dtt-iu__metric"${color}><span class="dtt-iu__metric-label">${esc(m.label)}</span>`
+        + `<span class="dtt-iu__metric-val">${esc(typeof m.value === 'number' ? formatNum(m.value) : m.value)}</span>${sub}</div>`
+    }).join('')
+    metricsHtml = `<div class="dtt-iu__metrics">${items}</div>`
+  }
+
+  let filtersHtml = ''
+  if (spec.filters && spec.filters.length > 0) {
+    const items = spec.filters.map((f, i) =>
+      `<button type="button" class="dtt-iu__filter" data-active="${i === 0 ? '1' : '0'}">${esc(f)}</button>`,
+    ).join('')
+    filtersHtml = `<div class="dtt-iu__filters" role="tablist">${items}</div>`
+  }
+
+  const maxMap = calcColMaxValues(spec.rows, spec.columns)
+
   const head = spec.columns.map(col =>
     `<th class="dtt-iu__th" role="button" tabindex="0" aria-sort="none"`
     + ` data-align="${escAttr(col.align)}">${esc(col.label)}`
     + `<span class="dtt-iu__arrow" aria-hidden="true">▼</span></th>`,
   ).join('')
-  const body = spec.rows.slice(0, SNAPSHOT_ROWS).map(row =>
-    `<tr class="dtt-iu__tr">${spec.columns.map((col, j) => {
+
+  const body = spec.rows.slice(0, SNAPSHOT_ROWS).map(row => {
+    let rowVariant: string | null = null
+    for (let j = 0; j < spec.columns.length; j++) {
+      const v = getCellBadgeVariant(row[j], spec.columns[j])
+      if (v) { rowVariant = v; break }
+    }
+    const cells = spec.columns.map((col, j) => {
       const cell = row[j] ?? ''
-      const text = typeof cell === 'number' ? formatNum(cell) : cell
-      return `<td class="dtt-iu__td" data-type="${escAttr(col.type)}" data-align="${escAttr(col.align)}">${esc(text)}</td>`
-    }).join('')}</tr>`,
-  ).join('')
+      let inner = ''
+      if (col.type === 'bar') {
+        const numVal = typeof cell === 'number' ? cell : parseFloat(String(cell))
+        const max = maxMap[j] || 1
+        const pct = Number.isFinite(numVal) ? Math.min(100, Math.max(0, (numVal / max) * 100)).toFixed(1) : '0'
+        const displayVal = typeof cell === 'number' ? formatNum(cell) : cell
+        const variantAttr = rowVariant ? ` data-variant="${escAttr(rowVariant)}"` : ''
+        inner = `<div class="dtt-iu__bar-wrap"><div class="dtt-iu__bar-track">`
+          + `<div class="dtt-iu__bar-fill"${variantAttr} style="width:${pct}%;"></div>`
+          + `</div><span class="dtt-iu__bar-num">${esc(displayVal)}</span></div>`
+      } else if (typeof cell === 'number') {
+        inner = esc(formatNum(cell))
+      } else {
+        const badgeVariant = getCellBadgeVariant(cell, col)
+        if (badgeVariant !== null) {
+          inner = `<span class="dtt-iu__badge" data-variant="${badgeVariant}">${esc(cell)}</span>`
+        } else {
+          inner = esc(cell)
+        }
+      }
+      return `<td class="dtt-iu__td" data-type="${escAttr(col.type)}" data-align="${escAttr(col.align)}">${inner}</td>`
+    }).join('')
+    return `<tr class="dtt-iu__tr">${cells}</tr>`
+  }).join('')
+
   const dense = spec.dense ? ' data-dense="1"' : ''
   const zebra = spec.zebra ? ' data-zebra="1"' : ''
-  return `<div class="dtt-iu__table-wrap"><table class="dtt-iu__table"${dense}${zebra}>`
+  return `${metricsHtml}${filtersHtml}<div class="dtt-iu__table-wrap"><table class="dtt-iu__table"${dense}${zebra}>`
     + `<thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`
 }
 
 const CSS = [
-  '/* table：可排序数据表 —— 表头即排序按钮，wrap 负责窄屏横向滚动；',
-  '   没有入场动画，数据可见性天然不依赖动效（与 chart 那条纪律一致）。',
-  '   ⚠ wrap 上不要再加边框 / 圆角 / 底色：那等于在卡片里又套一张小卡，',
-  '   视觉上变成「表格块 + 卡片块」两层容器（用户明确要求表格不再包一层背景）。',
-  '   层级只靠表头底线、行分隔线与字重区分，卡片底色直接透上来。 */',
-  '.dtt-iu__table-wrap { overflow: hidden; overflow-x: auto; margin: calc(6px * var(--iu-text-scale, 1)) 0 calc(4px * var(--iu-text-scale, 1)); padding-bottom: 2px; -webkit-overflow-scrolling: touch; }',
-  '.dtt-iu__table { width: 100%; border-collapse: collapse;',
-  '  font-size: calc(12.5px * var(--iu-text-scale, 1)); }',
-  '/* 表头：hover / 激活 / 键盘聚焦都有过渡反馈（button 语义在元素上） */',
-  '/* 表头：**唯一的保留结构线**。字重从 600 降到 500、颜色降成 label-tertiary —— 表头不该比正文响。 */',
-  '.dtt-iu__th { text-align: left; font-weight: 500; white-space: nowrap; cursor: pointer; letter-spacing: .02em;',
-  '  user-select: none; padding: 6px 10px; font-size: calc(11.5px * var(--iu-text-scale, 1));',
-  '  color: var(--dsw-alias-label-tertiary, currentColor);',
-  '  border-bottom: .5px solid color-mix(in srgb, var(--dsw-alias-label-primary) 14%, transparent);',
-  '  background: transparent;',
-  '  transition: background-color .18s ease, color .18s ease; }',
-  '/* 表头不再铺底色（底色 = 「又包了一层背景」的来源），hover / 激活才有块状背景，',
-  '   且首末列圆角，块不会方头方脑地顶在卡片留白里。 */',
-  '.dtt-iu__th:first-child { border-top-left-radius: 8px; }',
-  '.dtt-iu__th:last-child { border-top-right-radius: 8px; }',
-  '.dtt-iu__th:hover { background: color-mix(in srgb, var(--dsw-alias-label-primary) 5%, transparent);',
-  '  color: var(--dsw-alias-state-business-primary, #4176e6); }',
-  '.dtt-iu__th:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary, #4176e6);',
-  '  outline-offset: -2px; }',
-  '/* 激活列不铺底：箭头 + 变色已经是完整状态，再铺一块蓝底就变成「选中的控件」。 */',
-  '.dtt-iu__th[data-active="1"] { color: var(--dsw-alias-state-business-primary, #4176e6);',
-  '  background: transparent; }',
-  '.dtt-iu__th[data-active="1"]:hover {',
-  '  background: color-mix(in srgb, var(--dsw-alias-label-primary) 5%, transparent); }',
-  '/* 排序箭头：节点恒在、常态透明，激活列点亮；字形恒为 ▼，升序旋转 180°——',
-  '   方向切换走 transform 过渡（翻转动画），不靠换文本、不靠重挂载。 */',
-  '.dtt-iu__arrow { display: inline-block; margin-left: 4px; opacity: 0; transform: rotate(180deg);',
-  '  font-size: calc(9px * var(--iu-text-scale, 1));',
-  '  transition: opacity .18s ease, transform .2s cubic-bezier(.2,.8,.25,1); }',
-  '.dtt-iu__th[data-active="1"] .dtt-iu__arrow { opacity: .85; }',
+  '/* table：现代高质感可排序数据看板与表格 —— 指标概览、分类过滤、容量占比进度条与多彩胶囊 */',
+  '/* 顶部指标概览栏（KPI Metrics） */',
+  '.dtt-iu__metrics {',
+  '  display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));',
+  '  gap: 8px; margin-bottom: 8px;',
+  '}',
+  '.dtt-iu__metric {',
+  '  border: 1px solid color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 9%, transparent);',
+  '  border-radius: 8px; padding: 7px 10px;',
+  '  background: color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 2.5%, transparent);',
+  '  display: flex; flex-direction: column;',
+  '}',
+  '.dtt-iu__metric-label {',
+  '  font-size: calc(10.5px * var(--iu-text-scale, 1));',
+  '  color: var(--dsw-alias-label-secondary, currentColor); opacity: .82;',
+  '  margin-bottom: 2px;',
+  '}',
+  '.dtt-iu__metric-val {',
+  '  font-size: calc(15px * var(--iu-text-scale, 1)); font-weight: 700;',
+  '  font-variant-numeric: tabular-nums; line-height: 1.3;',
+  '  color: var(--dsw-alias-label-primary, currentColor);',
+  '}',
+  '.dtt-iu__metric-sub {',
+  '  font-size: calc(10px * var(--iu-text-scale, 1)); margin-top: 1px;',
+  '  color: var(--dsw-alias-state-business-primary, #4176e6);',
+  '}',
+  '.dtt-iu__metric[data-color="purple"] .dtt-iu__metric-val,',
+  '.dtt-iu__metric[data-color="purple"] .dtt-iu__metric-sub { color: #a78bfa; }',
+  '.dtt-iu__metric[data-color="green"] .dtt-iu__metric-val,',
+  '.dtt-iu__metric[data-color="green"] .dtt-iu__metric-sub { color: #34d399; }',
+  '.dtt-iu__metric[data-color="amber"] .dtt-iu__metric-val,',
+  '.dtt-iu__metric[data-color="amber"] .dtt-iu__metric-sub { color: #fbbf24; }',
+  '/* 快速分类过滤芯片（Filter Chips） */',
+  '.dtt-iu__filters {',
+  '  display: flex; gap: 6px; margin-bottom: 8px;',
+  '  overflow-x: auto; padding-bottom: 2px;',
+  '  -webkit-overflow-scrolling: touch;',
+  '}',
+  '.dtt-iu__filter {',
+  '  background: color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 5%, transparent);',
+  '  border: 1px solid color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 10%, transparent);',
+  '  border-radius: 9999px; padding: 2.5px 9px;',
+  '  font-size: calc(11px * var(--iu-text-scale, 1)); font-weight: 500;',
+  '  color: var(--dsw-alias-label-secondary, currentColor);',
+  '  cursor: pointer; white-space: nowrap;',
+  '  transition: all .15s ease; user-select: none;',
+  '}',
+  '.dtt-iu__filter:hover {',
+  '  background: color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 10%, transparent);',
+  '}',
+  '.dtt-iu__filter[data-active="1"] {',
+  '  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 16%, transparent);',
+  '  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 40%, transparent);',
+  '  color: var(--dsw-alias-state-business-primary, #60a5fa);',
+  '  font-weight: 600;',
+  '}',
+  '/* 表格主体容器 */',
+  '.dtt-iu__table-wrap {',
+  '  overflow: hidden; overflow-x: auto;',
+  '  margin: calc(8px * var(--iu-text-scale, 1)) 0 calc(6px * var(--iu-text-scale, 1));',
+  '  border-radius: 10px;',
+  '  border: 1px solid color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 8%, transparent);',
+  '  background: color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 1.5%, transparent);',
+  '  box-shadow: 0 1px 3px rgba(0, 0, 0, .06);',
+  '  -webkit-overflow-scrolling: touch;',
+  '}',
+  '.dtt-iu__table {',
+  '  width: 100%; border-collapse: separate; border-spacing: 0;',
+  '  font-size: calc(12.5px * var(--iu-text-scale, 1)); line-height: 1.5;',
+  '}',
+  '/* 表头 */',
+  '.dtt-iu__th {',
+  '  text-align: left; font-weight: 600; white-space: nowrap; cursor: pointer; letter-spacing: .02em;',
+  '  user-select: none; padding: 8.5px 12px; font-size: calc(12px * var(--iu-text-scale, 1));',
+  '  color: var(--dsw-alias-label-secondary, currentColor);',
+  '  background: color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 4.5%, transparent);',
+  '  border-bottom: 1px solid color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 9%, transparent);',
+  '  transition: background-color .18s ease, color .18s ease;',
+  '}',
+  '.dtt-iu__th:first-child {',
+  '  border-top-left-radius: 9px;',
+  '  padding-left: calc(14px * var(--iu-text-scale, 1));',
+  '}',
+  '.dtt-iu__th:last-child {',
+  '  border-top-right-radius: 9px;',
+  '  padding-right: calc(14px * var(--iu-text-scale, 1));',
+  '}',
+  '.dtt-iu__th:hover {',
+  '  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 12%, transparent);',
+  '  color: var(--dsw-alias-state-business-primary, #4176e6);',
+  '}',
+  '.dtt-iu__th:focus-visible {',
+  '  outline: 2px solid var(--dsw-alias-state-business-primary, #4176e6);',
+  '  outline-offset: -2px;',
+  '}',
+  '.dtt-iu__th[data-active="1"] {',
+  '  color: var(--dsw-alias-state-business-primary, #4176e6);',
+  '  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 7%, transparent);',
+  '}',
+  '/* 排序箭头 */',
+  '.dtt-iu__arrow {',
+  '  display: inline-block; margin-left: 5px; opacity: .28;',
+  '  font-size: calc(8.5px * var(--iu-text-scale, 1));',
+  '  transform: rotate(0deg);',
+  '  transition: opacity .18s ease, transform .22s cubic-bezier(.2,.8,.25,1);',
+  '}',
+  '.dtt-iu__th:hover .dtt-iu__arrow { opacity: .65; }',
+  '.dtt-iu__th[data-active="1"] .dtt-iu__arrow {',
+  '  opacity: 1; color: var(--dsw-alias-state-business-primary, #4176e6);',
+  '}',
   '.dtt-iu__th[data-active="1"][data-dir="asc"] .dtt-iu__arrow { transform: rotate(180deg); }',
   '.dtt-iu__th[data-active="1"][data-dir="desc"] .dtt-iu__arrow { transform: rotate(0deg); }',
-  '/* 行与单元格：**不画整行斑马纹，也不画行分隔线**。',
-  ' *',
-  ' * 融合第二版（2026-10-19）：上一版用 bg-layer-2 铺斑马纹 —— 实测（_tmp/mk-light.png / mk-dark.png）',
-  ' * 那是**整行满宽的纯色带**：亮色下近白、暗色下近黑，落在正文里像贴了一条色块，',
-  ' * 是全套卡片里最「表格组件」的一个信号。行分隔线同理，一屏三五条横线就是一块 data grid。',
-  ' *',
-  ' * 现在层级只靠三件事拉开，且都低于正文的对比度：',
-  ' *  ① 表头那条线（唯一保留的结构线，1px label 12%）；',
-  ' *  ② 行与行之间一条 4% 的发丝线（几乎只在暗色下可见，作用是「对得齐」，不是「分得开」）；',
-  ' *  ③ 数字列 tabular-nums 对齐。',
-  ' * 于是表格读起来是「正文里排出的一列数字」，而不是「嵌进来的一张表」。',
-  ' * ⚠ 想要可视化分组时请用行 hover，不要动斑马纹。 */',
-  '.dtt-iu__td { padding: 7px 10px; white-space: nowrap;',
-  '  border-bottom: 0;',
-  '  box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--dsw-alias-label-primary) 4%, transparent);',
-  '  transition: background-color .18s ease; }',
-  '.dtt-iu__tr:last-child .dtt-iu__td { box-shadow: none; }',
-  '/* 首末行 hover 的色块跟着卡片圆角收边，别在留白区留直角 */',
-  '.dtt-iu__tr:first-child .dtt-iu__td:first-child { border-top-left-radius: 8px; }',
-  '.dtt-iu__tr:first-child .dtt-iu__td:last-child { border-top-right-radius: 8px; }',
-  '.dtt-iu__tr:last-child .dtt-iu__td:first-child { border-bottom-left-radius: 8px; }',
-  '.dtt-iu__tr:last-child .dtt-iu__td:last-child { border-bottom-right-radius: 8px; }',
-  '/* zebra 字段保留（对外契约、注入文档、持久化 spec 都还在），但**不再渲染整行色带**：',
-  '   满宽色块是「组件感」的最大来源（见上一条注释）。真要区分分组，用 hover 或列内对齐。 */',
-  '.dtt-iu__table[data-zebra="1"] .dtt-iu__tr:nth-child(even) { background: transparent; }',
-  '.dtt-iu__th:first-child, .dtt-iu__td:first-child { padding-left: calc(12px * var(--iu-text-scale, 1)); }',
+  '/* 斑马纹与悬停 */',
+  '.dtt-iu__table[data-zebra="1"] .dtt-iu__tr:nth-child(even) {',
+  '  background: color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 2.4%, transparent);',
+  '}',
+  '.dtt-iu__tr { transition: background-color .15s ease; }',
   '.dtt-iu__tr:hover .dtt-iu__td {',
-  '  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 8%, transparent); }',
-  '/* 对齐与数字：align 在 parse 已解析成具体值（num 默认右、text 默认左），',
-  '   CSS 只认 data-align；num 列追加 tabular-nums 让数位对齐。 */',
+  '  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 8.5%, transparent);',
+  '}',
+  '/* 单元格 */',
+  '.dtt-iu__td {',
+  '  padding: 8px 12px; white-space: nowrap;',
+  '  border-bottom: 0;',
+  '  box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 4.5%, transparent);',
+  '  color: var(--dsw-alias-label-secondary, currentColor);',
+  '  transition: background-color .15s ease, color .15s ease;',
+  '}',
+  '.dtt-iu__tr:last-child .dtt-iu__td { box-shadow: none; }',
+  '.dtt-iu__td:first-child {',
+  '  padding-left: calc(14px * var(--iu-text-scale, 1));',
+  '  font-weight: 500;',
+  '  color: var(--dsw-alias-label-primary, currentColor);',
+  '}',
+  '.dtt-iu__td:last-child {',
+  '  padding-right: calc(14px * var(--iu-text-scale, 1));',
+  '}',
+  '/* 数字与进度条列 */',
+  '.dtt-iu__td[data-type="num"] {',
+  '  font-variant-numeric: tabular-nums;',
+  '  font-weight: 600;',
+  '  color: var(--dsw-alias-label-primary, currentColor);',
+  '}',
+  '.dtt-iu__bar-wrap {',
+  '  display: flex; align-items: center; gap: 8px;',
+  '  min-width: 120px;',
+  '}',
+  '.dtt-iu__bar-track {',
+  '  flex: 1; height: 5.5px;',
+  '  background: color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 9%, transparent);',
+  '  border-radius: 3px; overflow: hidden;',
+  '}',
+  '.dtt-iu__bar-fill {',
+  '  height: 100%; border-radius: 3px;',
+  '  background: linear-gradient(90deg, var(--dsw-alias-state-business-primary, #3b82f6), #60a5fa);',
+  '  transition: width .28s cubic-bezier(.2,.8,.25,1);',
+  '}',
+  '.dtt-iu__bar-fill[data-variant="system"] {',
+  '  background: linear-gradient(90deg, #8b5cf6, #a78bfa);',
+  '}',
+  '.dtt-iu__bar-fill[data-variant="warning"] {',
+  '  background: linear-gradient(90deg, #f59e0b, #fbbf24);',
+  '}',
+  '.dtt-iu__bar-fill[data-variant="dev"] {',
+  '  background: linear-gradient(90deg, #10b981, #34d399);',
+  '}',
+  '.dtt-iu__bar-num {',
+  '  font-variant-numeric: tabular-nums; font-weight: 600;',
+  '  min-width: 36px; text-align: right;',
+  '  color: var(--dsw-alias-label-primary, currentColor);',
+  '}',
+  '/* 对齐方式 */',
   '.dtt-iu__th[data-align="right"], .dtt-iu__td[data-align="right"] { text-align: right; }',
   '.dtt-iu__th[data-align="center"], .dtt-iu__td[data-align="center"] { text-align: center; }',
-  '.dtt-iu__td[data-type="num"] { font-variant-numeric: tabular-nums; }',
-  '/* dense：紧凑行高 */',
-  '.dtt-iu__table[data-dense="1"] .dtt-iu__th { padding: 4px 8px; }',
-  '.dtt-iu__table[data-dense="1"] .dtt-iu__td { padding: 3px 8px; }',
-  '/* 无障碍：以上全部是状态过渡，reduced-motion 直接关掉即可，不影响可读性。 */',
+  '/* 紧凑行高 dense */',
+  '.dtt-iu__table[data-dense="1"] .dtt-iu__th { padding: 5px 9px; }',
+  '.dtt-iu__table[data-dense="1"] .dtt-iu__td { padding: 4px 9px; }',
+  '/* 分类微徽标 */',
+  '.dtt-iu__badge {',
+  '  display: inline-flex; align-items: center;',
+  '  padding: 1.5px 8px; border-radius: 9999px;',
+  '  font-size: calc(11px * var(--iu-text-scale, 1)); font-weight: 500; line-height: 1.45;',
+  '  letter-spacing: .02em; white-space: nowrap;',
+  '  background: color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 6%, transparent);',
+  '  border: 1px solid color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 9%, transparent);',
+  '  color: var(--dsw-alias-label-secondary, currentColor);',
+  '}',
+  '.dtt-iu__badge[data-variant="system"] {',
+  '  background: color-mix(in srgb, #8b5cf6 13%, transparent);',
+  '  border-color: color-mix(in srgb, #8b5cf6 28%, transparent);',
+  '  color: color-mix(in srgb, #a78bfa 90%, var(--dsw-alias-label-primary, currentColor));',
+  '}',
+  '.dtt-iu__badge[data-variant="warning"] {',
+  '  background: color-mix(in srgb, #f59e0b 13%, transparent);',
+  '  border-color: color-mix(in srgb, #f59e0b 28%, transparent);',
+  '  color: color-mix(in srgb, #fbbf24 90%, var(--dsw-alias-label-primary, currentColor));',
+  '}',
+  '.dtt-iu__badge[data-variant="dev"] {',
+  '  background: color-mix(in srgb, #10b981 13%, transparent);',
+  '  border-color: color-mix(in srgb, #10b981 28%, transparent);',
+  '  color: color-mix(in srgb, #34d399 90%, var(--dsw-alias-label-primary, currentColor));',
+  '}',
+  '.dtt-iu__badge[data-variant="tool"] {',
+  '  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #3b82f6) 13%, transparent);',
+  '  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary, #3b82f6) 28%, transparent);',
+  '  color: color-mix(in srgb, var(--dsw-alias-state-business-primary, #60a5fa) 90%, var(--dsw-alias-label-primary, currentColor));',
+  '}',
+  '/* 无障碍 */',
   '@media (prefers-reduced-motion: reduce) {',
-  '  .dtt-iu__th, .dtt-iu__td { transition: background-color .18s ease, opacity .18s ease; }',
-  '  .dtt-iu__arrow { transition: opacity .18s ease; }',
+  '  .dtt-iu__th, .dtt-iu__td { transition: none; }',
+  '  .dtt-iu__arrow { transition: none; }',
+  '  .dtt-iu__bar-fill { transition: none; }',
   '}',
 ].join('\n')
 
@@ -289,5 +527,5 @@ export const tableKind: IuKind<TableState, IuTableSpec> = {
   fillText,
   snapshot,
   css: CSS,
-  doc: '  · table 数据表：{"kind":"table","title":"华东贵，华北在掉","columns":[{"key":"region","label":"区域"},{"key":"sales","label":"销售额","type":"num"},{"key":"rate","label":"增长率%","type":"num"}],"rows":[["华东",1280,12],["华北",960,-3],["华南",1105,8],["西南",742,5]],"dense":false,"zebra":true}（columns ≤8：key/label ≤16 字，type=text|num 默认 text、num 右对齐且数字等宽，align=left|right|center 可显式覆盖；rows ≤100 行、每行与 columns 等长，单元格=字符串|数字，缺失补空串；点表头按列排序、再点切换升/降序，num 列按数值、text 列按字典序；dense=紧凑行高默认 false，zebra=斑马纹默认 true）。',
+  doc: '  · table 数据表：{"kind":"table","title":"华东贵，华北在掉","columns":[{"key":"region","label":"区域"},{"key":"sales","label":"销售额","type":"bar"},{"key":"rate","label":"增长率%","type":"num"}],"rows":[["华东",1280,12],["华北",960,-3],["华南",1105,8],["西南",742,5]],"dense":false,"zebra":true,"metrics":[{"label":"总额","value":"4,087万","sub":"增长8.2%"}],"filters":["全部","华东","华北","华南","西南"]}（columns ≤8：key/label ≤16 字，type=text|num|bar 默认 text、bar 带占比进度条，align=left|right|center 可显式覆盖；metrics ≤4 个指标卡；filters ≤8 个过滤芯片；点表头排序、点芯片过滤）。',
 }

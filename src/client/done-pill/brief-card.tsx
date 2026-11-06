@@ -141,6 +141,8 @@ export function BriefCard(props: BriefCardProps): JSX.Element | null {
   /** 正在播放退场动画：为 true 的这 190ms 里卡片还在，只是开始缩小淡出。 */
   const [closing, setClosing] = useState(false)
   const [cardIndex, setCardIndex] = useState<number>(() => loadCardIndex())
+  /** 当前卡的配图加载失败时隐藏横版图 */
+  const [imageFailed, setImageFailed] = useState(false)
 
   /** 退场动画的卸载定时器（重复关闭 / 卸载时要清掉）。 */
   const closeTimerRef = useRef<number | null>(null)
@@ -341,6 +343,10 @@ export function BriefCard(props: BriefCardProps): JSX.Element | null {
   const safeIndex = cards.length === 0 ? 0 : Math.min(Math.max(cardIndex, 0), cards.length - 1)
   const card: BriefCard | null = cards.length === 0 ? null : (cards[safeIndex] ?? null)
 
+  useEffect(() => {
+    setImageFailed(false)
+  }, [card?.id])
+
   /** 视图状态：骨架 → 有卡 / 空 / 生成中 / 失败。 */
   const view: 'skeleton' | 'ready' | 'generating' | 'error' | 'empty' = !loaded
     ? 'skeleton'
@@ -506,9 +512,27 @@ export function BriefCard(props: BriefCardProps): JSX.Element | null {
       </div>
     )
   } else if (card !== null && brief !== null) {
+    // 横版图：仅在 AI 情报卡且配有图片时显示在两栏正文正上方（用户 2026-11-06 需求）
+    const isAiCard = card.kicker.includes('AI') || card.entries.some(e => e.tag === 'AI') || safeIndex === 0
+    const showHero = Boolean(card.image && !imageFailed && isAiCard)
     // 期刊式两栏：左栏主题（分类眉标 / 大标题 / 导语 / 翻页），右栏编号条目。
     body = (
-      <div className="db-body">
+      <>
+        {showHero && card.image && (
+          <div className="db-hero">
+            <img
+              className="db-hero-img"
+              src={card.image.url}
+              alt=""
+              decoding="async"
+              onError={() => setImageFailed(true)}
+            />
+            {card.image.caption && (
+              <span className="db-hero-caption">{card.image.caption}</span>
+            )}
+          </div>
+        )}
+        <div className="db-body">
         <div className="db-col-left">
           <div className="db-kicker-row">
             <span className="db-kicker">{card.kicker}</span>
@@ -555,6 +579,7 @@ export function BriefCard(props: BriefCardProps): JSX.Element | null {
           )}
         </div>
       </div>
+      </>
     )
   } else {
     body = (

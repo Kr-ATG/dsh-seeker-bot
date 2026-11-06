@@ -33,6 +33,8 @@ import { quizKind } from './quiz.ts'
 import { weatherKind } from './weather.ts'
 import { quoteKind } from './quote.ts'
 import { linkKind } from './link.ts'
+import { calculatorKind } from './calculator.ts'
+import { chartKind } from './chart.ts'
 
 /**
  * 已注册的全部 kind（顺序即注入文档里的出现顺序）。
@@ -51,7 +53,9 @@ import { linkKind } from './link.ts'
  */
 export const IU_KINDS = [
   sliderKind,
+  calculatorKind,
   tableKind,
+  chartKind,
   checklistKind,
   tabsKind,
   kanbanKind,

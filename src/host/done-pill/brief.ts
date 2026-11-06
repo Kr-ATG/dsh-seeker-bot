@@ -52,17 +52,20 @@
  * 锁与调度判定都不该互相牵连。
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
   BRIEF_DIR_NAME,
   BRIEF_FEEDS,
   BRIEF_FEED_ITEMS,
+  BRIEF_IMAGE_DIR,
+  BRIEF_IMAGE_ROUTE,
   BRIEF_MAX_QUERIES,
   BRIEF_SEARCH_TIMEOUT_MS,
   BRIEF_SOURCE_LIMIT,
   BRIEF_TIMEOUT_MS,
+  briefCardImagePrompt,
   briefDateKey,
   briefQueries,
   briefSourceIsRecent,
@@ -71,7 +74,9 @@ import {
   parseBriefDate,
   parseBriefFeed,
   sanitizeBriefRecord,
+  type BriefCard,
   type BriefFeed,
+  type BriefImage,
   type BriefRecord,
   type BriefSourceItem,
   type BriefTodayResponse,
@@ -181,6 +186,13 @@ function briefRootDir(): string {
 /** 简报目录（会 mkdir：写盘前必须存在）。 */
 export function briefDir(): string {
   const dir = briefRootDir()
+  mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+/** 简报配图目录（<DSH_HOME>/storages/dsh-seeker-bot/done-pill/briefs/images/）。 */
+export function briefImageDir(): string {
+  const dir = join(briefRootDir(), BRIEF_IMAGE_DIR)
   mkdirSync(dir, { recursive: true })
   return dir
 }
@@ -350,6 +362,220 @@ async function resolveChatModel(
     /* 列举失败：按「没有可用模型」处理 */
   }
   return null
+}
+
+/* ───────────────────────────── AI 生图（横版） ───────────────────────────── */
+
+/** 生图单次超时（ms）。 */
+const BRIEF_IMAGE_GEN_TIMEOUT_MS = 120_000
+
+/** 读 model-capabilities：优先 settings 命名空间，再退回 ~/.dsh/model-capabilities.json。 */
+function readModelCapabilities(ctx: Record<string, any>): Record<string, any> {
+  try {
+    const section = typeof ctx.settings?.get === 'function' ? ctx.settings.get('model-capabilities') : null
+    if (section !== null && typeof section === 'object') return section as Record<string, any>
+  } catch { /* ignore */ }
+  try {
+    const file = join(dshHome(), 'model-capabilities.json')
+    if (existsSync(file)) return JSON.parse(readFileSync(file, 'utf8')) as Record<string, any>
+  } catch { /* ignore */ }
+  return {}
+}
+
+/** 按 provider id 取供应商配置（带 cordis.patch.yml 兜底）。 */
+function providerProfile(ctx: Record<string, any>, providerId: string): any {
+  try {
+    const llm = getLlm(ctx)
+    const entries = typeof llm?.listConfigurableProviders === 'function' ? (llm.listConfigurableProviders() as any[]) : []
+    const entry = (Array.isArray(entries) ? entries : []).find((item: any) => item?.provider === providerId)
+    if (entry !== undefined) {
+      const section = typeof ctx.settings?.get === 'function' ? ctx.settings.get(entry.settingsNs) : null
+      if (section !== null && typeof section === 'object') {
+        let node: any = section
+        for (const key of Array.isArray(entry.settingsPath) ? entry.settingsPath : []) {
+          if (node !== null && typeof node === 'object' && key in node) node = node[key]
+          else { node = null; break }
+        }
+        if (node !== null && typeof node === 'object') return node
+      }
+    }
+  } catch { /* ignore */ }
+
+  try {
+    const patchFiles = [
+      join(dshHome(), 'profiles', 'web', 'cordis.patch.yml'),
+      join(dshHome(), 'cordis.patch.yml'),
+    ]
+    for (const patchFile of patchFiles) {
+      if (!existsSync(patchFile)) continue
+      const content = readFileSync(patchFile, 'utf8')
+      const lines = content.split(/\r?\n/)
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]
+        const match = new RegExp('^(\\s*)' + providerId + ':\\s*$').exec(line)
+        if (match) {
+          const baseIndent = match[1].length
+          const blockLines: string[] = []
+          for (let j = i + 1; j < lines.length; j++) {
+            const nextLine = lines[j]
+            if (nextLine.trim() === '' || nextLine.trim().startsWith('#')) continue
+            const nextIndent = nextLine.search(/\S/)
+            if (nextIndent <= baseIndent) break
+            blockLines.push(nextLine)
+          }
+          const block = blockLines.join('\n')
+          const baseMatch = /^\s*baseURL:\s*(.+)$/m.exec(block)
+          const keyEnvMatch = /^\s*apiKeyEnv:\s*(.+)$/m.exec(block)
+          if (baseMatch) {
+            return {
+              baseURL: baseMatch[1].trim().replace(/^['"]|['"]$/g, ''),
+              apiKeyEnv: keyEnvMatch ? keyEnvMatch[1].trim().replace(/^['"]|['"]$/g, '') : undefined,
+            }
+          }
+        }
+      }
+    }
+  } catch { /* ignore */ }
+  return null
+}
+
+/** 从凭据服务取 API key（带环境变量与 .credentials.yaml 兜底）。 */
+async function resolveCredential(ctx: Record<string, any>, envName: unknown): Promise<string | null> {
+  if (typeof envName !== 'string' || envName === '') return null
+  try {
+    const credentials = ctx.get?.('credentials') ?? ctx.credentials
+    if (credentials !== undefined && credentials !== null && typeof credentials.resolve === 'function') {
+      const resolved = await credentials.resolve(envName)
+      if (resolved !== null && resolved !== undefined && resolved.value) {
+        return String(resolved.value)
+      }
+    }
+  } catch { /* ignore */ }
+
+  if (typeof process.env[envName] === 'string' && process.env[envName]) {
+    return process.env[envName]
+  }
+
+  try {
+    const file = join(dshHome(), '.credentials.yaml')
+    if (existsSync(file)) {
+      const content = readFileSync(file, 'utf8')
+      const regex = new RegExp('^\\s*' + envName + ':\\s*(.+)$', 'm')
+      const match = regex.exec(content)
+      if (match && match[1].trim()) return match[1].trim()
+    }
+  } catch { /* ignore */ }
+  return null
+}
+
+function splitModelKey(key: unknown): { provider: string; model: string } | null {
+  const text = typeof key === 'string' ? key.trim() : ''
+  const index = text.indexOf('/')
+  if (index <= 0 || index >= text.length - 1) return null
+  return { provider: text.slice(0, index), model: text.slice(index + 1) }
+}
+
+async function fetchImageBytes(url: string, timeoutMs: number): Promise<Buffer | null> {
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) })
+    if (!response.ok) return null
+    const buffer = Buffer.from(await response.arrayBuffer())
+    return buffer.length >= 1024 ? buffer : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 为 AI 情报卡生成一张宽幅横版图（生图模型）。
+ *
+ * 用户 2026-11-06 需求：「情报卡能配图片也是一样使用生图工具就更好了，
+ * 显示在上方，只在AI情报上面需要图片，为横版图」。
+ * 失败时只返回 null，不影响整份简报出卡。
+ */
+async function generateBriefAiCardImage(
+  ctx: Record<string, any>,
+  card: BriefCard,
+  date: string,
+  generatedAt: number,
+  signal: AbortSignal,
+): Promise<BriefImage | null> {
+  const caps = readModelCapabilities(ctx)
+  const active = splitModelKey(caps.imageActive)
+  if (active === null) return null
+  const profile = providerProfile(ctx, active.provider)
+  if (profile === null || typeof profile.baseURL !== 'string' || profile.baseURL === '') {
+    ctx.logger?.warn?.(`[dsh-seeker-bot] brief AI 生图：供应商 ${active.provider} 没有 baseURL`)
+    return null
+  }
+  const apiKey = await resolveCredential(ctx, profile.apiKeyEnv)
+  if (apiKey === null) {
+    ctx.logger?.warn?.(`[dsh-seeker-bot] brief AI 生图：缺少凭据 ${String(profile.apiKeyEnv ?? '')}`)
+    return null
+  }
+  const imagePath = typeof caps.imagePath === 'string' && caps.imagePath !== '' ? caps.imagePath : 'images/generations'
+  const url = `${String(profile.baseURL).replace(/[\\/]+$/, '')}/${imagePath.replace(/^[\\/]+/, '')}`
+  const prompt = briefCardImagePrompt(card)
+  const payload: Record<string, unknown> = {
+    model: active.model,
+    prompt,
+    n: 1,
+    size: '1792x1024',
+    response_format: 'b64_json',
+  }
+  try {
+    const merged = mergeSignals(signal, AbortSignal.timeout(BRIEF_IMAGE_GEN_TIMEOUT_MS))
+    const call = async (body: Record<string, unknown>): Promise<{ response: Response; rawText: string }> => {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify(body),
+        signal: merged,
+      })
+      return { response, rawText: await response.text() }
+    }
+    let attempt = await call(payload)
+    if (!attempt.response.ok && /size|response_format|unknown|invalid|unsupported/i.test(attempt.rawText)) {
+      const relaxed = { ...payload }
+      delete relaxed.size
+      delete relaxed.response_format
+      attempt = await call(relaxed)
+    }
+    if (!attempt.response.ok) {
+      ctx.logger?.warn?.(`[dsh-seeker-bot] brief AI 生图接口 ${attempt.response.status}：${attempt.rawText.slice(0, 200)}`)
+      return null
+    }
+    let data: any
+    try { data = JSON.parse(attempt.rawText) } catch { return null }
+    const first = Array.isArray(data?.data) ? data.data[0] : undefined
+    let buffer: Buffer | null = null
+    if (first !== undefined && first !== null && typeof first.b64_json === 'string' && first.b64_json.length > 32) {
+      buffer = Buffer.from(first.b64_json, 'base64')
+    } else if (first !== undefined && first !== null && typeof first.url === 'string' && first.url !== '') {
+      buffer = await fetchImageBytes(first.url, 30_000)
+    }
+    if (buffer === null || buffer.length < 16 * 1024) return null
+
+    // 落盘为 <date>-ai.png
+    const dir = briefImageDir()
+    const fileName = `${date}-ai.png`
+    const filePath = join(dir, fileName)
+    try {
+      if (existsSync(filePath)) rmSync(filePath, { force: true })
+    } catch { /* ignore */ }
+    writeFileSync(filePath, buffer)
+
+    return {
+      file: fileName,
+      url: `${BRIEF_IMAGE_ROUTE}/${date}?v=${generatedAt}`,
+      caption: 'AI 生图 · 科技前沿',
+      width: 1792,
+      height: 1024,
+    }
+  } catch (error) {
+    ctx.logger?.warn?.(`[dsh-seeker-bot] brief AI 生图异常：${describeError(error)}`)
+    return null
+  }
 }
 
 /* ───────────────────────────── 素材采集 ───────────────────────────── */
@@ -669,6 +895,20 @@ export async function generateBrief(
     })
     if (record === null) return fail('模型返回的卡片内容为空')
 
+    // 只为 AI 情报卡配图（用户 2026-11-06 要求：「只在AI情报上面需要图片，为横版图」）
+    const aiCardIndex = record.cards.findIndex(c => c.kicker.startsWith('AI') || (c.entries.some(e => e.tag === 'AI')))
+    const targetIndex = aiCardIndex >= 0 ? aiCardIndex : 0
+    if (record.cards[targetIndex]) {
+      try {
+        const image = await generateBriefAiCardImage(ctx, record.cards[targetIndex], record.date, generatedAt, controller.signal)
+        if (image !== null) {
+          record.cards[targetIndex].image = image
+        }
+      } catch (err) {
+        ctx.logger?.warn?.(`[dsh-seeker-bot] brief AI 生图失败：${describeError(err)}`)
+      }
+    }
+
     try {
       writeBriefRecord(record)
     } catch (error) {
@@ -793,10 +1033,15 @@ export function applyBriefHost(ctx: Record<string, any>): void {
   if (!hostFeatureEnabled('view.daily-brief')) return
 
   ctx.inject(['webServer'], (webCtx: Record<string, any>) => {
-    const register = (path: string, label: string, handler: (req: any, res: any) => void): void => {
+    const register = (
+      kind: 'exact' | 'prefix',
+      path: string,
+      label: string,
+      handler: (req: any, res: any) => void,
+    ): void => {
       webCtx.effect(() => {
         try {
-          return webCtx.webServer.register({ kind: 'exact', path, handler })
+          return webCtx.webServer.register({ kind, path, handler })
         } catch (error) {
           // 路由可能已被同路径的其他插件注册：记警告并继续，不拖垮整个插件加载
           ctx.logger?.warn?.(`[dsh-seeker-bot] brief route ${path} 注册失败：${describeError(error)}`)
@@ -806,7 +1051,7 @@ export function applyBriefHost(ctx: Record<string, any>): void {
     }
 
     /* GET /brief/today：前端轮询用。brief 为 null 时前端显示「整理中 / 点此生成」。 */
-    register(`${ROUTE}/today`, 'brief today route', (req, res) => {
+    register('exact', `${ROUTE}/today`, 'brief today route', (req, res) => {
       if (String(req?.method ?? 'GET').toUpperCase() !== 'GET') {
         sendJson(res, 405, { ok: false, error: 'method not allowed' })
         return
@@ -826,7 +1071,7 @@ export function applyBriefHost(ctx: Record<string, any>): void {
     })
 
     /* POST /brief/generate：手动生成 / 换一批。即使失败也回 200，原因放 error。 */
-    register(`${ROUTE}/generate`, 'brief generate route', (req, res) => {
+    register('exact', `${ROUTE}/generate`, 'brief generate route', (req, res) => {
       if (String(req?.method ?? 'GET').toUpperCase() !== 'POST') {
         sendJson(res, 405, { ok: false, error: 'method not allowed' })
         return
@@ -842,7 +1087,7 @@ export function applyBriefHost(ctx: Record<string, any>): void {
     })
 
     /* GET /brief/list?days=7：历史简报（新的在前），给「往期」视图用。 */
-    register(`${ROUTE}/list`, 'brief list route', (req, res) => {
+    register('exact', `${ROUTE}/list`, 'brief list route', (req, res) => {
       if (String(req?.method ?? 'GET').toUpperCase() !== 'GET') {
         sendJson(res, 405, { ok: false, error: 'method not allowed' })
         return
@@ -856,6 +1101,53 @@ export function applyBriefHost(ctx: Record<string, any>): void {
         /* URL 解析失败：按默认 7 天 */
       }
       sendJson(res, 200, { ok: true, briefs: readBriefList(days) })
+    })
+
+    /* prefix /brief/image：按 date 流式返回 AI 情报卡顶部横版生图。 */
+    register('prefix', BRIEF_IMAGE_ROUTE, 'brief image route', (req, res) => {
+      if (String(req?.method ?? 'GET').toUpperCase() !== 'GET' && String(req?.method ?? 'GET').toUpperCase() !== 'HEAD') {
+        sendJson(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      const sub = decodeURIComponent(url.pathname.slice(BRIEF_IMAGE_ROUTE.length).replace(/^\/+/, ''))
+      const date = sub.split('/')[0]?.replace(/\.[a-zA-Z0-9]+$/, '') ?? ''
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        sendJson(res, 400, { ok: false, error: '非法日期格式' })
+        return
+      }
+      const dir = briefImageDir()
+      let foundFile: string | null = null
+      try {
+        if (existsSync(dir)) {
+          for (const name of readdirSync(dir)) {
+            if (name.startsWith(date + '-ai.')) {
+              foundFile = join(dir, name)
+              break
+            }
+          }
+        }
+      } catch { /* ignore */ }
+
+      if (foundFile === null || !existsSync(foundFile)) {
+        sendJson(res, 404, { ok: false, error: '图片不存在' })
+        return
+      }
+
+      try {
+        const size = statSync(foundFile).size
+        res.writeHead(200, {
+          'Content-Type': 'image/png',
+          'Content-Length': String(size),
+          'Cache-Control': 'public, max-age=86400',
+        })
+        if (req.method === 'HEAD') { res.end(); return }
+        const stream = createReadStream(foundFile)
+        stream.on('error', () => { try { res.destroy?.() } catch {} })
+        stream.pipe(res)
+      } catch {
+        sendJson(res, 404, { ok: false, error: '图片不可读' })
+      }
     })
   })
 
@@ -888,7 +1180,7 @@ export function applyBriefHost(ctx: Record<string, any>): void {
     ctx.logger?.warn?.(`[dsh-seeker-bot] brief 调度器启动失败：${describeError(error)}`)
   }
 
-  ctx.logger?.info?.(`[dsh-seeker-bot] brief mounted: ${ROUTE}/today + /generate + /list`)
+  ctx.logger?.info?.(`[dsh-seeker-bot] brief mounted: ${ROUTE}/today + /generate + /list + ${BRIEF_IMAGE_ROUTE}`)
 }
 
 /* ───────────────────────────── 测试面 ───────────────────────────── */
@@ -899,10 +1191,16 @@ export const __briefTest = {
   normalizeBriefQueries,
   briefFilePath,
   briefRootDir,
+  briefImageDir,
   readBriefRecord,
   resolveChatModel,
   fetchFeedSources,
   searchFallbackSources,
   collectBriefSources,
   laneOfQuery,
+  generateBriefAiCardImage,
+  readModelCapabilities,
+  providerProfile,
+  resolveCredential,
+  splitModelKey,
 }

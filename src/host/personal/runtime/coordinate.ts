@@ -28,7 +28,7 @@
  * 角色说话，比直接失败更难排查。
  */
 
-import { personalRuntime } from './registry.ts'
+import { knownBots, personalRuntime } from './registry.ts'
 import type { Mode, Reply } from './types.ts'
 
 /** 工具名。模型在 PTC 下会以 `tools.coordinate_bots(...)` 的形式调用它。 */
@@ -67,8 +67,22 @@ export function coordinate(
     return { ok: false, error: '作业运行时没有启动，现在不能派活。' }
   }
 
-  const targetId = typeof args.bot_id === 'string' ? args.bot_id.trim() : ''
-  if (targetId === '') return { ok: false, error: 'bot_id 不能为空：要说明派给哪个 Bot。' }
+  const rawTargetId = typeof args.bot_id === 'string' ? args.bot_id.trim() : ''
+  if (rawTargetId === '') return { ok: false, error: 'bot_id 不能为空：要说明派给哪个 Bot。' }
+
+  // 容错匹配：模型可能传了目标 Bot 的名称（如 "GitStar"），而不是 id（如 "bot-4c14ca51"）
+  let targetId = rawTargetId
+  const bots = knownBots()
+  const matchedById = bots.find((b) => b.id === rawTargetId)
+  if (!matchedById) {
+    const matchedByName = bots.find(
+      (b) => b.name.trim().toLowerCase() === rawTargetId.toLowerCase()
+    )
+    if (matchedByName) {
+      targetId = matchedByName.id
+    }
+  }
+
   if (targetId === options.botId) {
     return { ok: false, error: '不能把活派给自己；你自己直接做就行。' }
   }

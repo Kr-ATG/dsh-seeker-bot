@@ -2243,6 +2243,18 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
           // 私聊里用户 @ 了某个 Bot：把「该派给谁」告诉模型（群聊由前端路由，不需要）
           await injectMentionContextForReply(webCtx, spec, body)
 
+          const runtimeHandle = personalRuntime()
+          const rootAssignment = runtimeHandle?.runtime.begin({
+            origin: { kind: 'person', source: 'chat', quote: text.slice(0, 400) },
+            requester: { kind: 'person' },
+            assignee: { botId: spec.botId },
+            brief: text,
+            level: spec.permission === 'approval' ? 'ask' : 'full',
+          })
+          const unbindAssignment = rootAssignment && runtimeHandle?.bindAssignment
+            ? runtimeHandle.bindAssignment(spec.botId, rootAssignment.id)
+            : undefined
+
           /*
            * 首选：把这个 bot 接到宿主的真 agent 会话上（能读文件 / 跑命令 / 搜索…）。
            *
@@ -2251,8 +2263,12 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
            * 完全看不到真正的错误。
            */
           let agentError = ''
+          let turnOk = false
+          let turnText = ''
           try {
             const turn = await runBotTurn(webCtx, spec, text, () => {})
+            turnOk = turn.ok
+            turnText = turn.error ?? ''
             if (turn.ok) {
               // Bot 会话不再挂进 Work 的工作区：两套 agent 的会话列表互相隔离
               return sendJson(res, 200, {
@@ -2271,6 +2287,16 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
             agentError = turn.error ?? 'agent turn 未成功但未给出原因'
           } catch (error: any) {
             agentError = String(error?.message ?? error)
+            turnText = agentError
+          } finally {
+            unbindAssignment?.()
+            if (runtimeHandle !== undefined && rootAssignment !== undefined) {
+              try {
+                runtimeHandle.runtime.end(rootAssignment.id, { ok: turnOk, text: turnText })
+              } catch (error: any) {
+                console.warn('[personal-agent] 收尾作业记录失败:', String(error?.message ?? error))
+              }
+            }
           }
 
           /*
@@ -2372,6 +2398,9 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
             brief: briefText,
             level: spec.permission === 'approval' ? 'ask' : 'full',
           })
+          const unbindAssignment = rootAssignment && runtimeHandle?.bindAssignment
+            ? runtimeHandle.bindAssignment(spec.botId, rootAssignment.id)
+            : undefined
 
           let turnOk = false
           let turnText = ''
@@ -2390,6 +2419,7 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
             turnText = toUserFacingError(String(error?.message ?? error))
             write({ type: 'error', message: turnText })
           } finally {
+            unbindAssignment?.()
             /*
              * 收尾必须在 finally 里：用户中途断开、模型报错、`runBotTurn` 抛错，
              * 这一轮的作业记录都得有个结局，否则它会永远停在 running 上——下次

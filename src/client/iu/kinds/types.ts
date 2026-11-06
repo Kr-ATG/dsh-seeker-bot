@@ -20,14 +20,21 @@ import type { IuTimelineSpec } from './timeline.ts'
 import type { IuTreeSpec } from './tree.ts'
 import type { IuGaugeSpec } from './gauge.ts'
 import type { IuQuizSpec } from './quiz.ts'
+import type { IuWeatherSpec } from './weather.ts'
+import type { IuQuoteSpec } from './quote.ts'
+import type { IuLinkSpec } from './link.ts'
+import type { IuCalculatorSpec } from './calculator.ts'
+import type { IuChartSpec } from './chart.ts'
 
 /** 全部合法 spec 的判别联合（判别式是 kind 字段）。 */
 export type IuSpec =
   | IuSliderSpec
+  | IuCalculatorSpec
+  | IuTableSpec
+  | IuChartSpec
   | IuChecklistSpec
   | IuTabsSpec
   | IuPianoSpec
-  | IuTableSpec
   | IuKanbanSpec
   | IuFormSpec
   | IuDiffSpec
@@ -35,3 +42,6 @@ export type IuSpec =
   | IuTreeSpec
   | IuGaugeSpec
   | IuQuizSpec
+  | IuWeatherSpec
+  | IuQuoteSpec
+  | IuLinkSpec

@@ -3,27 +3,21 @@
  *
  * ## Body 契约（务必遵守，见 bodies.ts 头注释）
  *  · 只渲染「Head 之后」的正文，不要自己画 Head；
- *  · **提交按钮由本 Body 自绘**（文案 = spec.submitLabel）。这是唯一一个
- *    自带动作入口的 kind：外壳的 FillRow 已于 2026-09 移除，而表单填完
- *    没有出口就是一张废卡。回写文案统一走 form.ts 的 fillText，不在
- *    这里重算（否则 Body 与截图/冒烟会各说各话）。
- *  · DOM 结构必须与同名 form.ts 里的 `snapshot()` **逐字对齐**（class、层级、
- *    顺序），否则截图会长歪；
- *  · 本地状态一律走 props 的 `state` / `setState`，**不要**自己 useState——
- *    状态由外壳统一持久化（刷新不丢）。setState 支持补丁对象或函数式补丁。
- *
- * 校验：required 字段为空时该行显示轻量错误（.dtt-iu__form-err），但只有
- * 失焦/交互过（touched）之后才显示——不一上来就报红。
+ *  · 提交按钮由本 Body 自绘（文案 = spec.submitLabel）；
+ *  · DOM 结构必须与同名 form.ts 里的 `snapshot()` 逐字对齐；
+ *  · 本地状态一律走 props 的 `state` / `setState`，不要自己 useState；
+ *  · 下拉框采用 DSH 官方风格自绘弹层（IuFormSelect），彻底替代原生 select 的系统方块白底。
  */
 
-import { memo, useCallback, useMemo } from 'react'
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { createPortal } from 'react-dom'
 import type { IuBodyProps } from './bodies.ts'
 import {
   fillText, isFieldEmpty, safeTouched, safeValues,
   type FormState, type IuFormField, type IuFormSpec,
 } from './form.ts'
 
-/** 勾选框里的对勾 SVG（与 form.ts 的 CHECK_SVG 同一份路径，两边必须一致）。 */
+/** 勾选框里的对勾 SVG。 */
 function CheckMark(): JSX.Element {
   return (
     <svg
@@ -42,7 +36,172 @@ function CheckMark(): JSX.Element {
   )
 }
 
-/** required 字段为空时的轻量校验文案（按控件类型区分动词）。 */
+/** 弹层最大高度（px）。 */
+const MAX_POPUP_H = 220
+
+/** DSH 官方质感自绘下拉框（同步坐标测量 + 防误杀关闭 + 主题自适应实心底色）。 */
+function IuFormSelect({
+  field,
+  value,
+  invalid,
+  onChange,
+  onBlur,
+}: {
+  readonly field: IuFormField
+  readonly value: string
+  readonly invalid?: boolean | undefined
+  readonly onChange: (val: string) => void
+  readonly onBlur: () => void
+}): JSX.Element {
+  const [open, setOpen] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const popupRef = useRef<HTMLDivElement | null>(null)
+  const [box, setBox] = useState<{ left: number; top?: number; bottom?: number; width: number } | null>(null)
+
+  const isPlaceholder = value === ''
+  const display = !isPlaceholder ? value : (field.placeholder !== '' ? field.placeholder : '请选择')
+
+  /** 同步根据触发器位置计算 fixed 坐标（统一使用 top，绝对不产生负向 bottom 偏移）。 */
+  const measure = useCallback((): { left: number; top: number; width: number } | null => {
+    if (triggerRef.current === null) return null
+    const rect = triggerRef.current.getBoundingClientRect()
+    const width = Math.max(160, Math.round(rect.width))
+    const left = Math.max(8, Math.min(Math.round(rect.left), window.innerWidth - width - 8))
+    const below = window.innerHeight - rect.bottom - 4 - 8
+    const openUp = below < 140 && rect.top > 160
+    const top = openUp
+      ? Math.max(8, Math.round(rect.top - 180 - 4))
+      : Math.round(rect.bottom + 4)
+    return { left, top, width }
+  }, [])
+
+  /** 点击触发器：同步求值坐标并展开，首帧即可见，绝无延迟空白。 */
+  const toggle = (): void => {
+    if (open) {
+      setOpen(false)
+      onBlur()
+      return
+    }
+    const b = measure()
+    if (b !== null) setBox(b)
+    setOpen(true)
+  }
+
+  // 滚动与窗口缩放时实时重测，跟随卡片走
+  useEffect(() => {
+    if (!open) return undefined
+    const onScroll = (): void => {
+      const b = measure()
+      if (b !== null) setBox(b)
+    }
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', onScroll)
+    return () => {
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', onScroll)
+    }
+  }, [open, measure])
+
+  // 点外部关闭：避开当前点击的同一个事件调用栈
+  useEffect(() => {
+    if (!open) return undefined
+    const onPointerDown = (e: PointerEvent): void => {
+      const target = e.target
+      if (!(target instanceof Node)) return
+      if (triggerRef.current?.contains(target) === true) return
+      if (popupRef.current?.contains(target) === true) return
+      setOpen(false)
+      onBlur()
+    }
+    const timer = setTimeout(() => {
+      document.addEventListener('pointerdown', onPointerDown)
+    }, 0)
+    return () => {
+      clearTimeout(timer)
+      document.removeEventListener('pointerdown', onPointerDown)
+    }
+  }, [open, onBlur])
+
+  const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>): void => {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
+      e.preventDefault()
+      toggle()
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      setOpen(false)
+      onBlur()
+    }
+  }
+
+  return (
+    <div className="dtt-iu__select-wrap">
+      <button
+        ref={triggerRef}
+        type="button"
+        className="dtt-iu__select-btn"
+        data-open={open ? '1' : '0'}
+        data-empty={isPlaceholder ? '1' : '0'}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={field.label}
+        aria-invalid={invalid || undefined}
+        onClick={toggle}
+        onKeyDown={onKeyDown}
+      >
+        <span className="dtt-iu__select-text">{display}</span>
+        <span className="dtt-iu__select-arrow" aria-hidden="true">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M4 6l4 4 4-4" />
+          </svg>
+        </span>
+      </button>
+
+      {open && box !== null && typeof document !== 'undefined' && createPortal(
+        <div
+          ref={popupRef}
+          className="dtt-iu__select-dropdown"
+          role="listbox"
+          style={{
+            left: box.left,
+            top: box.top,
+            width: box.width,
+            maxHeight: MAX_POPUP_H,
+          }}
+        >
+          {field.options.map((opt, i) => {
+            const isSelected = opt === value
+            return (
+              <div
+                key={i}
+                className="dtt-iu__select-item"
+                role="option"
+                aria-selected={isSelected}
+                data-selected={isSelected ? '1' : '0'}
+                onClick={() => {
+                  onChange(opt)
+                  setOpen(false)
+                  onBlur()
+                }}
+              >
+                <span className="dtt-iu__select-item-label">{opt}</span>
+                {isSelected && (
+                  <span className="dtt-iu__select-item-check" aria-hidden="true">
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3.5 8.5l3 3 6-6" />
+                    </svg>
+                  </span>
+                )}
+              </div>
+            )
+          })}
+        </div>,
+        document.body,
+      )}
+    </div>
+  )
+}
+
+/** required 字段为空时的轻量校验文案。 */
 function errText(field: IuFormField): string {
   switch (field.type) {
     case 'select': return `请选择「${field.label}」`
@@ -57,24 +216,11 @@ export const FormBody = memo(function FormBody(
   const values = safeValues(state)
   const touched = safeTouched(state)
 
-  /**
-   * 必填字段是否还有空的。
-   *
-   * 提交按钮在有必填项未填时**不禁用**，改为点击后把没填过的字段标成
-   * touched（触发一次校验红字）：禁用按钮只会让人不知道还差什么，而
-   * 「点一下、红出来」是自解释的。
-   */
   const missing = useMemo(
     () => spec.fields.filter((f) => f.required && isFieldEmpty(f, values[f.id])),
     [spec.fields, values],
   )
 
-  /**
-   * 提交：把整张表按 fillText 拼成文本，交给外壳的回写通道。
-   *
-   * 有必填项没填时只标 touched 并返回——**不改变已填内容**，用户补完再点
-   * 一次即可（顺手把红字消掉）。全部合规才真的回写。
-   */
   const submit = useCallback((): void => {
     if (missing.length > 0) {
       setState((prev) => {
@@ -85,17 +231,14 @@ export const FormBody = memo(function FormBody(
       })
       return
     }
-    // 没有回写通道（独立预览 / 截图管线）时什么也不做，不假装成功。
     if (onFill === undefined) return
     onFill(fillText(spec, state))
   }, [missing, onFill, setState, spec, state])
 
-  /** 更新单个字段值（函数式补丁，避免并发/闭包读到旧 state；prev 也过一遍防御）。 */
   const patchValue = useCallback((id: string, v: string | boolean): void => {
     setState(prev => ({ values: { ...safeValues(prev), [id]: v } }))
   }, [setState])
 
-  /** 标记字段已交互（失焦/选择/勾选后），只有 touched 的字段才报校验错误。 */
   const touch = useCallback((id: string): void => {
     setState(prev => {
       const t = safeTouched(prev)
@@ -103,7 +246,6 @@ export const FormBody = memo(function FormBody(
     })
   }, [setState])
 
-  /** 同时更新值并标记 touched（select / checkbox 一步到位）。 */
   const patchValueAndTouch = useCallback((id: string, v: string | boolean): void => {
     setState(prev => {
       const t = safeTouched(prev)
@@ -163,19 +305,13 @@ export const FormBody = memo(function FormBody(
               )}
 
               {f.type === 'select' && (
-                <select
-                  className="dtt-iu__select"
+                <IuFormSelect
+                  field={f}
                   value={strVal}
-                  aria-label={f.label}
-                  aria-invalid={invalid || undefined}
-                  onChange={(e) => { patchValueAndTouch(f.id, e.currentTarget.value) }}
+                  invalid={invalid}
+                  onChange={(val) => { patchValueAndTouch(f.id, val) }}
                   onBlur={() => { touch(f.id) }}
-                >
-                  <option value="">{f.placeholder !== '' ? f.placeholder : '请选择'}</option>
-                  {f.options.map((o, i) => (
-                    <option value={o} key={i}>{o}</option>
-                  ))}
-                </select>
+                />
               )}
 
               {f.type === 'checkbox' && (
@@ -199,11 +335,6 @@ export const FormBody = memo(function FormBody(
           )
         })}
       </div>
-      {/*
-        提交行：只在有回写通道时出现。
-        没有 onFill 的场合（独立预览、截图管线）画一个点了没反应的按钮，
-        正是我们要消灭的「假按钮」——那种东西比没有按钮更伤。
-      */}
       {onFill !== undefined && (
         <div className="dtt-iu__form-submit">
           <button

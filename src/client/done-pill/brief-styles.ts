@@ -228,16 +228,17 @@ body[data-ds-dark-theme] .db-sheet{--paper-base:rgb(38 37 35)}
   position:absolute;
   top:calc(14px * var(--dps, 1));
   right:calc(16px * var(--dps, 1));
-  z-index:2;
-  width:calc(24px * var(--dps, 1));
-  height:calc(24px * var(--dps, 1));
+  z-index:3;
+  width:calc(26px * var(--dps, 1));
+  height:calc(26px * var(--dps, 1));
   display:inline-flex;
   align-items:center;
   justify-content:center;
   padding:0;
   border:none;
   border-radius:calc(6px * var(--dps, 1));
-  background:transparent;
+  background:color-mix(in srgb,var(--dpl-panel-bg) 75%,transparent);
+  backdrop-filter:blur(4px);
   color:var(--dpl-fg-weak);
   font-size:calc(12px * var(--dps, 1) * var(--dpt, 1));
   line-height:1;
@@ -246,6 +247,39 @@ body[data-ds-dark-theme] .db-sheet{--paper-base:rgb(38 37 35)}
 }
 .db-close:hover{background:var(--dpl-row-hover);color:var(--dpl-fg)}
 .db-close:focus-visible{outline:2px solid var(--dpl-fg);outline-offset:1px}
+
+/* 顶部横版图（AI 情报卡专用，位于眉标与正文之上，宽幅横构图） */
+.db-hero{
+  position:relative;
+  width:100%;
+  height:calc(196px * var(--dps, 1));
+  flex:none;
+  margin-bottom:calc(18px * var(--dps, 1));
+  overflow:hidden;
+  border-radius:calc(12px * var(--dps, 1));
+  border:1px solid var(--dpl-panel-border);
+  background:var(--dpl-row-bg);
+}
+.db-hero-img{
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  display:block;
+}
+.db-hero-caption{
+  position:absolute;
+  right:calc(10px * var(--dps, 1));
+  bottom:calc(8px * var(--dps, 1));
+  padding:calc(2px * var(--dps, 1)) calc(8px * var(--dps, 1));
+  border-radius:999px;
+  background:rgba(0,0,0,.60);
+  backdrop-filter:blur(4px);
+  color:rgba(255,255,255,.90);
+  font-size:calc(10.5px * var(--dps, 1) * var(--dpt, 1));
+  line-height:calc(16px * var(--dps, 1) * var(--dpt, 1));
+  letter-spacing:.04em;
+  pointer-events:none;
+}
 
 /* 正文两栏：左 38% 主题区、右 62% 条目区，中间一条发丝竖线。 */
 .db-body{
@@ -280,6 +314,7 @@ body[data-ds-dark-theme] .db-sheet{--paper-base:rgb(38 37 35)}
 
 /* 窄屏（壳子半屏 / 手机）：两栏收成单栏，右栏的竖线换成横线。 */
 @media (max-width:720px){
+  .db-hero{height:calc(140px * var(--dps, 1));margin-bottom:calc(12px * var(--dps, 1))}
   .db-body{grid-template-columns:minmax(0,1fr)}
   .db-col-right{
     padding-left:0;

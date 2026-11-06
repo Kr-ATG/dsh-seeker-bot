@@ -347,11 +347,13 @@ else pass('deferred webServer callback executed')
 // festival/list）与 1 条 prefix（festival/image，按 festivalDate 流式返回实拍图），
 // 31 → 35。漏注册同样全是静默失败：胶囊左侧永远不出现「立冬」小纸片、点开只有
 // 空态/骨架，或者卡里图片 404 只剩节日大字占位 —— 只能靠计数与路径断言钉住。
+// 2026-11-06：每日情报卡新增 1 条 prefix 路由（brief/image，按 date 流式返回 AI
+// 情报卡顶部的横版生图），35 → 36。漏注册表现是 AI 情报卡顶部没有横幅大图。
 // 这些路由漏注册的表现全是静默的：胶囊不出现、通知不弹、录屏面板只剩整屏、
 // 情报卡永远转圈、头像退回静态图、节日卡永远停在「准备节日卡」—— 只有计数与
 // 路径断言能钉住它们。
-if (registered.length !== 35) {
-  fail(`expected exactly 35 route registrations, got ${registered.length}: ${JSON.stringify(registered)}`)
+if (registered.length !== 36) {
+  fail(`expected exactly 36 route registrations, got ${registered.length}: ${JSON.stringify(registered)}`)
 } else {
   if (!registered.some(spec => spec?.path === '/api/dsh-done-pill/brief/today')) {
     fail('missing daily-brief today route (exact /api/dsh-done-pill/brief/today)')
@@ -359,6 +361,8 @@ if (registered.length !== 35) {
     fail('missing daily-brief generate route (exact /api/dsh-done-pill/brief/generate)')
   } else if (!registered.some(spec => spec?.path === '/api/dsh-done-pill/brief/list')) {
     fail('missing daily-brief list route (exact /api/dsh-done-pill/brief/list)')
+  } else if (!registered.some(spec => spec?.path === '/api/dsh-done-pill/brief/image' && spec?.kind === 'prefix')) {
+    fail('missing daily-brief image route (prefix /api/dsh-done-pill/brief/image)')
   }
   const exacts = registered.filter(spec => spec?.kind === 'exact')
   const prefix = registered.filter(spec => spec?.kind === 'prefix')

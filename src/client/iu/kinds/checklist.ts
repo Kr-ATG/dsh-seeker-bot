@@ -1,5 +1,9 @@
 /**
- * iu kind: **checklist**（待办清单，勾选进度条 + 持久化）。
+ * iu kind: **checklist**（待办清单与步骤展示）。
+ *
+ * 支持两种模式：
+ *  1. 默认交互式待办：带勾选框、进度条与 0/N 计数，用于真实任务打卡与闭环确认；
+ *  2. 只读步骤/清单（interactive: false）：隐藏进度条与已完成计数，使用精致数字序号展示，供审阅、指导与阅读。
  *
  * ⚠ 本文件零 React、零 DOM。React 体见 checklist.body.tsx。
  */
@@ -16,9 +20,11 @@ export interface IuChecklistSpec extends IuSpecBase {
   readonly kind: 'checklist'
   readonly title: string
   readonly items: readonly IuCheckItem[]
+  /** 是否为交互勾选模式（默认 true；设为 false 时为只读步骤/清单，隐藏进度条与计数，用数字序号展示）。 */
+  readonly interactive: boolean
 }
 
-/** checklist 的本地状态：已勾选的下标集合（持久化——老实现刷新即丢）。 */
+/** checklist 的本地状态：已勾选的下标集合（持久化）。 */
 export interface ChecklistState extends IuState {
   readonly checked: readonly number[]
 }
@@ -30,7 +36,13 @@ function parse(raw: Record<string, unknown>): IuChecklistSpec | undefined {
     return { label, desc: str(it.desc, 80) }
   })
   if (items.length === 0) return undefined
-  return { kind: 'checklist', title: strOr(raw.title, 40, '清单'), items }
+  const isViewOnly = raw.interactive === false || raw.mode === 'view' || raw.mode === 'steps' || raw.readonly === true
+  return {
+    kind: 'checklist',
+    title: strOr(raw.title, 40, '清单'),
+    items,
+    interactive: !isViewOnly,
+  }
 }
 
 function initState(_spec: IuChecklistSpec): ChecklistState {
@@ -38,6 +50,9 @@ function initState(_spec: IuChecklistSpec): ChecklistState {
 }
 
 function fillText(spec: IuChecklistSpec, state: ChecklistState): string {
+  if (spec.interactive === false) {
+    return `${spec.title}：共 ${spec.items.length} 步——${spec.items.map(it => it.label).join('、')}`
+  }
   const checked = new Set(state.checked)
   const picked = [...checked].sort((a, b) => a - b)
     .map(i => spec.items[i]?.label)
@@ -47,10 +62,17 @@ function fillText(spec: IuChecklistSpec, state: ChecklistState): string {
 }
 
 /**
- * 静态快照（截图用）。DOM 与 checklist.body.tsx 逐字对齐：
- * progress → count → 每行 check（box + label/desc）。截图定格在「全未勾」。
+ * 静态快照（截图用）。DOM 与 checklist.body.tsx 逐字对齐。
  */
 function snapshot(spec: IuChecklistSpec): string {
+  if (spec.interactive === false) {
+    const rows = spec.items.map((it, i) =>
+      `<div class="dtt-iu__check dtt-iu__check--static"><span class="dtt-iu__step-num">${i + 1}</span>`
+      + `<span><b>${esc(it.label)}</b>`
+      + (it.desc !== '' ? `<small>${esc(it.desc)}</small>` : '')
+      + `</span></div>`).join('')
+    return `<div class="dtt-iu__checklist-static">${rows}</div>`
+  }
   const rows = spec.items.map(it =>
     `<div class="dtt-iu__check"><span class="dtt-iu__box"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1.8 5.2 4 7.4 8.2 2.6"></path></svg></span>`
     + `<span><b>${esc(it.label)}</b>`
@@ -61,12 +83,7 @@ function snapshot(spec: IuChecklistSpec): string {
 }
 
 const CSS = [
-  '/* checklist：一根细进度线 + 可点行。',
-  ' *',
-  ' * 融合第二版（2026-10-19）：进度条此前是 6px 通栏纯蓝 + 外发光 —— 那是仪表盘语言（「进度管理」），',
-  ' * 不是正文语言。实测它在整段回答里比任何文字都抢眼，且发光让一根装饰条变成了「有状态的控件」。',
-  ' * 现在：2px、无发光、颜色是 label 的 45%（中性），只有**未完成比例**这一条信息，不宣示存在感。',
-  ' * ⚠ 高度别再调回去：≥4px 就重新变成「进度条组件」。 */',
+  '/* checklist：进度线 + 勾选行 / 只读步骤流 */',
   '.dtt-iu__progress { height: 2px; border-radius: 999px; overflow: hidden; margin: 9px 0 6px;',
   '  background: color-mix(in srgb, var(--dsw-alias-label-primary) 7%, transparent); }',
   '.dtt-iu__progress i { display: block; height: 100%; border-radius: 999px;',
@@ -74,19 +91,12 @@ const CSS = [
   '  transition: width .3s cubic-bezier(.2,.8,.25,1); }',
   '.dtt-iu__check { display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left;',
   '  border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer;',
-  '  /* 横向 padding 归零、去掉负 margin：外壳已与正文同宽（.dtt-iu 横向 padding 为 0），',
-  '     旧的 padding:8px 10px + margin:0 -10px 是靠「外层有 10px padding」互相抵消的，',
-  '     外壳一改就把行外溢出去、和正文左右边缘对不齐。勾选框与文字用 gap 拉开。 */',
   '  border-radius: var(--iu-r-md, 8px); padding: 8px 0; margin: 0;',
   '  transition: background-color .18s ease, transform .18s ease, box-shadow .18s ease; }',
-  /* 悬停只换底色，不做横向位移：卡片已融进正文，整行左右挪 2px 会像在抖。 */
   '.dtt-iu__check:hover { background: color-mix(in srgb, var(--dsw-alias-label-primary) 5%, transparent); }',
   '.dtt-iu__check:active { transform: scale(.99); }',
   '.dtt-iu__check:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary, #4176e6);',
   '  outline-offset: 2px; background: color-mix(in srgb, var(--dsw-alias-label-primary) 6%, transparent); }',
-  '/* 选中态**不再给整行铺底色 + 描边**：那张满宽色块在没有外框的卡片里就是一条横向',
-  '   色带，两张勾选行并排时整屏都是色条（实测截图里非常抢眼）。',
-  '   勾选这件事本来就由勾选框 + 删除线两个信号表达完整，行底色是多余的第二层强调。 */',
   '.dtt-iu__check[data-on="1"] { background: transparent; }',
   '.dtt-iu__box { width: 16px; height: 16px; border-radius: 5px; flex: none; margin-top: 1px;',
   '  border: 1px solid color-mix(in srgb, var(--dsw-alias-label-primary) 28%, transparent);',
@@ -98,10 +108,21 @@ const CSS = [
   '.dtt-iu__box svg { opacity: 0; transform: scale(.5); transition: opacity .18s ease, transform .2s cubic-bezier(.2,.8,.25,1); }',
   '.dtt-iu__check[data-on="1"] .dtt-iu__box svg { opacity: 1; transform: none; }',
   '.dtt-iu__check b { display: block; font-size: calc(13px * var(--iu-text-scale, 1)); font-weight: 500; line-height: 1.55; }',
-  '/* 文字层级走 label-* 令牌而不是 opacity：opacity 混出来的是非法定中间色，暗色下发灰。 */',
-  '  .dtt-iu__check[data-on="1"] b { color: var(--dsw-alias-label-tertiary, currentColor); text-decoration: line-through; }',
-  '  .dtt-iu__check small { display: block; font-size: calc(11.5px * var(--iu-text-scale, 1)); color: var(--dsw-alias-label-tertiary, currentColor); line-height: 1.6; margin-top: 1px; }',
-  '  .dtt-iu__count { font-size: calc(11px * var(--iu-text-scale, 1)); color: var(--dsw-alias-label-tertiary, currentColor); font-variant-numeric: tabular-nums; }',
+  '.dtt-iu__check[data-on="1"] b { color: var(--dsw-alias-label-tertiary, currentColor); text-decoration: line-through; }',
+  '.dtt-iu__check small { display: block; font-size: calc(11.5px * var(--iu-text-scale, 1)); color: var(--dsw-alias-label-tertiary, currentColor); line-height: 1.6; margin-top: 1px; }',
+  '.dtt-iu__count { font-size: calc(11px * var(--iu-text-scale, 1)); color: var(--dsw-alias-label-tertiary, currentColor); font-variant-numeric: tabular-nums; }',
+  '/* 只读步骤模式（无交互、无进度催促，供阅读参考） */',
+  '.dtt-iu__check--static { cursor: default; }',
+  '.dtt-iu__check--static:hover { background: transparent; }',
+  '.dtt-iu__step-num {',
+  '  width: 18px; height: 18px; border-radius: 50%; flex: none; margin-top: 1px;',
+  '  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 12%, transparent);',
+  '  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 30%, transparent);',
+  '  color: var(--dsw-alias-state-business-primary, #4176e6);',
+  '  font-size: calc(10.5px * var(--iu-text-scale, 1)); font-weight: 600;',
+  '  display: inline-flex; align-items: center; justify-content: center;',
+  '  font-variant-numeric: tabular-nums;',
+  '}',
 ].join('\n')
 
 export const checklistKind: IuKind<ChecklistState, IuChecklistSpec> = {
@@ -112,5 +133,5 @@ export const checklistKind: IuKind<ChecklistState, IuChecklistSpec> = {
   fillText,
   snapshot,
   css: CSS,
-  doc: '  · checklist 清单：{"kind":"checklist","title":"上线前还差三件","items":[{"label":"事项","desc":"说明"}]}（items ≤12；勾选进度会记住，刷新不丢）。',
+  doc: '  · checklist 清单：{"kind":"checklist","title":"上线前还差三件","items":[{"label":"事项","desc":"说明"}],"interactive":true}（items ≤12；interactive 默认 true，设为 false 时为只读步骤清单；仅在真正需要逐项确认打卡的执行场景使用交互式待办）。',
 }

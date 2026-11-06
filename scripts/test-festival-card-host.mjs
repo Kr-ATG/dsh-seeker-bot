@@ -4,10 +4,10 @@
  * 覆盖契约（见 src/shared/festival.ts 与 src/host/done-pill/festival.ts）：
  *   - 共享纯函数：日期窗口（2026-11-05 窗口内是立冬 11-07）、倒计时、搜图词合并、
  *     清洗与兜底卡；
- *   - 宿主内部：图片头解析（PNG / JPEG / GIF / WebP）、百度候选归一化与评分排序、
+ *   - 宿主内部：图片头解析（PNG / JPEG / GIF / WebP）、生图模型调用与字节校验、
  *     标题 / 来源 / 元数据尺寸过滤、来源展示名；
  *   - 生成链路（桩 ctx + 桩 fetch）：模型正常生成 → 清洗 → 搜图 → 落盘；模型坏
- *     JSON / 模型抛错 / 没有模型时走 origin='fallback' 且仍然搜图、仍然 ok:true；
+ *     JSON / 模型抛错 / 没有模型时走 origin='fallback'、仍然 ok:true；
  *     图片全部失败时 image=null 但记录照常生成；已有记录复用；force 重生成；并发锁；
  *   - 路由：3 条 exact（today / generate / list）+ 1 条 prefix（image）的注册与形状，
  *     image 路由 200 流式返回 / 404 明确 JSON，POST 跨站闸门 403；
@@ -74,7 +74,6 @@ const {
   festivalDateKey,
   festivalDateShort,
   festivalFallbackCard,
-  festivalImageQueries,
   sanitizeFestivalRecord,
   upcomingFestivals,
 } = shared
@@ -138,7 +137,6 @@ const GOOD_CARD = {
       { label: '北方', value: '吃饺子' },
       { label: '四川', value: '羊肉汤' },
     ],
-    imageQuery: '立冬 羊肉汤 砂锅 美食 摄影',
   }],
 }
 const GOOD_TEXT = JSON.stringify(GOOD_CARD)
@@ -200,85 +198,12 @@ function makeWebp(width, height, totalBytes = 220 * 1024) {
   return Buffer.concat([head, Buffer.alloc(Math.max(0, totalBytes - 30), 0x42)])
 }
 
-const IMAGE_BYTES = {
-  '/tiny.png': makePng(1200, 800, 50 * 1024),
-  '/small-real.png': makePng(800, 500),
-  '/good.png': makePng(1200, 800),
-  '/bad-title.png': makePng(1200, 800),
-  '/shop.png': makePng(1200, 800),
-  '/small-meta.png': makePng(1200, 800),
-}
-
-/** 百度图片接口返回的候选（前三个应被过滤，第四个实际尺寸不足，第五个退中图成功）。 */
-function baiduData() {
-  return [
-    {
-      fromPageTitleEnc: '<strong>当季</strong> 简笔画 教程',
-      fromURLHost: 'www.example.com',
-      fromURL: 'https://www.example.com/bad',
-      replaceUrl: [{ ObjURL: 'https://img.example.test/bad-title.png' }],
-      width: 1200,
-      height: 800,
-      type: 'png',
-    },
-    {
-      fromPageTitleEnc: '当季 实拍 图',
-      fromURLHost: 'www.smzdm.com',
-      fromURL: 'https://www.smzdm.com/x',
-      replaceUrl: [{ ObjURL: 'https://img.example.test/shop.png' }],
-      width: 1200,
-      height: 800,
-      type: 'png',
-    },
-    {
-      fromPageTitleEnc: '当季 微距',
-      fromURLHost: 'www.example.com',
-      fromURL: 'https://www.example.com/small',
-      replaceUrl: [{ ObjURL: 'https://img.example.test/small-meta.png' }],
-      width: 600,
-      height: 400,
-      type: 'png',
-    },
-    {
-      fromPageTitleEnc: '当季 美食 砂锅 实拍',
-      fromURLHost: 'www.sohu.com',
-      fromURL: 'https://www.sohu.com/a/000',
-      // 元数据合格但下载只有 50KB：用来验证「文件 150KB–8MB」这条下限。
-      replaceUrl: [{ ObjURL: 'https://img.example.test/tiny.png' }],
-      width: 2600,
-      height: 1700,
-      type: 'png',
-    },
-    {
-      fromPageTitleEnc: '当季 美食 砂锅 实拍',
-      fromURLHost: 'www.sohu.com',
-      fromURL: 'https://www.sohu.com/a/123',
-      // 元数据写得很大、实际下载只有 800x500：用来验证「实际解码像素」这一半校验。
-      replaceUrl: [{ ObjURL: 'https://img.example.test/small-real.png' }],
-      width: 2400,
-      height: 1600,
-      type: 'png',
-    },
-    {
-      fromPageTitleEnc: '当季 美食 砂锅 实拍',
-      fromURLHost: 'www.sohu.com',
-      fromURL: 'https://www.sohu.com/a/456',
-      replaceUrl: [{ ObjURL: 'https://img.example.test/missing.png' }],
-      middleURL: 'https://img.example.test/good.png',
-      width: 1200,
-      height: 800,
-      type: 'png',
-    },
-    null,
-  ]
-}
-
 /* ───────────────────────────── 桩 fetch ───────────────────────────── */
 
 const fetchLog = []
-let fetchMode = 'ok' // ok | search-fail | all-fail | image-gen-fail
-let lastFetchInit = null
 const realFetch = globalThis.fetch
+let fetchMode = 'ok' // ok | image-gen-fail
+let lastFetchInit = null
 
 function jsonResponse(payload) {
   return {
@@ -287,16 +212,6 @@ function jsonResponse(payload) {
     headers: { get: (name) => (String(name).toLowerCase() === 'content-type' ? 'application/json; charset=utf-8' : null) },
     text: async () => JSON.stringify(payload),
     arrayBuffer: async () => Buffer.from(JSON.stringify(payload)),
-  }
-}
-
-function binaryResponse(buffer, type) {
-  return {
-    ok: true,
-    status: 200,
-    headers: { get: (name) => (String(name).toLowerCase() === 'content-type' ? type : null) },
-    arrayBuffer: async () => buffer,
-    text: async () => '',
   }
 }
 
@@ -319,20 +234,7 @@ globalThis.fetch = async (url, init) => {
     if (fetchMode === 'image-gen-fail') return notFoundResponse()
     return jsonResponse({ data: [{ b64_json: makePng(1024, 1536, 320 * 1024).toString('base64') }] })
   }
-  if (text.includes('image.baidu.com/search/acjson')) {
-    if (fetchMode === 'search-fail' || fetchMode === 'all-fail') throw new Error('网络不可达')
-    return jsonResponse({ data: baiduData() })
-  }
-  if (fetchMode === 'all-fail') throw new Error('图片下载失败')
-  let pathname = ''
-  try {
-    pathname = new URL(text).pathname
-  } catch {
-    return notFoundResponse()
-  }
-  const bytes = IMAGE_BYTES[pathname]
-  if (bytes === undefined) return notFoundResponse()
-  return binaryResponse(bytes, 'image/png')
+  return notFoundResponse()
 }
 
 /* ───────────────────────────── 桩 ctx ───────────────────────────── */
@@ -409,7 +311,7 @@ function makeCtx(options = {}) {
     },
     llm: localLlm,
     web: undefined,
-    // 只有显式声明 imageModel 的用例才带生图配置；其余用例继续走百度搜图。
+    // 只有显式声明 imageModel 的用例才带生图配置；其余用例不配生图模型，image 应为 null。
     ...(options.imageModel === true ? {
       settings: {
         get(namespace) {
@@ -501,14 +403,6 @@ await test('upcomingFestivals：无节日窗口（2026-06-10）返回空数组',
   assertEqual(upcomingFestivals(new Date(2026, 5, 10), 10).length, 0, '6-10 到 6-20 没有节气或节日')
 })
 
-await test('festivalImageQueries：模型词 + 内置词去重，最多 4 组', () => {
-  const entry = upcomingFestivals(new Date(2026, 10, 5), 10)[0]
-  const queries = festivalImageQueries(entry, ['立冬 羊肉汤 砂锅 美食 摄影', '立冬 羊肉汤 砂锅 美食 摄影', ''])
-  assertEqual(queries[0], '立冬 羊肉汤 砂锅 美食 摄影', '模型词排最前')
-  assertEqual(queries.length <= 4, true, '最多 4 组')
-  assertEqual(new Set(queries).size, queries.length, '不能重复')
-})
-
 await test('sanitizeFestivalRecord / festivalFallbackCard：坏输入 null，兜底卡字段齐全', () => {
   const entry = upcomingFestivals(new Date(2026, 10, 5), 10)[0]
   assertEqual(sanitizeFestivalRecord({}, { entry, origin: 'model' }), null, '空 payload → null')
@@ -534,31 +428,6 @@ await test('imageSizeOf：PNG / JPEG / GIF / WebP 头解析，未知格式 null'
   assertEqual(T.imageSizeOf(Buffer.from('not an image')), null, '未知格式')
 })
 
-await test('normalizeBaiduCandidates：字段映射 / 实体解码 / null 尾项丢弃', () => {
-  const candidates = T.normalizeBaiduCandidates({ data: baiduData() })
-  assertEqual(candidates.length, 6, 'null 尾项必须丢弃')
-  assertEqual(candidates[0].title, '当季 简笔画 教程', '剥掉 strong 标签并保留文字')
-  assertEqual(candidates[5].objUrl, 'https://img.example.test/missing.png', 'ObjURL 取 replaceUrl[0]')
-  assertEqual(candidates[5].middleUrl, 'https://img.example.test/good.png', 'middleURL')
-  assertEqual(candidates[5].sourceUrl, 'https://www.sohu.com/a/456', 'fromURL')
-  assertEqual(candidates[5].metaWidth, 1200, '元数据宽')
-})
-
-await test('rankBaiduCandidates：标题 / 来源 / 小元数据过滤 + 横图优先排序', () => {
-  const candidates = T.normalizeBaiduCandidates({ data: baiduData() })
-  const ranked = T.rankBaiduCandidates(candidates)
-  assertEqual(ranked.length, 3, '三个坏候选应被过滤，只剩三个合格元数据候选')
-  assert(!ranked.some((item) => item.title.includes('简笔画')), '标题黑名单')
-  assert(!ranked.some((item) => item.fromHost.includes('smzdm.com')), '来源黑名单')
-  assert(!ranked.some((item) => item.metaWidth === 600), '小元数据被过滤')
-  assertEqual(ranked[0].objUrl, 'https://img.example.test/tiny.png', '元数据最大的排最前')
-  assertEqual(ranked[1].objUrl, 'https://img.example.test/small-real.png', '次大其次')
-  assertEqual(T.imageAspectOk(1200, 800), true, '横图比例合格')
-  assertEqual(T.imageAspectOk(600, 1200), false, '竖图比例不合格')
-  assertEqual(T.sourceDisplayName('www.sohu.com'), '搜狐', '来源展示名')
-  assertEqual(T.sourceDisplayName('photo.example.com'), 'photo.example.com', '未知域名原样')
-})
-
 await test('parseFestivalJson：剥 markdown 围栏；坏 JSON 抛中文错误', () => {
   const FENCE = String.fromCharCode(96, 96, 96)
   const payload = T.parseFestivalJson(FENCE + 'json\n' + GOOD_TEXT + '\n' + FENCE)
@@ -578,19 +447,15 @@ await test('normalizeFestivalDate：非法输入回退今天', () => {
   assertEqual(T.normalizeFestivalDate('not-a-date'), festivalDateKey(new Date()), '非法回退今天')
 })
 
-await test('imageQueriesOf：收集 imageQuery 并去重', () => {
-  const queries = T.imageQueriesOf({ cards: [{ imageQuery: '立冬 羊肉汤' }, { imageQuery: ['立冬 羊肉汤', '立冬 饺子'] }] })
-  assertEqual(queries.length, 2, '去重后两条')
-  assertEqual(queries[0], '立冬 羊肉汤', '第一条')
-})
-
 /* ═════════════════════════════ 生成链路 ═════════════════════════════ */
 
-await test('generateFestival：模型 → 清洗 → 搜图 → 落盘（origin=model）', async () => {
+await test('generateFestival：模型 → 清洗 → 生图 → 落盘（origin=model）', async () => {
   useHome('generate')
   fetchMode = 'ok'
-  const { ctx } = makeCtx()
+  lastFetchInit = null
+  const { ctx } = makeCtx({ imageModel: true })
   llmQueue.push(splitChunks(GOOD_TEXT))
+  const beforeLog = fetchLog.length
   const result = await generateFestival(ctx, { date: '2026-11-05', force: true })
 
   assert(result.ok === true, '生成应成功，实际 error=' + String(result.error))
@@ -604,15 +469,17 @@ await test('generateFestival：模型 → 清洗 → 搜图 → 落盘（origin=
   assertEqual(record.cards.length, 1, '一张卡')
   assertEqual(record.cards[0].festivalId, 'lidong', 'festivalId')
   assertEqual(record.cards[0].title, GOOD_CARD.cards[0].title, '标题来自模型')
-  assert(record.cards[0].image !== null, '图片必须抓到')
-  assertEqual(record.cards[0].image.file, '2026-11-07.png', '图片文件名按 festivalDate')
-  assertEqual(record.cards[0].image.width, 1200, '图片实际宽')
-  assertEqual(record.cards[0].image.height, 800, '图片实际高')
-  assertEqual(record.cards[0].image.source, '搜狐', '来源展示名')
-  assertEqual(record.cards[0].image.sourceUrl, 'https://www.sohu.com/a/456', '来源页')
-  assertEqual(record.cards[0].image.caption, '当季 美食 砂锅 实拍', '图注')
+
+  const image = record.cards[0].image
+  assert(image !== null, '生图模型可用时必须出图')
+  assertEqual(image.source, 'AI 生图', '来源标注')
+  assertEqual(image.caption, '立冬 · AI 绘制', '图注')
+  assertEqual(image.file, '2026-11-07.png', '图片文件名按 festivalDate')
+  assertEqual(image.width, 1024, '生图宽')
+  assertEqual(image.height, 1536, '生图高')
+  assertEqual(image.sourceUrl, undefined, 'AI 图不带来源页链接')
   assertEqual(
-    record.cards[0].image.url,
+    image.url,
     FESTIVAL_IMAGE_ROUTE + '/2026-11-07?v=' + String(record.generatedAt),
     '图片 URL 带 generatedAt 版本',
   )
@@ -636,16 +503,13 @@ await test('generateFestival：模型 → 清洗 → 搜图 → 落盘（origin=
   const imageFile = join(IMAGES_DIR(), '2026-11-07.png')
   assert(existsSync(imageFile), '图片没有落盘：' + imageFile)
 
-  // 下载顺序：坏候选不下载；small-real → missing（404）→ 退 middleURL good
-  const imageRequests = fetchLog.filter((url) => url.includes('img.example.test')).map((url) => new URL(url).pathname)
-  assertEqual(
-    JSON.stringify(imageRequests),
-    JSON.stringify(['/tiny.png', '/small-real.png', '/missing.png', '/good.png']),
-    '下载顺序：50KB 太小 → 实际 800x500 太小 → 原图 404 退中图成功',
-  )
+  // 配图只走生图网关：绝不能出现任何百度图片请求
+  const calls = fetchLog.slice(beforeLog).map((url) => String(url))
+  assert(calls.some((url) => url.includes('/images/generations')), '必须调用生图接口')
+  assert(!calls.some((url) => url.includes('image.baidu.com')), '绝不能再请求百度图片接口')
 })
 
-await test('generateFestival：有生图模型时优先用 AI 图，不再搜百度', async () => {
+await test('generateFestival：有生图模型时用 AI 图，且绝不请求百度', async () => {
   useHome('generate-model-image')
   fetchMode = 'ok'
   lastFetchInit = null
@@ -665,7 +529,7 @@ await test('generateFestival：有生图模型时优先用 AI 图，不再搜百
 
   const calls = fetchLog.slice(beforeLog).map((url) => String(url))
   assert(calls.some((url) => url.includes('/images/generations')), '必须调用生图接口')
-  assert(!calls.some((url) => url.includes('image.baidu.com')), '生图成功后不该再搜百度图')
+  assert(!calls.some((url) => url.includes('image.baidu.com')), '全程不应出现百度图片请求')
   assert(lastFetchInit !== null && lastFetchInit.method === 'POST', '生图必须走 POST')
   const body = JSON.parse(String(lastFetchInit.body))
   assertEqual(body.model, 'stub-image-model', '模型来自 model-capabilities')
@@ -674,18 +538,21 @@ await test('generateFestival：有生图模型时优先用 AI 图，不再搜百
   assert(String(body.prompt).includes('羊肉') || String(body.prompt).includes('饺子'), '生图提示词含应季食物')
 })
 
-await test('generateFestival：生图失败时降级到百度搜图', async () => {
+await test('generateFestival：生图失败 → image=null，绝不回退搜图', async () => {
   useHome('generate-model-image-fail')
   fetchMode = 'image-gen-fail'
   const { ctx } = makeCtx({ imageModel: true })
   llmQueue.push(splitChunks(GOOD_TEXT))
+  const beforeLog = fetchLog.length
   const result = await generateFestival(ctx, { date: '2026-11-05', force: true })
   fetchMode = 'ok'
 
   assertEqual(result.ok, true, '生图失败不应让记录生成失败')
-  const image = result.record.cards[0].image
-  assert(image !== null, '降级后仍应出图')
-  assertEqual(image.source, '搜狐', '降级图来源是百度实拍')
+  assertEqual(result.record.cards[0].image, null, 'image 必须是 null，不再降级到网上搜图')
+  const calls = fetchLog.slice(beforeLog).map((url) => String(url))
+  assert(calls.some((url) => url.includes('/images/generations')), '生图接口确实被尝试过')
+  assert(!calls.some((url) => url.includes('image.baidu.com')), '失败后绝不能去搜百度图')
+  assert(existsSync(join(FESTIVALS_DIR(), '2026-11-07.json')), '记录仍要落盘')
 })
 
 await test('generateFestival：已有记录且 force=false 直接复用（不调模型）', async () => {
@@ -707,7 +574,7 @@ await test('generateFestival：force=true 重新生成（换文案）', async ()
   assert(result.record.generatedAt >= old.generatedAt, 'generatedAt 不应倒退')
 })
 
-await test('generateFestival：模型输出坏 JSON → origin=fallback，仍然搜图并 ok:true', async () => {
+await test('generateFestival：模型输出坏 JSON → origin=fallback 且 ok:true', async () => {
   useHome('fallback-bad-json')
   fetchMode = 'ok'
   const { ctx } = makeCtx()
@@ -717,7 +584,7 @@ await test('generateFestival：模型输出坏 JSON → origin=fallback，仍然
   assertEqual(result.record.origin, 'fallback', 'origin=fallback')
   assertEqual(result.record.festivalDate, '2026-11-22', '小雪日期')
   assert(result.record.cards[0].title.includes('小雪'), '兜底卡标题含节日名')
-  assert(result.record.cards[0].image !== null, '兜底卡仍然要搜图')
+  assertEqual(result.record.cards[0].image, null, '未配生图模型时 image=null，资料卡照常出')
   assertEqual(result.record.model, undefined, '兜底卡不带 model')
 })
 
@@ -729,7 +596,7 @@ await test('generateFestival：模型抛错 → origin=fallback 且 ok:true', as
   const result = await generateFestival(ctx, { date: '2026-11-20', force: true })
   assertEqual(result.ok, true, '模型抛错也必须 ok:true')
   assertEqual(result.record.origin, 'fallback', '走资料卡')
-  assert(result.record.cards[0].image !== null, '仍然搜图')
+  assertEqual(result.record.cards[0].image, null, '未配生图模型时 image=null')
 })
 
 await test('generateFestival：没有可用模型 → origin=fallback 且 ok:true', async () => {
@@ -740,7 +607,7 @@ await test('generateFestival：没有可用模型 → origin=fallback 且 ok:tru
   assertEqual(result.ok, true, '没有模型也必须 ok:true')
   assertEqual(result.record.origin, 'fallback', '走资料卡')
   assertEqual(result.record.festivalDate, '2026-12-07', '大雪日期')
-  assert(result.record.cards[0].image !== null, '仍然搜图')
+  assertEqual(result.record.cards[0].image, null, '未配生图模型时 image=null')
 })
 
 await test('generateFestival：窗口内没有节日 → ok:false + 中文短句', async () => {
@@ -752,14 +619,13 @@ await test('generateFestival：窗口内没有节日 → ok:false + 中文短句
   assert(String(result.error).includes('最近'), '错误要说明窗口，实际：' + String(result.error))
 })
 
-await test('generateFestival：图片全部失败 → image=null，记录照常生成', async () => {
-  useHome('image-fail')
-  fetchMode = 'all-fail'
+await test('generateFestival：未配置生图模型 → image=null，记录照常生成', async () => {
+  useHome('no-image-model')
+  fetchMode = 'ok'
   const { ctx } = makeCtx()
   llmQueue.push(splitChunks(GOOD_TEXT))
   const result = await generateFestival(ctx, { date: '2026-12-19', force: true })
-  fetchMode = 'ok'
-  assertEqual(result.ok, true, '图片失败不影响记录生成')
+  assertEqual(result.ok, true, '没有生图模型不影响记录生成')
   assertEqual(result.record.cards[0].image, null, 'image 必须是 null')
   assert(existsSync(join(FESTIVALS_DIR(), '2026-12-22.json')), '记录仍要落盘')
 })
@@ -833,7 +699,7 @@ await test('checkFestivalSchedule：6 点后窗口内有节日且无记录 → �
 await test('路由：3 条 exact + 1 条 prefix 都在，形状符合契约', async () => {
   useHome('routes')
   fetchMode = 'ok'
-  const { ctx, state } = makeCtx()
+  const { ctx, state } = makeCtx({ imageModel: true })
   applyFestivalHost(ctx)
 
   const todayPath = FESTIVAL_ROUTE + '/today'

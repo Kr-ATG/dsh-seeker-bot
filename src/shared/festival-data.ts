@@ -2,23 +2,21 @@
  * dsh-seeker-bot — 节日卡（Festival Card）的**节气 / 节日文化资料**。
  *
  * 这里是「日历数据之外」的那一半：每个节气与节日叫什么、什么意思、有什么
- * 习俗、这天吃什么、该拿什么词去搜图。它刻意与 `festival.ts` 的契约分开：
+ * 习俗、这天吃什么。它刻意与 `festival.ts` 的契约分开：
  *
  *   · festival.ts 只放**类型、日期计算、提示词与清洗**，两端共享、纯函数；
  *   · 本文件只放**静态文化资料**，不参与任何时间计算，也不依赖运行环境。
  *
  * 为什么资料要写在代码里而不是每次让模型现编：
  *   1. 节气/节日是**确定性知识**——立春咬春、冬至饺子，模型胡编的代价比写死高；
- *   2. 图片搜索词必须稳定可复现：同样一张卡今天和明天搜出来的图应当一样；
+ *   2. 生图提示词要从资料里取意象与食物，写死才能保证画面口径稳定；
  *   3. 模型只负责「把资料写成有生活气的标题与导语」，资料本身不交给它发挥。
  *
  * 数据口径：
  *   · 24 节气按 2026 / 2027 两年公历日期表（见 festival.ts），这里只写文化资料；
  *   · 固定公历节日只收「适合做成生活卡片」的 8 个，农历节日（春节/端午/中秋等）
  *     需要逐年农历表，暂不纳入，避免把错误日期端给用户；
- *   · imageQueries 是**给百度图片搜索用的中文关键词**，每个节气准备 3 组：
- *     第一组最具体（食物 + 器皿/场景），第二组换一个地域或吃法，第三组给
- *     纯风景 / 时令意象兜底。搜索层会按顺序尝试，直到拿到合格的实拍图。
+ *   · 配图由生图模型按 festivalImagePrompt 现画，不再需要搜图词。
  */
 
 /** 一个节气的文化资料。 */
@@ -37,8 +35,6 @@ export interface SolarTermProfile {
   customs: string[]
   /** 2–4 种应季食物（尽量带地域差异）。 */
   foods: string[]
-  /** 2–3 组图片搜索词，按优先级排列。 */
-  imageQueries: string[]
 }
 
 /** 一个固定公历节日的文化资料。 */
@@ -53,7 +49,6 @@ export interface FixedFestivalProfile {
   blurb: string
   customs: string[]
   foods: string[]
-  imageQueries: string[]
 }
 
 /**
@@ -71,7 +66,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '一年里最冷的时段之一，北方滴水成冰，南方湿冷入骨；年味也从这时开始慢慢攒起来。',
     customs: ['探梅', '冰戏', '备年货'],
     foods: ['腊八粥', '糯米饭', '菜饭'],
-    imageQueries: ['小寒 腊梅 雪 摄影', '小寒 腊八粥 美食', '冬日 暖锅 热气'],
   },
   {
     id: 'dahan',
@@ -81,7 +75,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '二十四节气的最后一站，寒气到了顶，也意味着旧年将尽、新春已经在路上。',
     customs: ['尾牙祭', '扫尘', '备年货'],
     foods: ['年糕', '八宝饭', '腊味'],
-    imageQueries: ['大寒 年糕 腊味 美食', '大寒 梅花 雪 摄影', '冬日 红灯笼 年味'],
   },
   {
     id: 'lichun',
@@ -91,7 +84,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '春天的第一个节气。白天开始变长，风里有了暖意，老辈人说要「咬一口春」。',
     customs: ['咬春', '打春牛', '贴春字'],
     foods: ['春饼', '萝卜', '春卷'],
-    imageQueries: ['立春 春饼 咬春 美食', '早春 柳芽 暖阳 摄影', '春天 田野 新绿'],
   },
   {
     id: 'yushui',
@@ -101,7 +93,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '冰雪化开、降水渐多，空气里都是潮湿的泥土味；春笋和荠菜就是这时候冒头的。',
     customs: ['回娘家', '接寿', '占稻色'],
     foods: ['罐罐肉', '春笋', '荠菜'],
-    imageQueries: ['雨水 春笋 美食 摄影', '春雨 江南 屋檐 摄影', '荠菜 春菜 时令'],
   },
   {
     id: 'jingzhe',
@@ -111,7 +102,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '第一声春雷把蛰伏的虫子都叫醒了，桃李花开，田里也忙了起来。',
     customs: ['祭白虎', '打小人', '吃梨'],
     foods: ['梨', '炒豆', '春饼'],
-    imageQueries: ['惊蛰 梨花 春天 摄影', '惊蛰 吃梨 美食', '春雷 田野 春耕'],
   },
   {
     id: 'chunfen',
@@ -121,7 +111,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '昼夜平分、寒暑相半。燕子回来了，油菜花开成片，是一年里最适合出门的日子之一。',
     customs: ['竖蛋', '放风筝', '春祭'],
     foods: ['春菜', '太阳糕', '青团'],
-    imageQueries: ['春分 油菜花 风筝 摄影', '春分 竖蛋 春天', '江南 春菜 时令'],
   },
   {
     id: 'qingming',
@@ -131,7 +120,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '气清景明，既有扫墓的追思，也有踏青的轻快；江南的雨和青团是这天的标配。',
     customs: ['扫墓', '踏青', '插柳'],
     foods: ['青团', '艾粄', '螺蛳'],
-    imageQueries: ['清明 青团 艾草 美食', '清明 江南 烟雨 摄影', '清明 踏青 春山'],
   },
   {
     id: 'guyu',
@@ -141,7 +129,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '雨生百谷，春天的最后一个节气。香椿正嫩、牡丹正开，南方茶山也到了采春茶的时候。',
     customs: ['走谷雨', '赏牡丹', '祭仓颉'],
     foods: ['香椿', '谷雨茶', '荠菜'],
-    imageQueries: ['谷雨 香椿 美食 摄影', '谷雨 茶园 采茶 摄影', '牡丹 花开 春天'],
   },
   {
     id: 'lixia',
@@ -151,7 +138,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '夏天的第一个节气，气温明显往上走；江南有称人、斗蛋的旧俗，图一个平安度夏。',
     customs: ['称人', '斗蛋', '迎夏'],
     foods: ['立夏蛋', '蚕豆', '乌米饭'],
-    imageQueries: ['立夏 蚕豆 立夏蛋 美食', '初夏 荷塘 绿意 摄影', '立夏 乌米饭 江南'],
   },
   {
     id: 'xiaoman',
@@ -161,7 +147,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '麦粒开始灌浆，将满未满。南方雨水渐多，北方麦浪初黄，是一年里很有盼头的时节。',
     customs: ['祭车神', '祭蚕神', '抢水'],
     foods: ['苦菜', '麦仁', '苦瓜'],
-    imageQueries: ['小满 麦田 青麦 摄影', '小满 苦菜 时令美食', '初夏 麦浪 阳光'],
   },
   {
     id: 'mangzhong',
@@ -171,7 +156,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '有芒的麦子要收、有芒的稻子要种，一年里最忙的「双抢」时节；江南也在这时煮青梅。',
     customs: ['送花神', '安苗', '煮梅'],
     foods: ['青梅', '麦饭', '君踏菜'],
-    imageQueries: ['芒种 青梅 煮梅 美食', '芒种 麦田 收割 摄影', '芒种 插秧 水田 摄影'],
   },
   {
     id: 'xiazhi',
@@ -181,7 +165,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '白天最长的一天。北方「冬至饺子夏至面」，江南吃凉面消暑，岭南的荔枝也刚好上市。',
     customs: ['祭祖', '消夏', '称重'],
     foods: ['夏至面', '凉面', '西瓜'],
-    imageQueries: ['夏至 凉面 西瓜 美食', '夏至 荷塘 晚霞 摄影', '夏日 荔枝 时令'],
   },
   {
     id: 'xiaoshu',
@@ -191,7 +174,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '暑气渐盛但还没到顶点，荷花开了，藕也脆了；一碗绿豆汤就是最实在的消暑。',
     customs: ['食新', '晒书画', '封斋'],
     foods: ['藕', '黄鳝', '绿豆汤'],
-    imageQueries: ['小暑 荷花 莲藕 摄影', '小暑 绿豆汤 美食', '夏日 荷塘 蜻蜓'],
   },
   {
     id: 'dashu',
@@ -201,7 +183,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '一年里最热的一段，雷雨也多。南方吃仙草、冬瓜消暑，有些地方偏偏要「以热制热」喝羊肉汤。',
     customs: ['送大暑船', '斗蟋蟀', '晒伏姜'],
     foods: ['仙草', '冬瓜', '羊肉'],
-    imageQueries: ['大暑 冬瓜汤 美食', '大暑 萤火虫 夏夜 摄影', '盛夏 荷塘 雷雨'],
   },
   {
     id: 'liqiu',
@@ -211,7 +192,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '秋天的第一个节气，暑气未消但早晚已有凉意。北方讲究「贴秋膘」，江西婺源开始晒秋。',
     customs: ['贴秋膘', '啃秋', '晒秋'],
     foods: ['西瓜', '炖肉', '秋桃'],
-    imageQueries: ['立秋 晒秋 辣椒 摄影', '立秋 西瓜 啃秋 美食', '初秋 稻田 金黄'],
   },
   {
     id: 'chushu',
@@ -221,7 +201,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '「处」是躲藏、终止的意思，暑气到这里就散了。开渔节上第一网海鲜上岸，秋燥也该润一润。',
     customs: ['开渔节', '放河灯', '祭祖'],
     foods: ['鸭子', '百合', '莲子'],
-    imageQueries: ['处暑 鸭子 美食 摄影', '处暑 开渔 渔船 摄影', '初秋 荷塘 残荷'],
   },
   {
     id: 'bailu',
@@ -231,7 +210,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '昼夜温差拉大，清晨草叶上开始挂露珠。白露茶、米酒、龙眼，都是这个时节的甜。',
     customs: ['收清露', '祭禹王', '饮白露茶'],
     foods: ['白露茶', '米酒', '龙眼'],
-    imageQueries: ['白露 露水 草叶 摄影', '白露 茶园 秋茶 摄影', '白露 米酒 美食'],
   },
   {
     id: 'qiufen',
@@ -241,7 +219,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '昼夜再次平分，也是第八个中国农民丰收节。桂花香起来，蟹脚痒起来，秋天最富足的一段。',
     customs: ['祭月', '竖蛋', '吃秋菜'],
     foods: ['秋菜', '桂花糕', '螃蟹'],
-    imageQueries: ['秋分 桂花 稻田 摄影', '秋分 螃蟹 美食 摄影', '秋日 丰收 田野'],
   },
   {
     id: 'hanlu',
@@ -251,7 +228,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '露水开始带寒意，菊花却开得正好。登高、赏菊、吃蟹，秋天的味道越来越浓。',
     customs: ['登高', '赏菊', '饮菊花酒'],
     foods: ['芝麻', '螃蟹', '菊花酒'],
-    imageQueries: ['寒露 菊花 秋色 摄影', '寒露 螃蟹 美食', '深秋 山林 红叶'],
   },
   {
     id: 'shuangjiang',
@@ -261,7 +237,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '秋天的最后一个节气，霜一打，柿子就红了、萝卜就甜了。老话说「霜降吃丁柿，不会流鼻涕」。',
     customs: ['赏菊', '吃柿子', '登高'],
     foods: ['柿子', '鸭子', '萝卜'],
-    imageQueries: ['霜降 柿子 红 摄影', '霜降 枫叶 深秋 摄影', '霜降 萝卜 美食'],
   },
   {
     id: 'lidong',
@@ -271,7 +246,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '冬季的第一个节气，万物开始收藏。北方这天吃饺子，四川人却要炖一锅奶白的羊肉汤，涮一把豌豆尖。',
     customs: ['补冬', '贺冬', '酿黄酒'],
     foods: ['北方饺子', '四川羊肉汤', '南方鸡鸭鱼肉'],
-    imageQueries: ['立冬 羊肉汤 砂锅 美食 摄影', '立冬 饺子 热气腾腾 美食', '初冬 银杏 暖阳 摄影'],
   },
   {
     id: 'xiaoxue',
@@ -281,7 +255,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '开始飘雪但雪还不大，北方腌腊肉、灌香肠，南方打糍粑，都是在为冬天囤味道。',
     customs: ['腌腊肉', '做香肠', '晒鱼干'],
     foods: ['腊肉', '糍粑', '白菜'],
-    imageQueries: ['小雪 腊肉 晾晒 摄影', '小雪 糍粑 美食', '初雪 屋檐 村落 摄影'],
   },
   {
     id: 'daxue',
@@ -291,7 +264,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '雪量大起来，河面封冻，北方开始「猫冬」。一锅羊肉、一碗红薯粥，是雪天里最踏实的暖。',
     customs: ['腌肉', '观赏封河', '进补'],
     foods: ['红薯粥', '羊肉', '年糕'],
-    imageQueries: ['大雪 雪景 村落 摄影', '大雪 红薯粥 美食', '冬日 羊肉 暖锅 美食'],
   },
   {
     id: 'dongzhi',
@@ -301,7 +273,6 @@ export const SOLAR_TERM_PROFILES: readonly SolarTermProfile[] = [
     blurb: '白昼最短、黑夜最长的一天，也是「数九」的开始。北方吃饺子，南方吃汤圆，四川还是那锅羊肉汤。',
     customs: ['祭祖', '数九', '吃饺子汤圆'],
     foods: ['北方饺子', '南方汤圆', '羊肉汤'],
-    imageQueries: ['冬至 饺子 汤圆 美食', '冬至 羊肉汤 砂锅 美食', '冬至 雪 暖灯 摄影'],
   },
 ] as const
 
@@ -321,7 +292,6 @@ export const FIXED_FESTIVAL_PROFILES: readonly FixedFestivalProfile[] = [
     blurb: '新一年的第一天。有人守岁到零点，有人一早去爬山看日出，图的都是「从头开始」的好意头。',
     customs: ['跨年', '看日出', '写新年愿望'],
     foods: ['年糕', '饺子', '汤圆'],
-    imageQueries: ['元旦 烟花 城市夜景 摄影', '新年 红灯笼 年味 摄影', '新年 日出 山巅 摄影'],
   },
   {
     id: 'qingrenjie',
@@ -332,7 +302,6 @@ export const FIXED_FESTIVAL_PROFILES: readonly FixedFestivalProfile[] = [
     blurb: '一年里最甜的一天。花店提前一周就开始忙，餐厅订位要靠抢，连空气里都像掺了糖。',
     customs: ['送花', '约会', '交换礼物'],
     foods: ['巧克力', '草莓', '烛光晚餐'],
-    imageQueries: ['情人节 玫瑰 花束 摄影', '情人节 巧克力 甜品 摄影', '烛光晚餐 浪漫 摄影'],
   },
   {
     id: 'funvjie',
@@ -343,7 +312,6 @@ export const FIXED_FESTIVAL_PROFILES: readonly FixedFestivalProfile[] = [
     blurb: '三月八日，给身边的女性送一束花、放半天假。春天刚起头，花市里的颜色也最热闹。',
     customs: ['送花', '放半天假', '春游'],
     foods: ['鲜花饼', '蛋糕', '下午茶'],
-    imageQueries: ['妇女节 鲜花 花束 摄影', '春天 郁金香 花园 摄影', '下午茶 甜品 摄影'],
   },
   {
     id: 'laodongjie',
@@ -354,7 +322,6 @@ export const FIXED_FESTIVAL_PROFILES: readonly FixedFestivalProfile[] = [
     blurb: '五一小长假，高速免费、景区人多，但谁都想抓住春天最后一段好天气出门走走。',
     customs: ['出游', '踏青', '露营'],
     foods: ['野餐', '烧烤', '春笋'],
-    imageQueries: ['五一 春游 山野 摄影', '露营 野餐 草地 摄影', '春末 花海 风景 摄影'],
   },
   {
     id: 'ertongjie',
@@ -365,7 +332,6 @@ export const FIXED_FESTIVAL_PROFILES: readonly FixedFestivalProfile[] = [
     blurb: '六月一日，小朋友的节日，也是大朋友名正言顺吃糖、去游乐园的日子。',
     customs: ['游乐园', '送礼物', '吃糖果'],
     foods: ['棉花糖', '蛋糕', '冰淇淋'],
-    imageQueries: ['儿童节 气球 糖果 摄影', '游乐园 旋转木马 摄影', '冰淇淋 甜品 夏日'],
   },
   {
     id: 'jiaoshijie',
@@ -376,7 +342,6 @@ export const FIXED_FESTIVAL_PROFILES: readonly FixedFestivalProfile[] = [
     blurb: '九月十日，给老师送一束花、写一张卡片。开学没多久，校园里的桂花常常也刚好开了。',
     customs: ['送花', '写贺卡', '回母校'],
     foods: ['蛋糕', '水果', '桂花糕'],
-    imageQueries: ['教师节 鲜花 讲台 摄影', '校园 秋天 桂花 摄影', '贺卡 花束 静物'],
   },
   {
     id: 'guoqingjie',
@@ -387,7 +352,6 @@ export const FIXED_FESTIVAL_PROFILES: readonly FixedFestivalProfile[] = [
     blurb: '十月一日，街头挂满红旗，也是最长的假期之一。有人回家，有人远行，秋天正当时。',
     customs: ['看升旗', '旅行', '家庭聚餐'],
     foods: ['大闸蟹', '桂花糕', '家常菜'],
-    imageQueries: ['国庆 红旗 街道 摄影', '国庆 秋日 旅行 风景', '秋天 桂花 大闸蟹 美食'],
   },
   {
     id: 'shengdanjie',
@@ -398,6 +362,5 @@ export const FIXED_FESTIVAL_PROFILES: readonly FixedFestivalProfile[] = [
     blurb: '十二月二十五日，商场提前一个月就亮起灯。无论信不信，冬夜里看见一棵亮着灯的树，心情总会软一点。',
     customs: ['装饰圣诞树', '交换礼物', '逛圣诞市集'],
     foods: ['姜饼', '热红酒', '烤火鸡'],
-    imageQueries: ['圣诞树 灯光 雪 摄影', '圣诞节 礼物 暖光 摄影', '冬日 热红酒 美食'],
   },
 ] as const

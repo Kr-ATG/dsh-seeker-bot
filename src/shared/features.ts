@@ -87,7 +87,7 @@ export const FEATURES: ReadonlyArray<FeatureDef> = [
   { id: 'view.browser-flag', group: 'view', label: '浏览器操作标志', desc: '该会话正在操作浏览器时亮起的呼吸小图标（可点击拉窗口到前台）。', default: true, apply: 'live' },
   { id: 'view.done-pill', group: 'view', label: '对话完成胶囊', desc: '回合完成提醒小横条 / 顶部悬浮胶囊（含录屏与待机机器人）。', default: true, apply: 'live' },
   { id: 'view.daily-brief', group: 'view', label: '每日情报卡', desc: '胶囊上方斜插的半截日报卡：每天联网搜索 + 模型整理 AI / 世界 / 国内要闻。', default: true, apply: 'live' },
-  { id: 'view.festival-card', group: 'view', label: '节日卡', desc: '胶囊左侧斜插的节气 / 节日小卡：临近节气自动生成，配一张从网上找来的高清实拍图。', default: true, apply: 'live' },
+  { id: 'view.festival-card', group: 'view', label: '节日卡', desc: '胶囊左侧斜插的节气 / 节日小卡：临近节气自动生成，配一张由生图模型现画的图。', default: true, apply: 'live' },
   { id: 'view.stats-ttft', group: 'view', label: '首 token 平铺', desc: '输入框下状态栏显示首 token 平均耗时；关掉后只在官方统计卡里看。', default: true, apply: 'live' },
 
   // ── 正文卡片 ──────────────────────────────────────────────────────────

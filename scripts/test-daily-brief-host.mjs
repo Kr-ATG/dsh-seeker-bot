@@ -25,10 +25,11 @@
  * 跑法：node scripts/test-daily-brief-host.mjs（非 0 退出码 = 有失败）
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Writable } from 'node:stream'
 import { pathToFileURL } from 'node:url'
 
 const require = createRequire(import.meta.url)
@@ -66,6 +67,8 @@ const host = await import(pathToFileURL(join(OUT, 'host.mjs')).href)
 const {
   BRIEF_FEEDS,
   BRIEF_FEED_ITEMS,
+  BRIEF_IMAGE_ROUTE,
+  briefCardImagePrompt,
   briefDateKey,
   briefQueries,
   parseBriefFeed,
@@ -276,7 +279,7 @@ function makeCtx(options = {}) {
   return { ctx, state }
 }
 
-/** 极简 req / res 桩：够路由 handler 用（body 同步派发 data / end）。 */
+/** req / res 桩：支持 JSON 路由与 createReadStream().pipe(res)。 */
 function request(route, options = {}) {
   const method = options.method ?? 'GET'
   const url = options.url ?? route.path
@@ -295,20 +298,31 @@ function request(route, options = {}) {
     }
     let status = 0
     const responseHeaders = {}
-    const res = {
-      set statusCode(value) { status = value },
-      get statusCode() { return status },
-      writeHead(code, values) {
-        status = code
-        for (const [key, value] of Object.entries(values ?? {})) responseHeaders[String(key).toLowerCase()] = String(value)
+    const chunks = []
+    const sink = new Writable({
+      write(chunk, _encoding, callback) {
+        chunks.push(Buffer.from(chunk))
+        callback()
       },
-      setHeader(key, value) { responseHeaders[String(key).toLowerCase()] = String(value) },
-      end(chunk) {
-        const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk ?? '')
-        resolve({ status, text, headers: responseHeaders })
-      },
+    })
+    const originalEnd = sink.end.bind(sink)
+    sink.writeHead = (code, values) => {
+      status = code
+      for (const [key, value] of Object.entries(values ?? {})) responseHeaders[String(key).toLowerCase()] = String(value)
     }
-    route.handler(req, res)
+    sink.setHeader = (key, value) => { responseHeaders[String(key).toLowerCase()] = String(value) }
+    sink.end = (chunk, ...rest) => {
+      if (chunk !== undefined && chunk !== null && typeof chunk !== 'function') {
+        try { chunks.push(Buffer.from(chunk)) } catch { /* 忽略 */ }
+      }
+      const callback = rest.find((item) => typeof item === 'function')
+      return originalEnd(callback)
+    }
+    sink.on('finish', () => {
+      const buffer = Buffer.concat(chunks)
+      resolve({ status, text: buffer.toString('utf8'), buffer, headers: responseHeaders })
+    })
+    route.handler(req, sink)
   })
 }
 
@@ -326,6 +340,24 @@ await test('briefDateKey：本地时区切日（凌晨也算今天）', () => {
   assertEqual(briefDateKey(new Date(2026, 10, 3, 1, 30)), '2026-11-03', '凌晨 1:30 的日期键')
   assertEqual(briefDateKey(new Date(2026, 10, 3, 23, 59)), '2026-11-03', '深夜 23:59 的日期键')
   assertEqual(briefDateKey(new Date(2026, 0, 9, 12, 0)), '2026-01-09', '月份 / 日期补零')
+})
+
+await test('briefCardImagePrompt：为 AI 情报卡生成横版宽幅科技提示词', () => {
+  const card = {
+    id: 'test-1',
+    kicker: 'AI · 前沿',
+    title: 'OpenAI加速多模态落地',
+    lede: '测试导语',
+    entries: [
+      { order: 1, title: 'OpenAI发布新模型', text: '', source: '', url: '', tag: 'AI' },
+      { order: 2, title: '开源大模型突破', text: '', source: '', url: '', tag: 'AI' },
+    ],
+  }
+  const prompt = briefCardImagePrompt(card)
+  assert(prompt.includes('OpenAI加速多模态落地'), '提示词应包含大标题')
+  assert(prompt.includes('OpenAI发布新模型'), '提示词应包含前排条目')
+  assert(prompt.includes('宽幅横构图'), '提示词应包含宽幅横构图要求')
+  assert(prompt.includes('不要出现任何文字'), '提示词应禁止文字水印')
 })
 
 await test('briefQueries：四条查询、覆盖 AI 与世界 / 国内', () => {
@@ -562,9 +594,15 @@ await test('路由：today / generate / list 三条都在，形状符合契约',
   const todayPath = '/api/dsh-done-pill/brief/today'
   const generatePath = '/api/dsh-done-pill/brief/generate'
   const listPath = '/api/dsh-done-pill/brief/list'
+  const imagePath = BRIEF_IMAGE_ROUTE
   assert(state.routes.has(todayPath), 'GET /brief/today 未注册')
   assert(state.routes.has(generatePath), 'POST /brief/generate 未注册')
   assert(state.routes.has(listPath), 'GET /brief/list 未注册')
+  assert(state.routes.has(imagePath), 'prefix /brief/image 未注册')
+  assertEqual(state.routes.get(todayPath).kind, 'exact', 'today 必须是 exact')
+  assertEqual(state.routes.get(generatePath).kind, 'exact', 'generate 必须是 exact')
+  assertEqual(state.routes.get(listPath).kind, 'exact', 'list 必须是 exact')
+  assertEqual(state.routes.get(imagePath).kind, 'prefix', 'image 必须是 prefix')
 
   // 生成前：brief 为 null、hasToday=false、generating=false
   const empty = jsonOf(await request(state.routes.get(todayPath)))
@@ -615,6 +653,20 @@ await test('路由：today / generate / list 三条都在，形状符合契约',
   // 非 GET 方法 → 405
   const wrongMethod = await request(state.routes.get(todayPath), { method: 'POST' })
   assertEqual(wrongMethod.status, 405, 'today 非 GET 应 405')
+
+  // prefix /brief/image: 不存在的图片回 404 JSON
+  const missingImg = await request(state.routes.get(imagePath), { url: imagePath + '/1999-01-01' })
+  assertEqual(missingImg.status, 404, '不存在的图片必须 404')
+  assertChinese(jsonOf(missingImg).error, '404 响应必须带中文 error')
+
+  // prefix /brief/image: 有对应图片时流式返回 PNG 200
+  const fakeImgDir = join(BRIEFS_DIR, 'images')
+  mkdirSync(fakeImgDir, { recursive: true })
+  writeFileSync(join(fakeImgDir, todayKey + '-ai.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  const realImg = await request(state.routes.get(imagePath), { url: imagePath + '/' + todayKey })
+  assertEqual(realImg.status, 200, '存在图片时必须回 200')
+  assertEqual(realImg.headers['content-type'], 'image/png', '图片 Content-Type 应为 image/png')
+  assertEqual(realImg.buffer.length, 8, '图片字节完整')
 })
 
 await test('路由：跨站写请求被拒绝（403）', async () => {

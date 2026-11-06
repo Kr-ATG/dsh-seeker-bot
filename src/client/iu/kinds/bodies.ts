@@ -34,6 +34,8 @@ import { QuizBody } from './quiz.body.tsx'
 import { WeatherBody } from './weather.body.tsx'
 import { QuoteBody } from './quote.body.tsx'
 import { LinkBody } from './link.body.tsx'
+import { CalculatorBody } from './calculator.body.tsx'
+import { ChartBody } from './chart.body.tsx'
 
 /** Body 组件的统一 props。 */
 export interface IuBodyProps<S extends IuState, Spec extends IuSpecBase> {
@@ -71,10 +73,12 @@ export interface IuKindBody {
  */
 export const IU_BODIES: ReadonlyMap<string, IuKindBody> = new Map<string, IuKindBody>([
   ['slider', { kind: 'slider', Body: SliderBody }],
+  ['calculator', { kind: 'calculator', Body: CalculatorBody }],
   ['checklist', { kind: 'checklist', Body: ChecklistBody }],
   ['tabs', { kind: 'tabs', Body: TabsBody }],
   ['piano', { kind: 'piano', Body: PianoBody }],
   ['table', { kind: 'table', Body: TableBody }],
+  ['chart', { kind: 'chart', Body: ChartBody }],
   ['kanban', { kind: 'kanban', Body: KanbanBody }],
   ['form', { kind: 'form', Body: FormBody }],
   ['diff', { kind: 'diff', Body: DiffBody }],

@@ -53,6 +53,18 @@ export interface BriefEntry {
  * 两者共用同一套「卡片 + 编号条目」的视觉语言，但数据不共享（期刊有 mood /
  * quote / stats，情报卡只有 kicker / title / lede / entries）。
  */
+/** 卡片配图（主要用于 AI 情报卡顶部的横版大图）。 */
+export interface BriefImage {
+  /** 前端可直接放进 img.src 的同源 URL。 */
+  url: string
+  /** 图注（如「AI 生图 · 科技前沿」）。 */
+  caption?: string
+  width?: number
+  height?: number
+  /** 仅宿主使用：图片在 briefs/images/ 下的文件名（前端忽略）。 */
+  file?: string
+}
+
 export interface BriefCard {
   /** 稳定 id（`<date>-<序号>`），前端翻页与已读记忆按它索引。 */
   id: string
@@ -66,6 +78,8 @@ export interface BriefCard {
   entries: BriefEntry[]
   /** 主题色 id（可选，前端按它挑色标；缺省由前端按 index 轮换）。 */
   accent?: string
+  /** 顶部横版配图（当前仅 AI 情报卡配置，其余卡为 null / undefined）。 */
+  image?: BriefImage | null
 }
 
 /** 一天的简报：1–2 张卡。 */
@@ -195,6 +209,12 @@ export interface GenerateBriefResult {
 
 /** 每日简报的落盘目录名（宿主：`<DSH_HOME>/storages/dsh-seeker-bot/done-pill/briefs/`）。 */
 export const BRIEF_DIR_NAME = 'briefs'
+
+/** 图片子目录名（位于 briefs 目录内部）。 */
+export const BRIEF_IMAGE_DIR = 'images'
+
+/** 图片流式路由前缀（/api/dsh-done-pill/brief/image/<date>）。 */
+export const BRIEF_IMAGE_ROUTE = '/api/dsh-done-pill/brief/image'
 
 /** 一天的卡片数量上限（用户要「一个或两个」）。 */
 export const BRIEF_MAX_CARDS = 2
@@ -490,6 +510,18 @@ export function sanitizeBriefCard(raw: unknown, index: number, date: string): Br
   }
   if (entries.length < BRIEF_MIN_ENTRIES) return null
 
+  const rawImage = item.image !== null && typeof item.image === 'object' ? (item.image as Record<string, unknown>) : null
+  const imageUrl = typeof rawImage?.url === 'string' ? rawImage.url.trim() : ''
+  const image: BriefImage | null = imageUrl !== ''
+    ? {
+      url: imageUrl,
+      ...(typeof rawImage?.caption === 'string' && rawImage.caption.trim() !== '' ? { caption: rawImage.caption.trim() } : {}),
+      ...(typeof rawImage?.width === 'number' && Number.isFinite(rawImage.width) && rawImage.width > 0 ? { width: rawImage.width } : {}),
+      ...(typeof rawImage?.height === 'number' && Number.isFinite(rawImage.height) && rawImage.height > 0 ? { height: rawImage.height } : {}),
+      ...(typeof rawImage?.file === 'string' && rawImage.file.trim() !== '' ? { file: rawImage.file.trim() } : {}),
+    }
+    : null
+
   return {
     id: `${date}-${String(index + 1)}`,
     kicker: kicker === '' ? (index === 0 ? 'AI · 前沿' : '世界 · 要闻') : kicker,
@@ -497,6 +529,7 @@ export function sanitizeBriefCard(raw: unknown, index: number, date: string): Br
     lede,
     entries,
     ...(shortOf(item.accent, 16) !== '' ? { accent: shortOf(item.accent, 16) } : {}),
+    ...(image !== null ? { image } : {}),
   }
 }
 
@@ -553,6 +586,22 @@ export function briefCardChatPrompt(card: BriefCard): string {
     '',
     '请帮我挑最值得关注的一条展开讲讲：它为什么重要、对我意味着什么，如果我有兴趣可以怎么跟进。',
   ].join('\n')
+}
+
+/**
+ * 生成 AI 情报卡配图的提示词（生图模型专用）。
+ *
+ * 仅用于 AI 情报卡顶部的宽幅横版图：围绕大标题与主要条目展开，生成深邃精致、
+ * 具有科技杂志封面美感的未来概念摄影。
+ */
+export function briefCardImagePrompt(card: BriefCard): string {
+  const topics = card.entries.map(e => e.title).slice(0, 3).join('、')
+  return [
+    '未来科技概念艺术与现代科技摄影风格：聚焦人工智能前沿，主题为「' + card.title + '」。',
+    topics !== '' ? '关键要素：' + topics + '。' : '',
+    '画面展现数字化未来、多模态智能、神经网络、算力流光与科技美感，深邃精致，专业科技杂志封面质感，自然光影与科技光交织。',
+    '宽幅横构图，画面中不要出现任何文字、字母、水印、logo、边框、二维码。',
+  ].join('')
 }
 
 /** 卡片的无障碍标签（斜插半截卡只露半截，读屏要靠它）。 */

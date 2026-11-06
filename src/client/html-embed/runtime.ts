@@ -335,6 +335,73 @@ const STATE_JS = `
 `;
 
 /**
+ * 3D 空间变换与微仿真交互运行时（P2+）。
+ *
+ * 当正文出现 `__dsh3d` 时注入：包含三维向量欧拉角旋转、透视投影与手势 Orbit 控制器。
+ * 零外部依赖，极简手算，让 3D 机械、空间姿态与物理仿真卡片免去冗长的手写手势代码。
+ */
+const SIM_3D_JS = `
+(function () {
+  try {
+    var rad = Math.PI / 180;
+    var api = {
+      rad: function(deg) { return deg * rad; },
+      rotateX: function(v, deg) {
+        var r = deg * rad, c = Math.cos(r), s = Math.sin(r);
+        return { x: v.x, y: v.y * c - v.z * s, z: v.y * s + v.z * c };
+      },
+      rotateY: function(v, deg) {
+        var r = deg * rad, c = Math.cos(r), s = Math.sin(r);
+        return { x: v.x * c + v.z * s, y: v.y, z: -v.x * s + v.z * c };
+      },
+      rotateZ: function(v, deg) {
+        var r = deg * rad, c = Math.cos(r), s = Math.sin(r);
+        return { x: v.x * c - v.y * s, y: v.x * s + v.y * c, z: v.z };
+      },
+      project: function(v, fov, cx, cy, zOffset) {
+        var zo = zOffset || 40;
+        var zDist = fov + v.y + zo;
+        var scale = fov / Math.max(zDist, 20);
+        return { x: cx + v.x * scale, y: cy - v.z * scale, scale: scale, depth: v.y };
+      },
+      bindOrbit: function(el, onChange) {
+        if (!el || typeof onChange !== "function") return function() {};
+        var dragging = false, startX = 0, startY = 0;
+        function onDown(e) {
+          dragging = true;
+          var pt = e.touches ? e.touches[0] : e;
+          startX = pt.clientX; startY = pt.clientY;
+        }
+        function onMove(e) {
+          if (!dragging) return;
+          var pt = e.touches ? e.touches[0] : e;
+          var dx = pt.clientX - startX, dy = pt.clientY - startY;
+          startX = pt.clientX; startY = pt.clientY;
+          onChange(dx, dy);
+        }
+        function onUp() { dragging = false; }
+        el.addEventListener("mousedown", onDown);
+        window.addEventListener("mousemove", onMove);
+        window.addEventListener("mouseup", onUp);
+        el.addEventListener("touchstart", onDown, { passive: true });
+        window.addEventListener("touchmove", onMove, { passive: true });
+        window.addEventListener("touchend", onUp);
+        return function unbind() {
+          el.removeEventListener("mousedown", onDown);
+          window.removeEventListener("mousemove", onMove);
+          window.removeEventListener("mouseup", onUp);
+          el.removeEventListener("touchstart", onDown);
+          window.removeEventListener("touchmove", onMove);
+          window.removeEventListener("touchend", onUp);
+        };
+      }
+    };
+    try { window.__dsh3d = api; } catch (e) {}
+  } catch (e) {}
+})();
+`;
+
+/**
  * 判断正文需要哪些运行时块。
  *
  * 判定刻意**只看结构性标记**（属性名 / role），不做启发式：
@@ -345,11 +412,12 @@ const STATE_JS = `
  * 不用 `includes('tooltip')` 这种松判据：正文里写一句「这个 tooltip 说明…」
  * 就会误触发，把 3KB 白送进去。
  */
-export function needsRuntime(html: string): { tooltip: boolean; tabs: boolean; state: boolean } {
+export function needsRuntime(html: string): { tooltip: boolean; tabs: boolean; state: boolean; sim3d: boolean } {
   return {
     tooltip: /\bdata-tooltip\b/.test(html),
     tabs: /role\s*=\s*["']tablist["']/.test(html),
     state: /__dshState\b/.test(html),
+    sim3d: /__dsh3d\b/.test(html),
   }
 }
 
@@ -365,9 +433,10 @@ export function buildRuntime(html: string): string {
   if (need.tooltip) parts.push(TOOLTIP_JS)
   if (need.tabs) parts.push(TABS_JS)
   if (need.state) parts.push(STATE_JS)
+  if (need.sim3d) parts.push(SIM_3D_JS)
   if (parts.length === 0) return ''
   return '<script data-dsh-runtime>' + parts.join('\n') + '<\/script>'
 }
 
 /** 供冒烟断言用的运行时体积与能力清单。 */
-export const RUNTIME_PARTS = { tooltip: TOOLTIP_JS, tabs: TABS_JS, state: STATE_JS } as const
+export const RUNTIME_PARTS = { tooltip: TOOLTIP_JS, tabs: TABS_JS, state: STATE_JS, sim3d: SIM_3D_JS } as const

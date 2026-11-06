@@ -1348,6 +1348,78 @@ body[data-kr-resizing="true"] * {
   .kr-reasoning-view { -webkit-mask-image: none !important; mask-image: none !important; }
 }
 
+/* ══ 思考过程卡 · 原文 / 译文切换 ═══════════════════════════════════════════
+   KR 的思考卡不经过官方 ReasoningRow，官方那套「查看译文」控件在 KR 模式下
+   永远不出现；这里自绘一枚同口径的切换按钮。 */
+
+/*
+ * 按钮本体：ghost 文字形态，不画描边也不铺底色。
+ *
+ * 标题行右侧已经有「跟随中 / 已暂停」这类纯文字（见 .kr-card__follow），
+ * 再挂一枚有底色的胶囊就是那一列色块的老毛病（教训见 .kr-card__meta 注释）。
+ * 所以这里只有字色与背景的过渡，hover 时提亮一档。
+ *
+ * flex:none：短文本不参与收缩，否则窄栏里「查看译文」会被压成竖排。
+ */
+.kr-reasoning-translate {
+  flex: none;
+  border: 0;
+  background: transparent;
+  padding: 0 2px;
+  margin: 0;
+  font: inherit;
+  font-size: var(--kr-fs-11, 11px);
+  line-height: calc(16px + var(--dsh-content-font-delta, 0px) * 1.4545);
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+  white-space: nowrap;
+  /*
+   * 跟手零延迟：按下即反馈。
+   *
+   * 曲线用 --kr-ease-out（进入语义），时长用 --kr-dur-tap（120ms 局部动作）——
+   * 这是一个小范围动作，按官方「局部 200ms / 简单 100ms」的量级，120ms 落在
+   * 两档之间，正好是「点下去立刻看见、抬手时已经回到位」的节奏。
+   * 按钮没有位移（scale 会让标题行整行跟着抖），只做颜色与背景的过渡。
+   */
+  transition: color var(--kr-dur-tap) var(--kr-ease-out),
+    background-color var(--kr-dur-tap) var(--kr-ease-out);
+  border-radius: 4px;
+}
+
+.kr-reasoning-translate:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--kr-hover-bg);
+}
+
+/* 当前正显示译文：字色提到主色，读者一眼知道自己在看哪一侧。 */
+.kr-reasoning-translate[data-active="true"] {
+  color: var(--kr-accent);
+}
+
+/* 键盘可达：焦点环画在按钮自身内，不随标题行的整行热区漂移。 */
+.kr-reasoning-translate:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 1px;
+}
+
+/*
+ * 状态提示（翻译中 N/M · 翻译失败）：纯文字，无底色。
+ *
+ * 「状态不撒谎」：请求在飞时必须给出真实进度（已完成几片 / 共几片），
+ * 失败必须明说「显示原文」，不能让用户对着半截译文猜。
+ */
+.kr-reasoning-translate-status {
+  flex: none;
+  white-space: nowrap;
+  font-size: var(--kr-fs-11, 11px);
+  line-height: calc(16px + var(--dsh-content-font-delta, 0px) * 1.4545);
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.kr-reasoning-translate-status[data-failed="true"] {
+  color: var(--dsw-alias-label-secondary);
+}
 /* 「向上翻看更早的行」入口：它是窗口边界，不做成一枚按钮控件的样子。 */
 .kr-reasoning-more {
   display: block;

@@ -10,7 +10,7 @@
  *   1. 节气日期表：2026 立冬 11-07、冬至 12-22；缺年份只返回固定节日；
  *   2. upcomingFestivals：窗口边界、跨年窗口（2026-12-28 → 元旦 / 小寒）；
  *   3. 日期展示与倒计时：festivalDateLabel / festivalDateShort / 今天 / 明天 / 还有三天；
- *   4. 图片检索词：模型词优先、合并去重、最多 4 条；
+ *   4. 生图提示词：节气 / 食物 / 竖幅 / 无水印都写进提示词；
  *   5. 提示词：festivalSystemPrompt 含 JSON 形状；user 提示词含节日资料；
  *   6. 清洗：空 / 坏 JSON → null；正常 JSON → 合法记录；facts 上限 3 条；
  *   7. 兜底卡：title / lede / facts 存在，且不伪造图片。
@@ -73,7 +73,6 @@ const {
   festivalDayDiff,
   festivalFallbackCard,
   festivalImagePrompt,
-  festivalImageQueries,
   festivalKicker,
   festivalNextOf,
   festivalSystemPrompt,
@@ -229,36 +228,7 @@ await test('festivalCountdownLabel：今天 / 明天 / 还有三天 / 十天 / �
   assertEqual(festivalCountdownLabel('2026-11-16', today), '还有 11 天', '超过 10 天改用阿拉伯数字并留空格')
 })
 
-/* ───────────────────────────── 四、图片检索词 ───────────────────────────── */
-
-await test('festivalImageQueries：模型词优先、合并去重、最多 4 条', () => {
-  const lidong = lidong2026()
-  const merged = festivalImageQueries(lidong, [
-    '立冬 羊肉汤 砂锅 美食 摄影',
-    '  立冬   红烧肉   摄影  ',
-    '立冬 羊肉汤 砂锅 美食 摄影',
-  ])
-  assertEqual(merged.length, 4, '合并后应恰好 4 条（模型 2 条 + 内置补 2 条）')
-  assertEqual(merged[0], '立冬 羊肉汤 砂锅 美食 摄影', '模型词优先且去掉重复')
-  assertEqual(merged[1], '立冬 红烧肉 摄影', '连续空白压成一个空格')
-  assertEqual(merged[2], lidong.imageQueries[1], '内置第二组补位')
-  assertEqual(merged[3], lidong.imageQueries[2], '内置第三组补位')
-
-  // 不传模型词：内置词原样使用（最多 4 条）。
-  assertEqual(JSON.stringify(festivalImageQueries(lidong)), JSON.stringify(lidong.imageQueries.slice(0, 4)), '无模型词时用内置词')
-
-  // 全空时兜底：至少有一条可搜的「名字 + 节气 + 美食 + 摄影」。
-  const bare = { ...lidong, imageQueries: [] }
-  assertEqual(JSON.stringify(festivalImageQueries(bare, [])), JSON.stringify(['立冬 节气 美食 摄影']), '内置词全空时兜底')
-
-  // 非字符串 / 超长词必须被丢弃（模型可能回数字或整段说明）。
-  const dirty = festivalImageQueries(bare, [123, '   ', 'x'.repeat(61), '有效词'])
-  assertEqual(JSON.stringify(dirty), JSON.stringify(['有效词']), '脏输入不占位，合法词保留')
-  assert(!dirty.some((item) => item.length > 60), '超长检索词必须被丢弃')
-  // 全是脏输入时走兜底词（不能让搜图层拿到空数组）。
-  const allDirty = festivalImageQueries(bare, [null, '', 'x'.repeat(61)])
-  assertEqual(JSON.stringify(allDirty), JSON.stringify(['立冬 节气 美食 摄影']), '全脏输入时仍要给出兜底词')
-})
+/* ───────────────────────────── 四、配图提示词 ───────────────────────────── */
 
 await test('festivalImagePrompt：节气 / 食物 / 竖幅 / 无水印都写进生图提示词', () => {
   const entry = lidong2026()
@@ -274,10 +244,9 @@ await test('festivalImagePrompt：节气 / 食物 / 竖幅 / 无水印都写进�
 
 await test('festivalSystemPrompt：含 JSON 形状与关键写作约束', () => {
   const prompt = festivalSystemPrompt()
-  assert(prompt.includes('{"cards":[{"title":"","lede":"","facts":[{"label":"","value":""}],"imageQuery":""}]}'), '必须带完整 JSON 形状示例')
+  assert(prompt.includes('{"cards":[{"title":"","lede":"","facts":[{"label":"","value":""}]}]}'), '必须带完整 JSON 形状示例')
   assert(prompt.includes('只输出一个 JSON 对象'), '必须要求只输出 JSON')
   assert(prompt.includes('不得编造'), '必须带反编造约束')
-  assert(prompt.includes('imageQuery'), '必须说明 imageQuery 字段')
   assert(prompt.includes('title') && prompt.includes('lede') && prompt.includes('facts'), '必须说明 title/lede/facts')
 })
 
@@ -329,7 +298,6 @@ await test('sanitizeFestivalRecord：正常 JSON → 合法记录（facts 上限
         { label: '时节', value: '水始冰，地始冻' },
         { label: '多余', value: '第四条应被截断' },
       ],
-      imageQuery: '立冬 羊肉汤 砂锅 美食 摄影',
     }],
   }, meta)
 

@@ -244,12 +244,15 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
   left: 50%;
   transform: translateX(-50%);
   z-index: 32;
-  width: 216px;
+  width: 148px;
   /* 底部音量条是共用组件（shared/VolumeSlider.tsx）：颜色与挖空环在这里指定 */
   --pa-vs-color: var(--pa-text);
   --pa-vs-rest: var(--pa-line-2);
   --pa-vs-surface: #232427;
-  padding: 9px 12px 10px;
+  padding: 6px 10px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
   border-radius: 12px;
   background: #232427;
   border: 1px solid var(--pa-line-2);
@@ -274,28 +277,6 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
   .pa-autospeak__panel { animation: none; }
 }
 .pa-root[data-pa-theme='light'] .pa-autospeak__panel { background: #ffffff; --pa-vs-surface: #ffffff; }
-.pa-autospeak__head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 7px;
-  font-size: calc(11px + var(--pa-font-delta));
-  line-height: calc(15px + var(--pa-font-delta));
-  color: var(--pa-text-3);
-}
-.pa-autospeak__value {
-  color: var(--pa-text);
-  font-variant-numeric: tabular-nums;
-}
-.pa-autospeak__row { display: flex; align-items: center; gap: 9px; }
-.pa-autospeak__icon { flex: none; display: inline-flex; color: var(--pa-text-2); }
-.pa-autospeak__hint {
-  margin: 6px 0 0;
-  font-size: calc(10px + var(--pa-font-delta));
-  line-height: calc(14px + var(--pa-font-delta));
-  color: var(--pa-text-3);
-}
 
 /* 清空对话确认卡：自绘，替代 window.confirm（原生对话框会带 dsh-shell 标题、样式脱离界面） */
 .pa-confirm { width: 380px; max-width: calc(100vw - 48px); }
@@ -2393,9 +2374,22 @@ select.pa-int__input { appearance: none; background-image: linear-gradient(45deg
   text-align: left;
   transition: background 110ms ease;
 }
-.pa-composer__mention button:hover { background: var(--pa-chat-hover); }
+.pa-composer__mention button:hover,
+.pa-composer__mention button[data-active='true'] {
+  background: var(--pa-chat-hover);
+}
+.pa-root[data-pa-theme='light'] .pa-composer__mention button[data-active='true'] {
+  background: rgba(0, 0, 0, 0.06);
+}
 .pa-composer__mention-name { font-size: calc(12.5px + var(--pa-font-delta)); line-height: calc(17px + var(--pa-font-delta)); color: var(--pa-text); }
 .pa-composer__mention-role { font-size: calc(10px + var(--pa-font-delta)); line-height: calc(14px + var(--pa-font-delta)); color: var(--pa-text-3); }
+.pa-composer__mention-empty {
+  padding: 12px 8px;
+  font-size: calc(12px + var(--pa-font-delta));
+  line-height: 1.5;
+  color: var(--pa-text-3);
+  text-align: center;
+}
 
 /* ───────────────────────── 小浮层退场（closing 态） ───────────────────────── */
 /*

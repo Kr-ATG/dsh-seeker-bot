@@ -113,29 +113,14 @@ export function AutoSpeakButton(): JSX.Element | null {
 
       {open ? (
         <div className="pa-autospeak__panel" role="group" aria-label="朗读音量">
-          <div className="pa-autospeak__head">
-            <span>朗读音量</span>
-            <span className="pa-autospeak__value">{percent === 0 ? '静音' : `${percent}%`}</span>
-          </div>
-          <div className="pa-autospeak__row">
-            <span className="pa-autospeak__icon" aria-hidden="true">
-              {percent === 0 ? <IconVolumeOff size={14} /> : <IconVolume size={14} />}
-            </span>
-            {/* 与通话弹层共用同一个滑条：粗细表达音量（已选段粗 / 未选段细）。 */}
-            <VolumeSlider
-              value={percent}
-              onChange={(next) => {
-                changeVolume(next / 100)
-              }}
-              ariaLabel="朗读音量"
-              valueText={percent === 0 ? '静音' : `${percent}%`}
-            />
-          </div>
-          {/*
-            * 一行小字解释开关状态：关着的时候浮层仍然可调音量（下一句按新音量念），
-            * 不复述状态用户会以为「关了还能调音量」是个 bug。
-            */}
-          <p className="pa-autospeak__hint">{on ? '新回复会自动念出来' : '打开后新回复会自动念出来'}</p>
+          <VolumeSlider
+            value={percent}
+            onChange={(next) => {
+              changeVolume(next / 100)
+            }}
+            ariaLabel="朗读音量"
+            valueText={percent === 0 ? '静音' : `${percent}%`}
+          />
         </div>
       ) : null}
     </div>

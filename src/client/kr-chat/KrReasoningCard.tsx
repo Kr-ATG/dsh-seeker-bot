@@ -21,10 +21,12 @@
  * 与旧版的差异：旧版是「默认 3 条 + 展开其余 N 项」的静态列表；现在改成
  * 有界视口内的完整文本流——内容不再被截断，滚动由用户掌控。
  */
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties } from 'react'
 import { useHeightAnimation, useMotionAllowed, useSteppedFollow } from '../motion-utils.ts'
 import { KrFreshText } from './KrFreshText.tsx'
+import { useReasoningTranslation, useTranslationAvailability } from './use-reasoning-translation.ts'
+import { autoTranslateEnabled, subscribeAutoTranslate } from './auto-translate.ts'
 
 /**
  * 视口最多显示的行数（超出在视口内滚动）。
@@ -71,6 +73,22 @@ export interface ReasoningCardProps {
   readonly summarizing?: boolean
   /** 内联模式：贴在对话流里。 */
   readonly inline?: boolean
+  /**
+   * 所属会话 id。
+   *
+   * 译文层要靠它命中官方 translator 的 Session 级持久化缓存（命中即零请求），
+   * 拿不到就退化成无缓存调用。官方那条链路本身也是「有 sessionId 才落盘」。
+   */
+  readonly sessionId?: string | undefined
+}
+
+/** 自动翻译偏好（useSyncExternalStore）：订阅别的窗口的改动。 */
+function useAutoTranslate(): boolean {
+  return useSyncExternalStore(
+    subscribeAutoTranslate,
+    autoTranslateEnabled,
+    autoTranslateEnabled,
+  )
 }
 
 export const KrReasoningCard = memo(function KrReasoningCard({
@@ -79,6 +97,7 @@ export const KrReasoningCard = memo(function KrReasoningCard({
   maxRows = REASONING_MAX_ROWS,
   summarizing = false,
   inline = false,
+  sessionId,
 }: ReasoningCardProps) {
   /*
    * 初始态：**只看 summarizing**（这回合有没有出总结卡）。
@@ -92,6 +111,65 @@ export const KrReasoningCard = memo(function KrReasoningCard({
    */
   const [collapsed, setCollapsed] = useState(inline ? summarizing : false)
   const motion = useMotionAllowed(true)
+
+  /*
+   * 译文层（原文 / 译文双视图）。
+   *
+   * 官方那套挂在官方 ReasoningRow 的展开体里，KR 的思考卡不经过那条路径，
+   * 所以这里自绘一层：服务仍走官方 ctx.remote.cotTranslation（分片、缓存、
+   * provider 校验都在官方 host 侧），视图层是自己的。
+   *
+   * 三条口径：
+   *   · **不主动翻**。默认显示原文 —— 翻译要发网络请求、可能计费，用户没点
+   *     就不该发。这与官方一致（官方也是展开后才发）。
+   *   · **失败留原文**。译文不完整就是不能用，不能拿半截译文顶替原文。
+   *   · **快照语义**。译的是「点击那一刻的原文」：开跑后原文再长也不作废
+   *     已就绪的译文；只有「半截译文」才作废（对不上任何一版原文）。
+   *
+   * 「当前显示哪一侧」由本组件自己记，不塞进译文状态机：译文**一旦就绪就
+   * 留着**（官方 Session 缓存里也有），切回原文不该把它作废 —— 用户在原文
+   * 与译文之间来回对照是常态。状态机只管「有没有译好」，显示哪一侧是视图
+   * 层的事。
+   */
+  const fullText = useMemo(() => reasoningTexts.join('\n'), [reasoningTexts])
+  const translationAvailable = useTranslationAvailability()
+  /**
+   * 自动翻译开关（用户可关）。
+   *
+   * 默认**开**：用户明确要求「思考自动翻译，不用点」。关掉后仍可手动点
+   * 「查看译文」——两条路并存，不是二选一。
+   *
+   * 偏好存 localStorage（纯客户端表现偏好，不入提示词），与其他外观偏好
+   * 同一套口径（见 reply-card-chrome / tool-calls-visible）。
+   */
+  const autoTranslateOn = useAutoTranslate()
+  const translation = useReasoningTranslation({
+    sourceText: fullText,
+    sessionId,
+    available: translationAvailable === true,
+    autoTranslate: autoTranslateOn,
+    settled: summarizing,
+  })
+  const [viewTranslated, setViewTranslated] = useState(false)
+  /** 当前是否真的显示译文：译文就绪 **且** 用户切到了译文侧。 */
+  const showTranslation = viewTranslated && translation.state === 'ready' && translation.text.trim() !== ''
+
+  /*
+   * 译好了就自动切到译文侧。
+   *
+   * 用户点「查看译文」的目的是看译文；让他译完再点一次才看到，等于把
+   * 「点一下」拆成了「点一下 + 等 + 再点一下」。这里在**首次就绪**的那一刻
+   * 自动切过去，之后再点按钮就是在原文 / 译文之间来回切。
+   *
+   * 判据是**翻转**（idle → ready），不是持续态：否则用户手动切回原文后，
+   * 下一次渲染又会被立刻按回译文侧，「切回原文」这个动作根本留不住。
+   */
+  const wasReadyRef = useRef(false)
+  useEffect(() => {
+    const ready = translation.state === 'ready'
+    if (ready && !wasReadyRef.current) setViewTranslated(true)
+    wasReadyRef.current = ready
+  }, [translation.state])
 
   /*
    * 收口自动折叠：只在 summarizing 由 false→true 的**那一次**翻转上触发。
@@ -126,6 +204,19 @@ export const KrReasoningCard = memo(function KrReasoningCard({
   }, [reasoningTexts])
 
   /*
+   * 译文的行视图：与原文同一套拆行口径（去空行、按行挂载）。
+   *
+   * 译文的换行数与原文不一定一致，所以译文是**独立的一组行**，不按行号与
+   * 原文对齐 —— 强行对齐会串位（译文多一行就整体错位一行）。
+   */
+  const translatedPoints = useMemo(() => {
+    if (!showTranslation) return [] as readonly string[]
+    if (translation.text.trim() === '') return [] as readonly string[]
+    return translation.text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0)
+  }, [showTranslation, translation.text])
+
+
+  /*
    * 跟随探针：**只放长度指纹，不放全文**。
    *
    * 原来探针是 `points.join('\u0000')` ——整轮思考拼成一个大字符串。流式期每个
@@ -150,8 +241,16 @@ export const KrReasoningCard = memo(function KrReasoningCard({
    * 思考每长一段就把用户翻出来的上文又收回去，那一下比一开始就不给更气人。
    */
   const [windowSize, setWindowSize] = useState(WINDOW_ROWS)
-  const startIndex = Math.max(0, points.length - windowSize)
-  const windowed = startIndex === 0 ? points : points.slice(startIndex)
+  /*
+   * 当前要挂载的行：原文行或译文行。
+   *
+   * 两者都是「尾部窗口」口径（只挂最后 WINDOW_ROWS 行），因为译文的行数与
+   * 原文不同，各自算自己的窗口。切换视图时窗口起点会变 —— 这是对的：译文
+   * 与原文本来就不是同一份内容的两种排版，对齐行号没有意义。
+   */
+  const displayPoints = showTranslation ? translatedPoints : points
+  const startIndex = Math.max(0, displayPoints.length - windowSize)
+  const windowed = startIndex === 0 ? displayPoints : displayPoints.slice(startIndex)
   const hiddenCount = startIndex
   /*
    * 标题里的数字 = **这一轮模型思考了几段**（reasoning 块数），不是行数。
@@ -167,10 +266,23 @@ export const KrReasoningCard = memo(function KrReasoningCard({
     [reasoningTexts],
   )
 
+
   if (reasoningTexts.length === 0 && !running) return null
 
-  const hasContent = points.length > 0
+  const hasContent = displayPoints.length > 0
   const open = !collapsed
+  /**
+   * 翻译入口是否值得露出：服务可用 + 有内容 + 不在请求中。
+   *
+   * **不再要求回合收口**（早期版本要求 `!running`）：流式期思考随时在长，
+   * 但译文走的是**快照语义**——译的是「点击那一刻的原文」，之后原文再长
+   * 也不影响那份已就绪的译文。早期版本既不给入口、又在原文变化时作废译文，
+   * 两条叠在一起的结果是：回合正在跑的时候点了「查看译文」，翻译还没跑完
+   * 原文又长一行，译文被清掉 → 永远看不到译文。
+   */
+  const translationEntry = translationAvailable === true
+    && hasContent
+    && translation.state !== 'pending'
 
   return (
     <div className="kr-card kr-card--reasoning" data-inline={inline || undefined} data-open={open || undefined}>
@@ -209,6 +321,49 @@ export const KrReasoningCard = memo(function KrReasoningCard({
         {followActive && overflow && (
           <span className="kr-card__follow" data-following={following ? 'true' : 'false'}>
             {following ? '跟随中' : '已暂停'}
+          </span>
+        )}
+        {/*
+         * 原文 / 译文切换。
+         *
+         * 放在标题行**末尾**、且**不触发整行折叠**：标题行整行是 role=button 的
+         * 折叠热区，切换按钮嵌在里面必须 stopPropagation，否则点「查看译文」
+         * 会顺手把卡片收起来。
+         *
+         * 按钮用 ghost 文字形态（不画描边胶囊）：标题行右侧已经有过「跟随中 /
+         * 已暂停」这类纯文字，再挂一枚有底色的胶囊就是那一列色块的老毛病。
+         */}
+        {translationEntry && (
+          <button
+            type="button"
+            className="kr-reasoning-translate"
+            data-state={translation.state}
+            data-active={showTranslation ? 'true' : undefined}
+            onClick={(event) => {
+              event.stopPropagation()
+              if (translation.state === 'ready') {
+                // 已就绪：这一枚在原文与译文之间来回切（译文留着，不重发请求）。
+                setViewTranslated((value) => !value)
+                return
+              }
+              if (translation.state === 'failed') {
+                translation.retry()
+                return
+              }
+              translation.start()
+            }}
+          >
+            {translation.state === 'ready' ? (showTranslation ? '查看原文' : '查看译文') : '查看译文'}
+          </button>
+        )}
+        {translation.state === 'pending' && (
+          <span className="kr-reasoning-translate-status" role="status">
+            翻译中 {translation.done}/{translation.total}
+          </span>
+        )}
+        {translation.state === 'failed' && (
+          <span className="kr-reasoning-translate-status" data-failed="true" role="status">
+            翻译失败，显示原文
           </span>
         )}
       </div>
@@ -280,14 +435,16 @@ export const KrReasoningCard = memo(function KrReasoningCard({
                   <div className="kr-reasoning-row" key={startIndex + idx}>
                     {/* 逐字淡入：思考是流式按块到达的，整行直接冒出来会被读成
                         「一行字突然出现」；这里只让本次新增的字错峰显影。 */}
-                    <span><KrFreshText text={item} /></span>
+                    <span>{showTranslation ? item : <KrFreshText text={item} />}</span>
                   </div>
                 ))}
               </div>
             </div>
           ) : (
             <div style={{ color: 'var(--dsw-alias-label-tertiary)' }}>
-              {running ? '正在深入推演需求与实施方案…' : '本轮无独立思考记录'}
+              {running
+                ? '正在深入推演需求与实施方案…'
+                : showTranslation ? '本轮译文为空' : '本轮无独立思考记录'}
             </div>
           )}
         </div>

@@ -51,6 +51,12 @@ export interface RuntimeHandle {
    * 这条信息决定重启后是重跑还是判死。
    */
   recordOutward: (id: string, labels: readonly string[]) => void
+  /**
+   * 绑定前台直接对话的作业记录（例如用户私聊/群聊直接唤醒的一轮）。
+   *
+   * 返回一个解绑函数，在 finally 里调用。
+   */
+  bindAssignment?: (botId: string, assignmentId: string) => () => void
 }
 
 /**

@@ -12,7 +12,7 @@
  *
  *   情报卡：每天一张，内容是当天外部世界的新闻（AI / 世界 / 国内），来源是 RSS。
  *   节日卡：按**节气 / 节日**触发，提前几天出现在胶囊上沿，内容是「这个节气
- *           吃什么、做什么、有什么讲究」，并配一张从网上检索来的实拍图。
+ *           吃什么、做什么、有什么讲究」，并配一张由生图模型现画的图。
  *
  * 两者共用「斜插小标签 + 从屏幕正中划出的期刊式大卡」这套交互语言，但数据
  * 互不相干：节日卡没有 entry 列表，只有一张「左图右文」的生活卡片。
@@ -50,7 +50,6 @@ export interface FestivalEntry {
   blurb: string
   customs: string[]
   foods: string[]
-  imageQueries: string[]
 }
 
 /** 卡片里的一条「标签 + 内容」（如「北方 · 吃饺子」）。 */
@@ -180,20 +179,14 @@ export const FESTIVAL_WINDOW_DAYS = 3
 /** 一张记录最多几张卡。 */
 export const FESTIVAL_MAX_CARDS = 2
 
-/** 生成总超时（ms）：模型写文案 + 生图 + 搜图共用一个 AbortController。 */
+/** 生成总超时（ms）：模型写文案 + 生图共用一个 AbortController。 */
 export const FESTIVAL_TIMEOUT_MS = 240_000
 
 /** 生图单次超时（ms）：生图模型比聊天模型慢，但要给总超时留余量。 */
 export const FESTIVAL_IMAGE_GEN_TIMEOUT_MS = 180_000
 
-/** 百度图片搜索单次超时（ms）。 */
-export const FESTIVAL_IMAGE_SEARCH_TIMEOUT_MS = 15_000
-
 /** 单张图片下载超时（ms）。 */
 export const FESTIVAL_IMAGE_DOWNLOAD_TIMEOUT_MS = 20_000
-
-/** 单张图片字节上限（8MB）：再大就不是卡片配图，是原片。 */
-export const FESTIVAL_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 
 /* ───────────────────────────── 节气日期表 ───────────────────────────── */
 
@@ -325,7 +318,6 @@ function entryOfSolarTerm(profile: SolarTermProfile, year: number, monthDay: str
     blurb: profile.blurb,
     customs: [...profile.customs],
     foods: [...profile.foods],
-    imageQueries: [...profile.imageQueries],
   }
 }
 
@@ -342,7 +334,6 @@ function entryOfFixedFestival(profile: FixedFestivalProfile, year: number): Fest
     blurb: profile.blurb,
     customs: [...profile.customs],
     foods: [...profile.foods],
-    imageQueries: [...profile.imageQueries],
   }
 }
 
@@ -408,36 +399,13 @@ export function festivalNextOf(entry: FestivalEntry, today: Date = new Date()): 
   }
 }
 
-/* ───────────────────────────── 图片检索词 ───────────────────────────── */
-
-/**
- * 合并模型给的搜图词与内置兜底词，去重、截断、最多 4 条。
- *
- * 模型最了解它写出来的画面（比如标题提到「砂锅」，就搜砂锅），但它也可能
- * 给出空词或英文词；内置的 2–3 组是确保「任何情况下都能搜到图」的底线。
- */
-export function festivalImageQueries(entry: FestivalEntry, modelQueries: readonly string[] = []): string[] {
-  const out: string[] = []
-  const seen = new Set<string>()
-  const push = (raw: unknown): void => {
-    const text = typeof raw === 'string' ? raw.replace(/\s+/g, ' ').trim() : ''
-    if (text === '' || text.length > 60) return
-    if (seen.has(text)) return
-    seen.add(text)
-    out.push(text)
-  }
-  for (const query of modelQueries) push(query)
-  for (const query of entry.imageQueries) push(query)
-  if (out.length === 0) push(entry.name + ' 节气 美食 摄影')
-  return out.slice(0, 4)
-}
+/* ───────────────────────────── 配图提示词 ───────────────────────────── */
 
 /**
  * 生成节日卡配图的提示词（生图模型优先）。
  *
- * 用户 2026-11-05 反馈「百度搜到的图对不上」：搜图只能按关键词撞运气，
- * 立冬搜回来的是生羊肉与食材拼图。于是改为**生图模型优先**——把节气名、
- * 应季食物、习俗与意象写进同一段提示词，画面才可控。竖幅是因为大卡左栏
+ * 配图**只走生图模型**：把节气名、应季食物、习俗与意象写进同一段提示词，
+ * 画面才可控（网上按关键词搜图会搜回生羊肉 / 食材拼图）。竖幅是因为大卡左栏
  * 是 46% 宽、560px 高的竖图（1024×1536 正好）。
  *
  * 水印：主流生图模型常带自己的水印，提示词里明确写「不要文字 / 水印 / logo」，
@@ -472,14 +440,13 @@ export function festivalSystemPrompt(): string {
     '- title：12–26 个字，像杂志标题。必须落到具体的食物、器皿、地域或场景上（参考「立冬的羊肉汤，四川人最后涮的是豌豆尖」）；不要「XX 节气到了 / 注意保暖 / 万物复苏」这类空话。',
     '- lede：40–90 个字，写这个节气 / 节日这天吃什么、做什么、南北方有什么不同；可以有一句时令感受，但不要抒情过头。',
     '- facts：2–3 条 { label, value }。label 2–6 个字（如「北方」「南方」「此时」「老话说」），value 4–24 个字，必须来自资料。',
-    '- imageQuery：1–2 个中文搜图词，用来搜一张高质量实拍图。要具体（食物 + 器皿 / 场景），不要「节气图片」这种泛词。',
     '',
     '输出格式（硬要求）：',
     '- 只输出一个 JSON 对象，不要 markdown 代码围栏，不要解释、前言、后记。',
     '- 字段名严格使用：cards。cards 是数组（本次只写 1 项）。',
-    '- 每项 { title, lede, facts, imageQuery }。facts 是数组，每项 { label, value }。',
+    '- 每项 { title, lede, facts }。facts 是数组，每项 { label, value }。',
     'JSON 形状：',
-    '{"cards":[{"title":"","lede":"","facts":[{"label":"","value":""}],"imageQuery":""}]}',
+    '{"cards":[{"title":"","lede":"","facts":[{"label":"","value":""}]}]}',
   ].join('\n')
 }
 
@@ -531,7 +498,7 @@ function factsOf(value: unknown): FestivalFact[] {
 /**
  * 把模型输出清洗成一份合法的节日卡记录；没有合格卡片时返回 null。
  *
- * 图像字段留 null：图片由宿主半身在清洗后检索 / 下载，再回填到记录里。
+ * 图像字段留 null：图片由宿主半身在清洗后调用生图模型生成，再回填到记录里。
  */
 export function sanitizeFestivalRecord(
   payload: unknown,

@@ -1,9 +1,9 @@
 /**
  * iu kind **checklist** 的 React 体（client 专用）。
  *
- * 勾选状态走 props 的 state/setState（外壳统一持久化，刷新不丢——老实现是
- * 组件内 useState，刷新即归零）。DOM 与 checklist.ts 的 snapshot() 对齐：
- * progress → count → 每行 check（box + label/desc）。
+ * 支持两种模式：
+ *  1. interactive: true（默认）：可勾选、带进度条与已完成计数；
+ *  2. interactive: false：只读步骤/建议清单，仅供审阅浏览，不带勾选框与催促进度。
  */
 
 import { memo } from 'react'
@@ -22,6 +22,24 @@ export const ChecklistBody = memo(function ChecklistBody(
       return { checked: [...set].sort((a, b) => a - b) }
     })
   }
+
+  // 只读步骤模式：纯浏览、不打勾、无 0/N 催促
+  if (spec.interactive === false) {
+    return (
+      <div className="dtt-iu__checklist-static">
+        {spec.items.map((item, i) => (
+          <div key={i} className="dtt-iu__check dtt-iu__check--static">
+            <span className="dtt-iu__step-num" aria-hidden="true">{i + 1}</span>
+            <span>
+              <b>{item.label}</b>
+              {item.desc !== '' && <small>{item.desc}</small>}
+            </span>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
   const pct = spec.items.length === 0 ? 0 : (checked.size / spec.items.length) * 100
   return (
     <>

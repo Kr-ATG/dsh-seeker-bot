@@ -153,6 +153,7 @@ interface AssistantBodyEnv {
    * 打穿 MarkdownText 的 memo（与 mergedMentions 同一理由）。
    */
   readonly onFill?: ((text: string) => boolean) | undefined
+  readonly onSubmit?: ((text: string) => boolean) | undefined
 }
 
 /**
@@ -311,7 +312,7 @@ function AssistantBody({ blocks, streaming, interrupted, renderMessageImages, me
               // 复用同一个 HtmlCard 实例，让卡片从占位平滑变成真身而不是闪一下。
               rendered.push(
                 <Fresh live={streaming} freshKey={`${key}-he${subIndex}`}>
-                  <HtmlCard spec={sub.spec} pending={sub.pending} onFill={env?.onFill} />
+                  <HtmlCard spec={sub.spec} pending={sub.pending} onFill={env?.onFill} onSubmit={env?.onSubmit} />
                 </Fresh>,
               )
             } else {
@@ -469,7 +470,7 @@ export const ThinkingStepNodeView = memo(function ThinkingStepNodeView(
    * 跟着每帧重建，打穿 MarkdownText 的 memo。
    * 拿不到时回退剪贴板——至少用户能粘过去，不静默丢字。
    */
-  const inputActionsOf = (props as { readonly inputActions?: { setDraft?: (t: string) => void } }).inputActions
+  const inputActionsOf = (props as { readonly inputActions?: { setDraft?: (t: string) => void; submit?: () => void } }).inputActions
   const onFill = useCallback((text: string): boolean => {
     const clean = text.trim()
     if (clean === '') return false
@@ -486,6 +487,23 @@ export const ThinkingStepNodeView = memo(function ThinkingStepNodeView(
       return false
     }
   }, [inputActionsOf])
+
+  const onSubmit = useCallback((text: string): boolean => {
+    const clean = text.trim()
+    if (clean === '') return false
+    try {
+      if (inputActionsOf !== undefined && typeof inputActionsOf.setDraft === 'function') {
+        inputActionsOf.setDraft(clean)
+        if (typeof inputActionsOf.submit === 'function') {
+          setTimeout(() => {
+            try { inputActionsOf.submit?.() } catch {}
+          }, 30)
+          return true
+        }
+      }
+    } catch {}
+    return onFill(clean)
+  }, [inputActionsOf, onFill])
   /**
    * 自建文件提及：行内代码里的路径 → 可点开右侧工作区预览。
    *
@@ -538,8 +556,9 @@ export const ThinkingStepNodeView = memo(function ThinkingStepNodeView(
       ...(mergedMentions === undefined ? {} : { mergedMentions }),
       ...(pathImages === undefined ? {} : { pathImages }),
       onFill,
+      onSubmit,
     }
-  }, [bodySessionId, mentions, onFill])
+  }, [bodySessionId, mentions, onFill, onSubmit])
 
   // Aggregate reasoning across every assistant step of this turn.
   /*
@@ -1018,6 +1037,7 @@ export const ThinkingStepNodeView = memo(function ThinkingStepNodeView(
         reasoningTexts={stableReasoningTexts}
         running={turnActive}
         summarizing={summarizing}
+        sessionId={bodySessionId ?? undefined}
         inline
       />
     )

@@ -306,6 +306,20 @@ class PersonalTurnRunner implements TurnRunner {
   assignmentOf(botId: string): string | undefined {
     return this.currentAssignment.get(botId)
   }
+
+  /**
+   * 绑定外部（例如直接对话的 /reply 或 /reply/stream）发起的 assignment。
+   * 使得在这一轮 turn 期间，coordinate_bots 能够通过 assignmentOf 找到当前正在运行的根 assignment。
+   * 返回 unbind 函数用于在 finally 中解绑。
+   */
+  bindAssignment(botId: string, assignmentId: string): () => void {
+    this.currentAssignment.set(botId, assignmentId)
+    return () => {
+      if (this.currentAssignment.get(botId) === assignmentId) {
+        this.currentAssignment.delete(botId)
+      }
+    }
+  }
 }
 
 function lastTextOf(turn: { blocks: Array<Record<string, unknown>> }): string {
@@ -364,6 +378,7 @@ export function startPersonalRuntime(ctx: any): { runtime: JobRuntime; runner: P
     registerRuntime({
       runtime,
       assignmentOf: (botId) => runner.assignmentOf(botId),
+      bindAssignment: (botId, id) => runner.bindAssignment(botId, id),
       enqueue: (request) => runtime.enqueue(request),
       get: (id) => store.get(id),
       list: () => store.all(),

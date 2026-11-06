@@ -257,6 +257,21 @@ const KIT_CLASSES = [
 
   // SVG 里的文字必须继承主题色，否则暗色下是黑字压深底
   'svg text{fill:currentColor}',
+
+  /* ── 即时微应用与双向行动按钮（P2+） ── */
+  '.k-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;',
+  'padding:calc(6px * var(--k-scale)) calc(12px * var(--k-scale));border-radius:6px;',
+  'font-size:calc(12px * var(--k-scale));font-weight:600;cursor:pointer;',
+  'border:1px solid var(--k-line);background:var(--k-fill);color:var(--k-ink);',
+  'transition:all .15s ease;text-decoration:none;user-select:none}',
+  '.k-btn:hover{background:color-mix(in srgb,var(--k-accent) 15%,transparent);border-color:var(--k-accent-2);color:var(--k-accent)}',
+  '.k-btn:active{transform:scale(.98)}',
+  '.k-btn-primary{background:var(--k-accent);border-color:var(--k-accent);color:#fff}',
+  '.k-btn-primary:hover{background:color-mix(in srgb,var(--k-accent) 85%,#000);color:#fff}',
+  '.k-btn-group{display:flex;gap:calc(8px * var(--k-scale));align-items:center}',
+  '.k-slider{width:100%;height:4px;border-radius:2px;background:var(--k-fill);outline:none;-webkit-appearance:none}',
+  '.k-slider::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--k-accent);cursor:pointer;transition:transform .1s}',
+  '.k-slider::-webkit-slider-thumb:hover{transform:scale(1.15)}',
 ].join('')
 
 /**

@@ -5,15 +5,15 @@
  *
  * 对话完成胶囊上方、每日情报卡旁边的第二类「斜插卡」：按二十四节气与固定公历
  * 节日触发，提前几天出现一张「这个节气吃什么、做什么、有什么讲究」的生活
- * 卡片，配一张从网上检索来的实拍图。
+ * 卡片，配一张由生图模型现画的图。
  *
  * ## 为什么整条链路必须在宿主
  *
  * 1. **页面关掉也要跑**：用户第二天早上打开 DSH 就该看到当天的卡，而不是「打开
  *    页面才开始联网」。定时器必须活在常驻进程里（浏览器定时器一关标签页就停）。
- * 2. **浏览器侧拿不到图片搜索**：百度图片接口带反爬与 CORS 限制，前端直接 fetch
- *    会被拦；而且图片要落盘缓存，刷新不该重新下载。
- * 3. **token 只烧一次**：模型生成的文案与检索到的图片都落盘，刷新、换标签页、
+ * 2. **浏览器侧调不到生图模型**：生图要走宿主的凭据与供应商配置；而且图片
+ *    要落盘缓存，刷新不该重新生成。
+ * 3. **token 只烧一次**：模型生成的文案与画出的图片都落盘，刷新、换标签页、
  *    清缓存都读同一份文件。
  *
  * ## 链路（模型为主、资料卡兜底，绝不伪造、绝不空手）
@@ -23,9 +23,10 @@
  *   ③ 有模型：buildFestivalUserPrompt（资料为准）→ ctx.llm.stream → parseFestivalJson
  *      → sanitizeFestivalRecord；模型不可用 / 输出坏 JSON / 内容为空时**不失败**，
  *      改用 festivalFallbackCard 生成 origin='fallback' 的资料卡
- *   ④ 无论模型还是资料卡，都继续走图片检索：festivalImageQueries(entry, modelQueries)
- *      → 百度图片 JSON 接口 → 筛选 / 下载 / 解码校验 → 落盘
+ *   ④ 无论模型卡还是资料卡，都走同一条生图链路：读 model-capabilities.imageActive
+ *      → festivalImagePrompt(entry) → 生图网关 → 校验字节 → 落盘
  *        <DSH_HOME>/storages/dsh-seeker-bot/done-pill/festivals/images/<festivalDate>.<ext>
+ *      生图失败不再退到网上搜图，直接让 image=null
  *   ⑤ 记录落盘 <DSH_HOME>/storages/dsh-seeker-bot/done-pill/festivals/<festivalDate>.json
  *
  * ## 为什么「模型坏了也要出卡」
@@ -37,8 +38,9 @@
  *
  * ## 图片抓取失败只让 image=null
  *
- * 图片是最容易失败的一环（百度接口反爬 / 源站 404 / 图片太小 / 格式不支持）。
- * 图片失败只影响卡面配图，前端会用节气大字占位；记录生成与 ok:true 不受影响。
+ * 生图是最容易失败的一环（没配生图模型 / 网关报错 / 返回空 / 格式不支持）。
+ * 生图失败只影响卡面配图，前端会用节气大字占位；记录生成与 ok:true 不受影响。
+ * 这里**不再**降级到百度图片检索：用户 2026-11-05 明确要求「只用生图生成的」。
  *
  * ## 数据契约
  *
@@ -62,9 +64,7 @@ import {
   FESTIVAL_IMAGE_DIR,
   FESTIVAL_IMAGE_DOWNLOAD_TIMEOUT_MS,
   FESTIVAL_IMAGE_GEN_TIMEOUT_MS,
-  FESTIVAL_IMAGE_MAX_BYTES,
   FESTIVAL_IMAGE_ROUTE,
-  FESTIVAL_IMAGE_SEARCH_TIMEOUT_MS,
   FESTIVAL_ROUTE,
   FESTIVAL_TIMEOUT_MS,
   FESTIVAL_WINDOW_DAYS,
@@ -73,7 +73,6 @@ import {
   festivalDateShort,
   festivalFallbackCard,
   festivalImagePrompt,
-  festivalImageQueries,
   festivalNextOf,
   festivalSystemPrompt,
   parseFestivalDate,
@@ -93,53 +92,6 @@ import { rejectCrossSite } from '../../shared/csrf.ts'
 
 /** 路由前缀（挂在对话完成胶囊同一条 /api/dsh-done-pill 下，前端不必记两个前缀）。 */
 const ROUTE = FESTIVAL_ROUTE
-
-/** 单张卡片配图的最小字节数：低于这个数基本是缩略图或占位图。 */
-const IMAGE_MIN_BYTES = 150 * 1024
-
-/** 图片「像卡片配图」的最小像素（宽 × 高）：再小放大就糊。 */
-const IMAGE_MIN_WIDTH = 900
-const IMAGE_MIN_HEIGHT = 600
-
-/** 允许的宽高比区间：优先横图 / 方图（竖图放进左栏会被裁得只剩一条）。 */
-const IMAGE_MIN_RATIO = 0.75
-const IMAGE_MAX_RATIO = 1.7
-
-/** 每组查询最多下载几个候选（前几个不合格就换下一组，避免无限试）。 */
-const IMAGE_CANDIDATES_PER_QUERY = 8
-
-/** 百度图片搜索接口（JSON 版，不需要解析 HTML）。 */
-const BAIDU_IMAGE_API = 'https://image.baidu.com/search/acjson'
-
-/** 候选标题里出现这些词就不是「实拍生活图」：简笔画 / 素材 / 海报一律不要。 */
-const IMAGE_TITLE_BLOCKLIST = /简笔画|插画|卡通|动漫|壁纸|素材|模板|海报|图标|表情|免抠|二维码|教程|做法|步骤|图解|广告/
-
-/** 来源站点黑名单（导购 / 点评站的图往往是摆拍或带水印）。 */
-const IMAGE_HOST_BLOCKLIST = /smzdm\.com|dianping\.com|meituan\.com/
-
-/** 常见来源域名的展示名（source 字段给用户看，不直接糊一串 www 域名）。 */
-const SOURCE_DISPLAY_NAMES: ReadonlyArray<readonly [string, string]> = [
-  ['xiaohongshu.com', '小红书'],
-  ['douyin.com', '抖音'],
-  ['zhihu.com', '知乎'],
-  ['weibo.com', '微博'],
-  ['sohu.com', '搜狐'],
-  ['sina.com.cn', '新浪'],
-  ['sina.cn', '新浪'],
-  ['163.com', '网易'],
-  ['qq.com', '腾讯网'],
-  ['toutiao.com', '今日头条'],
-  ['bilibili.com', '哔哩哔哩'],
-  ['baidu.com', '百度'],
-  ['xinhuanet.com', '新华网'],
-  ['people.com.cn', '人民网'],
-  ['ifeng.com', '凤凰网'],
-  ['thepaper.cn', '澎湃新闻'],
-  ['jiemian.com', '界面新闻'],
-  ['pconline.com.cn', '太平洋摄影'],
-  ['mafengwo.cn', '马蜂窝'],
-  ['ctrip.com', '携程'],
-]
 
 /** POST body 上限：请求体只有 date / force 两个字段，8KB 已经非常宽裕。 */
 const MAX_BODY = 8 * 1024
@@ -165,7 +117,7 @@ const RETENTION_DAYS = 90
  * 模块级生成锁。
  *
  * 手动「换一张」与 30 分钟调度共用这一把：没有它，用户在按钮上连点两下、或
- * 调度 tick 恰好与手动请求撞上，就会同时跑两次模型 + 两次图片检索（白烧
+ * 调度 tick 恰好与手动请求撞上，就会同时跑两次模型 + 两次生图（白烧
  * token，后写的文件还会覆盖先写的）。
  */
 let generating = false
@@ -572,180 +524,11 @@ export function imageSizeOf(buffer: Buffer): ImageSize | null {
   return null
 }
 
-/* ───────────────────────────── 图片：候选筛选 ───────────────────────────── */
+/* ───────────────────────────── 图片：通用工具 ───────────────────────────── */
 
-/** 百度图片接口的一条候选（只在内部用，字段名映射自对方 JSON）。 */
-export interface BaiduImageCandidate {
-  /** 图片标题（fromPageTitleEnc，已剥 HTML / 解实体）。 */
-  title: string
-  /** 原图 URL（replaceUrl[0].ObjURL）。 */
-  objUrl: string
-  /** 中等尺寸 URL（middleURL）。 */
-  middleUrl: string
-  /** 缩略图 URL（thumbURL，仅兜底展示用，不参与评分）。 */
-  thumbUrl: string
-  /** 来源站点域名（fromURLHost）。 */
-  fromHost: string
-  /** 来源页面 URL（fromURL）。 */
-  sourceUrl: string
-  /** 元数据宽（可能缺失 / 0）。 */
-  metaWidth: number
-  /** 元数据高（可能缺失 / 0）。 */
-  metaHeight: number
-  /** 图片类型（jpeg / png / ...）。 */
-  type: string
-}
-
-/** 解码 HTML 实体 + 剥标签（百度标题里常有 <strong> 高亮与 &quot;）。 */
-function decodeHtml(text: string): string {
-  return String(text ?? '')
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
-    .replace(/&#(\d+);/g, (_match, code: string) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([0-9a-f]+);/gi, (_match, code: string) => String.fromCodePoint(parseInt(code, 16)))
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-/** 是否是 http(s) URL（百度接口偶尔给空串 / javascript: / data:）。 */
+/** 是否是 http(s) URL（回读记录里的来源链接必须过滤非 http 值）。 */
 function isHttpUrl(value: string): boolean {
   return /^https?:\/\//i.test(value)
-}
-
-/** 标题命中「不是实拍」词表。 */
-export function imageTitleBlocked(title: string): boolean {
-  return IMAGE_TITLE_BLOCKLIST.test(title)
-}
-
-/** 来源域名命中黑名单。 */
-export function imageHostBlocked(host: string): boolean {
-  return IMAGE_HOST_BLOCKLIST.test(String(host ?? '').toLowerCase())
-}
-
-/** 宽高比是否在「横图 / 方图」区间。 */
-export function imageAspectOk(width: number, height: number): boolean {
-  if (!(width > 0) || !(height > 0)) return false
-  const ratio = width / height
-  return ratio >= IMAGE_MIN_RATIO && ratio <= IMAGE_MAX_RATIO
-}
-
-/**
- * 把百度接口的 data[] 归一化成候选数组。
- *
- * 接口末尾常常带一个 null（历史遗留），字段也可能缺：所有字段都防御式读取，
- * 坏候选直接丢，绝不让一个畸形条目把整轮搜图搞崩。
- */
-export function normalizeBaiduCandidates(payload: unknown): BaiduImageCandidate[] {
-  const root = payload !== null && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
-  const data = Array.isArray(root.data) ? root.data : []
-  const out: BaiduImageCandidate[] = []
-  /**
-   * 标题归一化：先剥 HTML / 解实体，再兜一层 URL 解码。
-   *
-   * 百度接口的 fromPageTitleEnc 正常是 HTML 实体编码，但中文标题偶尔会被
-   * 双重编码成 %E7%AB%8B%E5%86%AC 这种 URL 形式；不做这一步，图注就会是
-   * 一串百分号编码（用户看不懂）。解码失败时保持原样，绝不因此丢候选。
-   */
-  const normalizeTitle = (raw: string): string => {
-    let text = decodeHtml(raw)
-    if (/%[0-9a-f]{2}/i.test(text)) {
-      try {
-        const decoded = decodeURIComponent(text)
-        if (decoded !== text) text = decodeHtml(decoded)
-      } catch {
-        /* 非法百分号序列：保留解码前文本 */
-      }
-    }
-    return text
-  }
-  for (const item of data) {
-    if (item === null || typeof item !== 'object') continue
-    const record = item as Record<string, unknown>
-    const replaceUrl = Array.isArray(record.replaceUrl) ? record.replaceUrl : []
-    const firstReplace = replaceUrl[0]
-    const firstReplaceRecord = firstReplace !== null && typeof firstReplace === 'object' ? (firstReplace as Record<string, unknown>) : {}
-    const objUrl = typeof firstReplaceRecord.ObjURL === 'string'
-      ? firstReplaceRecord.ObjURL
-      : typeof record.objURL === 'string' ? record.objURL : ''
-    const middleUrl = typeof record.middleURL === 'string' ? record.middleURL : ''
-    const thumbUrl = typeof record.thumbURL === 'string' ? record.thumbURL : ''
-    if (!isHttpUrl(objUrl) && !isHttpUrl(middleUrl)) continue
-    const metaWidth = Number(record.width)
-    const metaHeight = Number(record.height)
-    out.push({
-      title: normalizeTitle(typeof record.fromPageTitleEnc === 'string' ? record.fromPageTitleEnc : String(record.fromPageTitle ?? '')),
-      objUrl: isHttpUrl(objUrl) ? objUrl : '',
-      middleUrl: isHttpUrl(middleUrl) ? middleUrl : '',
-      thumbUrl: isHttpUrl(thumbUrl) ? thumbUrl : '',
-      fromHost: typeof record.fromURLHost === 'string' ? record.fromURLHost : '',
-      sourceUrl: typeof record.fromURL === 'string' ? record.fromURL : '',
-      metaWidth: Number.isFinite(metaWidth) && metaWidth > 0 ? metaWidth : 0,
-      metaHeight: Number.isFinite(metaHeight) && metaHeight > 0 ? metaHeight : 0,
-      type: typeof record.type === 'string' ? record.type : '',
-    })
-  }
-  return out
-}
-
-/**
- * 候选打分（分越高越先尝试）。
- *
- * 排序偏好：横图/方图 > 元数据达标 > 有原图 > 有中图 > 尺寸大。真正的硬性
- * 条件（文件大小、实际解码像素）在下载后才校验，所以这里只负责「先试谁」。
- */
-function candidateScore(candidate: BaiduImageCandidate): number {
-  let score = 0
-  if (candidate.metaWidth > 0 && candidate.metaHeight > 0) {
-    if (imageAspectOk(candidate.metaWidth, candidate.metaHeight)) score += 100
-    if (candidate.metaWidth >= IMAGE_MIN_WIDTH && candidate.metaHeight >= IMAGE_MIN_HEIGHT) score += 40
-    score += Math.min(20, candidate.metaWidth / 200)
-  } else {
-    score += 30 // 元数据缺失：不确定，放中间
-  }
-  if (candidate.objUrl !== '') score += 20
-  if (candidate.middleUrl !== '') score += 5
-  return score
-}
-
-/**
- * 过滤 + 排序候选。
- *
- * 硬过滤：标题黑名单、来源黑名单、元数据明确小于 900×600（「元数据与实际
- * 解码像素都 >= 900×600」的前一半）。元数据缺失不硬拒 —— 交给下载后的实际
- * 解码尺寸兜底。
- */
-export function rankBaiduCandidates(candidates: readonly BaiduImageCandidate[]): BaiduImageCandidate[] {
-  const filtered: BaiduImageCandidate[] = []
-  for (const candidate of candidates) {
-    if (candidate.objUrl === '' && candidate.middleUrl === '') continue
-    if (imageTitleBlocked(candidate.title)) continue
-    if (imageHostBlocked(candidate.fromHost)) continue
-    if (
-      candidate.metaWidth > 0 &&
-      candidate.metaHeight > 0 &&
-      (candidate.metaWidth < IMAGE_MIN_WIDTH || candidate.metaHeight < IMAGE_MIN_HEIGHT)
-    ) continue
-    filtered.push(candidate)
-  }
-  return filtered
-    .map((candidate) => ({ candidate, score: candidateScore(candidate) }))
-    .sort((a, b) => b.score - a.score)
-    .map((item) => item.candidate)
-}
-
-/** 来源域名 → 展示名（未知域名原样返回去 www 的域名）。 */
-export function sourceDisplayName(host: string): string {
-  const normalized = String(host ?? '').trim().toLowerCase().replace(/^www\./, '').replace(/:\d+$/, '')
-  if (normalized === '') return '网络'
-  for (const [domain, name] of SOURCE_DISPLAY_NAMES) {
-    if (normalized === domain || normalized.endsWith('.' + domain)) return name
-  }
-  return normalized
 }
 
 /* ───────────────────────────── 图片：下载与落盘 ───────────────────────────── */
@@ -769,7 +552,7 @@ function mergeSignals(signal: AbortSignal, timeout: AbortSignal): AbortSignal {
   return typeof combine === 'function' ? combine([signal, timeout]) : signal
 }
 
-/** 按文件头判断 MIME（百度的 content-type 常常是 application/octet-stream）。 */
+/** 按文件头判断 MIME（生图网关的 content-type 未必可靠）。 */
 function sniffImageMime(buffer: Buffer, headerType: string | null): string | null {
   if (buffer.length >= 8 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return 'image/png'
   if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8) return 'image/jpeg'
@@ -789,32 +572,6 @@ function extensionOfMime(mime: string): string {
   return 'bin'
 }
 
-/** 单个 URL 的下载 + 全部硬性校验（任一不过返回 null）。 */
-async function downloadImage(url: string, signal: AbortSignal): Promise<DownloadedImage | null> {
-  try {
-    const merged = mergeSignals(signal, AbortSignal.timeout(FESTIVAL_IMAGE_DOWNLOAD_TIMEOUT_MS))
-    const response = await fetch(url, {
-      signal: merged,
-      headers: {
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
-        referer: 'https://image.baidu.com/',
-        accept: 'image/avif,image/webp,image/png,image/jpeg,*/*',
-      },
-    })
-    if (!response.ok) return null
-    const buffer = Buffer.from(await response.arrayBuffer())
-    if (buffer.length < IMAGE_MIN_BYTES || buffer.length > FESTIVAL_IMAGE_MAX_BYTES) return null
-    const size = imageSizeOf(buffer)
-    if (size === null) return null
-    if (size.width < IMAGE_MIN_WIDTH || size.height < IMAGE_MIN_HEIGHT) return null
-    if (!imageAspectOk(size.width, size.height)) return null
-    const mime = sniffImageMime(buffer, response.headers.get('content-type'))
-    if (mime === null) return null
-    return { buffer, mime, width: size.width, height: size.height }
-  } catch {
-    return null
-  }
-}
 
 /* ───────────────────────────── 图片：生图模型 ───────────────────────────── */
 
@@ -837,18 +594,56 @@ function providerProfile(ctx: Record<string, any>, providerId: string): any {
     const llm = getLlm(ctx)
     const entries = typeof llm?.listConfigurableProviders === 'function' ? (llm.listConfigurableProviders() as any[]) : []
     const entry = (Array.isArray(entries) ? entries : []).find((item: any) => item?.provider === providerId)
-    if (entry === undefined) return null
-    const section = typeof ctx.settings?.get === 'function' ? ctx.settings.get(entry.settingsNs) : null
-    if (section === null || typeof section !== 'object') return null
-    let node: any = section
-    for (const key of Array.isArray(entry.settingsPath) ? entry.settingsPath : []) {
-      if (node !== null && typeof node === 'object' && key in node) node = node[key]
-      else return null
+    if (entry !== undefined) {
+      const section = typeof ctx.settings?.get === 'function' ? ctx.settings.get(entry.settingsNs) : null
+      if (section !== null && typeof section === 'object') {
+        let node: any = section
+        for (const key of Array.isArray(entry.settingsPath) ? entry.settingsPath : []) {
+          if (node !== null && typeof node === 'object' && key in node) node = node[key]
+          else { node = null; break }
+        }
+        if (node !== null && typeof node === 'object') return node
+      }
     }
-    return node !== null && typeof node === 'object' ? node : null
-  } catch {
-    return null
-  }
+  } catch { /* ignore */ }
+
+  // 兜底：从 cordis.patch.yml 解析供应商配置（避免 ctx.settings 未就绪时丢失 baseURL）
+  try {
+    const patchFiles = [
+      join(dshHome(), 'profiles', 'web', 'cordis.patch.yml'),
+      join(dshHome(), 'cordis.patch.yml'),
+    ]
+    for (const patchFile of patchFiles) {
+      if (!existsSync(patchFile)) continue
+      const content = readFileSync(patchFile, 'utf8')
+      const lines = content.split(/\r?\n/)
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i]
+        const match = new RegExp('^(\\s*)' + providerId + ':\\s*$').exec(line)
+        if (match) {
+          const baseIndent = match[1].length
+          const blockLines: string[] = []
+          for (let j = i + 1; j < lines.length; j++) {
+            const nextLine = lines[j]
+            if (nextLine.trim() === '' || nextLine.trim().startsWith('#')) continue
+            const nextIndent = nextLine.search(/\S/)
+            if (nextIndent <= baseIndent) break
+            blockLines.push(nextLine)
+          }
+          const block = blockLines.join('\n')
+          const baseMatch = /^\s*baseURL:\s*(.+)$/m.exec(block)
+          const keyEnvMatch = /^\s*apiKeyEnv:\s*(.+)$/m.exec(block)
+          if (baseMatch) {
+            return {
+              baseURL: baseMatch[1].trim().replace(/^['"]|['"]$/g, ''),
+              apiKeyEnv: keyEnvMatch ? keyEnvMatch[1].trim().replace(/^['"]|['"]$/g, '') : undefined,
+            }
+          }
+        }
+      }
+    }
+  } catch { /* ignore */ }
+  return null
 }
 
 /** 从凭据服务取 API key；取不到返回 null。 */
@@ -856,12 +651,30 @@ async function resolveCredential(ctx: Record<string, any>, envName: unknown): Pr
   if (typeof envName !== 'string' || envName === '') return null
   try {
     const credentials = ctx.get?.('credentials') ?? ctx.credentials
-    if (credentials === undefined || credentials === null || typeof credentials.resolve !== 'function') return null
-    const resolved = await credentials.resolve(envName)
-    return resolved !== null && resolved !== undefined ? String(resolved.value) : null
-  } catch {
-    return null
+    if (credentials !== undefined && credentials !== null && typeof credentials.resolve === 'function') {
+      const resolved = await credentials.resolve(envName)
+      if (resolved !== null && resolved !== undefined && resolved.value) {
+        return String(resolved.value)
+      }
+    }
+  } catch { /* ignore */ }
+
+  // 兜底 1：环境变量
+  if (typeof process.env[envName] === 'string' && process.env[envName]) {
+    return process.env[envName]
   }
+
+  // 兜底 2：~/.dsh/.credentials.yaml 的 refs
+  try {
+    const file = join(dshHome(), '.credentials.yaml')
+    if (existsSync(file)) {
+      const content = readFileSync(file, 'utf8')
+      const regex = new RegExp('^\\s*' + envName + ':\\s*(.+)$', 'm')
+      const match = regex.exec(content)
+      if (match && match[1].trim()) return match[1].trim()
+    }
+  } catch { /* ignore */ }
+  return null
 }
 
 /** 'provider/model' → 两段；不合法返回 null。 */
@@ -889,11 +702,13 @@ async function fetchImageBytes(url: string, timeoutMs: number): Promise<{ buffer
  * 用当前配置的生图模型（model-capabilities.imageActive）生成节日配图。
  *
  * 用户 2026-11-05 反馈「百度图片对不上」：立冬搜回来的是生羊肉与食材拼图。
- * 生图模型可以把节气、食物、习俗直接写进提示词，画面可控，所以配图流程
- * 改为**生图优先、搜图降级**。
+ * 生图模型可以把节气、食物、习俗直接写进提示词，画面可控；2026-11-06 用户
+ * 进一步要求「只用生图生成的」，于是整条百度实拍检索链路已移除，这里是
+ * 节日卡配图的**唯一来源**。
  *
  * 任何失败（没配生图模型 / 没凭据 / 网关报错 / 返回空 / 字节校验不过）
- * 都只返回 null、不抛——调用方继续走百度搜图，最差也只是无图占位。
+ * 都只返回 null、不抛——调用方据此把 image 置 null，前端用节气大字占位，
+ * 记录生成与 ok:true 不受影响。
  */
 async function generateModelImage(
   ctx: Record<string, any>,
@@ -969,17 +784,6 @@ async function generateModelImage(
   }
 }
 
-/** 候选取图：优先原图（ObjURL），失败退中图（middleURL）。 */
-async function downloadCandidate(candidate: BaiduImageCandidate, signal: AbortSignal): Promise<DownloadedImage | null> {
-  const urls = [candidate.objUrl, candidate.middleUrl].filter((url) => isHttpUrl(url))
-  for (const url of urls) {
-    if (signal.aborted) return null
-    const downloaded = await downloadImage(url, signal)
-    if (downloaded !== null) return downloaded
-  }
-  return null
-}
-
 /**
  * 把下载好的图片写进 festivals/images/，返回磁盘文件名。
  *
@@ -1003,99 +807,38 @@ function writeFestivalImageFile(festivalDate: string, downloaded: DownloadedImag
   return file
 }
 
-/** 搜一组百度图片候选；失败抛错（调用方按「本组没有图」处理）。 */
-async function searchBaiduImages(query: string, signal: AbortSignal): Promise<BaiduImageCandidate[]> {
-  const url = BAIDU_IMAGE_API + '?tn=resultjson_com&word=' + encodeURIComponent(query) + '&pn=0&rn=30'
-  const merged = mergeSignals(signal, AbortSignal.timeout(FESTIVAL_IMAGE_SEARCH_TIMEOUT_MS))
-  const response = await fetch(url, {
-    signal: merged,
-    headers: {
-      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
-      referer: 'https://image.baidu.com/',
-      accept: 'application/json, text/plain, */*',
-    },
-  })
-  if (!response.ok) throw new Error('百度图片接口 ' + response.status)
-  const text = await response.text()
-  let payload: unknown
-  try {
-    payload = JSON.parse(text)
-  } catch {
-    // 反爬时可能返回 HTML 验证页：按「本组无候选」处理，不抛
-    return []
-  }
-  return normalizeBaiduCandidates(payload)
-}
-
 /**
- * 节日卡配图主流程：按查询词逐组搜、逐候选下载，第一个通过全部校验的即用。
+ * 节日卡配图主流程：**只调用生图模型**。
+ *
+ * 用户 2026-11-05 明确要求「只用生图生成的」：百度实拍检索会搜回与文案无关的
+ * 生羊肉 / 食材拼图，所以整条搜图链路已移除。生图模型没配 / 网关报错 /
+ * 返回空 / 字节校验不过，都直接返回 null —— 前端用节气大字占位，绝不再
+ * 退到网上搜图，也绝不让记录生成失败。
  *
  * 返回的图片**不含 url**（url 要等最终 generatedAt 确定后由调用方拼，
- * 保证 ?v= 与记录里的生成时间一致）。任何一步失败都只返回 null，绝不抛。
+ * 保证 ?v= 与记录里的生成时间一致）。
  */
 async function pickFestivalImage(
   ctx: Record<string, any>,
   entry: FestivalEntry,
-  modelQueries: readonly string[],
   festivalDate: string,
   signal: AbortSignal,
 ): Promise<Omit<FestivalImage, 'url'> | null> {
-  /*
-   * 1) 生图模型优先（用户 2026-11-05 的要求）：把节气、应季食物、习俗直接
-   *    写进提示词，画面可控；百度搜图只能按关键词撞运气，立冬会搜回生羊肉
-   *    与食材拼图。生图失败才降到第 2 步的实拍检索。
-   */
   try {
     const generated = await generateModelImage(ctx, entry, signal)
-    if (generated !== null) {
-      const file = writeFestivalImageFile(festivalDate, generated)
-      return {
-        file,
-        caption: entry.name + ' · AI 绘制',
-        source: 'AI 生图',
-        width: generated.width,
-        height: generated.height,
-      }
+    if (generated === null) return null
+    const file = writeFestivalImageFile(festivalDate, generated)
+    return {
+      file,
+      caption: entry.name + ' · AI 绘制',
+      source: 'AI 生图',
+      width: generated.width,
+      height: generated.height,
     }
   } catch (error) {
-    ctx.logger?.warn?.('[dsh-seeker-bot] festival 生图流程失败，降级到搜图：' + describeError(error))
+    ctx.logger?.warn?.('[dsh-seeker-bot] festival 生图失败：' + describeError(error))
+    return null
   }
-
-  // 2) 百度实拍检索兜底。
-  const queries = festivalImageQueries(entry, modelQueries)
-  for (const query of queries) {
-    if (signal.aborted) return null
-    let candidates: BaiduImageCandidate[]
-    try {
-      candidates = await searchBaiduImages(query, signal)
-    } catch (error) {
-      ctx.logger?.warn?.('[dsh-seeker-bot] festival 图片搜索失败（' + query + '）：' + describeError(error))
-      continue
-    }
-    const ranked = rankBaiduCandidates(candidates).slice(0, IMAGE_CANDIDATES_PER_QUERY)
-    if (ranked.length === 0) continue
-    for (const candidate of ranked) {
-      if (signal.aborted) return null
-      const downloaded = await downloadCandidate(candidate, signal)
-      if (downloaded === null) continue
-      try {
-        const file = writeFestivalImageFile(festivalDate, downloaded)
-        return {
-          file,
-          caption: candidate.title.length > 60 ? candidate.title.slice(0, 60) : candidate.title,
-          source: sourceDisplayName(candidate.fromHost),
-          // 百度的 fromURL 偶尔是加密跳转串（ippr_z2C…），不是 http 地址：
-          // 这种值写进记录只会让前端图注链接失效，宁可不写。
-          ...(candidate.sourceUrl !== '' && isHttpUrl(candidate.sourceUrl) ? { sourceUrl: candidate.sourceUrl } : {}),
-          width: downloaded.width,
-          height: downloaded.height,
-        }
-      } catch (error) {
-        ctx.logger?.warn?.('[dsh-seeker-bot] festival 图片落盘失败：' + describeError(error))
-      }
-    }
-  }
-  return null
 }
 
 /* ───────────────────────────── JSON 解析 ───────────────────────────── */
@@ -1129,24 +872,6 @@ export function parseFestivalJson(raw: string): Record<string, unknown> {
     throw new Error('模型返回的 JSON 不是对象')
   }
   return parsed as Record<string, unknown>
-}
-
-/** 从模型 JSON 里收集搜图词（imageQuery 允许字符串或数组）。 */
-function imageQueriesOf(payload: Record<string, unknown>): string[] {
-  const cards = Array.isArray(payload.cards) ? payload.cards : []
-  const out: string[] = []
-  for (const raw of cards) {
-    if (raw === null || typeof raw !== 'object') continue
-    const value = (raw as Record<string, unknown>).imageQuery
-    const list = Array.isArray(value) ? value : [value]
-    for (const item of list) {
-      if (typeof item !== 'string') continue
-      const text = item.replace(/\s+/g, ' ').trim()
-      if (text === '' || text.length > 60) continue
-      if (!out.includes(text)) out.push(text)
-    }
-  }
-  return out.slice(0, 4)
 }
 
 /* ───────────────────────────── 归一化 ───────────────────────────── */
@@ -1205,7 +930,6 @@ export async function generateFestival(
   const timer = setTimeout(() => controller.abort(), FESTIVAL_TIMEOUT_MS)
   try {
     let record: FestivalRecord | null = null
-    let modelQueries: string[] = []
     const llm = getLlm(ctx)
     const route = llm !== undefined && llm !== null && typeof llm.stream === 'function'
       ? await resolveChatModel(ctx, (request as unknown as Record<string, any>).model)
@@ -1233,7 +957,6 @@ export async function generateFestival(
         }
         if (raw.trim() === '') throw new Error('模型没有返回内容')
         const payload = parseFestivalJson(raw)
-        modelQueries = imageQueriesOf(payload)
         const generatedAt = Date.now()
         record = sanitizeFestivalRecord(payload, {
           entry,
@@ -1247,7 +970,6 @@ export async function generateFestival(
       } catch (error) {
         ctx.logger?.warn?.('[dsh-seeker-bot] festival 模型生成失败，改走资料卡：' + describeError(error))
         record = null
-        modelQueries = []
       }
     }
 
@@ -1264,14 +986,14 @@ export async function generateFestival(
     if (record === null) return fail('生成失败：节日资料不完整')
 
     /*
-     * 搜图放在最后：模型写文案用掉的 token 与图片无关，图片失败只让 image=null。
+     * 生图放在最后：模型写文案用掉的 token 与配图无关，生图失败只让 image=null。
      * 即使 controller 已因超时 abort，这里也只会快速返回 null，不会把整张卡拖垮。
      */
     let imageBase: Omit<FestivalImage, 'url'> | null = null
     try {
-      imageBase = await pickFestivalImage(ctx, entry, modelQueries, entry.date, controller.signal)
+      imageBase = await pickFestivalImage(ctx, entry, entry.date, controller.signal)
     } catch (error) {
-      ctx.logger?.warn?.('[dsh-seeker-bot] festival 搜图失败：' + describeError(error))
+      ctx.logger?.warn?.('[dsh-seeker-bot] festival 生图失败：' + describeError(error))
     }
 
     const generatedAt = Date.now()
@@ -1640,16 +1362,7 @@ export const __festivalTest = {
   festivalTodayPayload,
   resolveChatModel,
   parseFestivalJson,
-  imageQueriesOf,
   imageSizeOf,
-  normalizeBaiduCandidates,
-  rankBaiduCandidates,
-  candidateScore,
-  imageTitleBlocked,
-  imageHostBlocked,
-  imageAspectOk,
-  sourceDisplayName,
-  searchBaiduImages,
   pickFestivalImage,
   generateModelImage,
   readModelCapabilities,

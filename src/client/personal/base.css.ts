@@ -907,7 +907,7 @@ button.pa-select__trigger[data-open='true'] .pa-select__chevron { transform: rot
   height: 10px;
   border-radius: 999px;
   background: var(--pa-vs-color, var(--pa-text));
-  transition: height 140ms ease;
+  transition: height 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 /* 未选段：细（fill 到 100% 时宽度归零，不会画出半截圆头） */
 .pa-vs__rest {
@@ -919,7 +919,7 @@ button.pa-select__trigger[data-open='true'] .pa-select__chevron { transform: rot
   height: 4px;
   border-radius: 999px;
   background: var(--pa-vs-rest, var(--pa-line-2));
-  transition: height 140ms ease;
+  transition: height 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 /* 真 range 叠在上层：轨道透明（视觉在下面两段），只保留圆点 */
 .pa-vs__input {
@@ -949,9 +949,13 @@ button.pa-select__trigger[data-open='true'] .pa-select__chevron { transform: rot
   border-radius: 50%;
   background: var(--pa-vs-color, var(--pa-text));
   box-shadow: 0 0 0 2px var(--pa-vs-surface, var(--pa-card)), 0 1px 3px rgba(0, 0, 0, 0.28);
-  transition: transform 120ms ease, box-shadow 140ms ease;
+  transition: transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 .pa-vs__input:hover::-webkit-slider-thumb { transform: scale(1.12); }
+.pa-vs__input:active::-webkit-slider-thumb {
+  transform: scale(1.24);
+  box-shadow: 0 0 0 3px var(--pa-vs-surface, var(--pa-card)), 0 2px 6px rgba(0, 0, 0, 0.38);
+}
 .pa-vs__input:focus-visible::-webkit-slider-thumb {
   box-shadow: 0 0 0 2px var(--pa-vs-surface, var(--pa-card)), 0 0 0 4px rgba(255, 159, 10, 0.32);
 }

@@ -73,6 +73,8 @@ check(cardSrc.includes('if (!wide) return null'), '窄轨（wide=false）不渲�
 check(cardSrc.includes('rotate(-6deg)') && cardSrc.includes('rotate(-10deg)'), '两张卡两个角度：前 -6° / 后 -10°（轻微逆时针，白卡插在胶囊上沿）')
 check(cardSrc.includes('db-sheet'), '大卡容器 .db-sheet（期刊式）')
 check(cardSrc.includes('db-col-left') && cardSrc.includes('db-col-right'), '两栏结构：左主题 / 右条目')
+check(cardSrc.includes('db-hero') && stylesSrc.includes('.db-hero{'), 'AI 情报卡顶部横版大图 .db-hero 结构与样式在位')
+check(cardSrc.includes('db-hero-img') && stylesSrc.includes('.db-hero-img{'), '横版大图图片 .db-hero-img 结构与样式在位')
 check(cardSrc.includes('db-modal'), '遮罩层 .db-modal（点遮罩关闭）')
 check(cardSrc.includes("document.addEventListener('pointerdown'"), '点浮层外面关闭（pointerdown 捕获）')
 check(/onPointerDown[\s\S]{0,400}?close\(\)/.test(cardSrc), '点外面也走 close()（同样有退场动效，不是裸 setOpen(false)）')

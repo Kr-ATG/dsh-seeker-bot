@@ -5553,6 +5553,8 @@ if (krEnabled) {
         weather: { kind: 'weather', title: EVIL, city: EVIL, temp: EVIL, condition: EVIL, range: EVIL, aqi: EVIL, wind: EVIL, humidity: EVIL, uv: EVIL, tips: EVIL, forecast: [{ day: EVIL, condition: EVIL, temp: EVIL, rain: EVIL }] },
         quote: { kind: 'quote', title: EVIL, name: EVIL, code: EVIL, price: EVIL, change: EVIL, changePct: EVIL, unit: EVIL, metrics: [{ label: EVIL, value: EVIL }], series: [1, 2, 3], note: EVIL },
         link: { kind: 'link', title: EVIL, url: 'https://example.com/?q=' + encodeURIComponent(EVIL), source: EVIL, summary: EVIL, meta: EVIL, badge: EVIL },
+        calculator: { kind: 'calculator', title: EVIL, desc: EVIL, submitLabel: EVIL, inputs: [{ id: 'v1', label: EVIL, value: 50, min: 0, max: 100, step: 1, unit: EVIL }], outputs: [{ label: EVIL, calc: 'v1*2', unit: EVIL, highlight: true }] },
+        chart: { kind: 'chart', title: EVIL, desc: EVIL, unit: EVIL, categories: [EVIL], series: [{ name: EVIL, data: [100] }], metrics: [{ label: EVIL, value: EVIL, sub: EVIL }] },
       }
       const sample = samples[kind]
       if (sample === undefined) { reasons.push(kind + '：新增 kind 必须在转义探针里补样本（否则它的快照没人守）'); continue }
@@ -5765,14 +5767,15 @@ if (krEnabled) {
     //    的绿勾。同理下面校验 `--row-i` 序号必须是从 0 起连续的整数 —— 新增行忘了顺延
     //    后面的序号，错开浮现会两行同时冒出来，而这既不该报错也不会打日志。
     const hostWriters = [
-      'setZhInjectState', 'setHtmlInjectState',
+      'setHtmlInjectState',
       'setTeamInjectState', 'setTodoRuleInjectState', 'setTodoClosureState',
       'setMotionInjectState', 'setEli5InjectState',
     ]
     const missingWriter = hostWriters.filter(name => !src.includes(name))
     const rowCount = (src.match(/<SettingsRow\b/g) ?? []).length
-    // 9 处 = 4（中文 / 交互卡片 / 团队 / 动效）+ 1（通俗解释）+ 1（任务清单纪律）+ 1（自动收口）+ 2（展示组）。
-    // 2026-11-05：新增「通俗解释 (ELI5)」行（提示词通道组第 5 行），由 8 变 9。
+    // 9 处 = 3（交互卡片 / 团队 / 动效）+ 1（通俗解释）+ 1（任务清单纪律）+ 1（自动收口）+ 3（展示组）。
+    // 2026-11-06：「中文优先」行删除（用户要求）由 9 变 8；同日加「思考自动翻译」行（展示组）
+    // 由 8 变 9。host 侧 zh 通道保留。
     const expectedRows = 9
     const expectedIndexes = 9
     const rowIndexes = [...src.matchAll(/index=\{(\d+)\}/g)].map(m => Number(m[1]))
@@ -5792,7 +5795,20 @@ if (krEnabled) {
     } else if (!consecutive) {
       fail(`行序号 --row-i 必须从 0 起连续到 ${expectedIndexes - 1}（新增行要顺延后面的序号，否则两行同时浮现）：实得 ${JSON.stringify(distinctIndexes)}`)
     } else {
-      pass(`大盘设置：${expectedRows} 个开关行接线完整（6 条 host 通道 + 2 条外观偏好；--row-i 0..${expectedIndexes - 1} 连续，含 busy 门控）`)
+      pass(`大盘设置：${expectedRows} 个开关行接线完整（5 条 host 通道 + 3 条外观偏好；--row-i 0..${expectedIndexes - 1} 连续，含 busy 门控）`)
+    }
+
+    // 6b) 「中文优先」行已按用户要求删除（2026-11-06）：全局 AGENTS.md 已有
+    //     「思考与输出默认中文」那条基线，面板这枚旋钮是重复的第二道闸门。
+    //     钉住它不得复活 —— 面板少一行用户看不出来，但多一行又是噪声。
+    //
+    //     注意只查**面板 UI**：host 侧的 zh 注入通道、/zh-inject-state 端点、
+    //     落盘字段一律保留（记忆库里已沉淀的中文偏好条目不该停止注入），
+    //     那些在别的文件里，不受这条断言管辖。
+    if (/label="中文优先"/.test(src) || /zhEnabled/.test(src) || /setZhInjectState/.test(src)) {
+      fail('大盘设置不该再有「中文优先」行（2026-11-06 用户要求删除；host 侧 zh 通道保留即可）')
+    } else {
+      pass('大盘设置：「中文优先」行已删除（host 侧 zh 通道保留，不受本条管辖）')
     }
 
     // 6c) 「工作区记忆」组（2026-10-18 改成逐工作区列表）：用户要求「显示出来所有工作区

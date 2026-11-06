@@ -90,6 +90,7 @@ import { createMemoryApi, type InjectStateView, type ProjectView } from '../tria
 import { FALLBACK_INJECT_STATE, normalizeInjectState } from '../triad/memory/Toggle.js'
 import { replyCardChromeEnabled, setReplyCardChromeEnabled, subscribeReplyCardChrome } from '../reply-card-chrome.js'
 import { setToolCallsVisible, subscribeToolCallsVisible, toolCallsVisible } from '../tool-calls-visible.js'
+import { autoTranslateEnabled, setAutoTranslateEnabled, subscribeAutoTranslate } from './auto-translate.ts'
 import { workspaceCwdOf } from '../client-ctx.js'
 import { getPanelSettingsStore } from './panel-settings-store.js'
 
@@ -247,27 +248,30 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
    * 路由时会静默丢弃写入，回滚会让 UI 显示一个它并不具备的能力，回读拿到的是真实状态。
    */
   const pushChannel = useCallback((
-    key: 'zhEnabled' | 'htmlEnabled' | 'teamEnabled' | 'todoClosureEnabled' | 'todoRuleEnabled' | 'motionEnabled' | 'eli5Enabled',
+    key: 'htmlEnabled' | 'teamEnabled' | 'todoClosureEnabled' | 'todoRuleEnabled' | 'motionEnabled' | 'eli5Enabled',
     next: boolean,
   ): void => {
     setBusy(true)
     setState(prev => ({ ...prev, [key]: next }))
-    const write = key === 'zhEnabled'
-      ? api.setZhInjectState(next)
-      : key === 'htmlEnabled'
-        ? api.setHtmlInjectState(next)
-        : key === 'teamEnabled'
-          ? api.setTeamInjectState(next)
-          : key === 'todoRuleEnabled'
-            ? api.setTodoRuleInjectState(next)
-            : key === 'motionEnabled'
-              ? api.setMotionInjectState(next)
-              : key === 'eli5Enabled'
-                ? api.setEli5InjectState(next)
-                : api.setTodoClosureState(next)
+    /*
+     * 「中文优先」已从面板删除（2026-11-06），它的写入口
+     * api.setZhInjectState 也一并撤掉：留着一个没有 UI 的写入口，只会让下一个人
+     * 以为还能从哪儿拨它。host 侧的通道与端点保留（见上面那行 SettingsRow 的注释）。
+     */
+    const write = key === 'htmlEnabled'
+      ? api.setHtmlInjectState(next)
+      : key === 'teamEnabled'
+        ? api.setTeamInjectState(next)
+        : key === 'todoRuleEnabled'
+          ? api.setTodoRuleInjectState(next)
+          : key === 'motionEnabled'
+            ? api.setMotionInjectState(next)
+            : key === 'eli5Enabled'
+              ? api.setEli5InjectState(next)
+              : api.setTodoClosureState(next)
     void write
       .then(res => {
-        // 中文 / 自动收口缺字段按开兜底（默认开的内置能力）；html / team / motion / eli5 缺字段按
+        // 自动收口缺字段按开兜底（默认开的内置能力）；html / team / motion / eli5 缺字段按
         // 关兜底（旧 host 根本没有这个能力，显示「开」是假阳性）—— 与 normalizeInjectState
         // 的口径逐条一致，改这里必须同步改那里。
         const enabled = key === 'htmlEnabled' || key === 'teamEnabled' || key === 'motionEnabled' || key === 'eli5Enabled' ? res.enabled === true : res.enabled !== false
@@ -350,7 +354,6 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
       .finally(() => { setPruneBusy(current => (current === hash ? null : current)) })
   }, [])
 
-  const zhOn = state.zhEnabled !== false
   const htmlOn = state.htmlEnabled === true
   const teamOn = state.teamEnabled === true
   // 自动收口与 zh 同口径（默认开）：缺字段按开，别抄 html / team 的 === true。
@@ -370,6 +373,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
    */
   const chromeOn = useSyncExternalStore(subscribeReplyCardChrome, replyCardChromeEnabled, replyCardChromeEnabled)
   const toolCallsOn = useSyncExternalStore(subscribeToolCallsVisible, toolCallsVisible, toolCallsVisible)
+  const autoTranslateOn = useSyncExternalStore(subscribeAutoTranslate, autoTranslateEnabled, autoTranslateEnabled)
 
   /*
    * 当前工作区 cwd（只用来给列表里那一行打「当前」标；拿不到就是 null）。
@@ -422,17 +426,24 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               <span className="kr-settings__group-title">提示词通道</span>
               <span className="kr-settings__group-scope">每会话首步 · 存于 host</span>
             </div>
+            {/*
+             * 「中文优先」行已删除（2026-11-06 用户要求）。
+             *
+             * 为什么它冗余：全局 ~/.dsh/AGENTS.md 里本来就有一节「语言：思考与输出
+             * 默认中文」，那是**全局基线**，比这条记忆通道更靠前、更权威。面板这枚
+             * 开关拨的只是记忆库里的「中文偏好条目」注入通道（host 侧
+             * engine/inject.ts 的 zh 通道），与「模型思考用什么语言」不是同一件事。
+             *
+             * 删的只是**面板入口**，host 侧的通道、端点（/zh-inject-state）、落盘
+             * 字段（zhInjectEnabled）与 config 默认值一律保留：
+             *   · /inject-state 的回包契约里有 zhEnabled 字段，一堆归一化断言按它
+             *     对拍，删字段会连带打崩那份契约；
+             *   · 记忆库里已沉淀的中文偏好条目不该因为少了一个旋钮就停止注入。
+             * 所以这行去掉后，该通道按 config.zhInjectDefaultEnabled（默认开）走。
+             */}
             <SettingsRow
               index={0}
               lead
-              label="中文优先"
-              hint="中文思考与输出，代码与报错保持原文"
-              on={zhOn}
-              busy={busy}
-              onToggle={() => { pushChannel('zhEnabled', !zhOn) }}
-            />
-            <SettingsRow
-              index={1}
               label="对话内交互卡片"
               hint="让模型主动用小工具、图表来交付"
               title="注入沙箱规范，模型才会主动用它交付小工具（可点、能动、能算的卡片）。"
@@ -441,7 +452,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               onToggle={() => { pushChannel('htmlEnabled', !htmlOn) }}
             />
             <SettingsRow
-              index={2}
+              index={1}
               label="团队协作"
               hint="独立子任务默认并行，复杂任务组队"
               title="独立子任务默认并行发 subagent；复杂任务组队当 Lead；只有小事自己做。每会话首步注入一次。"
@@ -453,7 +464,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
                 「涉及动效时先加载 harmonyos-motion」从概率行为变成确定性动作。
                 默认开等于替所有人改了行为，所以升级后开关是灰的，要自己拨。 */}
             <SettingsRow
-              index={3}
+              index={2}
               label="动效技能强制加载"
               hint="涉及动效时先加载 harmonyos-motion"
               title="开启后每会话首步注入一条规则：遇到「做个动画 / 加个过渡 / 交互太生硬 / 松手像急刹车 / 卡片展开 / 页面转场」这类诉求，先调用 skill 加载 harmonyos-motion 再动手。默认关 —— 不打开就仍按模型自己的语义判断决定要不要加载。"
@@ -462,7 +473,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               onToggle={() => { pushChannel('motionEnabled', !motionOn) }}
             />
             <SettingsRow
-              index={4}
+              index={3}
               label="通俗解释 (ELI5)"
               hint="用生活比喻和大白话解释复杂概念"
               title="开启后每会话首步注入规则：用通俗平实的语言、生动日常比喻解释抽象概念和技术机制，不堆专业黑话。工程实操部分（代码/命令/配置）保持精准专业。"
@@ -502,7 +513,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               <span className="kr-settings__group-scope">本机浏览器 · 不进提示词</span>
             </div>
             <SettingsRow
-              index={5}
+              index={4}
               lead
               label="总结卡外框"
               hint="关掉后不留边框与阴影，退回纯正文"
@@ -515,7 +526,7 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               onToggle={() => { setReplyCardChromeEnabled(!chromeOn) }}
             />
             <SettingsRow
-              index={6}
+              index={5}
               label="工具调用卡"
               hint="关掉后右栏不显示技术台账"
               title="关掉后 Seeker 右栏不再显示技术向的「工具调用」台账（默认 5 行滚动窗口那张）；人话行动流不受影响。"
@@ -523,6 +534,16 @@ export function KrPanelSettings({ sessionId }: KrPanelSettingsProps): JSX.Elemen
               // 与总结卡外框同族：写 localStorage，同步落盘无网络往返，busy 恒 false。
               busy={false}
               onToggle={() => { setToolCallsVisible(!toolCallsOn) }}
+            />
+            <SettingsRow
+              index={6}
+              label="思考自动翻译"
+              hint="收口后自动把英文思考翻成中文"
+              title="开启后每轮思考写完（回合收口）自动翻成中文，不用点「查看译文」。关掉后仍可手动点那枚按钮。翻译服务与目标语言在官方 CoT 翻译插件的配置里选。"
+              on={autoTranslateOn}
+              // 与上面两条同族：写 localStorage，同步落盘无网络往返，busy 恒 false。
+              busy={false}
+              onToggle={() => { setAutoTranslateEnabled(!autoTranslateOn) }}
             />
           </div>
 

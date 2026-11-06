@@ -110,12 +110,15 @@ const IU_BASE_CSS = [
   ' *  · 图注与内容之间只留 4px，和 markdown 的 <figcaption> 一个节奏。',
   ' * 这样卡片顶部不再是「一条线 + 一行标题」，而是「一行小字说明」——眼睛不会把它当成一个 panel。',
   ' * ⚠ 不要给它加回任何 border-bottom / 背景：线一回来，整张卡立刻退回「窗口」。 */',
-  '.dtt-iu__head { display: flex; align-items: center; gap: 8px; margin: 0 0 4px;',
-  '  padding: 0; min-height: 16px; }',
-  '.dtt-iu__title { font-size: calc(11px * var(--iu-text-scale, 1)); font-weight: 500;',
-  '  color: var(--dsw-alias-label-caption, var(--dsw-alias-label-tertiary, currentColor));',
-  '  letter-spacing: .04em;',
-  '  flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
+  '.dtt-iu__head { display: flex; align-items: center; gap: 8px; margin: 0 0 6px;',
+  '  padding: 0 2px; min-height: 20px; }',
+  '.dtt-iu__title { font-size: calc(13px * var(--iu-text-scale, 1)); font-weight: 600;',
+  '  color: var(--dsw-alias-label-primary, currentColor);',
+  '  letter-spacing: .02em;',
+  '  flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;',
+  '  display: flex; align-items: center; gap: 6px; }',
+  '.dtt-iu__title::before { content: ""; display: inline-block; width: 3px; height: 11px;',
+  '  border-radius: 2px; background: var(--dsw-alias-state-business-primary, #4176e6); opacity: .85; flex: none; }',
   '/* 副说明：走 label-tertiary 令牌，不用 opacity —— opacity 会把文字往背景里混，',
   '   得到的是非法定中间色，暗色下发灰（实测旧值 opacity:.62 叠在 label-primary 上）。 */',
   '.dtt-iu__desc { font-size: calc(12px * var(--iu-text-scale, 1)); color: var(--dsw-alias-label-tertiary, currentColor);',
@@ -236,9 +239,13 @@ export const IU_CSS = IU_BASE_CSS + '\n' + iuKindsCss()
 
 export function injectIuStyles(): void {
   if (typeof document === 'undefined') return
-  if (document.getElementById('dsh-seeker-bot-iu-styles') !== null) return
-  const style = document.createElement('style')
-  style.id = 'dsh-seeker-bot-iu-styles'
-  style.textContent = IU_CSS
-  document.head.appendChild(style)
+  let style = document.getElementById('dsh-seeker-bot-iu-styles') as HTMLStyleElement | null
+  if (style === null) {
+    style = document.createElement('style')
+    style.id = 'dsh-seeker-bot-iu-styles'
+    document.head.appendChild(style)
+  }
+  if (style.textContent !== IU_CSS) {
+    style.textContent = IU_CSS
+  }
 }

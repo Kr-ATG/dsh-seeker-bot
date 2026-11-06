@@ -9,7 +9,7 @@
  * 语音输入不再在输入框上方堆一行状态文字：录音时整块输入框让位给
  * VoiceBar（X / 实时波形 / 停止 / 发送），录完把文字交回输入框或直接发。
  */
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ChangeEvent, type ClipboardEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
 import { IconMessage, IconPaperclip, IconPlus, IconSend, IconStop, IconUsers, IconWave, IconX } from '../icons.tsx'
 import { usePersonal } from '../store.tsx'
@@ -37,6 +37,23 @@ function autoGrowTextarea(element: HTMLTextAreaElement): void {
   element.style.height = `${next}px`
 }
 
+/**
+ * 检查当前光标前是否有正在输入的 @ 提及。
+ * 返回查询词 query 和 @ 的起始位置 atPos；若没有则返回 null。
+ */
+function checkMentionAtCursor(element: HTMLTextAreaElement | null): { query: string; atPos: number } | null {
+  if (element === null) return null
+  const cursor = element.selectionStart
+  if (cursor === undefined || cursor === null || cursor < 0) return null
+  const source = element.value
+  const before = source.slice(0, cursor)
+  // 匹配光标前的 @query：@ 位于行首、空白符或标点符号后，后面跟随 0 个或多个非空白字符直到光标处
+  const match = /(?:^|[\s，。、；：！？,!?;:])([@＠]([^\s@＠]*))$/.exec(before)
+  if (!match) return null
+  const atPos = before.length - match[1].length
+  return { query: match[2], atPos }
+}
+
 export function Composer(): JSX.Element {
   const { state, ui, actions, activeBot, activeRoom, activeMessages } = usePersonal()
   const [text, setText] = useState('')
@@ -51,6 +68,9 @@ export function Composer(): JSX.Element {
    * src/client/modal-animation.ts 的 MODAL_ANIM_MS 对齐。
    */
   const [mentionClosing, setMentionClosing] = useState(false)
+  const [mentionQuery, setMentionQuery] = useState('')
+  const [mentionAtPos, setMentionAtPos] = useState(-1)
+  const [activeIndex, setActiveIndex] = useState(0)
   const mentionTimerRef = useRef<number | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -75,6 +95,15 @@ export function Composer(): JSX.Element {
   const mentionTargets: Bot[] = activeRoom === null
     ? state.bots.filter((bot) => bot.id !== activeBot.id)
     : members
+
+  const filteredTargets = useMemo(() => {
+    const q = mentionQuery.trim().toLowerCase()
+    if (q === '') return mentionTargets
+    return mentionTargets.filter((bot) =>
+      bot.name.toLowerCase().includes(q) ||
+      bot.role.toLowerCase().includes(q)
+    )
+  }, [mentionTargets, mentionQuery])
 
   /*
    * 用 layout effect：发送后立刻回到单行高度，避免下一帧还闪一下高框。
@@ -111,9 +140,10 @@ export function Composer(): JSX.Element {
 
   /** 收起 @ 气泡：先播退场，240ms 后再真正卸载。 */
   const closeMention = useCallback((): void => {
-    // 气泡本来就没开（例如私聊里直接发送、或没有可点名的 Bot）：不能起退场，
-    // 否则会凭空渲染一个空气泡。
     if (!mentionOpen) return
+    setMentionQuery('')
+    setMentionAtPos(-1)
+    setActiveIndex(0)
     if (mentionTimerRef.current !== null) return
     setMentionClosing(true)
     mentionTimerRef.current = window.setTimeout(() => {
@@ -318,15 +348,66 @@ export function Composer(): JSX.Element {
 
   const insertMention = (name: string): void => {
     const element = textareaRef.current
-    const prefix = text !== '' && !text.endsWith(' ') && !text.endsWith('\n') ? ' ' : ''
-    const next = `${text}${prefix}@${name} `
+    const cursor = element?.selectionStart ?? text.length
+    let next: string
+    let nextCursor: number
+
+    // 检查当前光标前是否有未闭合的 @query
+    const check = checkMentionAtCursor(element)
+    const atPos = check !== null && check.atPos >= 0 ? check.atPos : mentionAtPos
+    if (atPos >= 0 && atPos <= cursor) {
+      // 将 [atPos, cursor] 替换为 @name
+      const beforeAt = text.slice(0, atPos)
+      const afterCursor = text.slice(cursor)
+      const insertStr = `@${name} `
+      next = `${beforeAt}${insertStr}${afterCursor}`
+      nextCursor = beforeAt.length + insertStr.length
+    } else {
+      // 没定位到 @ 时在当前光标处或末尾追加
+      const prefix = text !== '' && !text.endsWith(' ') && !text.endsWith('\n') ? ' ' : ''
+      const insertStr = `${prefix}@${name} `
+      next = `${text.slice(0, cursor)}${insertStr}${text.slice(cursor)}`
+      nextCursor = cursor + insertStr.length
+    }
+
     setText(next)
-    // 插入文字是即时的，气泡只负责滑出——不必等退场播完才把 @ 写进输入框。
+    setMentionQuery('')
+    setMentionAtPos(-1)
+    setActiveIndex(0)
     closeMention()
     window.requestAnimationFrame(() => {
       element?.focus()
-      element?.setSelectionRange(next.length, next.length)
+      element?.setSelectionRange(nextCursor, nextCursor)
     })
+  }
+
+  const handleTextChange = (event: ChangeEvent<HTMLTextAreaElement>): void => {
+    const val = event.target.value
+    setText(val)
+    const check = checkMentionAtCursor(event.target)
+    if (check !== null) {
+      if (!mentionOpen) setMentionOpen(true)
+      cancelMentionClose()
+      setMentionQuery(check.query)
+      setMentionAtPos(check.atPos)
+      setActiveIndex(0)
+    } else if (mentionOpen && mentionAtPos !== -1) {
+      closeMention()
+    }
+  }
+
+  const handleCursorMove = (): void => {
+    const element = textareaRef.current
+    if (element === null) return
+    const check = checkMentionAtCursor(element)
+    if (check !== null) {
+      if (!mentionOpen) setMentionOpen(true)
+      cancelMentionClose()
+      setMentionQuery(check.query)
+      setMentionAtPos(check.atPos)
+    } else if (mentionOpen && mentionAtPos !== -1) {
+      closeMention()
+    }
   }
 
   const hasText = text.trim() !== ''
@@ -433,9 +514,39 @@ export function Composer(): JSX.Element {
             rows={1}
             value={text}
             placeholder={`给 ${targetName} 发消息`}
-            onChange={(event) => setText(event.target.value)}
+            onChange={handleTextChange}
+            onKeyUp={handleCursorMove}
+            onClick={handleCursorMove}
             onPaste={handlePaste}
             onKeyDown={(event) => {
+              if (mentionOpen && filteredTargets.length > 0) {
+                if (event.key === 'ArrowDown') {
+                  event.preventDefault()
+                  setActiveIndex((prev) => (prev + 1) % filteredTargets.length)
+                  return
+                }
+                if (event.key === 'ArrowUp') {
+                  event.preventDefault()
+                  setActiveIndex((prev) => (prev - 1 + filteredTargets.length) % filteredTargets.length)
+                  return
+                }
+                if (event.key === 'Enter' || event.key === 'Tab') {
+                  if (!event.shiftKey && !event.nativeEvent.isComposing) {
+                    event.preventDefault()
+                    const chosen = filteredTargets[activeIndex] ?? filteredTargets[0]
+                    if (chosen !== undefined) {
+                      insertMention(chosen.name)
+                      return
+                    }
+                  }
+                }
+                if (event.key === 'Escape') {
+                  event.preventDefault()
+                  closeMention()
+                  return
+                }
+              }
+
               if (event.key === 'Enter' && !event.shiftKey) {
                 if (event.nativeEvent.isComposing) return
                 event.preventDefault()
@@ -463,18 +574,34 @@ export function Composer(): JSX.Element {
             )}
           </div>
 
-          {(mentionOpen || mentionClosing) && mentionTargets.length > 0 ? (
+          {(mentionOpen || mentionClosing) ? (
             <div className="pa-composer__mention" data-closing={mentionClosing ? '1' : undefined}>
               {activeRoom === null ? (
                 <div className="pa-chat-empty__desc">点名让它去做：消息会交给它，主 Bot 负责转派和验收</div>
               ) : null}
-              {mentionTargets.map((member) => (
-                <button type="button" key={member.id} onClick={() => insertMention(member.name)}>
-                  <BotAvatar avatar={member.avatar} size={22} />
-                  <span className="pa-composer__mention-name">{member.name}</span>
-                  <span className="pa-composer__mention-role">{member.role}</span>
-                </button>
-              ))}
+              {mentionTargets.length === 0 ? (
+                <div className="pa-composer__mention-empty">
+                  {activeRoom === null ? '暂无可派活的子 Bot（可在左栏「+」新建）' : '群内暂无可 @ 的其他成员'}
+                </div>
+              ) : filteredTargets.length === 0 ? (
+                <div className="pa-composer__mention-empty">
+                  未找到匹配「{mentionQuery}」的 Bot
+                </div>
+              ) : (
+                filteredTargets.map((member, index) => (
+                  <button
+                    type="button"
+                    key={member.id}
+                    data-active={index === activeIndex ? 'true' : undefined}
+                    onClick={() => insertMention(member.name)}
+                    onMouseEnter={() => setActiveIndex(index)}
+                  >
+                    <BotAvatar avatar={member.avatar} size={22} />
+                    <span className="pa-composer__mention-name">{member.name}</span>
+                    <span className="pa-composer__mention-role">{member.role}</span>
+                  </button>
+                ))
+              )}
             </div>
           ) : null}
         </div>

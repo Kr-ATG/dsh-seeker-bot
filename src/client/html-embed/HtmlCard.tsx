@@ -147,7 +147,7 @@ function writeCardState(key: string, state: Record<string, unknown>): void {
  * `fullscreen` 只影响尺寸策略：全屏时高度铺满容器，不再跟随内容高度上报
  * （那个高度是为对话流里的内联卡片服务的）。
  */
-function SandboxFrame({ doc, dark, fullscreen, reloadKey, zoom, stateKey, onHeight, onFill }: {
+function SandboxFrame({ doc, dark, fullscreen, reloadKey, zoom, stateKey, onHeight, onFill, onSubmit }: {
   readonly doc: string
   readonly dark: boolean
   readonly fullscreen: boolean
@@ -158,6 +158,7 @@ function SandboxFrame({ doc, dark, fullscreen, reloadKey, zoom, stateKey, onHeig
   readonly stateKey: string
   readonly onHeight?: ((height: number) => void) | undefined
   readonly onFill?: ((text: string) => boolean) | undefined
+  readonly onSubmit?: ((text: string) => boolean) | undefined
 }): JSX.Element {
   const frameRef = useRef<HTMLIFrameElement | null>(null)
 
@@ -322,9 +323,11 @@ function SandboxFrame({ doc, dark, fullscreen, reloadKey, zoom, stateKey, onHeig
     }
   }, [])
 
-  // 高度上报 + ready 握手 + fill 回写：三重校验后才接受，fill 只取 text 一个字段。
+  // 高度上报 + ready 握手 + fill 回写 + submit 闭环：三重校验后才接受。
   const onFillRef = useRef(onFill)
   onFillRef.current = onFill
+  const onSubmitRef = useRef(onSubmit)
+  onSubmitRef.current = onSubmit
   useEffect(() => {
     const onMessage = (event: MessageEvent): void => {
       // ① 来源窗口必须是本卡片自己的 iframe（opaque origin 下 origin 恒为 "null"，
@@ -371,6 +374,20 @@ function SandboxFrame({ doc, dark, fullscreen, reloadKey, zoom, stateKey, onHeig
         const clean = data.text.trim().slice(0, 2000)
         if (clean === '') return
         try { onFillRef.current?.(clean) } catch { /* 写回失败不影响卡片 */ }
+        return
+      }
+      // ④b submit 发送：卡片内调用 window.__dshSubmit(text) 直接发起下一轮对话闭环。
+      if (data.kind === 'submit') {
+        if (typeof data.text !== 'string') return
+        const clean = data.text.trim().slice(0, 4000)
+        if (clean === '') return
+        try {
+          if (onSubmitRef.current) {
+            onSubmitRef.current(clean)
+          } else {
+            onFillRef.current?.(clean)
+          }
+        } catch { /* 提交失败不影响卡片 */ }
         return
       }
       /*
@@ -500,12 +517,14 @@ function pendingStage(bytes: number): JSX.Element {
  * 提前 return 另一个组件会让 React 卸载重建 DOM，卡片闭合那一刻会跳一下。
  * 正确做法是在同一个 <figure> 内部条件渲染内容（见 return 里的三元）。
  */
-export const HtmlCard = memo(function HtmlCard({ spec, pending = false, onFill }: {
+export const HtmlCard = memo(function HtmlCard({ spec, pending = false, onFill, onSubmit }: {
   readonly spec: HtmlSpec
   /** 流式期围栏未闭合 → 只渲染占位，不挂 iframe。 */
   readonly pending?: boolean
   /** 沙箱内 window.__dshFill(text) 的回写（C），拿不到时卡片照常渲染。 */
   readonly onFill?: ((text: string) => boolean) | undefined
+  /** 沙箱内 window.__dshSubmit(text) 的发送闭环，直接发起下一轮对话。 */
+  readonly onSubmit?: ((text: string) => boolean) | undefined
 }): JSX.Element {
   const dark = useDarkTheme()
   const [height, setHeight] = useState<number | null>(null)
@@ -532,7 +551,7 @@ export const HtmlCard = memo(function HtmlCard({ spec, pending = false, onFill }
   }, [])
 
   const frame = (
-    <SandboxFrame doc={doc} dark={dark} fullscreen={false} reloadKey={0} zoom={1} stateKey={stateKey} onHeight={onHeight} onFill={onFill} />
+    <SandboxFrame doc={doc} dark={dark} fullscreen={false} reloadKey={0} zoom={1} stateKey={stateKey} onHeight={onHeight} onFill={onFill} onSubmit={onSubmit} />
   )
 
   /*

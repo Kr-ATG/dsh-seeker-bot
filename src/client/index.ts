@@ -40,6 +40,7 @@ import { ThinkingStepNodeView } from './thinking/ThinkingStepNodeView.tsx'
 import { RetryShadowView } from './retry/RetryShadowView.tsx'
 import { installReplyCardChrome } from './reply-card-chrome.ts'
 import { installToolCallsVisible } from './tool-calls-visible.js'
+import { installAutoTranslate } from './kr-chat/auto-translate.ts'
 import { applyMessageScreenshot } from './shot/index.tsx'
 import { mountShellChrome } from './shell-chrome.ts'
 import { installOpenPathFix } from './open-path-fix.ts'
@@ -295,6 +296,10 @@ export function apply(ctx: ClientContext): void {
   // 工具调用卡展示开关（localStorage 呈现偏好）：读盘 + 绑跨窗口 storage 监听。
   // KrAgentPanel 经 useSyncExternalStore 订阅，拨完即时生效、刷新后保留。
   guarded(ctx, 'tool calls visible', installToolCallsVisible)
+
+  // 「思考自动翻译」偏好（localStorage 呈现偏好）：读盘 + 绑跨窗口 storage 监听。
+  // 默认开 —— 用户明确要求思考不用点按钮就自动翻。
+  guarded(ctx, 'auto translate', installAutoTranslate)
 
   // 捕获官方原生的 assistant-step / turn-process 渲染组件：普通「对话」模式下
   // 两个座位都原样委托回官方，插件只负责 KR 那一栏。
