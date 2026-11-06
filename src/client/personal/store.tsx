@@ -136,12 +136,12 @@ function userFacingErrorText(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error)
   const text = raw.trim()
   if (/[\u4e00-\u9fa5]/.test(text)) return text
-  const detail = text.length > 400 ? `${text.slice(0, 400)}…` : text
-  const withDetail = (summary: string): string => detail === '' ? summary : `${summary}｜具体异常：${detail}`
-  if (/(fetch|network|failed to fetch|timeout|econnrefused|enotfound)/i.test(text)) {
-    return withDetail('网络请求失败，请稍后重试')
+  // 界面报错必须是中文：英文原文只写控制台，不拼进用户可见文案。
+  if (/(fetch|network|failed to fetch|econnrefused|enotfound)/i.test(text)) {
+    return '网络请求失败，无法连接宿主服务，请稍后重试'
   }
-  return withDetail('请求失败，请稍后重试')
+  if (/(timeout|timed out)/i.test(text)) return '请求超时，请稍后重试'
+  return '请求失败，请稍后重试（详细原因请查看宿主日志）'
 }
 
 /**

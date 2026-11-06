@@ -3599,54 +3599,103 @@ function steerRunningTurn(agent: any, spec: BotAgentSpec, text: string): { steer
  * 边收边通过 emit 推给前端，最后返回完整 blocks。
  */
 /**
- * 从上游错误原文里提取可读细节（provider JSON 的 message / code 优先）。
+ * 把上游错误里的英文信息翻译成中文详情（模型名 / 参数名等专有标识保留原样）。
  *
- * 之前这里只按关键字折叠成一句中文概括，把具体异常吞掉了：用户看到「模型调用
- * 失败，请稍后重试」时完全不知道是模型名写错、参数越界还是别的。现在保留原文
- * 里最有用的部分（message + code），截断后附在中文概括后面。
+ * 用户明确要求（2026-11-06）：报错必须是中文。所以这里不贴英文原文，而是按
+ * provider 常见错误形态翻译成一句中文；无法识别的返回空串，调用方只显示中文
+ * 概括（原始英文仍写进宿主日志，排查时看得到）。
  */
-function errorDetailText(raw: string): string {
+function translateErrorDetail(raw: string): string {
   const text = raw.trim()
   if (text === '') return ''
+
+  let message = text
+  let code = ''
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
   if (start >= 0 && end > start) {
     try {
       const parsed = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>
-      const message = typeof parsed.message === 'string' ? parsed.message.trim() : ''
-      const code = parsed.code ?? parsed.type ?? parsed.param
-      const prefix = text.slice(0, start).replace(/[:：]\s*$/, '').trim()
-      const parts: string[] = []
-      if (prefix !== '') parts.push(prefix)
-      if (message !== '') parts.push(message)
-      let detail = parts.join(': ')
-      if (code !== undefined && code !== null && String(code).trim() !== '') {
-        detail = detail === '' ? `code=${String(code)}` : `${detail} [${String(code)}]`
-      }
-      if (detail !== '') return detail.length > 500 ? `${detail.slice(0, 500)}…` : detail
+      if (typeof parsed.message === 'string' && parsed.message.trim() !== '') message = parsed.message.trim()
+      const rawCode = parsed.code ?? parsed.type ?? parsed.param
+      if (rawCode !== undefined && rawCode !== null && String(rawCode).trim() !== '') code = String(rawCode)
     } catch {
-      /* 不是完整 JSON：按原文截断 */
+      /* 不是完整 JSON：继续用原文匹配 */
     }
   }
-  return text.length > 500 ? `${text.slice(0, 500)}…` : text
+  const lower = message.toLowerCase()
+
+  // ── 模型不存在 / 未配置 ─────────────────────────────────────────────
+  if (/(no configured model|knows no model|no such model|unknown model|model .{0,40}not found)/i.test(message)) {
+    const provider = /provider\s+"([^"]+)"/i.exec(message)?.[1] ?? ''
+    const quoted = [...message.matchAll(/"([^"]+)"/g)].map((match) => match[1]).filter((item) => item !== '')
+    const model = quoted.length >= 2 ? quoted[1] : (quoted[0] ?? '')
+    if (provider !== '' && model !== '') return `模型提供方 ${provider} 未配置模型 ${model}`
+    if (model !== '') return `模型不存在或未配置：${model}`
+    return '模型不存在或未配置'
+  }
+  // ── 参数非法（先于状态码兜底，优先说出是哪个字段越界）────────────────
+  const fieldMatch = /field\s+([A-Za-z0-9_.-]+)\s+invalid,\s*should be in\s*\[([^\]]+)\]/i.exec(message)
+  if (fieldMatch !== null) return `参数 ${fieldMatch[1]} 取值非法，应在 ${fieldMatch[2]} 范围内`
+  if (/(invalid_request_error|invalid request)/i.test(message) || code === 'INVALID_REQUEST') return '请求参数非法'
+  // ── 额度 / 鉴权 / 权限 ──────────────────────────────────────────────
+  if (/(usage limit|insufficient balance|quota|balance)/i.test(lower) || /\b429\b/.test(text)) return '模型额度已用尽或请求过于频繁'
+  if (/(invalid api key|unauthorized|authentication failed|\b401\b)/i.test(lower)) return '模型鉴权失败（API Key 无效或未配置）'
+  if (/(forbidden|\b403\b)/i.test(lower)) return '模型拒绝访问（权限不足）'
+  // ── 上下文 / 超时 / 服务 / 网络 / 限流 ──────────────────────────────
+  if (/(context length|maximum context|too many tokens|token limit|exceed.*token)/i.test(lower)) return '上下文超过模型上限'
+  if (/(timeout|timed out|etimedout)/i.test(lower)) return '模型请求超时'
+  if (/(overloaded|service unavailable|\b50[0-9]\b|internal server error)/i.test(lower)) return '模型服务暂时不可用'
+  if (/(fetch failed|econnrefused|enotfound|socket|connect.*refused|network)/i.test(lower)) return '网络连接失败'
+  if (/(rate limit|too many requests)/i.test(lower)) return '请求过于频繁'
+  // ── 会话状态 ────────────────────────────────────────────────────────
+  if (/(stored log is corrupt|does not match an open turn|sessionformaterror)/i.test(message)) {
+    return '会话历史记录损坏（与当前会话状态不一致）'
+  }
+  const missingSession = /session\s+"([^"]+)"\s+not found/i.exec(message)
+  if (missingSession !== null) return `会话不存在：${missingSession[1]}`
+  if (/(\b404\b|not found)/i.test(lower)) return '接口或资源不存在（404）'
+  // ── 兜底：至少给出错误码（全中文）──────────────────────────────────
+  if (code !== '') return `上游返回未知错误（错误码 ${code}）`
+  return ''
+}
+
+/** 中文文本原样返回；英文文本走 translateErrorDetail。 */
+function localizeAnyError(raw: string): string {
+  const text = raw.trim()
+  if (text === '') return ''
+  return /[\u4e00-\u9fa5]/.test(text) ? text : translateErrorDetail(text)
+}
+
+/**
+ * 中文错误里的英文异常片段也翻成中文（保留中文主体）。
+ *
+ * 例：「无法连接该 Bot 的会话：timeout」→「无法连接该 Bot 的会话：模型请求超时」。
+ * 无法翻译的英文片段保持原样——宁可留一个标识符，也不要丢掉上下文。
+ */
+function localizeChineseError(text: string): string {
+  if (!/[A-Za-z]{3,}/.test(text)) return text
+  const translated = translateErrorDetail(text)
+  if (translated === '' || translated === text) return text
+  const idx = Math.max(text.lastIndexOf('：'), text.lastIndexOf(':'))
+  const prefix = idx >= 0 ? text.slice(0, idx + 1) : ''
+  if (prefix !== '' && /[\u4e00-\u9fa5]/.test(prefix)) return prefix + translated
+  return translated
 }
 
 /**
  * 把宿主 / 模型提供方的错误折叠成一句**中文**提示。
  *
- * 中文概括负责用户可读，**具体异常原文必须保留**（2026-11-06 用户要求：
- * 「具体什么异常要显示出来」）。上游错误经常是
- * `429: {"code":null,"message":"MiniMax ... insufficient balance"}` 这种
- * 「状态码 + 英文 JSON」——折叠时把 message / code 提取出来附在末尾，
- * 用户和排查者都能直接看到真正原因。
+ * 中文概括负责用户可读，具体异常也必须用中文说清楚（2026-11-06 用户要求：
+ * 「具体什么异常要显示出来」，同时「报错是中文」）。英文原文只写日志，不上面。
  */
 export function toUserFacingError(raw: string): string {
   const text = raw.trim()
   if (text === '') return '本轮没有产生任何输出'
-  // 本来就是中文的错误（插件自己抛的）原样保留
-  if (/[\u4e00-\u9fa5]/.test(text)) return text
+  // 中文错误保留中文主体；里面夹带的英文异常片段尽量翻成中文
+  if (/[\u4e00-\u9fa5]/.test(text)) return localizeChineseError(text)
   const lower = text.toLowerCase()
-  const detail = errorDetailText(text)
+  const detail = translateErrorDetail(text)
   const withDetail = (summary: string): string => detail === '' ? summary : `${summary}｜具体异常：${detail}`
   if (/(usage limit|insufficient balance|quota|balance)/.test(lower) || /\b429\b/.test(text)) {
     return withDetail('模型额度已用尽或请求过于频繁（429），请稍后重试或更换模型')
@@ -3680,13 +3729,40 @@ export function toUserFacingError(raw: string): string {
   return withDetail('模型调用失败，请稍后重试或查看宿主日志')
 }
 
+/** 会话事件类型 → 中文名（只用于错误提示，不参与任何逻辑判断）。 */
+const SESSION_EVENT_LABELS: Record<string, string> = {
+  'agent/inbox/spliced': '消息入队',
+  'turn/start': '回合开始',
+  'turn/end': '回合结束',
+  'step/start': '步骤开始',
+  'step/end': '步骤结束',
+  'assistant/message': '模型回复',
+  'assistant/attempt': '模型调用',
+  'system/message': '系统提示',
+  'user/message': '用户消息',
+  'tool/call': '工具调用',
+  'tool/result': '工具结果',
+  'request/header': '请求头',
+  'request/context': '请求上下文',
+  'session/title': '会话标题',
+  'session/title-llm-request': '会话标题请求',
+  'permission/preset': '权限预设',
+  'sandbox/mode': '沙箱模式',
+  'approval/policy': '审批策略',
+  'model/selection': '模型选择',
+}
+
+function sessionEventLabel(type: string): string {
+  return SESSION_EVENT_LABELS[type] ?? '其它会话事件'
+}
+
 /**
- * 把 `turn/end.reason.kind === 'blocked'` 展开成可排查的具体描述。
+ * 把 `turn/end.reason.kind === 'blocked'` 展开成可排查的**中文**描述。
  *
  * 宿主的 TurnEndReasonMap 里 blocked 只有 `{ kind: 'blocked' }`——没有 reason /
- * error 字段，所以只报「会话状态异常」会把真正的问题吞掉。这里把宿主能给的原始
+ * error 字段，所以只报「会话状态异常」会把真正的问题吞掉。这里把宿主能给的
  * reason、会话 header、归档状态、会话/Agent 是否还在注册表里、pre-step 探针结果
- * 和本轮事件序列都拼出来；有具体异常时直接显示异常原文。
+ * 和本轮事件序列都拼出来；所有面向用户的词都用中文（模型名等专有标识符保留）。
  */
 export function describeBlockedTurn(
   ctx: any,
@@ -3699,7 +3775,6 @@ export function describeBlockedTurn(
   },
 ): string {
   const parts: string[] = []
-  const clipText = (text: string, max: number): string => text.length > max ? `${text.slice(0, max)}…` : text
   const turnEnd = (debug?.turnEnd ?? null) as {
     turn?: number
     reason?: { kind?: string; error?: { message?: string; code?: string } }
@@ -3707,26 +3782,23 @@ export function describeBlockedTurn(
   const failure = turnEnd?.reason?.error
   const failureMessage = typeof failure?.message === 'string' ? failure.message.trim() : ''
   if (failureMessage !== '') {
-    const failureCode = typeof failure?.code === 'string' ? failure.code : ''
-    const code = failureCode !== '' ? `（${failureCode}）` : ''
-    parts.push(`宿主错误${code}：${clipText(failureMessage, 400)}`)
+    const detail = localizeAnyError(failureMessage)
+    parts.push(`宿主错误：${detail !== '' ? detail : '上游返回未知错误（详情见宿主日志）'}`)
   } else {
-    let rawReason = 'null'
-    try {
-      rawReason = JSON.stringify(turnEnd?.reason ?? null)
-    } catch {
-      /* reason 里可能有不可序列化字段：保留 null */
-    }
-    parts.push(`宿主未提供拒绝原因（turn/end.reason=${rawReason}）`)
+    parts.push('宿主未提供拒绝原因（只返回了「被拒绝」状态）')
   }
 
   const header = agent?.session?.header
   if (header !== undefined && header !== null) {
-    const bits: string[] = [`id=${String(header.id ?? sessionId)}`]
-    if (header.origin !== undefined) bits.push(`origin=${String(header.origin)}`)
-    if (header.parentSession !== undefined) bits.push(`parentSession=${String(header.parentSession)}`)
-    if (header.delegationDepth !== undefined) bits.push(`delegationDepth=${String(header.delegationDepth)}`)
-    parts.push(`会话 header：${bits.join('，')}`)
+    const originLabel = header.origin === 'subagent'
+      ? '子代理会话'
+      : header.origin === 'user'
+        ? '用户会话'
+        : '其它来源'
+    const bits: string[] = [`会话标识 ${String(header.id ?? sessionId)}`, `来源：${originLabel}`]
+    if (header.parentSession !== undefined) bits.push(`父会话：${String(header.parentSession)}`)
+    if (header.delegationDepth !== undefined) bits.push(`层级：${String(header.delegationDepth)}`)
+    parts.push(bits.join('，'))
   }
 
   /*
@@ -3737,11 +3809,11 @@ export function describeBlockedTurn(
     const registry = typeof ctx?.get === 'function' ? ctx.get('workspaceRegistry') : undefined
     const archived: readonly string[] = Array.isArray(registry?.archivedSessionIds) ? registry.archivedSessionIds : []
     if (archived.includes(sessionId)) {
-      parts.push('该会话已被归档（宿主 archived-session-gate 会拒绝它的所有步骤），请先取消归档再重试')
+      parts.push('该会话已被归档，宿主会拒绝它的所有步骤；请先取消归档再重试')
     } else {
       const parent = header?.parentSession
       if (typeof parent === 'string' && archived.includes(parent)) {
-        parts.push(`父会话 ${parent} 已归档（宿主 archived-session-gate 会拒绝子会话步骤），请先取消归档`)
+        parts.push(`父会话 ${parent} 已归档，宿主会拒绝子会话步骤；请先取消归档`)
       }
     }
   } catch {
@@ -3751,7 +3823,7 @@ export function describeBlockedTurn(
   try {
     const sessions = typeof ctx?.get === 'function' ? ctx.get('sessions') : undefined
     if (typeof sessions?.get === 'function' && sessions.get(sessionId) === undefined) {
-      parts.push('宿主会话存储里已找不到该会话（可能已被清理/重建）')
+      parts.push('宿主已找不到该会话（可能已被清理或重建）')
     }
   } catch {
     /* 跳过会话探测 */
@@ -3761,8 +3833,8 @@ export function describeBlockedTurn(
     const agents = typeof ctx?.get === 'function' ? ctx.get('agents') : undefined
     if (typeof agents?.get === 'function') {
       const live = agents.get(sessionId)
-      if (live === undefined || live === null) parts.push('宿主 agent 注册表里已找不到该 agent')
-      else if (agent !== undefined && live !== agent) parts.push('宿主 agent 注册表里已是另一个 agent（旧 agent 被替换）')
+      if (live === undefined || live === null) parts.push('宿主已找不到该 Agent（可能已被释放或替换）')
+      else if (agent !== undefined && live !== agent) parts.push('宿主中该会话已换成另一个 Agent（旧 Agent 被替换）')
     }
   } catch {
     /* 跳过 agent 探测 */
@@ -3770,13 +3842,14 @@ export function describeBlockedTurn(
 
   const preStep = debug?.preStep
   if (preStep?.error !== undefined && preStep.error !== '') {
-    parts.push(`pre-step 监听器抛出异常：${clipText(preStep.error, 400)}`)
+    const preStepDetail = localizeAnyError(preStep.error)
+    parts.push(`步骤前置检查抛出异常：${preStepDetail !== '' ? preStepDetail : '上游返回未知错误（详情见宿主日志）'}`)
   } else if (preStep?.rejected === true) {
-    parts.push('模型一步都没开始：pre-step 阶段被下游监听器拒绝（宿主接口不返回拒绝者名称）')
+    parts.push('模型步骤没有开始：步骤前置检查被下游插件拒绝（宿主未返回拒绝者名称）')
   }
 
   const events = Array.isArray(debug?.events) ? debug.events : []
-  if (events.length > 0) parts.push(`本轮事件：${events.join(' → ')}`)
+  if (events.length > 0) parts.push(`本轮事件：${events.slice(-20).map(sessionEventLabel).join(' → ')}`)
   return parts.join('；')
 }
 

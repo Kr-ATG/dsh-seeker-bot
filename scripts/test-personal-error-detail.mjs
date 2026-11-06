@@ -6,9 +6,9 @@
  * 会话状态异常」时，必须显示具体异常，而不是一句笼统话术。
  *
  * 覆盖：
- *  - toUserFacingError 保留 provider 错误原文（message / code），不再只给中文概括；
- *  - describeBlockedTurn 能把 turn/end.reason、会话 header、归档态、pre-step 探针
- *    结果和事件序列拼成可排查的诊断；
+ *  - toUserFacingError 把常见 provider 错误翻译成**中文**具体原因（模型名等专有
+ *    标识保留），界面不出现英文句子；
+ *  - describeBlockedTurn 用中文说清会话状态、归档态、步骤前置检查结果与事件序列；
  *  - blocked 分支必须接线到 describeBlockedTurn，且旧的笼统话术不再出现。
  *
  * Usage: node scripts/test-personal-error-detail.mjs
@@ -49,28 +49,39 @@ try {
   })
   const host = await import(pathToFileURL(join(OUT, 'agent.mjs')).href)
 
-  check('404 模型不存在：保留 message 与 code', () => {
+  check('404 模型不存在：翻译成中文且保留模型标识', () => {
     const text = host.toUserFacingError('404: {"code":"UNKNOWN_MODEL","message":"magpie knows no model \\"group/auto-qfmodel\\"; did you mean auto/deepseek-v4.1-flash?"}')
-    assert.match(text, /模型或接口不存在（404）/)
-    assert.match(text, /magpie knows no model/)
-    assert.match(text, /UNKNOWN_MODEL/)
+    assert.match(text, /模型不存在或未配置/)
+    assert.match(text, /group\/auto-qfmodel/)
+    assert.ok(!/knows no model/i.test(text), '界面仍出现英文原文：' + text)
   })
 
-  check('400 参数非法：保留 MaxTokens 细节与错误码', () => {
+  check('400 参数非法：翻译成中文且指出字段与范围', () => {
     const text = host.toUserFacingError('400: {"message":"field MaxTokens invalid, should be in [1, 131072]","type":"invalid_request_error","param":"max_tokens","code":"3"}')
     assert.match(text, /具体异常/)
     assert.match(text, /错误码 400/)
-    assert.match(text, /MaxTokens invalid/)
-    assert.match(text, /\[3\]/)
+    assert.match(text, /参数 MaxTokens 取值非法/)
+    assert.match(text, /1, 131072/)
+    assert.ok(!/should be in|invalid/i.test(text), '界面仍出现英文原文：' + text)
   })
 
-  check('未知英文错误：原文不再被吞', () => {
+  check('模型未配置：翻译成中文', () => {
+    const text = host.toUserFacingError('pi-ai provider "sensenova" has no configured model "sensenova-6.8-flash-lite"')
+    assert.match(text, /模型提供方 sensenova 未配置模型 sensenova-6\.8-flash-lite/)
+    assert.ok(!/provider|configured model/i.test(text), '界面仍出现英文原文：' + text)
+  })
+
+  check('未知英文错误：给中文兜底，不贴英文原文', () => {
     const text = host.toUserFacingError('Something exploded in listener chain')
-    assert.match(text, /Something exploded in listener chain/)
+    assert.match(text, /模型调用失败/)
+    assert.ok(!/Something exploded/i.test(text), '界面仍出现英文原文：' + text)
   })
 
-  check('中文错误保持原样', () => {
-    assert.equal(host.toUserFacingError('无法连接该 Bot 的会话：timeout'), '无法连接该 Bot 的会话：timeout')
+  check('中文错误保留中文主体，夹带的英文异常翻成中文', () => {
+    const text = host.toUserFacingError('无法连接该 Bot 的会话：timeout')
+    assert.match(text, /无法连接该 Bot 的会话：/)
+    assert.match(text, /模型请求超时/)
+    assert.ok(!/timeout/i.test(text), '界面仍出现英文原文：' + text)
   })
 
   const ctx = {
@@ -83,25 +94,27 @@ try {
   }
   const agent = { session: { header: { id: 'pa-bot-v2-bot-x', origin: 'subagent', delegationDepth: 0 } } }
 
-  check('blocked 诊断：明确说出已归档而不是「会话状态异常」', () => {
+  check('blocked 诊断：中文说出已归档而不是「会话状态异常」', () => {
     const detail = host.describeBlockedTurn(ctx, agent, 'pa-bot-v2-bot-x', {
       events: ['turn/start', 'turn/end'],
       turnEnd: { reason: { kind: 'blocked' } },
       preStep: { seen: true, rejected: true },
     })
     assert.match(detail, /已被归档/)
-    assert.match(detail, /turn\/end\.reason=\{"kind":"blocked"\}/)
-    assert.match(detail, /pre-step 阶段被下游监听器拒绝/)
-    assert.match(detail, /turn\/start → turn\/end/)
+    assert.match(detail, /宿主未提供拒绝原因/)
+    assert.match(detail, /步骤前置检查被下游插件拒绝/)
+    assert.match(detail, /回合开始 → 回合结束/)
+    assert.ok(!/turn\/|reason=|origin=/i.test(detail), 'blocked 诊断仍出现英文技术串：' + detail)
   })
 
-  check('blocked 诊断：pre-step 探针异常会显示原文', () => {
+  check('blocked 诊断：步骤前置检查异常也翻译成中文', () => {
     const detail = host.describeBlockedTurn(ctx, agent, 'pa-bot-v2-bot-x', {
       events: [],
       turnEnd: { reason: { kind: 'blocked' } },
       preStep: { seen: true, rejected: false, error: 'boom: listener failed' },
     })
-    assert.match(detail, /pre-step 监听器抛出异常：boom: listener failed/)
+    assert.match(detail, /步骤前置检查抛出异常：上游返回未知错误（详情见宿主日志）/)
+    assert.ok(!/boom|listener failed/i.test(detail), 'blocked 诊断仍出现英文原文：' + detail)
   })
 
   /*
@@ -146,12 +159,14 @@ try {
   const spec = { botId: 'test-error', name: '测试 Bot', role: '测试', description: '', instructions: '', model: { provider: 'test', model: 'test' } }
 
   const blockedResult = await host.runBotTurn(runtimeCtx, spec, '你好', () => {})
-  check('runBotTurn blocked：错误文本带具体 reason 与会话 header', () => {
+  check('runBotTurn blocked：错误文本为中文且带具体会话信息', () => {
     assert.equal(blockedResult.ok, false)
     assert.match(String(blockedResult.error), /本轮被宿主拒绝（pre-step blocked）/)
-    assert.match(String(blockedResult.error), /turn\/end\.reason=\{"kind":"blocked"\}/)
-    assert.match(String(blockedResult.error), /id=pa-bot-v2-test-error/)
-    assert.match(String(blockedResult.error), /origin=subagent/)
+    assert.match(String(blockedResult.error), /宿主未提供拒绝原因/)
+    assert.match(String(blockedResult.error), /会话标识 pa-bot-v2-test-error/)
+    assert.match(String(blockedResult.error), /来源：子代理会话/)
+    assert.match(String(blockedResult.error), /回合开始 → 回合结束/)
+    assert.ok(!/turn\/end|origin=|id=/.test(String(blockedResult.error)), '仍出现英文技术串：' + String(blockedResult.error))
   })
   rmSync(HOME, { recursive: true, force: true })
 
