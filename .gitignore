@@ -28,3 +28,18 @@ dist/
 # 头像动图生成时的灰度原始像素中转文件（160×160 单通道，正好 25600 字节），
 # 仅用于转图/调试，代码与打包都不引用，不入库。
 assets/avatar/*.webp.gray
+
+# 含凭据的本地文件一律不入库：凭据只走环境变量 / ~/.dsh/.credentials.yaml
+# （全局安全规范）。.env.example 是给安装方照抄的空模板，保留在仓库里。
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*credentials*.json
+*credentials*.yaml
+*credentials*.yml
