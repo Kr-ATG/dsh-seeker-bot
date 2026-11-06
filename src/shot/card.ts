@@ -679,10 +679,12 @@ ${segCss}
 ${hasIuFence ? iuCssFor(theme, input.zoom) : ''}</style></head>
 <body><div class="card">
 <header class="head">
-  ${chip ? `<span class="chip">${escapeHtml(chip)}</span>` : ''}
-  <span class="stamp">${stampNow()}</span>
+  <h1 class="title">${escapeHtml(title)}</h1>
+  <span class="head-meta">
+    ${chip ? `<span class="chip">${escapeHtml(chip)}</span>` : ''}
+    <span class="stamp">${stampNow()}</span>
+  </span>
 </header>
-<h1 class="title">${escapeHtml(title)}</h1>
 ${sections.join('\n')}
 <footer class="foot">
   <span class="whale">${whale(18, 13)}</span>

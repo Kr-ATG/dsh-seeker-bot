@@ -254,14 +254,15 @@ body{${canvas};min-height:100vh;box-sizing:border-box;padding:${m.outer}px ${m.o
 .card{width:var(--w);min-height:${minHeight}px;margin:auto;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden}
 /* 顶部强调色导轨 */
 .rail{flex:none;height:3px;background:linear-gradient(90deg,var(--accent),color-mix(in srgb,var(--accent) 25%,transparent) 62%,transparent)}
-/* 页头：徽标块 + 品牌 + 角色标签 + 右侧时间 */
-.head{flex:none;display:flex;align-items:center;gap:14px;padding:calc(var(--pad) * .78) var(--pad) 0}
+/* 页头：标题与「徽章 + 时间」同处一行；徽章紧贴时间左侧，整行只有一条 */
+.head{flex:none;display:flex;align-items:center;gap:14px;padding:calc(var(--pad) * .9) var(--pad) 0}
 .mark{flex:none;width:38px;height:38px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:var(--accentSoft);color:var(--accent)}
 .brand{font-size:${m.brand}px;font-weight:650;letter-spacing:.01em}
+.head-meta{flex:none;display:inline-flex;align-items:center;gap:10px;white-space:nowrap}
 .chip{display:inline-flex;align-items:center;height:22px;padding:0 9px;border-radius:11px;background:var(--accentSoft);color:var(--accent);font-size:12px;font-weight:600;line-height:1}
-.stamp{margin-left:auto;font-size:13px;color:var(--fg3);font-variant-numeric:tabular-nums;white-space:nowrap}
-/* 标题 */
-.title{flex:none;padding:calc(var(--pad) * .62) var(--pad) 0;font-size:${m.title}px;font-weight:700;line-height:1.36;letter-spacing:-.01em;overflow-wrap:anywhere}
+.stamp{font-size:13px;color:var(--fg3);font-variant-numeric:tabular-nums;white-space:nowrap}
+/* 标题（占满剩余宽度，右侧让给徽章 + 时间） */
+.title{flex:1;min-width:0;margin:0;padding:0;font-size:${m.title}px;font-weight:700;line-height:1.36;letter-spacing:-.01em;overflow-wrap:anywhere}
 /* 正文 */
 .content{flex:1;padding:calc(var(--pad) * .6) var(--pad) calc(var(--pad) * .8);font-size:${m.body}px;line-height:1.8;color:var(--fg)}
 .content.plain{white-space:pre-wrap;overflow-wrap:anywhere}
@@ -324,7 +325,7 @@ body{${canvas};min-height:100vh;box-sizing:border-box;padding:${m.outer}px ${m.o
 .foot .whale{display:flex;align-items:center;color:var(--fg2)}
 .foot .sign{color:var(--fg2);font-weight:500;letter-spacing:.01em}
 .foot .right{margin-left:auto;font-variant-numeric:tabular-nums}
-/* 手机窄幅：页头放不下「品牌 + 徽章 + 时间」一行，收起时间戳并缩小徽标块。
+/* 手机窄幅：标题行放不下「标题 + 徽章 + 时间」，收起时间戳并缩小徽标块。
    宽度是编译期已知值，直接按宽度出条件 CSS，不用媒体查询。 */
 ${width < 640 ? `.head{gap:10px;padding-top:calc(var(--pad) * .9)}.mark{width:30px;height:30px;border-radius:9px}.mark svg{width:17px;height:13px}.stamp{display:none}.chip{height:20px;padding:0 8px;font-size:11px}.foot{font-size:12px}` : ''}
 ${readerStyles}
