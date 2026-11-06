@@ -320,10 +320,13 @@ body{${canvas};min-height:100vh;box-sizing:border-box;padding:${m.outer}px ${m.o
 .content pre.mermaid[data-processed="true"] svg{max-width:100%;height:auto;display:block}
 /* mermaid 自绘文字用 currentColor 的地方跟随卡片前景色，避免深色主题下发灰。 */
 .content pre.mermaid[data-processed="true"] .nodeLabel,.content pre.mermaid[data-processed="true"] .edgeLabel,.content pre.mermaid[data-processed="true"] .cluster-label{overflow-wrap:anywhere}
-/* 页脚：细线 + 鲸鱼署名 + 右侧统计 */
+/* 页脚：细线 + 鲸鱼署名 + 模型名 + 右侧统计 */
 .foot{flex:none;display:flex;align-items:center;gap:9px;margin:0 var(--pad);padding:16px 0 calc(var(--pad) * .52);border-top:1px solid var(--border2);color:var(--fg3);font-size:13px}
 .foot .whale{display:flex;align-items:center;color:var(--fg2)}
 .foot .sign{color:var(--fg2);font-weight:500;letter-spacing:.01em}
+/* 模型名：署名右侧的低调附注；拿不到模型时整个 span 不渲染。 */
+.foot .model{color:var(--fg3);font-size:12px;font-weight:400;white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.foot .model::before{content:'·';margin-right:8px;opacity:.72}
 .foot .right{margin-left:auto;font-variant-numeric:tabular-nums}
 /* 手机窄幅：标题行放不下「标题 + 徽章 + 时间」，收起时间戳并缩小徽标块。
    宽度是编译期已知值，直接按宽度出条件 CSS，不用媒体查询。 */

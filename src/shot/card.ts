@@ -90,6 +90,8 @@ export interface ShotCardInput {
   title?: string
   /** 页头徽章文案（如「这一轮问答」），留空按消息数与角色生成。 */
   label?: string
+  /** 当前会话使用的模型名称（页脚署名右侧显示）；留空则不显示。 */
+  model?: string
   /** 正文提到的本地 HTML：以 iframe 内嵌进截图（只要页面本身，不带对话里那圈工具条）。 */
   embeds?: readonly ShotEmbed[]
   /**
@@ -595,6 +597,8 @@ export async function buildCardHtml(input: ShotCardInput): Promise<ShotCardOutpu
   const chip = (input.label ?? '').trim() !== ''
     ? (input.label as string).trim()
     : multi ? `${messages.length} 条消息` : (first.role === 'user' ? '提问' : 'AI 回复')
+  // 页脚署名右侧的模型名：外部传入，缺省空串 = 不显示（老调用方零改动）。
+  const model = (input.model ?? '').trim()
   const sections: string[] = []
   let hasFenceEmbed = false
   let hasIuFence = false
@@ -689,6 +693,7 @@ ${sections.join('\n')}
 <footer class="foot">
   <span class="whale">${whale(18, 13)}</span>
   <span class="sign">DeepSeek Harness</span>
+  ${model !== '' ? `<span class="model">${escapeHtml(model)}</span>` : ''}
   <span class="right">${note}</span>
 </footer>
 </div>${needsMermaid ? `\n${mermaidBoot(theme)}` : ''}${hasFenceEmbed ? `\n${embedBoot(theme)}` : ''}</body></html>`

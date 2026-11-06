@@ -77,6 +77,8 @@ export interface ShotPanelProps {
    * 标题会跑到 B 消息的面板里。缺省空串 = 不做锚定（老调用方行为不变）。
    */
   messageKey?: string
+  /** 当前会话使用的模型名称（透传给 /render，页脚署名右侧显示）。 */
+  model?: string
 }
 
 /** 可编辑文案输入框：blur / Enter 提交，Esc 还原。 */
@@ -112,7 +114,7 @@ function EditableText(props: {
 }
 
 /** 面板主体：选项条 + 预览台 + 底栏操作。 */
-export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, sessionTitle, cwd = '', initialRange, messageKey = '' }: ShotPanelProps): JSX.Element {
+export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, sessionTitle, cwd = '', initialRange, messageKey = '', model = '' }: ShotPanelProps): JSX.Element {
   // 打开时读一次持久化偏好（只在挂载时读：面板存活期间以本地 state 为准）。
   const saved = useMemo(() => readShotPrefs(), [])
   const [range, setRange] = useState<ShotRange>(() => initialRange ?? saved.range)
@@ -179,7 +181,7 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
     setError(null)
     setSavedPath(null)
     setToast(null)
-    const p = render({ messages, theme, width: effectiveWidth, quality, title: titleText, label: DEFAULT_LABEL, cwd })
+    const p = render({ messages, theme, width: effectiveWidth, quality, title: titleText, label: DEFAULT_LABEL, model, cwd })
       .then((next) => {
         if (tokenRef.current !== token) return null
         setResult(next)
@@ -200,7 +202,7 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
       })
     pendingPromiseRef.current = p
     return p
-  }, [messages, theme, cardWidth, quality, titleText, cwd])
+  }, [messages, theme, cardWidth, quality, titleText, model, cwd])
 
   // 打开时渲染一次，之后任一选项变化都重渲染。
   useEffect(() => { run() }, [run])
@@ -251,6 +253,7 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
         quality,
         title: titleText,
         label: DEFAULT_LABEL,
+        model,
         html: baseHtml,
         cwd,
       })
@@ -268,7 +271,7 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
           setBusy(false)
         })
     }
-  }, [baseHtml, result, messages, theme, cardWidth, quality, titleText, scale, cwd])
+  }, [baseHtml, result, messages, theme, cardWidth, quality, titleText, model, scale, cwd])
 
   /** 退出编辑：切回 PNG 预览（未应用删除时预览仍是最初渲染图）。 */
   const stopEdit = useCallback((): void => {
@@ -396,6 +399,7 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
       quality,
       title: titleText,
       label: DEFAULT_LABEL,
+      model,
       html: next,
       cwd,
     })
@@ -417,7 +421,7 @@ export function ShotPanel({ closing, onClose, collect, title, dialogueTitle, ses
         if (tokenRef.current !== token) return
         setBusy(false)
       })
-  }, [messages, theme, cardWidth, quality, titleText, scale, cwd])
+  }, [messages, theme, cardWidth, quality, titleText, model, scale, cwd])
 
   const switchRange = useCallback((next: ShotRange): void => {
     setRange(next)

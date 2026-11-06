@@ -51,6 +51,8 @@ export interface RenderRequest {
   title?: string
   /** 页头徽章文案（截图范围，可编辑）。 */
   label?: string
+  /** 当前会话使用的模型名称（页脚署名右侧显示）；取不到留空。 */
+  model?: string
   /** 编辑后的完整 HTML 文档（存在时 host 跳过卡片组装，直接渲染该页面）。 */
   html?: string
   /** 会话工作目录：host 用它解析正文里的相对 HTML 路径做内嵌预览。 */

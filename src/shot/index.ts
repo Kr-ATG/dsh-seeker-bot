@@ -300,6 +300,7 @@ async function handleRender(req: IncomingMessage, res: ServerResponse): Promise<
           ? body.title.trim()
           : deriveTitle(messages[0]!.text, messages[0]!.role),
         label: typeof body.label === 'string' ? body.label : '',
+        model: typeof body.model === 'string' ? body.model.trim().slice(0, 120) : '',
         zoom: parseZoom(body.zoom),
       })
     const html = card !== null ? card.html : (editedHtml as string)

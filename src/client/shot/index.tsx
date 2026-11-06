@@ -28,12 +28,53 @@ import { KR_CHAT_ENABLED } from '../kr-chat/enabled.ts'
 import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type { Context as ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import { getService } from '../client-ctx.ts'
 import { useModalClose, ensureModalAnimStyles } from '../modal-animation.ts'
 import { collectMessages, deriveCurrentDialogueTitle, type ShotMessage, type ShotRange } from './collect.ts'
 import { ShotPanel } from './Panel.tsx'
 import { cls, ensureStyles } from './styles.ts'
 
 import { setLatestChatSnapshot } from '../tool-summary/TurnProcessShadowView.tsx'
+
+/** 模型目录快照里我们只关心的两处（与 ui-model-selection 的 ModelDirectoryState 对齐）。 */
+interface ModelDirSnapshot {
+  current?: { model?: string }
+  groups?: Array<{ models?: Array<{ id?: string; name?: string }> }>
+}
+
+type ModelDirectoryService = {
+  directoryFor?: (id: string) => { store?: { getSnapshot?: () => ModelDirSnapshot } }
+}
+
+/**
+ * 延迟注入拿到的模型目录服务（缺服务时为 null，页脚自动不显示模型名）。
+ *
+ * 顶层 inject 不声明 modelDirectories —— 它是硬依赖，少一个整插件都不 apply。
+ * 这里改用 ctx.inject 等依赖齐全时把服务存下来，缺服务时截图按钮照常挂载。
+ */
+let modelDirectoryService: ModelDirectoryService | null = null
+
+/**
+ * 当前会话选中的模型显示名（页脚署名右侧用）。
+ *
+ * 优先用延迟注入存下来的服务，兜底再走 client-ctx 的 getService；两处都拿不到
+ * 就返回空串（页脚照旧只显示署名与统计），绝不让截图功能因为模型名挂掉。
+ * 只读一次同步快照、不订阅 —— 相机按钮每条消息都有一份，订阅会炸重渲染。
+ */
+function currentModelName(sessionId: string): string {
+  try {
+    const models = modelDirectoryService ?? getService<ModelDirectoryService>('modelDirectories')
+    const snapshot = models?.directoryFor?.(sessionId)?.store?.getSnapshot?.()
+    if (snapshot === undefined) return ''
+    const id = typeof snapshot.current?.model === 'string' ? snapshot.current.model : ''
+    if (id === '') return ''
+    const groups = Array.isArray(snapshot.groups) ? snapshot.groups : []
+    const name = groups.flatMap(group => group.models ?? []).find(item => item.id === id)?.name
+    return String(name ?? id).trim().slice(0, 120)
+  } catch {
+    return ''
+  }
+}
 
 /** 相机图标（16px 线性精致镂空，与操作栏复制/分支图标同规格）。 */
 function CameraIcon(): JSX.Element {
@@ -61,6 +102,8 @@ export function AssistantScreenshotAction(
 ): JSX.Element {
   const { messageId, useChat, useSessions, sessionId } = props
   const [open, setOpen] = useState(false)
+  // 打开面板那一刻取一次当前模型名：截图定格的是「此刻」的选择，不订阅变化。
+  const [model, setModel] = useState('')
   const { closing, requestClose } = useModalClose(open, () => { setOpen(false) })
 
   // 只把快照落进 ref（返回常量 → 不触发重渲染），点击时再读。
@@ -104,7 +147,7 @@ export function AssistantScreenshotAction(
         type="button"
         className={open ? `${cls.btn} ${cls.btnBusy}` : cls.btn}
         aria-label="截图为图片"
-        onClick={() => { setOpen(true) }}
+        onClick={() => { setModel(currentModelName(String(sessionId))); setOpen(true) }}
       >
         <CameraIcon />
       </button>
@@ -117,6 +160,7 @@ export function AssistantScreenshotAction(
           dialogueTitle={dialogueTitle}
           sessionTitle={sessionTitle}
           cwd={cwd}
+          model={model}
           messageKey={String(messageId)}
         />
       )}
@@ -129,6 +173,12 @@ export function AssistantScreenshotAction(
  * @param ctx - client 插件上下文。
  */
 export function applyMessageScreenshot(ctx: ClientContext): void {
+  // 模型目录服务延迟注入：依赖齐全时把服务存下来；缺服务时回调不执行，
+  // 相机按钮与面板照常可用，只是页脚不显示模型名（currentModelName 回落空串）。
+  ctx.inject(['modelDirectories', 'remote.session'], (scope: ClientContext) => {
+    modelDirectoryService = scope.modelDirectories as unknown as ModelDirectoryService
+    ctx.effect(() => () => { modelDirectoryService = null }, 'dsh-seeker-bot: shot model directory cleanup')
+  })
   ensureStyles()
   ensureModalAnimStyles()
   ctx.slots.inject('conversation.chat.assistant-actions', () => ctx.slots.register({
