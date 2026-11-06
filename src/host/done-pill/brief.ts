@@ -257,13 +257,61 @@ export function readBriefToday(): BriefRecord | null {
   return readBriefRecord(briefDateKey(new Date()))
 }
 
-/** 某一天是否已经有简报文件（调度去重与前端 hasToday 的判定口径）。 */
+/** 某一天是否已经有简报文件（前端 hasToday 的判定口径；调度另看 generatedAt）。 */
 export function hasBriefForDate(date: string): boolean {
   try {
     return existsSync(briefFilePath(date))
   } catch {
     return false
   }
+}
+
+/**
+ * 最近几期已经写过的条目标题（跨日去重用）。
+ *
+ * 同一事件在不同媒体会有不同标题、不同 URL（例如 11-05 的「OpenAI 全量上线
+ * Images 2.6」与 11-06 的「OpenAI发布图像生成模型Images 2.6」就是同一件事），
+ * 只按 URL 去重挡不住。把原标题交给模型看，让它主动换新闻。
+ *
+ * @param date 本次要生成的日期：历史记录里同一天的旧卡不算「上一期」。
+ */
+function recentBriefTitles(date: string, limit = 12): string[] {
+  const titles: string[] = []
+  try {
+    for (const record of readBriefList(4)) {
+      if (record.date === date) continue
+      for (const card of record.cards) {
+        for (const entry of card.entries) {
+          const title = entry.title.replace(/\s+/g, ' ').trim()
+          if (title === '' || titles.includes(title)) continue
+          titles.push(title)
+          if (titles.length >= limit) return titles
+        }
+      }
+    }
+  } catch {
+    /* 历史记录读不到不影响本次生成 */
+  }
+  return titles
+}
+
+/** 最近几期用过的原文 URL（精确去重；同一事件的不同来源交给 recentBriefTitles）。 */
+function recentBriefUrls(date: string, limit = 60): Set<string> {
+  const urls = new Set<string>()
+  try {
+    for (const record of readBriefList(3)) {
+      if (record.date === date) continue
+      for (const card of record.cards) {
+        for (const entry of card.entries) {
+          if (entry.url !== undefined && entry.url !== '') urls.add(entry.url)
+          if (urls.size >= limit) return urls
+        }
+      }
+    }
+  } catch {
+    /* 历史记录读不到不影响本次生成 */
+  }
+  return urls
 }
 
 /**
@@ -861,7 +909,14 @@ export async function generateBrief(
     // 先采集素材（RSS 主 + 搜索兜底）再问模型：素材为空也继续
     // （origin 会记成 model，前端标注「未联网」）
     const collected = await collectBriefSources(ctx, parseBriefDate(date), controller.signal, customQueries)
-    const sources = collected.sources
+    // 跨日去重第一层：原文 URL 精确过滤（同一篇文章昨天上过卡就不再喂给模型）。
+    // 过滤后如果素材太薄（AI 源本来条数就有限），保留原素材——提示词里的
+    //「上一期已报道」清单会继续拦同一事件的其他来源写法，别为了去重把素材筛空。
+    const usedUrls = recentBriefUrls(date)
+    const freshSources = usedUrls.size === 0
+      ? collected.sources
+      : collected.sources.filter(source => !usedUrls.has(source.url))
+    const sources = freshSources.length >= SEARCH_FALLBACK_MIN ? freshSources : collected.sources
     const origin: 'web' | 'model' = sources.length > 0 ? 'web' : 'model'
 
     let raw = ''
@@ -869,7 +924,7 @@ export async function generateBrief(
       provider: route.provider,
       model: route.model,
       messages: [createUserMessage({
-        content: [{ type: 'text', text: buildBriefUserPrompt(sources, date) }],
+        content: [{ type: 'text', text: buildBriefUserPrompt(sources, date, recentBriefTitles(date)) }],
         // 消息归属写当前实际装载的 bundle id：用量与会话日志按 bundle 聚合
         source: { kind: 'plugin:dsh-seeker-bot', plugin: 'dsh-seeker-bot' },
       })],
@@ -941,9 +996,9 @@ export interface BriefCheckResult {
 /**
  * 检查今天该不该生成简报（满足时生成）。
  *
- * 判定顺序（**先便宜后昂贵**）：当前小时 ≥ 6 → 当天是否已有文件 → 距上次尝试是否
- * 满 30 分钟。前三步只读一个小目录 + 纯计算，窗口外每 30 分钟的 tick 几乎零成本；
- * 只有全部通过才会真的联网 + 调模型。
+ * 判定顺序（**先便宜后昂贵**）：当前小时 ≥ 6 → 当天是否已有「6 点后生成的」
+ * 正式简报 → 距上次尝试是否满 30 分钟。前三步只读一个小目录 + 纯计算，窗口外
+ * 每 30 分钟的 tick 几乎零成本；只有全部通过才会真的联网 + 调模型。
  *
  * @param now 判定用的当前时间（测试可注入）。
  */
@@ -957,13 +1012,27 @@ export async function checkBriefSchedule(
     return { ok: false, reason: `还没到 ${String(SCHEDULE_START_HOUR)} 点` }
   }
   const date = briefDateKey(at)
-  if (hasBriefForDate(date)) return { ok: false, reason: `${date} 的简报已生成` }
+  /**
+   * 关键：只有「计划生成时刻（今天 6:00）之后落盘的」才算今天的正式简报。
+   *
+   * 0–6 点之间生成的卡（用户手动点 / 开发调试 / 跨日边界触发的）日期键已经是今天，
+   * 但内容全是前一夜的旧闻。如果只用「文件存在」判定，6 点后的调度就会认为今天
+   * 已经完成、一整天都不再更新——这正是「AI 情报卡一直不更新」的根因。
+   */
+  const scheduleStart = new Date(at)
+  scheduleStart.setHours(SCHEDULE_START_HOUR, 0, 0, 0)
+  const existing = readBriefRecord(date)
+  if (existing !== null && existing.generatedAt >= scheduleStart.getTime()) {
+    return { ok: false, reason: `${date} 的简报已生成` }
+  }
   if (at.getTime() - lastAttemptAt < SCHEDULE_RETRY_GAP_MS) {
     return { ok: false, reason: '距上次尝试不足 30 分钟' }
   }
   lastAttemptAt = at.getTime()
 
-  const result = await generateBrief(ctx, { date, force: false })
+  // existing 是凌晨旧卡时必须 force：generateBrief 的非 force 分支会直接把它返回，
+  // 结果等于没重新生成。
+  const result = await generateBrief(ctx, { date, force: existing !== null })
   if (result.ok) {
     const reason = `已生成 ${date} 的简报`
     ctx.logger?.info?.(`[dsh-seeker-bot] ${reason}`)
@@ -1064,7 +1133,8 @@ export function applyBriefHost(ctx: Record<string, any>): void {
         generating,
         ...(lastError === undefined ? {} : { error: lastError }),
         // hasToday 按「文件是否存在」判定：回读可能因坏文件返回 null，
-        // 但「今天生成过」这件事本身对调度去重和前端提示都还有意义。
+        // 但「今天有文件」这件事本身对前端提示仍有意义。
+        // 注意调度去重已不只看它：凌晨生成的旧卡会在 6 点后被重新生成（见 checkBriefSchedule）。
         hasToday: hasBriefForDate(today),
       }
       sendJson(res, 200, payload as unknown as Record<string, unknown>)

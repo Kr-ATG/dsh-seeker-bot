@@ -182,7 +182,7 @@ export interface BriefTodayResponse {
   generating?: boolean
   /** 最近一次生成失败的中文原因（前端在空态里显示）。 */
   error?: string
-  /** 当天是否已经生成过（调度去重口径与宿主一致）。 */
+  /** 当天是否已有简报文件（文件存在口径；调度还会要求生成时间晚于当天 6:00）。 */
   hasToday?: boolean
 }
 
@@ -399,6 +399,7 @@ export function briefSystemPrompt(): string {
     '栏目要求（必须两张卡，顺序固定）：',
     '1. 第一张卡讲 AI 前沿模型与产品：必须优先聚焦 OpenAI（GPT/o系列/ChatGPT）、Claude（Anthropic）、Gemini（Google）、Grok（xAI）等核心主流模型发布、重大产品功能升级与生态突破；若素材中有上述头部厂商的动态，必须优先采选为条目；kicker 用「AI · 模型」或「AI · 某某」；',
     '2. 第二张卡讲世界或国内重大事件：政治、经济、冲突、灾害、监管、社会事件均可，kicker 用「世界 · 某某」或「国内 · 某某」。',
+    '3. **必须优先选择最近 24 小时内新发生的事**。若某条素材讲的事件已经在【上一期已报道】里出现过，除非这次有实质性新进展（新数字、新决定、新发布），否则不要再选它；宁可换一条更新的新闻，也不要把同一件事换个说法再写一遍。',
     '',
     '写作要求：',
     '- 全部用简体中文（素材可能是繁体或英文，一律转写成简体中文），语气克制、具体，像一本真正的要闻周刊；不要客服腔，不要「首先 / 其次 / 综上」。',
@@ -428,8 +429,15 @@ export function briefSystemPrompt(): string {
  *
  * @param sources 抓取 / 搜索到的素材；为空时提示词会说明「本次没有联网素材」，
  *   调用方据此把 origin 记成 'model'（模型只能用自身知识，前端会标注）。
+ * @param recentTitles 最近几期情报卡已经写过的条目标题（可选）。拼进提示词，
+ *   让模型主动避开「换个说法再写一遍同一件事」——这是 AI 卡连续几天看起来
+ *   没更新的根因之一，光靠发布时间过滤挡不住同一事件的不同来源。
  */
-export function buildBriefUserPrompt(sources: ReadonlyArray<BriefSourceItem>, date: string): string {
+export function buildBriefUserPrompt(
+  sources: ReadonlyArray<BriefSourceItem>,
+  date: string,
+  recentTitles: ReadonlyArray<string> = [],
+): string {
   const lanes: Array<{ lane: 'ai' | 'world' | 'china'; label: string }> = [
     { lane: 'ai', label: 'AI 方向' },
     { lane: 'world', label: '世界方向' },
@@ -441,12 +449,24 @@ export function buildBriefUserPrompt(sources: ReadonlyArray<BriefSourceItem>, da
       return items.length === 0 ? '' : `— ${label}（${String(items.length)} 条）—\n${items.map(item => briefSourceLine(item)).join('\n')}`
     })
     .filter(group => group !== '')
+  const recent = recentTitles
+    .map(title => String(title ?? '').replace(/\s+/g, ' ').trim())
+    .filter(title => title !== '')
+    .slice(0, 12)
+  const recentBlock = recent.length === 0
+    ? []
+    : [
+      '',
+      '【上一期已报道（不要重复）】',
+      ...recent.map(title => `- ${title.length > 40 ? `${title.slice(0, 40)}…` : title}`),
+    ]
   return [
     `日期：${date}（${briefDateLabel(date)}）`,
     '',
     sources.length === 0
       ? '【联网素材】\n（本次没有抓到任何联网素材。请只用你确定的事实写，宁可条目少，不要编造。）'
       : `【联网素材】共 ${String(sources.length)} 条：\n${groups.join('\n')}`,
+    ...recentBlock,
     '',
     '注意：素材的发布时间可能不是今天，也可能混有旧闻。优先选与今天最接近、信息最新的一条；',
     '素材里没有明确日期时，条目正文不要写「今天 / 昨日」这类时间词。',

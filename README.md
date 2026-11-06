@@ -558,16 +558,16 @@ blur(10px) 显影、下面一层点阵同步淡出），不是硬切。回合收
 
 **数据怎么来**（这是「每天自动」的关键，不依赖某个难找的 RSS 聚合商）：
 
-1. **RSS 主通道**：宿主并行抓 `BRIEF_FEEDS` 里的 9 个源 —— AI 侧 OpenAI 官方、TechCrunch AI、MarkTechPost AI、Ars Technica AI、InfoQ AI、量子位，要闻侧 BBC 中文、纽约时报中文网、WSJ 世界；每个源解析出标题 / 链接 / 摘要 / pubDate，按 pubDate 过滤 3 天前的旧闻、URL 去重，单源最多 6 条、素材总量封顶 48 条。
+1. **RSS 主通道**：宿主并行抓 `BRIEF_FEEDS` 里的 9 个源 —— AI 侧 OpenAI 官方、TechCrunch AI、MarkTechPost AI、Ars Technica AI、InfoQ AI、量子位，要闻侧 BBC 中文、纽约时报中文网、WSJ 世界；每个源解析出标题 / 链接 / 摘要 / pubDate，按 pubDate 过滤 3 天前的旧闻、URL 去重，单源最多 6 条、素材总量封顶 48 条。生成前还会拿最近几期简报做跨日去重：上一期用过的原文 URL 不再喂给模型，上一期的条目标题会作为「不要重复」清单拼进提示词（同一事件换个来源写法也挡得住）。
 2. **搜索兜底**：素材不足 6 条时，再用 `ctx.web.search` 走一遍 `briefQueries`（OpenAI / Claude / Gemini·Grok 三组头部模型动态 + 今日世界国内重大要闻，共四条）。实测宿主搜索链对「今天的新闻」召回很差（返回旧闻合集），所以它只是兜底，时效性靠 RSS 的 pubDate 保证。
 3. **模型整理**：素材按 lane（AI / 世界 / 国内）分组喂给当前聊天模型，要求「只依据素材、不得编造」，输出 1–2 张卡的结构化 JSON；清洗层（`sanitizeBriefRecord`）兜底任何字段缺失 / 超长 / 类型错误。
-4. **落盘 + 调度**：写 `<DSH_HOME>/storages/dsh-seeker-bot/done-pill/briefs/<YYYY-MM-DD>.json`；宿主每 30 分钟检查一次，当天 06:00 后且还没有简报就自动生成（页面关着也照跑）。
+4. **落盘 + 调度**：写 `<DSH_HOME>/storages/dsh-seeker-bot/done-pill/briefs/<YYYY-MM-DD>.json`；宿主每 30 分钟检查一次，当天 06:00 后若还没有「6 点后生成的」正式简报就自动生成（页面关着也照跑）。凌晨 0–6 点手动生成的旧卡日期键虽然是今天，但内容全是前一夜的旧闻——调度会在 6 点后把它识别出来并重新生成覆盖，避免一整天停在凌晨那一版。
 5. **降级不伪造**：RSS 与搜索全失败时仍然出卡，但 `origin` 记为 `model`，卡上标「未联网」——来源不同，可信度不同，界面上要看得出来。
 6. **AI 情报卡横版生图**（2026-11-06）：只在 AI 情报卡上面配图——由当前配置的生图模型现画一张宽幅横版科技大图，置于大卡弹窗正上方（位于眉标与正文之上，高度约 196px，带精致图注）；翻页切换到世界 / 国内卡时无图，自然恢复纯文字两栏版式。
 
 ![每日情报卡 · AI生图顶部横版图](docs/shots/daily-brief-ai-hero.png)
 
-宿主路由：`GET /api/dsh-done-pill/brief/today`、`POST /api/dsh-done-pill/brief/generate`（手动/换一批，`force: true`）、`GET /api/dsh-done-pill/brief/list?days=7`、`GET /api/dsh-done-pill/brief/image/<date>`。功能开关是「设置 → 插件 → 功能开关 → 每日情报卡」（`view.daily-brief`），关掉时连路由与定时器一起不挂。
+宿主路由：`GET /api/dsh-done-pill/brief/today`、`POST /api/dsh-done-pill/brief/generate`（手动/换一批，`force: true`）、`GET /api/dsh-done-pill/brief/list?days=7`、`GET /api/dsh-done-pill/brief/image/<date>`。大卡右上角有关闭按钮左侧的「↻ 重新整理」：点一下带 `force: true` 重新生成当天的卡（生成中转图标、按钮禁用，不会重复提交）。功能开关是「设置 → 插件 → 功能开关 → 每日情报卡」（`view.daily-brief`），关掉时连路由与定时器一起不挂。
 
 > 从 `dsh-companion` 迁入：存储键（`dsh.donePill.*`）、样式类名与宿主路由保持原样，浏览器里的已读状态、位置与外观设置无缝延续。`dsh-companion` 若同时启用，两套胶囊会重复显示——只保留一个即可（本插件已内置完整胶囊，不需要再开 companion 的 pill 模块）。
 

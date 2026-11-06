@@ -196,7 +196,12 @@ export function BriefCard(props: BriefCardProps): JSX.Element | null {
     }
   }, [])
 
-  /** 手动生成 / 重试：POST 一个空对象，宿主按默认日期与模型生成。 */
+  /**
+   * 手动生成 / 重新整理：POST force=true，宿主按默认日期与模型重新生成并覆盖当天旧卡。
+   *
+   * 必须带 force：宿主对「当天已有简报」的默认行为是直接复用旧文件，
+   * 不带 force 的请求只会原样返回那份旧卡——UI 上看起来「点了没反应」。
+   */
   const generate = useCallback(async (): Promise<void> => {
     if (generatingRef.current) return
     generatingRef.current = true
@@ -206,7 +211,7 @@ export function BriefCard(props: BriefCardProps): JSX.Element | null {
       const response = await fetch(GENERATE_ROUTE, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: '{}',
+        body: JSON.stringify({ force: true }),
         cache: 'no-store',
       })
       const raw: unknown = await response.json()
@@ -665,6 +670,21 @@ export function BriefCard(props: BriefCardProps): JSX.Element | null {
               }
             }}
           >
+            {/* 重新整理：force 重生成当天的卡。用户看到 AI 卡内容旧了可以随时手动换一批。 */}
+            <button
+              type="button"
+              className="db-refresh"
+              aria-label="重新整理情报卡"
+              title="重新整理情报卡"
+              data-busy={generating ? '1' : undefined}
+              disabled={generating}
+              onClick={(event) => {
+                event.stopPropagation()
+                void generate()
+              }}
+            >
+              <span className="db-refresh-icon" aria-hidden>↻</span>
+            </button>
             <button type="button" className="db-close" aria-label="关闭情报卡" onClick={close}>✕</button>
             {body}
           </div>

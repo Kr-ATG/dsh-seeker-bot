@@ -71,6 +71,7 @@ const {
   briefCardImagePrompt,
   briefDateKey,
   briefQueries,
+  buildBriefUserPrompt,
   parseBriefFeed,
   sanitizeBriefRecord,
 } = shared
@@ -189,6 +190,26 @@ const SEARCH_SOURCES = [
   { url: 'https://search.test/ai-1', title: '搜索结果：AI 要闻', summary: '一条搜索摘要' },
   { url: 'https://search.test/world-1', title: '搜索结果：世界要闻', snippet: '另一条搜索摘要' },
 ]
+
+/** 把一份合法简报写进临时 DSH_HOME（调度用例造「凌晨旧卡 / 6 点后新卡」）。 */
+function writeBriefFixture(date, generatedAt, title = '旧闻标题', urls = null) {
+  const cards = [{
+    kicker: 'AI · 前沿',
+    title,
+    lede: '导语',
+    entries: [1, 2, 3].map((index) => ({
+      title: title + ' ' + String(index),
+      text: '正文',
+      source: '量子位',
+      url: urls === null ? 'https://example.test/' + date + '/' + String(index) : urls[index - 1],
+      tag: 'AI',
+    })),
+  }]
+  const record = sanitizeBriefRecord({ cards }, { date, origin: 'web', sources: 3, generatedAt })
+  mkdirSync(BRIEFS_DIR, { recursive: true })
+  writeFileSync(join(BRIEFS_DIR, date + '.json'), JSON.stringify(record, null, 2))
+  return record
+}
 
 /* ───────────────────────────── 桩 ctx ───────────────────────────── */
 
@@ -367,6 +388,20 @@ await test('briefQueries：四条查询、覆盖 AI 与世界 / 国内', () => {
   assert(queries.some((query) => query.includes('AI')), '至少一条 AI 查询')
   assert(queries.some((query) => query.includes('世界')), '至少一条世界查询')
   assert(queries.some((query) => query.includes('国内')), '至少一条国内查询')
+})
+
+await test('buildBriefUserPrompt：近期已报道的标题会拼进提示词（跨日去重）', () => {
+  const prompt = buildBriefUserPrompt(
+    [{ title: '今天的 AI 新闻', url: 'https://example.test/today', lane: 'ai' }],
+    '2026-11-06',
+    ['OpenAI 全量上线 Images 2.6 图像模型', 'OpenAI 耗资百万挖出近千个 Linux 内核漏洞'],
+  )
+  assert(prompt.includes('【上一期已报道（不要重复）】'), '提示词必须有「上一期已报道」段')
+  assert(prompt.includes('OpenAI 全量上线 Images 2.6 图像模型'), '昨天的 AI 条目标题必须进提示词')
+  assert(prompt.includes('OpenAI 耗资百万挖出近千个 Linux 内核漏洞'), '昨天的第二条目也要进提示词')
+  // 不传第三参时保持旧形状：没有「上一期已报道」段（向后兼容）
+  const plain = buildBriefUserPrompt([{ title: 't', url: 'https://example.test/1', lane: 'ai' }], '2026-11-06')
+  assert(!plain.includes('【上一期已报道'), '没有历史标题时不该出现空段')
 })
 
 await test('sanitizeBriefRecord：条目不足 3 条 → null，合格 → 1–2 张卡', () => {
@@ -580,6 +615,22 @@ await test('generateBrief：当天已有简报时 force=false 直接复用（不
   assertEqual(llmQueue.length, before, '不该消耗模型调用')
 })
 
+await test('generateBrief：上一期用过的原文 URL 会被过滤、标题会进提示词', async () => {
+  writeBriefFixture('2026-11-15', Date.now() - 86400000, '昨天的独家标题', [
+    'https://example.test/qbitai/1',
+    'https://example.test/qbitai/2',
+    'https://example.test/qbitai/3',
+  ])
+  const { ctx } = makeCtx()
+  llmQueue.push(splitChunks(GOOD_TEXT))
+  const result = await generateBrief(ctx, { date: '2026-11-16', force: true })
+  assertEqual(result.ok, true, '生成应成功：' + String(result.error))
+  const userText = String(lastLlmOptions.messages?.[0]?.content?.[0]?.text ?? '')
+  assert(!userText.includes('example.test/qbitai/1'), '上一期用过的原文 URL 不该再喂给模型')
+  assert(userText.includes('【上一期已报道（不要重复）】'), '提示词必须带上一期已报道清单')
+  assert(userText.includes('昨天的独家标题 1'), '上一期条目标题必须进提示词')
+})
+
 /* ═════════════════════════════ HTTP 路由 ═════════════════════════════ */
 
 await test('路由：today / generate / list 三条都在，形状符合契约', async () => {
@@ -686,6 +737,33 @@ await test('checkBriefSchedule：凌晨不生成（便宜判定先跑）', async
   const result = await checkBriefSchedule(ctx, new Date(2026, 10, 3, 3, 0))
   assertEqual(result.ok, false, '凌晨 3 点不该生成')
   assert(String(result.reason).includes('还没到'), '原因应说明还没到 6 点，实际：' + String(result.reason))
+})
+
+await test('checkBriefSchedule：当天凌晨生成的旧卡会在 6 点后重新生成', async () => {
+  const date = '2026-11-12'
+  const at = new Date(2026, 10, 12, 9, 0)
+  const oldGeneratedAt = new Date(2026, 10, 12, 1, 0).getTime()
+  writeBriefFixture(date, oldGeneratedAt, '凌晨那版旧闻')
+  const { ctx } = makeCtx()
+  llmQueue.push(splitChunks(GOOD_TEXT))
+  const result = await checkBriefSchedule(ctx, at)
+  assertEqual(result.ok, true, '6 点后必须把凌晨旧卡换掉，实际：' + result.reason)
+  const persisted = JSON.parse(readFileSync(join(BRIEFS_DIR, date + '.json'), 'utf8'))
+  assert(persisted.generatedAt !== oldGeneratedAt, '落盘记录必须被新生成覆盖（generatedAt 变了）')
+  assertEqual(persisted.cards[0].title, '模型开始自己找活干', '必须是模型新写的卡，而不是复用了凌晨旧卡')
+})
+
+await test('checkBriefSchedule：当天 6 点后已生成 → 不重复生成', async () => {
+  const date = '2026-11-13'
+  const at = new Date(2026, 10, 13, 9, 0)
+  const freshAt = new Date(2026, 10, 13, 7, 0).getTime()
+  writeBriefFixture(date, freshAt)
+  const { ctx } = makeCtx()
+  const before = llmQueue.length
+  const result = await checkBriefSchedule(ctx, at)
+  assertEqual(result.ok, false, '当天已有 6 点后的卡时不该再生成')
+  assert(String(result.reason).includes('已生成'), '原因应说明已生成，实际：' + String(result.reason))
+  assertEqual(llmQueue.length, before, '不该消耗模型调用')
 })
 
 await test('applyBriefHost：调度定时器已挂上且可 dispose', () => {

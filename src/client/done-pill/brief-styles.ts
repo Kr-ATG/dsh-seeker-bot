@@ -248,6 +248,37 @@ body[data-ds-dark-theme] .db-sheet{--paper-base:rgb(38 37 35)}
 .db-close:hover{background:var(--dpl-row-hover);color:var(--dpl-fg)}
 .db-close:focus-visible{outline:2px solid var(--dpl-fg);outline-offset:1px}
 
+/* 右上角「重新整理」按钮：与关闭按钮同尺寸，排在它左边。
+   busy 时只转内部的 ↻ 图标（按钮本体不转），避免整块底色跟着旋。 */
+.db-refresh{
+  position:absolute;
+  top:calc(14px * var(--dps, 1));
+  right:calc(48px * var(--dps, 1));
+  z-index:3;
+  width:calc(26px * var(--dps, 1));
+  height:calc(26px * var(--dps, 1));
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding:0;
+  border:none;
+  border-radius:calc(6px * var(--dps, 1));
+  background:color-mix(in srgb,var(--dpl-panel-bg) 75%,transparent);
+  backdrop-filter:blur(4px);
+  color:var(--dpl-fg-weak);
+  font-size:calc(14px * var(--dps, 1) * var(--dpt, 1));
+  line-height:1;
+  cursor:pointer;
+  transition:background-color .18s ease,color .18s ease,transform .12s ease;
+}
+.db-refresh:hover{background:var(--dpl-row-hover);color:var(--dpl-fg)}
+.db-refresh:active{transform:scale(.94)}
+.db-refresh:focus-visible{outline:2px solid var(--dpl-fg);outline-offset:1px}
+.db-refresh:disabled{cursor:default}
+.db-refresh-icon{display:inline-block;line-height:1}
+.db-refresh[data-busy="1"] .db-refresh-icon{animation:dbRefreshSpin .9s linear infinite}
+@keyframes dbRefreshSpin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+
 /* 顶部横版图（AI 情报卡专用，位于眉标与正文之上，宽幅横构图） */
 .db-hero{
   position:relative;
@@ -576,7 +607,7 @@ body[data-ds-dark-theme] .db-sheet{--paper-base:rgb(38 37 35)}
 /* 系统开了「减少动效」时只保留状态变化，不做位移与 shimmer。 */
 @media (prefers-reduced-motion:reduce){
   .dsh-daily-brief,.db-modal,.db-sheet{transition:none;animation:none}
-  .db-skeleton-line,.db-progress::after,.db-pip{animation:none}
+  .db-skeleton-line,.db-progress::after,.db-pip,.db-refresh-icon{animation:none}
 }
 `
 
