@@ -36,6 +36,7 @@ import { QuoteBody } from './quote.body.tsx'
 import { LinkBody } from './link.body.tsx'
 import { CalculatorBody } from './calculator.body.tsx'
 import { ChartBody } from './chart.body.tsx'
+import { CompareBody } from './compare.body.tsx'
 
 /** Body 组件的统一 props。 */
 export interface IuBodyProps<S extends IuState, Spec extends IuSpecBase> {
@@ -89,4 +90,5 @@ export const IU_BODIES: ReadonlyMap<string, IuKindBody> = new Map<string, IuKind
   ['weather', { kind: 'weather', Body: WeatherBody }],
   ['quote', { kind: 'quote', Body: QuoteBody }],
   ['link', { kind: 'link', Body: LinkBody }],
+  ['compare', { kind: 'compare', Body: CompareBody }],
 ])

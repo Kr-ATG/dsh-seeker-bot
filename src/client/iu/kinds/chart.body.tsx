@@ -7,7 +7,7 @@
  *  · 纯内联 SVG，无外部重型图表库依赖。
  */
 
-import { memo, useMemo } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import type { IuBodyProps } from './bodies.ts'
 import type { ChartMode, ChartState, IuChartSpec } from './chart.ts'
 import { formatNum } from './core.ts'
@@ -21,17 +21,42 @@ export const ChartBody = memo(function ChartBody(
   const data = s0?.data ?? []
   const maxVal = Math.max(...data, 1)
 
-  // 计算多系列或单系列的柱状图数据
-  const svgW = 500
+  // 坐标系按「卡片容器实测宽」推导，而不是视口宽度：卡片宽度由对话流决定，
+  // 侧栏折叠 / 窗口缩放 / 全屏进出都会变，只有 ResizeObserver 量到的是图表
+  // 容器自己的实宽。SSR 与截图链路没有 ResizeObserver 时兜底 500（旧版写死值），
+  // 挂载后先同步量一次，避免 500 兜底带来的可见高度跳变。
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const [svgW, setSvgW] = useState(500)
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const measure = (w: number) => {
+      if (w > 0) setSvgW(Math.max(240, Math.round(w)))
+    }
+    measure(el.clientWidth)
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width
+      if (w) measure(w)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
   const svgH = 200
-  const padL = 40
-  const padR = 20
+  const padL = svgW < 360 ? 28 : 40
+  const padR = svgW < 360 ? 12 : 20
   const padT = 20
   const padB = 30
-  const chartW = svgW - padL - padR
+  const chartW = Math.max(1, svgW - padL - padR)
   const chartH = svgH - padT - padB
 
-  const barWidth = Math.min(36, Math.max(12, (chartW / (spec.categories.length || 1)) * 0.6))
+  const barWidth = Math.min(36, Math.max(6, (chartW / (spec.categories.length || 1)) * 0.6))
+  // 窄容器抽稀类目标签：按图表可用宽估算能放下的标签数，隔 N 个显示一个，
+  // 首个始终保留，避免 12 个类目在窄卡里挤成一团（不改数据，只改标签密度）。
+  const labelEvery = Math.max(1, Math.ceil(
+    spec.categories.length / Math.max(1, Math.floor(chartW / 56)),
+  ))
 
   // 折线图坐标计算
   const linePoints = useMemo(() => {
@@ -134,7 +159,7 @@ export const ChartBody = memo(function ChartBody(
       )}
 
       {/* 图表主区域 */}
-      <div className="dtt-iu__chart-container">
+      <div className="dtt-iu__chart-container" ref={containerRef}>
         {currentMode === 'bar' && (
           <svg className="dtt-iu__chart-svg" viewBox={`0 0 ${svgW} ${svgH}`}>
             {/* 刻度背景横虚线 */}
@@ -208,7 +233,7 @@ export const ChartBody = memo(function ChartBody(
                     fontSize="10"
                     fill="var(--dsh-muted, currentColor)"
                   >
-                    {spec.categories[i]}
+                    {i % labelEvery === 0 ? spec.categories[i] : ''}
                   </text>
                 </g>
               )
@@ -287,7 +312,7 @@ export const ChartBody = memo(function ChartBody(
                     fontSize="10"
                     fill="var(--dsh-muted, currentColor)"
                   >
-                    {p.cat}
+                    {i % labelEvery === 0 ? p.cat : ''}
                   </text>
                 </g>
               )
@@ -296,8 +321,8 @@ export const ChartBody = memo(function ChartBody(
         )}
 
         {currentMode === 'donut' && (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <svg style={{ width: 220, height: 200 }} viewBox="150 0 200 200">
+          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+            <svg style={{ width: 'min(100%, 220px)', height: 'auto' }} viewBox="150 0 200 200">
               {donutSlices.map((s, i) => (
                 <path
                   key={i}

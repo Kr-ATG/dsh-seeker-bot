@@ -277,7 +277,7 @@ const CSS = [
   '.dtt-iu__tnode[data-depth="4"] > .dtt-iu__trow { opacity: .88; }',
   '.dtt-iu__tnode > .dtt-iu__trow:hover { opacity: 1; }',
   '/* 窄屏：缩进量减小，行距收紧 */',
-  '@media (max-width: 480px) {',
+  '@container iu (max-width: 480px) {',
   '  .dtt-iu__tkids { margin-left: calc(9px * var(--iu-text-scale, 1)); padding-left: calc(6px * var(--iu-text-scale, 1)); }',
   '  .dtt-iu__trow { gap: 4px; padding: 3px 4px; }',
   '}',

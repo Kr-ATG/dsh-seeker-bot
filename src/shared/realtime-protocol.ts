@@ -294,6 +294,14 @@ export type RealtimeServerMessage =
      */
     artifacts?: RealtimeArtifact[]
   }
+  /**
+   * 语音挂断：用户明确要求挂断，模型已经说完道别，宿主请前端在**播完最后一句**后收线。
+   *
+   * 为什么不直接发 closed：`response.done` 只代表音频生成完，浏览器播放器里通常
+   * 还排着一两秒音频；立刻关连接会把「再见」的尾音切掉。前端收到后等
+   * `RealtimeCall.playing === false` 再 finalize，并留 6 秒上限兜底。
+   */
+  | { type: 'hangup'; reason?: string }
   /** 会话即将到期（30 分钟上限），前端应提示用户。 */
   | { type: 'expiring'; inMs: number }
   /**

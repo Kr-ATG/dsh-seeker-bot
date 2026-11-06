@@ -149,8 +149,9 @@ const CSS = [
   'body[data-ds-dark-theme] .dtt-iu__pblack .dtt-iu__pkey[data-on="1"] { background: linear-gradient(180deg,',
   '  color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 72%, #0d1117) 0%,',
   '  color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 42%, #0d1117) 100%); }',
-  /* 窄屏：琴键本来就窄，缩一点高度避免挤成缝（--iu-piano-scale 由 IuCard 按容器宽给）。 */
-  '@media (max-width: 480px) { .dtt-iu__piano { height: 108px; } }',
+  /* 窄容器：按卡片自身宽度分档收琴键高度（@container 量容器，不量视口）。 */
+  '@container iu (max-width: 480px) { .dtt-iu__piano { height: 108px; } }',
+  '@container iu (max-width: 340px) { .dtt-iu__piano { height: 88px; } }',
   /* reduced-motion 兜底：关掉「按下回弹」动画与过渡，但**下沉与高亮保留**——
      那是按键反馈本身，不是装饰。去掉它按下去就没反应了。
      ⚠ 不得给 [data-on="1"] 写 transform:none（冒烟有断言钉这条）。 */

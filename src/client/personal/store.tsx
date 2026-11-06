@@ -6228,6 +6228,26 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
         patch((call) => ({ ...call, realtime: { ...call.realtime, error: error.message } }))
         if (alive()) toast(error.message)
       },
+      /*
+       * 语音挂断：模型已经说完道别，但播放器里通常还排着一两秒音频。
+       * 先把界面切成「通话已结束」，等播放队列排空后再真正收线——立刻 stop 会把
+       * 「再见」的尾音切掉。6 秒是兜底上限：音频卡住 / 浏览器挂起时不能永远不收线。
+       */
+      onHangup: (reason) => {
+        if (!alive()) return
+        patch((call) => ({ ...call, status: 'ended' }))
+        const deadline = Date.now() + 6000
+        const checkDrained = (): void => {
+          if (!alive()) return
+          // playing 变 false = 最后一句已播完；超过 6 秒也强制收线
+          if (session?.playing !== true || Date.now() >= deadline) {
+            finalizeCall(reason)
+            return
+          }
+          later(120, checkDrained)
+        }
+        later(120, checkDrained)
+      },
       onClosed: (reason) => {
         if (!alive()) return
         // 链路彻底结束：落通话记录并如实说明原因（没内容就不落，见 finalizeCall）

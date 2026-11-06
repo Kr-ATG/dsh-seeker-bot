@@ -140,16 +140,16 @@ const css = `
   gap: 2px;
 }
 .dtt-iu__chart-m-label {
-  font-size: 11px;
+  font-size: calc(11px * var(--iu-text-scale, 1));
   color: var(--dsh-muted, rgba(140, 145, 160, 0.8));
 }
 .dtt-iu__chart-m-val {
-  font-size: 16px;
+  font-size: calc(16px * var(--iu-text-scale, 1));
   font-weight: 700;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .dtt-iu__chart-m-sub {
-  font-size: 10px;
+  font-size: calc(10px * var(--iu-text-scale, 1));
   color: var(--dsh-muted, rgba(140, 145, 160, 0.65));
 }
 .dtt-iu__chart-toolbar {

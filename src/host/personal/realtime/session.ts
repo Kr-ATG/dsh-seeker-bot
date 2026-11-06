@@ -193,6 +193,14 @@ export function buildSessionUpdate(options: {
    */
   agentTools?: boolean
   /**
+   * 是否注册 `end_call`（语音挂断）。
+   *
+   * 默认开：这是通话的基础能力，不依赖 Bot 定义；只有上游拒绝带 tools 的
+   * `session.update`、宿主降级重发时才会显式关掉（见 index.ts 的
+   * resendUpdateWithoutTools）。
+   */
+  endCallTool?: boolean
+  /**
    * 供应商（决定几处**不兼容**的字段写法，见下）。
    *
    * 各家虽然都自称 OpenAI Realtime 兼容，但实测差异点集中在这三处：
@@ -212,6 +220,7 @@ export function buildSessionUpdate(options: {
     silenceDurationMs = 800,
     eventId,
     agentTools = false,
+    endCallTool = true,
     vendor = 'stepfun',
     speechRate,
   } = options
@@ -247,6 +256,30 @@ export function buildSessionUpdate(options: {
    * 字段」是各家都认的写法。timeout_seconds 官方默认 3 秒，搜索类请求偏紧，给到 6。
    */
   const tools: unknown[] = []
+  /*
+   * end_call：语音挂断。
+   *
+   * 为什么必须是 function calling 而不是让前端做关键词匹配：ASR 结果里「不要挂断」
+   * 也包含「挂断」，纯关键词会误挂；交给模型判断 + 工具调用才能分清语义。而且模型
+   * 调用工具后会先拿到一句「请道别」的 output，于是能自然说一句「好的，挂了」再收线，
+   * 不会说完「挂断」两个字就突兀静音。
+   *
+   * 这个工具不依赖 Bot 定义：即使没有 run_task，人也得能挂电话。
+   */
+  if (endCallTool) {
+    tools.push({
+      type: 'function',
+      function: {
+        name: 'end_call',
+        description: '结束当前语音通话。当用户明确要求挂断、结束通话、不用聊了时调用。调用后你会得到一次简短道别的机会，然后通话会自动结束。用户只是随口说「拜拜」「再见」时不要调用，先问一句是否要挂断。',
+        parameters: {
+          type: 'object',
+          properties: {},
+          required: [],
+        },
+      },
+    })
+  }
   if (webSearch) {
     tools.push({
       type: 'web_search',
@@ -316,6 +349,7 @@ export function wrapVoiceInstructions(persona: string, speed?: RealtimeSpeed): s
     '需要分点时用「第一、第二」这样的口语连接词。',
     '遇到需要最新信息的问题（新闻、版本发布、实时动态、价格、天气等），先用你能用的工具去查，查不到再如实说明，不要凭空猜测，也不要一上来就说自己不能联网。',
     '如果用户让你做实际的事（生成图片、查资料整理、读写文件、跑命令等），先判断你手上有没有对应工具：有就直接做；没有就用 run_task 交给执行助手，不要说「我没有这个功能」。',
+    '当用户明确要求结束通话（「挂断」「结束通话」「先这样吧」等）时，调用 end_call 工具，不要只口头答应；用户只是随口说「拜拜」「再见」时，先问一句要不要挂断，别擅自挂。',
     '听不清或没听懂时直接说，不要猜。',
   ]
   // 语速只能靠指令表达（Realtime API 没有 speed 参数，见 speedInstruction 的注释）

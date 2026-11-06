@@ -213,7 +213,7 @@ const CSS = [
   '.dtt-iu__tl-item[data-expanded="1"] .dtt-iu__tl-body {',
   '  max-height: calc(220px * var(--iu-text-scale, 1)); opacity: .85; }',
   '/* 窄屏：horizontal 降级为竖向（item 几何、连接线几何整套切回竖线） */',
-  '@media (max-width: 640px) {',
+  '@container iu (max-width: 640px) {',
   '  .dtt-iu__timeline[data-orient="horizontal"] { flex-direction: column; overflow-x: visible; }',
   '  .dtt-iu__timeline[data-orient="horizontal"] .dtt-iu__tl-item { flex-direction: row;',
   '    align-items: flex-start; text-align: left; gap: 10px; min-width: 0; padding: 6px 8px; }',

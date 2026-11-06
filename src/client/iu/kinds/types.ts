@@ -25,6 +25,7 @@ import type { IuQuoteSpec } from './quote.ts'
 import type { IuLinkSpec } from './link.ts'
 import type { IuCalculatorSpec } from './calculator.ts'
 import type { IuChartSpec } from './chart.ts'
+import type { IuCompareSpec } from './compare.ts'
 
 /** 全部合法 spec 的判别联合（判别式是 kind 字段）。 */
 export type IuSpec =
@@ -45,3 +46,4 @@ export type IuSpec =
   | IuWeatherSpec
   | IuQuoteSpec
   | IuLinkSpec
+  | IuCompareSpec

@@ -339,7 +339,7 @@ const CSS = [
   `.dtt-iu__quiz-score-chip[data-ok="1"] { background: color-mix(in srgb, ${STATE_COLORS.ok} 13%, transparent);`,
   `  color: ${STATE_COLORS.ok}; }`,
   /* 窄屏：选项满宽纵排 */
-  '@media (max-width: 560px) {',
+  '@container iu (max-width: 560px) {',
   '  .dtt-iu__q-opts { grid-template-columns: 1fr; }',
   '}',
   /* 无障碍：关动画但**保留状态色与最终态**——对错反馈靠颜色/符号本身，不靠动效 */

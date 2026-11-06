@@ -321,7 +321,7 @@ const CSS = [
   '.dtt-iu__wicon-hero { display: flex; align-items: center; justify-content: center; flex-shrink: 0; padding-top: 2px;',
   '  filter: drop-shadow(0 4px 14px rgba(245,158,11,.15)); }',
   '/* 四列气象生活指标：极简通透，去除灰色小块框 */',
-  '.dtt-iu__wmetrics { display: grid; grid-template-columns: repeat(4, 1fr); padding: 11px 0 12px;',
+  '.dtt-iu__wmetrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(76px, 1fr)); padding: 11px 0 12px;',
   '  border-top: .5px solid rgba(127,127,127,.16); border-bottom: .5px solid rgba(127,127,127,.16); margin-bottom: 12px; }',
   '.dtt-iu__wm-item { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 0; }',
   '.dtt-iu__wm-label { font-size: calc(11px * var(--iu-text-scale, 1)); color: var(--dsw-alias-label-tertiary, currentColor); opacity: .6; }',
@@ -342,9 +342,10 @@ const CSS = [
   '.dtt-iu__wf-cond { font-size: calc(11px * var(--iu-text-scale, 1)); opacity: .75; white-space: nowrap; }',
   '.dtt-iu__wf-temp { font-size: calc(11.5px * var(--iu-text-scale, 1)); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }',
   '.dtt-iu__wf-rain { font-size: 10px; color: #0ea5e9; font-variant-numeric: tabular-nums; }',
-  '@media (max-width: 480px) {',
+  '@container iu (max-width: 480px) {',
   '  .dtt-iu__wbig-temp { font-size: calc(44px * var(--iu-text-scale, 1)); }',
   '  .dtt-iu__wmetrics { grid-template-columns: repeat(2, 1fr); gap: 8px; }',
+  '  .dtt-iu__wf-col { min-width: 52px; padding: 6px 2px; }',
   '}',
 ].join('\n')
 

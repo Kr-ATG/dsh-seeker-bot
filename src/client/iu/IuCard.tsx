@@ -29,9 +29,18 @@
  * 基座 CSS（styles.ts）在 .dtt-iu 上定义 --iu-text-scale = 官方正文字号 / 14，
  * 各 kind 的字号写 calc(Npx * var(--iu-text-scale,1))，于是卡片文字跟随官方
  * 「设置 → 字号」无级缩放，不需要 JS 监听。
+ *
+ * ## 宽度轴（卡片级，不是视口级）
+ *
+ * 基座 CSS 给 .dtt-iu 挂 container-type: inline-size / container-name: iu，
+ * kinds 侧的窄卡降级写 @container iu (max-width:Npx)，量的是这张卡自己的实宽。
+ * 外壳再用 ResizeObserver 把实测宽写进根节点 inline 变量 --iu-card-w（px）与
+ * data-iu-w（narrow/mid/wide）；两者都不经 JS 传给 Body，kind 该用哪把尺子自己选。
+ * 全屏层是 portal 到 body 的独立实例，各自测量、各自写，不共用内嵌卡的读数。
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { IuSpecBase } from './kinds/contract.ts'
 import type { IuState } from './kinds/contract.ts'
@@ -145,6 +154,57 @@ function pendingStage(bytes: number): JSX.Element {
   )
 }
 
+/**
+ * 卡片根节点：把「自身实测宽度」写进根节点，供 kinds 侧的 @container iu 与
+ * data-iu-w 分档消费。
+ *
+ * ⚠ 量的是**这张卡自己**的宽度，不是浏览器视口：卡片宽度由对话流决定（侧栏
+ * 折叠、窗口缩放、全屏进出都会变），媒体查询量视口会漏掉这些变化。全屏层是
+ * createPortal 到 body 的独立实例，所以每个根节点各自挂一份 observer，不能
+ * 由内嵌卡代测。
+ *
+ * 照 section.tsx 的范式：读数去抖、只在结果翻转时动 DOM、卸载清理。去抖取
+ * 120ms（约 8 帧）——比设置页三栏切换短，因为这里不搬动整列内容，只更新一个
+ * 变量和一个档位属性；既滤掉拖拽侧栏时的连续抖动，又不让人看出延迟。
+ * ⚠ 宽度/档位切换**不加 transition**：布局属性连续改会触发布局重算，容器查询
+ * 的切换应当是即时确定的。
+ */
+function IuRoot({ className, children }: {
+  readonly className: string
+  readonly children: ReactNode
+}): JSX.Element {
+  const ref = useRef<HTMLElement | null>(null)
+  useEffect(() => {
+    const el = ref.current
+    if (el === null || typeof ResizeObserver === 'undefined') return undefined
+    let timer: number | undefined
+    let lastW = -1
+    const apply = (): void => {
+      const w = Math.round(el.getBoundingClientRect().width)
+      // 实测宽只在变化时写：去抖后仍可能重复报到同一宽度，无脑 setProperty
+      // 会让每次回调都碰一次 inline style。
+      if (w !== lastW) {
+        lastW = w
+        el.style.setProperty('--iu-card-w', `${w}px`)
+      }
+      // 档位只在跨阈值时改（<520 / 520–860 / >860），同样避免无谓的 DOM 写入。
+      const next = w < 520 ? 'narrow' : w <= 860 ? 'mid' : 'wide'
+      if (el.dataset.iuW !== next) el.dataset.iuW = next
+    }
+    apply()
+    const observer = new ResizeObserver(() => {
+      if (timer !== undefined) window.clearTimeout(timer)
+      timer = window.setTimeout(() => { timer = undefined; apply() }, 120)
+    })
+    observer.observe(el)
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer)
+      observer.disconnect()
+    }
+  }, [])
+  return <figure ref={ref} className={className}>{children}</figure>
+}
+
 /** 持久化写入的节流窗口（拖动滑块会高频 setState，逐次写会拖慢主线程）。 */
 const PERSIST_DEBOUNCE = 400
 
@@ -166,9 +226,9 @@ export const IuCard = memo(function IuCard({ spec, pending = false, bytes = 0, o
 }): JSX.Element | null {
   if (pending || spec === undefined) {
     return (
-      <figure className="dtt-iu dtt-iu--pending">
+      <IuRoot className="dtt-iu dtt-iu--pending">
         {pendingStage(bytes)}
-      </figure>
+      </IuRoot>
     )
   }
   // hooks 必须在任何提前 return 之后仍保持稳定调用——但 pending 分支不触发任何
@@ -307,13 +367,13 @@ function IuCardLive({ spec, onFill }: {
   )
   return (
     <>
-      <figure className="dtt-iu">
+      <IuRoot className="dtt-iu">
         <Head
           title={spec.title}
           actions={<CardActions onFullscreen={enterFullscreen} />}
         />
         {bodyNode}
-      </figure>
+      </IuRoot>
       {fullscreen && typeof document !== 'undefined' && createPortal(
         <div
           className="dtt-iu-fs"
@@ -337,10 +397,10 @@ function IuCardLive({ spec, onFill }: {
           </div>
           <div className="dtt-iu-fs__stage">
             {/* 全屏里再渲染一份卡片：与内嵌卡共享 state，改一边两边同步。 */}
-            <figure className="dtt-iu dtt-iu--fs">
+            <IuRoot className="dtt-iu dtt-iu--fs">
               <Head title={spec.title} />
               {bodyNode}
-            </figure>
+            </IuRoot>
           </div>
         </div>,
         document.body,

@@ -2888,6 +2888,15 @@ const MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 const MAX_ARTIFACTS = 12
 
 /**
+ * 产出物时间门槛的宽容窗口（毫秒）。
+ *
+ * 判据是「文件必须在本轮开始之后写过」，但事件时间与文件系统写入时间之间有
+ * 几十毫秒到几秒的抖动（尤其 Windows 上 writeFileSync 与 event.time 不是同一个
+ * 时钟源），留 5 秒窗口避免把真产出误杀。跨小时 / 跨天的历史文件照样被拦住。
+ */
+const ARTIFACT_MTIME_GRACE_MS = 5000
+
+/**
  * 可识别的产出物扩展名 → 展示类型。
  *
  * 这份表同时是**扫描结果文本时的白名单**：只有命中它的 token 才会被当路径去
@@ -2914,8 +2923,12 @@ function normalizeCompare(value: string): string {
  *
  * 判据（缺一条都不收）：落在 bot 工作区内、扩展名在白名单、存在且是普通文件、
  * 非空、≤256MB。绝对路径与相对路径都接受（相对以 bot 工作区为基准）。
+ *
+ * `since` 是可选的时间门槛（毫秒时间戳）：传了它，文件就必须在那之后写过。
+ * 只有「从结果文本里猜出来的路径」需要传 —— present 参数是模型显式声明的
+ * 交付物，不看时间（理由见 collectArtifacts）。
  */
-function artifactRefFor(rawPath: string): ArtifactRef | null {
+function artifactRefFor(rawPath: string, since?: number): ArtifactRef | null {
   const text = rawPath.trim()
   if (text === '' || text.includes('://')) return null
   let target: string
@@ -2937,6 +2950,23 @@ function artifactRefFor(rawPath: string): ArtifactRef | null {
     return null
   }
   if (!info.isFile() || info.size <= 0 || info.size > MAX_ARTIFACT_BYTES) return null
+  /*
+   * 时间门槛：只认「本轮开始之后才写过」的文件。
+   *
+   * 为什么必须卡：结果文本里的路径不能证明它是**这一轮**的产物。模型随手
+   * readdir / glob 一下工作区，历史文件的路径就原样印进了结果，全被当成本轮产出
+   * 挂上卡片（2026-11-06 实测：一轮只读侦察把 11-02 的 12 张旧图全认领了，用户
+   * 看到「12 个产出」，一个都不是这轮做的）。
+   *
+   * 为什么取 max(mtime, birthtime)：复制类工具会保留源文件的 mtime
+   * （robocopy /COPY:DAT、cp -p、PowerShell Copy-Item），只看 mtime 会把复制出来
+   * 的真产出误杀；创建时间在主流文件系统上都是新文件的新时间，可作兜底。
+   * birthtime 不可用时为 0，max 自然退化成 mtime。
+   */
+  if (since !== undefined) {
+    const birth = info.birthtimeMs > 0 ? info.birthtimeMs : 0
+    if (Math.max(info.mtimeMs, birth) < since) return null
+  }
   const rel = relative(botWorkspaceDir(), target).replace(/\\/g, '/')
   if (rel === '' || rel.startsWith('..')) return null
   return {
@@ -3009,19 +3039,39 @@ function parsePresentPaths(raw: unknown): string[] {
 /**
  * 汇总一张工具卡的产出物：present 的参数路径 + 结果文本里出现的路径。
  *
+ * 两个来源的**信任等级不同**，必须分开处理：
+ *  · `present` 的参数是模型显式声明的交付物 —— 不设时间门槛。它可能在本轮早些
+ *    时候就写好了，也可能本来就是历史文件（模型重新展示一次也算交付）。
+ *  · 结果文本里扫出来的路径是**猜**的 —— 必须证明文件是本轮写出来的（`since`
+ *    门槛，见 artifactRefFor）。只读工具（glob / readdir / ls / git status）会把
+ *    历史文件的路径原样印进结果，不过滤就会把几个月前的旧图当成本轮产出。
+ *
  * 去重（同一路径只留一条）、最多 12 条、按出现顺序（present 参数在前）。
+ *
+ * 导出是给 `scripts/test-bot-outputs.mjs` 做回归测试用的：时间门槛必须能用一个
+ * 可控的 `since` 直接验，不然只能靠 sleep 等过宽限窗口，测试又慢又不稳。
  */
-function collectArtifacts(presentPaths: readonly string[], resultText: string): ArtifactRef[] {
-  const candidates = [...presentPaths, ...extractArtifactPaths(resultText)]
+export function collectArtifacts(
+  presentPaths: readonly string[],
+  resultText: string,
+  since?: number,
+): ArtifactRef[] {
   const refs: ArtifactRef[] = []
   const seen = new Set<string>()
-  for (const candidate of candidates) {
-    if (refs.length >= MAX_ARTIFACTS) break
-    const ref = artifactRefFor(candidate)
-    if (ref === null) continue
-    if (seen.has(ref.path)) continue
+  /** 收一条：不合规 / 重复 / 已满都跳过。`gate` 只有扫描来的候选才传。 */
+  const take = (candidate: string, gate?: number): void => {
+    if (refs.length >= MAX_ARTIFACTS) return
+    const ref = artifactRefFor(candidate, gate)
+    if (ref === null || seen.has(ref.path)) return
     seen.add(ref.path)
     refs.push(ref)
+  }
+  // present 参数：模型显式声明，权威来源，不做时间校验
+  for (const candidate of presentPaths) take(candidate)
+  // 结果文本：只是线索，必须证明是本轮写的
+  for (const candidate of extractArtifactPaths(resultText)) {
+    if (refs.length >= MAX_ARTIFACTS) break
+    take(candidate, since)
   }
   return refs
 }
@@ -3593,6 +3643,13 @@ export async function runBotTurn(
   emit: (event: PersonalStreamEvent) => void,
   signal?: AbortSignal,
 ): Promise<TurnResult> {
+  /**
+   * 本轮开始时间。
+   *
+   * 既是 `done` 事件里 durationMs 的起点，也是**产出物时间门槛**的基准：
+   * 从工具结果文本里扫到的路径，只有文件 mtime / birthtime 晚于它才算本轮产出
+   * （见 collectArtifacts / artifactRefFor）。
+   */
   const startedAt = Date.now()
   /*
    * 记下这一轮的意图，供本步组装时做 MCP 工具检索（见 host/tool-retrieval）。
@@ -4162,7 +4219,12 @@ export async function runBotTurn(
       pendingPresentPaths.delete(callId)
       const artifacts = isError
         ? []
-        : collectArtifacts(presentPaths, readGeneratedResultText(ctx, rawResultText))
+        : collectArtifacts(
+            presentPaths,
+            readGeneratedResultText(ctx, rawResultText),
+            // 结果文本扫出来的路径必须晚于本轮开始时间（宽容 5s），见 artifactRefFor
+            startedAt - ARTIFACT_MTIME_GRACE_MS,
+          )
       /*
        * 完整结果落盘路径：超阈值被压缩时才有（见 installToolResultSummarizer）。
        * 前端可据此展开全文；不接也不影响——同一路径也写在压缩文本里，模型能用 read 读回。

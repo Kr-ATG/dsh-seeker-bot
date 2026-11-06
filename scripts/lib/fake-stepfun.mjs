@@ -30,7 +30,9 @@
  *   宿主应当据此调 `runTask`，再向上游回
  *   `conversation.item.create`（`item.type='function_call_output'`）+ `response.create`。
  *   本假上游把收到的 `function_call_output` 记在 `connection.functionCallOutputs`
- *   与 `fake.functionCallOutputs` 里供断言。
+ *   与 `fake.functionCallOutputs` 里供断言；`conversation.item.create` 的
+ *   `item.type='message'`（任务完成后的 message/system）记在
+ *   `connection.messageItems` 与 `fake.messageItems` 里。
  *   - `injectFunctionCall.holdDoneMs`：工具调用通知发完先**不**发 `response.done`，
  *     拖这么久再发。用来复现真实竞态：任务在「上游那一轮响应还没结束」时跑完，
  *     宿主此刻发 `response.create` 必被拒（见下面 `errorOnResponseCreate`）。
@@ -289,6 +291,8 @@ export async function createFakeStepfun(options = {}) {
   const allReceived = []
   /** 所有连接上收到的 `function_call_output`（跨连接，断言「宿主把任务结果回灌了」用）。 */
   const functionCallOutputs = []
+  /** 所有连接上收到的 `conversation.item.create` message item（跨连接，断言完成结果注入用）。 */
+  const messageItems = []
 
   const server = createServer((req, res) => {
     // 上游只提供 WS；普通 HTTP 请求给 404 JSON，便于宿主探测时拿到明确结果。
@@ -369,6 +373,8 @@ export async function createFakeStepfun(options = {}) {
       sentLog: [],
       /** 本连接上收到的 `function_call_output`（宿主把 agent 结果回灌给模型）。 */
       functionCallOutputs: [],
+      /** 本连接上收到的 `conversation.item.create` message item（role + 文本）。 */
+      messageItems: [],
       /** 本连接上收到过几条 `response.create`（断言「补发了一次、没重复补」用）。 */
       responseCreateCount: 0,
       sendEvent,
@@ -739,6 +745,22 @@ export async function createFakeStepfun(options = {}) {
             connection.functionCallOutputs.push(entry)
             functionCallOutputs.push({ connectionId: connection.id, ...entry })
             log(`[fake-stepfun] <- function_call_output call_id=${entry.callId} output=${entry.output.slice(0, 80)}`)
+          } else if (item !== null && typeof item === 'object' && item.type === 'message') {
+            /*
+             * 任务完成后的结果注入（契约：受理后走 message/system，不再发第二条
+             * function_call_output）。把 role 与拼接后的文本记下来，便于断言。
+             */
+            const entry = {
+              role: String(item.role ?? ''),
+              text: Array.isArray(item.content)
+                ? item.content.map((part) => String(part?.text ?? '')).join('')
+                : '',
+              raw: item,
+              at: Date.now(),
+            }
+            connection.messageItems.push(entry)
+            messageItems.push({ connectionId: connection.id, ...entry })
+            log(`[fake-stepfun] <- message role=${entry.role} text=${entry.text.slice(0, 80)}`)
           }
           return
         }
@@ -908,6 +930,8 @@ export async function createFakeStepfun(options = {}) {
     allReceived,
     /** 所有连接上收到的 `function_call_output`（宿主回灌给模型的工具结果）。 */
     functionCallOutputs,
+    /** 所有连接上收到的 `conversation.item.create` message item。 */
+    messageItems,
     /** 最近一条连接。 */
     get connection() {
       return connections.at(-1)
@@ -923,6 +947,10 @@ export async function createFakeStepfun(options = {}) {
     /** 等宿主回灌一条满足条件的 `function_call_output`。 */
     waitForFunctionCallOutput(predicate = () => true, options2 = {}) {
       return waitFor(() => functionCallOutputs.find(predicate), { label: 'function_call_output', ...options2 })
+    },
+    /** 等宿主注入一条满足条件的 message item（role + 文本）。 */
+    waitForMessageItem(predicate = () => true, options2 = {}) {
+      return waitFor(() => messageItems.find(predicate), { label: 'message item', ...options2 })
     },
     waitFor,
     close() {

@@ -35,6 +35,7 @@ import { quoteKind } from './quote.ts'
 import { linkKind } from './link.ts'
 import { calculatorKind } from './calculator.ts'
 import { chartKind } from './chart.ts'
+import { compareKind } from './compare.ts'
 
 /**
  * 已注册的全部 kind（顺序即注入文档里的出现顺序）。
@@ -69,6 +70,7 @@ export const IU_KINDS = [
   quoteKind,
   linkKind,
   pianoKind,
+  compareKind,
 ] as const
 
 /** 擦除泛型后的 kind 模块类型（注册表与四个消费方共用）。 */

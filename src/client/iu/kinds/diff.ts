@@ -435,7 +435,7 @@ const CSS = [
   'body[data-ds-dark-theme] .dtt-iu__dline[data-type="del"]:hover { background: color-mix(in srgb, ' + ERROR + ' 32%, transparent); }',
 
   '/* 窄屏：split 自动降级 —— 两栏改上下堆叠，各占满宽（单栏可读，等价于回到统一流）。 */',
-  '@media (max-width: 640px) {',
+  '@container iu (max-width: 640px) {',
   '  .dtt-iu__diff--split { flex-direction: column; }',
   '  .dtt-iu__dcol + .dtt-iu__dcol { border-left: 0; border-top: .5px solid ' + BORDER + '; }',
   '}',

@@ -342,7 +342,7 @@ const CSS = [
   '  .dtt-iu__lk-row:focus-visible .dtt-iu__lk-arrow { transform: none; }',
   '}',
   '/* 窄屏：只收内边距与间距，徽标尺寸不动（38px 是这条卡的可识别特征）。 */',
-  '@media (max-width: 480px) {',
+  '@container iu (max-width: 480px) {',
   '  .dtt-iu__lk-row { gap: 8px; padding: 9px 10px; }',
   '}',
 ].join('\n')

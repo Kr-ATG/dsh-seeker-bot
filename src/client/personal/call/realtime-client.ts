@@ -210,6 +210,13 @@ export interface RealtimeCallHandlers {
   onExpiring?(inMs: number): void
   /** 链路错误。retryable 为真时内部会自动重连一次。 */
   onError?(error: RealtimeCallError): void
+  /**
+   * 语音挂断：用户明确要求挂断，模型已经说完道别，宿主请前端在**播完最后一句**后收线。
+   *
+   * 与 `onClosed` 不同：收到时链路还没断。播放器里通常还排着一两秒音频，调用方
+   * 要等 `playing` 变 false 再收尾，否则「再见」的尾音会被切掉。
+   */
+  onHangup?(reason: string): void
   /** 链路彻底结束（宿主主动关闭 / 重连也失败）。 */
   onClosed?(reason: string): void
   /** 麦克风不可用（权限拒绝 / 没有设备）。会话仍在，但通话界面只提示重试 / 挂断。 */
@@ -452,6 +459,16 @@ export class RealtimeCall {
     return this.mic !== null
   }
 
+  /**
+   * 是否还有排队 / 正在播放的下行音频。
+   *
+   * 语音挂断时宿主已经发完道别，但播放器里往往还排着一两秒音频；调用方要等它
+   * 变 false 再收线，否则「再见」的尾音会被切掉。
+   */
+  get playing(): boolean {
+    return this.player?.playing === true
+  }
+
   /** 重试麦克风（用户点了「重试麦克风」）。 */
   async retryMicrophone(): Promise<void> {
     this.micUnavailable = false
@@ -600,6 +617,16 @@ export class RealtimeCall {
          * 表现为「刚连上又被上一次的 close 打断」。不可重试的直接结束。
          */
         if (error.retryable) this.pendingRetry = true
+        return
+      }
+      case 'hangup': {
+        /*
+         * 语音挂断：宿主已经说完道别，但播放器里通常还排着一两秒音频。这里只置
+         * serverClosed（后续 WS 关闭不再当异常）并回调；何时真正收线由调用方决定
+         * ——要等 `playing` 排空，见 RealtimeCallHandlers.onHangup。
+         */
+        this.serverClosed = true
+        this.handlers.onHangup?.(message.reason ?? '通话已结束')
         return
       }
       case 'closed': {

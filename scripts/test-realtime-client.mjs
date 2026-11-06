@@ -120,6 +120,7 @@ const call = new RealtimeCall({
   onInterrupted: () => events.push(['interrupted']),
   onExpiring: (inMs) => events.push(['expiring', inMs]),
   onError: (error) => events.push(['error', error.message, error.retryable]),
+  onHangup: (reason) => events.push(['hangup', reason]),
   onClosed: (reason) => events.push(['closed', reason]),
   onMicUnavailable: (message) => events.push(['micUnavailable', message]),
   onMicReady: () => events.push(['micReady']),
@@ -165,6 +166,7 @@ check('二进制帧是 960 采样（40ms @24k）', binary[0]?.length === 960)
 /* 4. 下行音频 → 播放队列 */
 first.emit({ type: 'audio_delta', audio: 'AAAAAAAA' })
 check('audio_delta 入播放队列', globalThis.__audioMock.enqueued === 1)
+check('playing：有排队的下行音频时为 true', call.playing === true)
 check('首片音频触发 speakingStart', events.filter(([kind]) => kind === 'speakingStart').length === 1)
 first.emit({ type: 'audio_delta', audio: 'AAAAAAAA' })
 check('speakingStart 只回调一次', events.filter(([kind]) => kind === 'speakingStart').length === 1)
@@ -172,6 +174,7 @@ check('speakingStart 只回调一次', events.filter(([kind]) => kind === 'speak
 /* 5. speech_started 必须立刻清空播放 */
 first.emit({ type: 'speech_started' })
 check('speech_started 立刻 interrupt 播放器', globalThis.__audioMock.interrupts >= 1)
+check('playing：打断后播放队列清空为 false', call.playing === false)
 
 /* 6. 转写事件透传 */
 first.emit({ type: 'user_transcript', text: '帮我订一张票' })
@@ -246,6 +249,31 @@ check('stop 后 linkState 是 closed', call2.linkState === 'closed')
 const playersBefore = globalThis.__audioMock.playerCloses
 await tick(20)
 check('stop 关闭了播放器', globalThis.__audioMock.playerCloses > playersBefore - 1)
+
+/* 11b. 语音挂断：hangup 分发 + playing getter（前端等播放器排空再 finalize） */
+const hangupEvents = []
+const callHangup = new RealtimeCall({
+  onHangup: (reason) => hangupEvents.push(['hangup', reason]),
+  onClosed: (reason) => hangupEvents.push(['closed', reason]),
+})
+await callHangup.start({ botId: 'bot-hangup' })
+await tick(5)
+const hangupSocket = sockets.at(-1)
+hangupSocket.emit({ type: 'ready', model: 'm', voice: 'v', sampleRate: 24000, maxSessionMs: 1 })
+await tick(10)
+const hangupPlayer = globalThis.__audioMock.players.at(-1)
+check('playing：没有待播音频时为 false', callHangup.playing === false)
+hangupSocket.emit({ type: 'audio_delta', audio: 'AAAAAAAA' })
+check('playing：有排队的下行音频时为 true', callHangup.playing === true)
+hangupSocket.emit({ type: 'hangup', reason: '通话已结束' })
+check('hangup 分发 reason 给 onHangup', hangupEvents.some(([kind, reason]) => kind === 'hangup' && reason === '通话已结束'))
+check('hangup 不触发 onClosed（链路还在，等播放器排空）', !hangupEvents.some(([kind]) => kind === 'closed'))
+check('hangup 后尾音未播完时 playing 仍为 true', callHangup.playing === true)
+hangupPlayer.interrupt()
+check('playing：尾音排空后为 false（前端据此 finalize）', callHangup.playing === false)
+hangupSocket.close()
+await tick(20)
+check('hangup 后连接关闭不再回调 onClosed（避免重复收尾）', !hangupEvents.some(([kind]) => kind === 'closed'))
 
 /* 12. 非法环境：file:// 直接报错而不是静默 */
 globalThis.location = { protocol: 'file:', host: '' }

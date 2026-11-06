@@ -21,12 +21,15 @@
  *   - `/realtime/diagnose` 返回配置且不含 key 明文；
  *   - 跨站 Origin 的 upgrade 被拒绝。
  *
- * 语音里「让 Bot 干活」的闭环（function calling，[O]~[X]）：
+ * 语音里「让 Bot 干活」的闭环（function calling，[O]~[Z]）：
  *   - start 带 agent → `session.update` 注册 `run_task` 工具；
  *   - 注入 `response.function_call_arguments.done` → 宿主调注入的 `runTask`
  *     （task / botId / callId / agent 都对），并推 `task_started` / `task_progress` / `task_done`；
- *   - 任务结果以 `conversation.item.create(function_call_output)` 回灌上游，随后 `response.create`；
- *   - `runTask` 失败时 `task_done.ok=false`，失败原因同样回灌给模型；
+ *   - **任务受理即时播报**（[Z]）：任务交给 runner 的同一刻先回一条
+ *     `function_call_output`（含「任务已受理」）让模型立刻开口，再把完成结果以
+ *     `conversation.item.create(message/system)` 注入（不再是第二条 function_call_output）；
+ *   - 未受理的失败（空参数 / 没 agent / 没 runner）仍以 `function_call_output` 回灌；
+ *   - `runTask` 失败时 `task_done.ok=false`，失败原因以 message/system 回灌给模型；
  *   - start 没带 agent 时模型乱调 `run_task`：宿主回一条可读 output，不挂住、不误调；
  *   - 同一 `call_id` 的 `arguments.done` 重复投递（含「任务已跑完再来一条」）只执行一次；
  *   - **另一种上游形状** `conversation.item.created` + `item.type='function_call'` 同样能触发；
@@ -35,6 +38,12 @@
  *     任务完成时上游那轮响应还没结束 → 宿主不发 `response.create`、记 pending，
  *     等 `response.done` 后补发一次；上游直接回该 error 时同样不转发给前端、done 后
  *     补发；补发也被拒时放弃（不死循环）；没有竞态时仍立刻发（正常路径行为不变）。
+ *
+ * 语音挂断（[Y]）：
+ *   - 不带 agent 的会话，`session.update.session.tools` 里也有 `end_call`；
+ *   - 注入 `end_call` 调用 → 上游收到对应 `function_call_output`（请模型道别）；
+ *   - 假上游回一轮正常道别音频 → 客户端**先收到 response_done、再收到 hangup**；
+ *   - 客户端发 `stop` 后正常收线，全程无 error。
  *
  * Usage: node scripts/test-realtime-proxy.mjs
  */
@@ -131,7 +140,8 @@ async function openClient(url) {
   ws.addEventListener('message', (event) => {
     if (typeof event.data === 'string') {
       try {
-        client.messages.push(JSON.parse(event.data))
+        // at：到达时刻，用于断言「受理回执先于 task_done」这类时序
+        client.messages.push({ ...JSON.parse(event.data), at: Date.now() })
       } catch {
         client.messages.push({ type: '__unparsable__', raw: event.data })
       }
@@ -176,6 +186,15 @@ async function waitForClientMessageOrNull(client, predicate, options) {
 async function waitForOutputOrNull(fake, predicate, options) {
   try {
     return await fake.waitForFunctionCallOutput(predicate, options)
+  } catch {
+    return null
+  }
+}
+
+/** 同上，针对假上游侧收到的 `conversation.item.create` message item。 */
+async function waitForMessageItemOrNull(fake, predicate, options) {
+  try {
+    return await fake.waitForMessageItem(predicate, options)
   } catch {
     return null
   }
@@ -1071,7 +1090,7 @@ try {
 /* O. 语音里让 Bot 干活：function_call → runTask → function_call_output        */
 /* ========================================================================== */
 
-console.log('\n[O] 正常执行：注入 function_call → runTask → 回灌 function_call_output')
+console.log('\n[O] 正常执行：注入 function_call → runTask → 受理 function_call_output + 完成 message/system')
 
 /** 最小可用的 Bot agent 定义（start 帧带上它，宿主才会注册 run_task）。 */
 const AGENT_SPEC = {
@@ -1138,7 +1157,7 @@ try {
   // 用「攒够上行音频」触发一轮：最贴近真实场景（用户说话 → 模型决定动手）
   client.sendBinary(Buffer.alloc(1920, 0x5a))
 
-  const [taskStarted, taskProgress, taskDone, outputEntry] = await Promise.all([
+  const [taskStarted, taskProgress, taskDone, acceptedOutput, completionMessage] = await Promise.all([
     waitForClientMessageOrNull(client, (m) => m.type === 'task_started', {
       label: 'task_started',
       timeoutMs: NEW_CASE_TIMEOUT_MS,
@@ -1152,7 +1171,11 @@ try {
       timeoutMs: NEW_CASE_TIMEOUT_MS,
     }),
     waitForOutputOrNull(envTask.fake, (entry) => entry.callId === CALL_ID_OK, {
-      label: 'function_call_output',
+      label: 'function_call_output (accepted)',
+      timeoutMs: NEW_CASE_TIMEOUT_MS,
+    }),
+    waitForMessageItemOrNull(envTask.fake, (entry) => entry.role === 'system' && entry.text.includes(SUMMARY_OK), {
+      label: 'message/system (completion)',
       timeoutMs: NEW_CASE_TIMEOUT_MS,
     }),
   ])
@@ -1178,17 +1201,34 @@ try {
     assert.equal(taskProgress.note, '正在生成图片…')
   })
 
-  await check('上游收到 function_call_output：call_id 对得上、output 含 runTask 的 summary', () => {
-    assert.ok(outputEntry !== null, '上游没收到 function_call_output（宿主没把结果回灌给模型）')
-    assert.equal(outputEntry.raw.type, 'function_call_output')
-    assert.equal(outputEntry.callId, CALL_ID_OK)
+  await check('任务受理：上游先收到 function_call_output（含「任务已受理」与任务文本）', () => {
+    assert.ok(acceptedOutput !== null, '上游没收到 task 的 function_call_output（受理回执）')
+    assert.equal(acceptedOutput.raw.type, 'function_call_output')
+    assert.equal(acceptedOutput.callId, CALL_ID_OK)
+    assert.match(acceptedOutput.output, /任务已受理，正在后台执行：/)
     assert.ok(
-      outputEntry.output.includes(SUMMARY_OK),
-      `output 里没有 runTask 的 summary：${outputEntry.output}`,
+      acceptedOutput.output.includes(TASK_TEXT),
+      `受理回执里没有任务文本：${acceptedOutput.output}`,
     )
   })
 
-  await check('上游在 function_call_output 之后收到 response.create（回灌后让模型接着说话）', () => {
+  await check('任务完成：上游收到 message/system（含 summary），不是第二条 function_call_output', () => {
+    assert.ok(completionMessage !== null, '上游没收到完成任务的结果（message/system）')
+    assert.equal(completionMessage.role, 'system')
+    assert.match(completionMessage.text, /【后台任务完成】/)
+    assert.ok(
+      completionMessage.text.includes(SUMMARY_OK),
+      `message/system 里没有 runTask 的 summary：${completionMessage.text}`,
+    )
+    const outputs = envTask.fake.functionCallOutputs.filter((entry) => entry.callId === CALL_ID_OK)
+    assert.equal(
+      outputs.length,
+      1,
+      `上游收到 ${outputs.length} 条同 call_id 的 function_call_output（任务完成后应改用 message/system）`,
+    )
+  })
+
+  await check('受理回执之后收到 response.create（模型能立刻开口播报）', () => {
     const received = connection.received
     const outputIndex = received.findIndex(
       (entry) => entry.type === 'conversation.item.create' && entry.raw?.item?.type === 'function_call_output',
@@ -1241,13 +1281,17 @@ try {
   await waitForClientMessage(client, (m) => m.type === 'ready', { label: 'ready (fail)' })
   client.sendBinary(Buffer.alloc(1920, 0x3c))
 
-  const [taskDone, outputEntry] = await Promise.all([
+  const [taskDone, acceptedOutput, completionMessage] = await Promise.all([
     waitForClientMessageOrNull(client, (m) => m.type === 'task_done', {
       label: 'task_done (fail)',
       timeoutMs: NEW_CASE_TIMEOUT_MS,
     }),
     waitForOutputOrNull(envFail.fake, (entry) => entry.callId === CALL_ID_FAIL, {
-      label: 'function_call_output (fail)',
+      label: 'function_call_output (fail accepted)',
+      timeoutMs: NEW_CASE_TIMEOUT_MS,
+    }),
+    waitForMessageItemOrNull(envFail.fake, (entry) => entry.role === 'system' && /炸了|失败/.test(entry.text), {
+      label: 'message/system (fail completion)',
       timeoutMs: NEW_CASE_TIMEOUT_MS,
     }),
   ])
@@ -1259,10 +1303,17 @@ try {
     assert.match(String(taskDone.error ?? ''), /炸了/)
   })
 
-  await check('失败也回灌给模型（function_call_output 带失败原因，让它用语音解释）', () => {
-    assert.ok(outputEntry !== null, '上游没收到 function_call_output（失败时模型无法用语音解释）')
-    assert.equal(outputEntry.callId, CALL_ID_FAIL)
-    assert.match(outputEntry.output, /炸了|失败/)
+  await check('任务受理：上游收到 function_call_output（含「任务已受理」）', () => {
+    assert.ok(acceptedOutput !== null, '上游没收到受理回执（function_call_output）')
+    assert.equal(acceptedOutput.callId, CALL_ID_FAIL)
+    assert.match(acceptedOutput.output, /任务已受理/)
+  })
+
+  await check('失败结果以 message/system 回灌给模型（带失败原因，让它用语音解释）', () => {
+    assert.ok(completionMessage !== null, '上游没收到失败结果（message/system，失败时模型无法用语音解释）')
+    assert.equal(completionMessage.role, 'system')
+    assert.match(completionMessage.text, /【后台任务失败】/)
+    assert.match(completionMessage.text, /炸了/)
   })
 } finally {
   await envFail.close()
@@ -1376,13 +1427,17 @@ try {
   const connection = await envDup.fake.waitForConnection(() => true, { label: 'upstream (dup)' })
   client.sendBinary(Buffer.alloc(1920, 0x11))
 
-  const [taskDone] = await Promise.all([
+  const [taskDone, acceptedOutput, completionMessage] = await Promise.all([
     waitForClientMessageOrNull(client, (m) => m.type === 'task_done', {
       label: 'task_done (dup)',
       timeoutMs: NEW_CASE_TIMEOUT_MS,
     }),
     waitForOutputOrNull(envDup.fake, (entry) => entry.callId === CALL_ID_DUP, {
       label: 'function_call_output (dup)',
+      timeoutMs: NEW_CASE_TIMEOUT_MS,
+    }),
+    waitForMessageItemOrNull(envDup.fake, (entry) => entry.role === 'system' && entry.text.includes('做完了'), {
+      label: 'message/system (dup)',
       timeoutMs: NEW_CASE_TIMEOUT_MS,
     }),
   ])
@@ -1404,9 +1459,19 @@ try {
     )
   })
 
-  await check('该 call_id 只回灌一条 function_call_output（模型不会收到重复工具结果）', () => {
+  await check('该 call_id 只回灌一条 function_call_output（受理回执，重复投递不重复受理）', () => {
     const outputs = envDup.fake.functionCallOutputs.filter((entry) => entry.callId === CALL_ID_DUP)
     assert.equal(outputs.length, 1, `上游收到 ${outputs.length} 条同 call_id 的 function_call_output`)
+    assert.match(String(outputs[0]?.output), /任务已受理/)
+  })
+
+  await check('该 call_id 只收到一条完成 message/system（结果不重复注入）', () => {
+    assert.ok(completionMessage !== null, '上游没收到完成结果（message/system）')
+    const messages = envDup.fake.messageItems.filter(
+      (entry) => entry.role === 'system' && entry.text.includes('做完了'),
+    )
+    assert.equal(messages.length, 1, `上游收到 ${messages.length} 条完成 message/system`)
+    assert.ok(acceptedOutput !== null, '上游没收到受理回执')
   })
 
   await check('客户端只收到一条 task_done（不重复通知）', () => {
@@ -1460,7 +1525,7 @@ try {
   const connection = await envItemShape.fake.waitForConnection(() => true, { label: 'upstream (item shape)' })
   client.sendBinary(Buffer.alloc(1920, 0x22))
 
-  const [taskStarted, taskDone, outputEntry] = await Promise.all([
+  const [taskStarted, taskDone, acceptedOutput, completionMessage] = await Promise.all([
     waitForClientMessageOrNull(client, (m) => m.type === 'task_started', {
       label: 'task_started (item shape)',
       timeoutMs: NEW_CASE_TIMEOUT_MS,
@@ -1470,7 +1535,11 @@ try {
       timeoutMs: NEW_CASE_TIMEOUT_MS,
     }),
     waitForOutputOrNull(envItemShape.fake, (entry) => entry.callId === CALL_ID_ITEM_SHAPE, {
-      label: 'function_call_output (item shape)',
+      label: 'function_call_output (item shape accepted)',
+      timeoutMs: NEW_CASE_TIMEOUT_MS,
+    }),
+    waitForMessageItemOrNull(envItemShape.fake, (entry) => entry.role === 'system' && entry.text.includes('图好了'), {
+      label: 'message/system (item shape completion)',
       timeoutMs: NEW_CASE_TIMEOUT_MS,
     }),
   ])
@@ -1494,10 +1563,16 @@ try {
     assert.equal(runTaskCallsItemShape[0].callId, CALL_ID_ITEM_SHAPE)
   })
 
-  await check('上游收到 function_call_output 且 call_id 一致（结果照常回灌）', () => {
-    assert.ok(outputEntry !== null, '上游没收到 function_call_output（item.created 形状的结果没回灌给模型）')
-    assert.equal(outputEntry.callId, CALL_ID_ITEM_SHAPE)
-    assert.ok(outputEntry.output.includes('图好了'), `output 里没有 runTask 的 summary：${outputEntry.output}`)
+  await check('上游收到受理 function_call_output 且 call_id 一致（item.created 形状照常执行）', () => {
+    assert.ok(acceptedOutput !== null, '上游没收到 function_call_output（item.created 形状的结果没回灌给模型）')
+    assert.equal(acceptedOutput.callId, CALL_ID_ITEM_SHAPE)
+    assert.match(String(acceptedOutput.output), /任务已受理/)
+  })
+
+  await check('完成结果以 message/system 回灌（含 summary）', () => {
+    assert.ok(completionMessage !== null, '上游没收到完成结果（message/system）')
+    assert.equal(completionMessage.role, 'system')
+    assert.ok(completionMessage.text.includes('图好了'), `message/system 里没有 summary：${completionMessage.text}`)
   })
 
   await check('客户端仍收到 task_started + task_done（ok=true）', () => {
@@ -1641,10 +1716,16 @@ try {
 
   // 回灌是「上游收到 → 记录」的异步链路，给一拍再查（task_done 先于记录可见是正常的）
   await sleep(120)
-  const output = envStreamed.fake.functionCallOutputs.find((entry) => entry.callId === CALL_ID_STREAMED)
-  await check('结果照常回灌上游（function_call_output 带 call_id 与 summary）', () => {
-    assert.ok(output !== undefined, `上游没收到 call_id=${CALL_ID_STREAMED} 的 function_call_output（共 ${envStreamed.fake.functionCallOutputs.length} 条）`)
-    assert.match(String(output.output), /图片已生成/)
+  const accepted = envStreamed.fake.functionCallOutputs.find((entry) => entry.callId === CALL_ID_STREAMED)
+  const completion = envStreamed.fake.messageItems.find((entry) => entry.role === 'system')
+  await check('结果照常回灌上游：受理 function_call_output + 完成 message/system 含 summary', () => {
+    assert.ok(
+      accepted !== undefined,
+      `上游没收到 call_id=${CALL_ID_STREAMED} 的受理 function_call_output（共 ${envStreamed.fake.functionCallOutputs.length} 条）`,
+    )
+    assert.match(String(accepted.output), /任务已受理/)
+    assert.ok(completion !== undefined, `上游没收到完成 message/system（共 ${envStreamed.fake.messageItems.length} 条）`)
+    assert.match(String(completion.text), /图片已生成/)
   })
 } finally {
   await envStreamed.close()
@@ -1842,12 +1923,24 @@ try {
     )
   })
 
-  await check('被拒后不忙重试（等 response.done，而不是立刻再发）', () => {
+  await check('被拒后不忙重试（等 response.done / 完成回灌，而不是立刻再发）', () => {
+    /*
+     * 受理回执会发一条 response.create（被 errorOnResponseCreate 拒掉）；任务完成后的
+     * message/system 回灌还会合法地再发一条——它是「完成汇报」，不是「忙重试」。
+     * 真正要钉住的是：被拒之后、完成回灌之前，不能再冒出第三条 response.create。
+     */
+    const creates = connection.received.filter((entry) => entry.type === 'response.create')
+    const completion = envOngoing.fake.messageItems.find((entry) => entry.role === 'system')
+    assert.ok(creates.length >= 1, '第一条 response.create 没发出去')
+    const retriesBeforeCompletion = creates.filter((entry, index) => (
+      index > 0 && (completion === undefined || entry.at < completion.at)
+    ))
     assert.equal(
-      createsBeforeDone,
-      1,
-      `response.done 之前上游收到了 ${createsBeforeDone} 条 response.create（期望 1 条，多出来的是忙重试）`,
+      retriesBeforeCompletion.length,
+      0,
+      `被拒后到完成回灌之前又发了 ${retriesBeforeCompletion.length} 条 response.create（忙重试）`,
     )
+    assert.ok(createsBeforeDone >= 1, 'sleep 之后一条 response.create 都没发出')
   })
 
   await check('response.done 之后补发了一次 response.create', () => {
@@ -1960,7 +2053,7 @@ try {
 /* X. 正常路径：没有进行中的响应 → 立刻发 response.create                      */
 /* ========================================================================== */
 
-console.log('\n[X] 正常路径：上游没有进行中的响应 → 立即发 response.create（行为不变）')
+console.log('\n[X] 正常路径：上游没有进行中的响应 → 受理 / 完成各自立即发 response.create')
 
 /*
  * 竞态修复不能把正常路径也拖成「等 done 再发」——那样每轮任务结果都会晚一拍，
@@ -1998,14 +2091,14 @@ try {
     label: 'task_done (plain)',
     timeoutMs: NEW_CASE_TIMEOUT_MS,
   })
-  // 注入那一轮 + 回灌后那一轮，一共两条 response_done；等到两条才说明模型真的接着说话了
+  // 注入轮 + 受理轮 + 完成轮 = 三条 response_done；等到三条才说明「完成汇报」也真的开口了
   const responseDone = await waitForOrNull(
-    () => client.messages.filter((m) => m.type === 'response_done').length >= 2,
-    { label: 'response_done (plain 回灌后那一轮)', timeoutMs: NEW_CASE_TIMEOUT_MS },
+    () => client.messages.filter((m) => m.type === 'response_done').length >= 3,
+    { label: 'response_done (plain 完成轮)', timeoutMs: NEW_CASE_TIMEOUT_MS },
   )
   const clientErrors = client.messages.filter((m) => m.type === 'error')
 
-  await check('上游在 function_call_output 之后立刻收到 response.create（不等 done）', () => {
+  await check('受理 function_call_output 之后立刻收到 response.create（不等任务完成）', () => {
     assert.ok(taskDone !== null, '客户端没收到 task_done')
     const received = connection.received
     const outputIndex = received.findIndex(
@@ -2016,13 +2109,23 @@ try {
     assert.ok(createIndex > outputIndex, 'function_call_output 之后没有 response.create（正常路径被改坏了）')
   })
 
-  await check('只发一次 response.create（没有多余补发）', () => {
+  await check('完成 message/system 之后立刻收到 response.create（汇报不等人）', () => {
+    const received = connection.received
+    const messageIndex = received.findIndex(
+      (entry) => entry.type === 'conversation.item.create' && entry.raw?.item?.type === 'message' && entry.raw?.item?.role === 'system',
+    )
+    assert.ok(messageIndex >= 0, '上游没收到完成结果（message/system）')
+    const createIndex = received.findIndex((entry, index) => index > messageIndex && entry.type === 'response.create')
+    assert.ok(createIndex > messageIndex, '完成结果之后没有 response.create（模型不会汇报）')
+  })
+
+  await check('受理与完成各触发一次 response.create（共 2 条，没有多余补发）', () => {
     assert.equal(
       connection.responseCreateCount,
-      1,
-      `上游收到 ${connection.responseCreateCount} 条 response.create（期望 1）`,
+      2,
+      `上游收到 ${connection.responseCreateCount} 条 response.create（期望 2：受理 1 + 完成 1）`,
     )
-    assert.ok(responseDone !== null, '客户端没收到 response_done')
+    assert.ok(responseDone !== null, '客户端没收到完成轮的 response_done')
   })
 
   await check('正常路径客户端零 error', () => {
@@ -2030,6 +2133,213 @@ try {
   })
 } finally {
   await envPlain.close()
+}
+
+/* ========================================================================== */
+/* Y. 语音挂断：end_call → 道别说完 → 先 response_done 再 hangup                */
+/* ========================================================================== */
+
+console.log('\n[Y] 语音挂断：end_call → 道别说完 → 客户端先收到 response_done 再收到 hangup')
+
+const CALL_ID_HANGUP = 'call_hangup_1'
+const envHangup = await startEnv({
+  fakeOptions: {
+    audioBytesThreshold: 1920,
+    injectFunctionCall: {
+      name: 'end_call',
+      arguments: '{}',
+      callId: CALL_ID_HANGUP,
+    },
+  },
+})
+try {
+  const client = await openClient(envHangup.proxy.url)
+  // 故意不带 agent：挂断是通话基础能力，不依赖 Bot 定义
+  client.sendJson({ type: 'start', botId: 'bot-hangup', instructions: '你是小墨。' })
+  await waitForClientMessage(client, (m) => m.type === 'ready', { label: 'ready (hangup)' })
+  const connection = await envHangup.fake.waitForConnection(() => true, { label: 'upstream (hangup)' })
+  client.sendBinary(Buffer.alloc(1920, 0x7a))
+
+  const [hangupMessage, outputEntry] = await Promise.all([
+    waitForClientMessageOrNull(client, (m) => m.type === 'hangup', {
+      label: 'hangup',
+      timeoutMs: NEW_CASE_TIMEOUT_MS,
+    }),
+    waitForOutputOrNull(envHangup.fake, (entry) => entry.callId === CALL_ID_HANGUP, {
+      label: 'function_call_output (hangup)',
+      timeoutMs: NEW_CASE_TIMEOUT_MS,
+    }),
+  ])
+
+  await check('不带 agent 的 session.update 也注册 end_call 工具', () => {
+    const tools = connection.sessionUpdate?.session?.tools
+    assert.ok(Array.isArray(tools), 'session.tools 不是数组')
+    const endCall = tools.find((entry) => entry?.type === 'function' && entry?.function?.name === 'end_call')
+    assert.ok(
+      endCall !== undefined,
+      `session.tools 里没有 end_call（实际：${JSON.stringify(tools?.map((entry) => entry?.function?.name ?? entry?.type))}）`,
+    )
+    // 契约：end_call 先于 web_search，参数为空对象且 required=[]
+    assert.equal(tools[0]?.function?.name, 'end_call', 'end_call 应排在 web_search 前面')
+    assert.deepEqual(endCall.function.parameters, { type: 'object', properties: {}, required: [] })
+    const runTask = tools.find((entry) => entry?.type === 'function' && entry?.function?.name === 'run_task')
+    assert.equal(runTask, undefined, '没带 agent 时不应注册 run_task')
+  })
+
+  await check('end_call 调用 → 上游收到对应 function_call_output（请模型道别）', () => {
+    assert.ok(outputEntry !== null, '上游没收到 end_call 的 function_call_output（模型没有机会道别）')
+    assert.equal(outputEntry.callId, CALL_ID_HANGUP)
+    assert.match(String(outputEntry.output), /已收到用户的挂断请求/)
+  })
+
+  await check('客户端先收到 response_done、再收到 hangup（尾音不被切）', () => {
+    assert.ok(hangupMessage !== null, '客户端没收到 hangup')
+    const hangupIndex = client.messages.indexOf(hangupMessage)
+    const doneBefore = client.messages.slice(0, hangupIndex).filter((m) => m.type === 'response_done')
+    assert.ok(
+      doneBefore.length >= 2,
+      `hangup 之前的 response_done 只有 ${doneBefore.length} 条（期望注入轮 + 道别轮共 2 条）`,
+    )
+    // 道别轮必须真的出了音频，否则「先说完再收线」只是空口
+    const audioBefore = client.messages.slice(0, hangupIndex).filter((m) => m.type === 'audio_delta')
+    assert.ok(audioBefore.length >= 1, `hangup 之前的 audio_delta 只有 ${audioBefore.length} 条（道别轮应有音频）`)
+    assert.equal(hangupMessage.reason, '通话已结束')
+  })
+
+  // 前端收到 hangup 后会等播放器排空再发 stop；这里直接模拟这一步
+  client.sendJson({ type: 'stop' })
+  const closed = await waitForClientMessageOrNull(client, (m) => m.type === 'closed', {
+    label: 'closed (hangup)',
+    timeoutMs: NEW_CASE_TIMEOUT_MS,
+  })
+  await waitForOrNull(() => client.closed, { label: 'client closed (hangup)', timeoutMs: NEW_CASE_TIMEOUT_MS })
+  await waitForOrNull(() => connection.closed, { label: 'upstream closed (hangup)', timeoutMs: NEW_CASE_TIMEOUT_MS })
+  await sleep(80)
+  const errors = client.messages.filter((m) => m.type === 'error')
+
+  await check('客户端 stop 后正常收线（两端关闭）、全程无 error', () => {
+    assert.ok(closed !== null, '客户端没收到 closed')
+    assert.equal(client.closed, true, 'stop 之后客户端 WebSocket 没关闭')
+    assert.equal(connection.closed, true, 'stop 之后上游连接没关闭')
+    assert.deepEqual(errors.map((m) => m.message), [])
+  })
+} finally {
+  await envHangup.close()
+}
+
+/* ========================================================================== */
+/* Z. 任务受理即时播报：不等任务跑完就先回「任务已受理」                        */
+/* ========================================================================== */
+
+console.log('\n[Z] 任务受理即时播报：受理回执先于 task_done，完成后 message/system 带 summary')
+
+const CALL_ID_ACCEPT = 'call_accept_1'
+const ACCEPT_TASK = '生成一张海边日落的插画，16:9'
+const ACCEPT_SUMMARY = '图已生成：海边日落-受理版.png'
+let acceptRunFinishedAt = 0
+const envAccept = await startEnv({
+  fakeOptions: {
+    audioBytesThreshold: 1920,
+    injectFunctionCall: {
+      name: 'run_task',
+      arguments: JSON.stringify({ task: ACCEPT_TASK }),
+      callId: CALL_ID_ACCEPT,
+    },
+  },
+  routeOptions: {
+    runTask: async () => {
+      await sleep(300) // 任务真跑一会儿：受理播报必须等它之前就发出去
+      acceptRunFinishedAt = Date.now()
+      return { ok: true, summary: ACCEPT_SUMMARY }
+    },
+  },
+})
+try {
+  const client = await openClient(envAccept.proxy.url)
+  client.sendJson({
+    type: 'start',
+    botId: AGENT_SPEC.botId,
+    instructions: AGENT_SPEC.instructions,
+    agent: AGENT_SPEC,
+  })
+  await waitForClientMessage(client, (m) => m.type === 'ready', { label: 'ready (accept)' })
+  const connection = await envAccept.fake.waitForConnection(() => true, { label: 'upstream (accept)' })
+  client.sendBinary(Buffer.alloc(1920, 0x7b))
+
+  const [taskDone, acceptedOutput, completionMessage] = await Promise.all([
+    waitForClientMessageOrNull(client, (m) => m.type === 'task_done', {
+      label: 'task_done (accept)',
+      timeoutMs: 3000,
+    }),
+    waitForOutputOrNull(envAccept.fake, (entry) => entry.callId === CALL_ID_ACCEPT, {
+      label: 'function_call_output (accept)',
+      timeoutMs: 3000,
+    }),
+    waitForMessageItemOrNull(envAccept.fake, (entry) => entry.role === 'system' && entry.text.includes(ACCEPT_SUMMARY), {
+      label: 'message/system (accept)',
+      timeoutMs: 3000,
+    }),
+  ])
+
+  await check('第一条 function_call_output 在任务跑完之前到达，且含「任务已受理」', () => {
+    assert.ok(acceptedOutput !== null, '上游没收到受理回执（function_call_output）')
+    assert.equal(acceptedOutput.callId, CALL_ID_ACCEPT)
+    assert.match(acceptedOutput.output, /任务已受理，正在后台执行：/)
+    assert.ok(
+      acceptedOutput.output.includes(ACCEPT_TASK),
+      `受理回执里没有任务文本：${acceptedOutput.output}`,
+    )
+    assert.ok(acceptRunFinishedAt > 0, 'runTask 没跑完（测试前提不成立）')
+    assert.ok(
+      acceptedOutput.at < acceptRunFinishedAt,
+      `受理回执在任务跑完之后才到（output@${acceptedOutput.at} >= runFinished@${acceptRunFinishedAt}），「即时播报」不成立`,
+    )
+  })
+
+  await check('第一条 function_call_output 在 task_done 之前到达', () => {
+    assert.ok(taskDone !== null, '客户端没收到 task_done')
+    assert.ok(acceptedOutput !== null, '上游没收到受理回执')
+    assert.ok(
+      acceptedOutput.at < taskDone.at,
+      `受理回执晚于 task_done（output@${acceptedOutput.at} >= task_done@${taskDone.at}）`,
+    )
+  })
+
+  await check('任务完成后上游收到 message/system（role=system，文本含 summary）', () => {
+    assert.ok(completionMessage !== null, '上游没收到完成结果（message/system）')
+    assert.equal(completionMessage.role, 'system')
+    assert.equal(completionMessage.raw?.content?.[0]?.type, 'input_text')
+    assert.match(completionMessage.text, /【后台任务完成】/)
+    assert.ok(
+      completionMessage.text.includes(ACCEPT_SUMMARY),
+      `message/system 里没有 summary：${completionMessage.text}`,
+    )
+    const outputs = envAccept.fake.functionCallOutputs.filter((entry) => entry.callId === CALL_ID_ACCEPT)
+    assert.equal(
+      outputs.length,
+      1,
+      `上游收到 ${outputs.length} 条同 call_id 的 function_call_output（完成结果应为 message/system）`,
+    )
+  })
+
+  await check('task_done.ok=true 且带 summary', () => {
+    assert.ok(taskDone !== null, '客户端没收到 task_done')
+    assert.equal(taskDone.callId, CALL_ID_ACCEPT)
+    assert.equal(taskDone.ok, true)
+    assert.equal(taskDone.summary, ACCEPT_SUMMARY)
+  })
+
+  await check('受理回执之后上游收到 response.create（模型能立刻开口）', () => {
+    const received = connection.received
+    const outputIndex = received.findIndex(
+      (entry) => entry.type === 'conversation.item.create' && entry.raw?.item?.type === 'function_call_output',
+    )
+    assert.ok(outputIndex >= 0, '上游没收到受理回执')
+    const createIndex = received.findIndex((entry, index) => index > outputIndex && entry.type === 'response.create')
+    assert.ok(createIndex > outputIndex, '受理回执之后没有 response.create，模型无法立刻播报')
+  })
+} finally {
+  await envAccept.close()
 }
 
 /* ========================================================================== */

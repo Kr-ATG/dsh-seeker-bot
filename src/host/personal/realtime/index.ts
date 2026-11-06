@@ -251,6 +251,30 @@ class RealtimeBridge {
   /** start 帧带来的 Bot 定义；语音里「干活」全靠它。 */
   private agentSpec: RealtimeAgentSpec | undefined
   /**
+   * 语音挂断状态机。
+   *
+   * 流程：模型调用 end_call → 宿主把「已收到挂断请求，请道别」作为工具结果回给模型
+   * → 模型说完最后一句（response.done）→ 发 hangup 给前端 → 前端等播放器排空后
+   * 回 stop → 宿主 shutdown。中间任何一步卡住都有兜底定时器，不会让通话永远挂着。
+   */
+  private hangupRequested = false
+  /** 模型已经开始生成道别那一轮（只有 response.created 之后才允许收线）。 */
+  private hangupSpeechStarted = false
+  /** 已经给前端发过 hangup 帧（幂等）。 */
+  private hangupSent = false
+  /** 道别一直没来时的兜底：8 秒后强制发 hangup。 */
+  private hangupTimer: NodeJS.Timeout | null = null
+  /** 客户端收到 hangup 后迟迟不回 stop 的兜底：10 秒后宿主自己 shutdown。 */
+  private hangupCloseTimer: NodeJS.Timeout | null = null
+  /**
+   * 已受理但还没跑完的任务：callId → task 原文。
+   *
+   * 为什么需要记 task：任务完成时不再回第二条 function_call_output（一个 call_id
+   * 只该有一条），改发 message/system 注入结果；写结果文案时要把原任务带上，
+   * 模型才知道「刚才那件事」是什么。
+   */
+  private readonly acceptedTasks = new Map<string, string>()
+  /**
    * 已经在跑 / 跑过的任务 call_id。
    *
    * 上游可能把同一次 function_call 的完成事件发两遍（重连、乱序），没有这个集合
@@ -424,22 +448,25 @@ class RealtimeBridge {
         this.model = model
         this.voice = voice
         this.instructions = instructions
-        this.toolsEnabled = webSearch
+        // end_call 是通话基础能力，默认始终注册——所以「带了 tools」恒为真。
+        this.toolsEnabled = true
         this.agentToolsEnabled = agentTools
         this.updateEventId = `evt_update_${Date.now().toString(36)}`
         this.upstream.sendText(JSON.stringify(buildSessionUpdate({
           instructions,
           voice,
-          webSearch: this.toolsEnabled,
+          webSearch,
           agentTools,
+          endCallTool: true,
           eventId: this.updateEventId,
           vendor,
           speechRate,
         })))
         log(`[realtime] 已连接上游 vendor=${vendor} model=${model} voice=${voice} tools=${[
-          this.toolsEnabled ? 'web_search' : '',
+          'end_call',
+          webSearch ? 'web_search' : '',
           agentTools ? 'run_task' : '',
-        ].filter((item) => item !== '').join('+') || 'off'}`)
+        ].filter((item) => item !== '').join('+')}`)
         this.armTimers()
         return
       } catch (error) {
@@ -503,6 +530,8 @@ class RealtimeBridge {
       this.responseActive = true
       // 上游接住了我们那条 response.create：不再有「已发未确认」的在途请求
       this.responseCreateInFlight = false
+      // 语音挂断：道别那一轮真的开始了，response.done 之后才允许收线
+      if (this.hangupRequested) this.hangupSpeechStarted = true
     }
 
     /*
@@ -564,6 +593,12 @@ class RealtimeBridge {
       }
       return
     }
+    /*
+     * 语音挂断：这一轮如果是道别（或道别后的任意一轮），先记一个 flag；等下面
+     * 把 response_done 映射发给前端之后再发 hangup。顺序反了的话，前端会先收到
+     * hangup（状态置 ended），又被随后的 response_done 拉回 listening。
+     */
+    let hangupAfterDone = false
     if (type === 'response.done') {
       this.responseActive = false
       this.responseCreateInFlight = false
@@ -602,6 +637,7 @@ class RealtimeBridge {
        * pending 那边由 in-flight 标记挡住，不会重复。
        */
       this.flushPendingResponseCreate()
+      if (this.hangupRequested && this.hangupSpeechStarted) hangupAfterDone = true
       // 不 return：下面还要把 response_done 转发给前端
     }
 
@@ -647,6 +683,7 @@ class RealtimeBridge {
     const mapped = mapUpstreamEvent(event)
     if (mapped !== null) {
       this.send(mapped)
+      if (hangupAfterDone) this.finishVoiceHangup()
       return
     }
     // 已知忽略的事件不计数；不认识的才记——见 diagnostics.unknownEvents 的注释
@@ -654,6 +691,7 @@ class RealtimeBridge {
       diagnostics.unknownEvents.set(type, (diagnostics.unknownEvents.get(type) ?? 0) + 1)
       this.options.log?.(`[realtime] 未识别的上游事件：${type}（可能是上游改了事件名，前端将收不到对应数据）`)
     }
+    if (hangupAfterDone) this.finishVoiceHangup()
   }
 
   /**
@@ -671,10 +709,12 @@ class RealtimeBridge {
         instructions: this.instructions,
         voice: this.voice,
         webSearch: false,
+        agentTools: false,
+        endCallTool: false,
         eventId: this.updateEventId,
       })))
       diagnostics.lastError = {
-        message: `内置联网搜索未启用（上游拒绝 tools：${reason}）；通话其余功能正常`,
+        message: `工具注册未启用（上游拒绝 tools：${reason}）；通话其余功能正常，但语音挂断与语音任务不可用`,
         at: Date.now(),
       }
     } catch {
@@ -691,6 +731,27 @@ class RealtimeBridge {
    */
   private dispatchFunctionCall(callId: string, name: string, args: string, source = ''): void {
     const log = this.options.log ?? ((): void => {})
+    const pending = this.pendingCalls.get(callId)
+    const resolvedName = name !== '' ? name : (pending?.name ?? '')
+    const resolvedArgs = args.trim() !== '' ? args : (pending?.args ?? '')
+    /*
+     * end_call 先于「缺 call_id 报错」处理：挂断这件事**不需要** call_id 也能做
+     * （只是没法让模型道别）。若上游这条事件没带 call_id（少见），仍然要挂断，
+     * 不能把用户的挂断意图当成一条技术错误吞掉。
+     */
+    if (resolvedName === 'end_call') {
+      diagnostics.lastFunctionCall = {
+        callId,
+        name: resolvedName,
+        source,
+        argsPreview: resolvedArgs.slice(0, 200),
+        emptyArgs: resolvedArgs.trim() === '',
+        at: Date.now(),
+      }
+      this.pendingCalls.delete(callId)
+      this.runEndCall(callId)
+      return
+    }
     if (callId === '') {
       /*
        * 没有 call_id 就没法回灌结果（`function_call_output` 必须带它），任务注定
@@ -701,9 +762,6 @@ class RealtimeBridge {
       this.send({ type: 'error', message: reason, retryable: false })
       return
     }
-    const pending = this.pendingCalls.get(callId)
-    const resolvedName = name !== '' ? name : (pending?.name ?? '')
-    const resolvedArgs = args.trim() !== '' ? args : (pending?.args ?? '')
     diagnostics.lastFunctionCall = {
       callId,
       name: resolvedName,
@@ -797,6 +855,20 @@ class RealtimeBridge {
       return
     }
 
+    /*
+     * **任务受理即时播报**（用户口径：真把任务交出去后要及时语音说一下）。
+     *
+     * 不能等 runner 跑完才第一次回灌：原来的实现是 await 整个 agent loop 之后才发
+     * function_call_output，任务执行期间模型一直停在「等工具结果」，用户说完
+     * 「帮我生成一张图」后只能看到界面上的「正在执行」，听不到任何回应。
+     *
+     * 这里在 await 之前先回一条「已受理」，让模型立刻说「好，我这就去办」；
+     * 真正的结果等任务完成后以 message/system 注入（一个 call_id 只能回一条
+     * function_call_output，不能完成时再发第二条）。
+     */
+    this.acceptedTasks.set(callId, task)
+    this.acceptAgentTask(callId, task)
+
     this.taskAbort ??= new AbortController()
     let result: { ok: boolean; summary?: string; error?: string; artifacts?: RealtimeArtifact[] }
     try {
@@ -834,14 +906,32 @@ class RealtimeBridge {
     result: { ok: boolean; summary?: string; error?: string; artifacts?: RealtimeArtifact[] },
   ): Promise<void> {
     const upstream = this.upstream
-    const output = result.ok
-      ? `任务已完成。执行结果：\n${(result.summary ?? '已完成').slice(0, 2000)}\n\n请用一两句口语向用户汇报，不要念出这段格式，也不要重复「任务已完成」这几个字。`
-      : `任务执行失败：${result.error ?? '未知原因'}\n\n请用一两句话如实告诉用户失败了以及原因，不要假装成功，也不要说「系统提示」这类话。`
+    /*
+     * 已受理的任务：完成时**不能再回 function_call_output**。
+     *
+     * 一个 call_id 只该有一条工具结果；受理那一刻已经回过「任务已受理」了。完成时
+     * 改发 message/system，把真正的结果注入上下文，再让模型汇报。未受理的失败路径
+     * （参数为空 / 没有 runner / 没有 agent）仍然用 function_call_output，因为模型
+     * 还停在工具调用处等结果，需要它来重试或解释。
+     */
+    const acceptedTask = this.acceptedTasks.get(callId)
+    this.acceptedTasks.delete(callId)
     if (upstream !== null && !this.closed) {
       try {
+        const item = acceptedTask !== undefined
+          ? {
+              type: 'message',
+              role: 'system',
+              content: [{ type: 'input_text', text: this.taskResultText(acceptedTask, result) }],
+            }
+          : {
+              type: 'function_call_output',
+              call_id: callId,
+              output: this.taskResultOutput(result),
+            }
         upstream.sendText(JSON.stringify({
           type: 'conversation.item.create',
-          item: { type: 'function_call_output', call_id: callId, output },
+          item,
         }))
         /*
          * 不直接发 response.create：上游此刻可能正有一轮响应在跑（模型在说话 /
@@ -862,6 +952,104 @@ class RealtimeBridge {
       // 产物一并下发：前端要把它们落成对话流里的图片/文件消息（只让模型念一句不够）
       ...(result.artifacts !== undefined && result.artifacts.length > 0 ? { artifacts: result.artifacts } : {}),
     })
+  }
+
+  /** 未受理的失败路径：给模型的工具结果（要求口语化，不要念格式）。 */
+  private taskResultOutput(result: { ok: boolean; summary?: string; error?: string }): string {
+    return result.ok
+      ? `任务已完成。执行结果：\n${(result.summary ?? '已完成').slice(0, 2000)}\n\n请用一两句口语向用户汇报，不要念出这段格式，也不要重复「任务已完成」这几个字。`
+      : `任务执行失败：${result.error ?? '未知原因'}\n\n请用一两句话如实告诉用户失败了以及原因，不要假装成功，也不要说「系统提示」这类话。`
+  }
+
+  /** 已受理任务完成后的系统消息：把原任务和结果一起交给模型汇报。 */
+  private taskResultText(
+    task: string,
+    result: { ok: boolean; summary?: string; error?: string },
+  ): string {
+    return result.ok
+      ? `【后台任务完成】任务：${task}\n执行结果：${(result.summary ?? '已完成').slice(0, 2000)}\n\n请用一两句口语向用户汇报结果，不要念出这段格式，也不要重复「任务已完成」这几个字。`
+      : `【后台任务失败】任务：${task}\n失败原因：${result.error ?? '未知原因'}\n\n请用一两句话如实告诉用户失败了以及原因，不要假装成功，也不要说「系统提示」这类话。`
+  }
+
+  /**
+   * 任务受理的即时播报：把「已开始执行」作为工具结果回给模型，让它立刻开口。
+   *
+   * 只写「已受理」不写结果，并明确要求不要再次调用 run_task——否则模型可能因为
+   * 没看到任务完成而反复派同一个任务。
+   */
+  private acceptAgentTask(callId: string, task: string): void {
+    const upstream = this.upstream
+    if (upstream === null || this.closed) return
+    try {
+      upstream.sendText(JSON.stringify({
+        type: 'conversation.item.create',
+        item: {
+          type: 'function_call_output',
+          call_id: callId,
+          output: `任务已受理，正在后台执行：${task}\n\n请立刻用一句话告诉用户你已经开始处理（例如「好，我这就去办，办好告诉你」），不要等待执行结果，也不要再次调用 run_task。`,
+        },
+      }))
+      this.requestResponseCreate()
+    } catch {
+      /* 上游已断：onUpstreamClose 会接手 */
+    }
+  }
+
+  /**
+   * 语音挂断：模型调用 `end_call` 后的第一步。
+   *
+   * 先给模型回一条「请道别」的工具结果，让它自然说一句再收线；同时挂 8 秒兜底，
+   * 防止上游不理这条 output、用户干等。
+   */
+  private runEndCall(callId: string): void {
+    if (this.hangupRequested || this.closed) return
+    this.hangupRequested = true
+    const log = this.options.log ?? ((): void => {})
+    log(`[realtime] 用户请求语音挂断 call=${callId || '(空)'}`)
+    const upstream = this.upstream
+    /*
+     * 没有 call_id / 上游已断：没法让模型道别，直接收线。不要等 8 秒兜底——
+     * 用户已经说了挂断，多挂 8 秒只会让人以为没反应。
+     */
+    if (upstream === null || callId === '') {
+      this.finishVoiceHangup()
+      return
+    }
+    try {
+      upstream.sendText(JSON.stringify({
+        type: 'conversation.item.create',
+        item: {
+          type: 'function_call_output',
+          call_id: callId,
+          output: '已收到用户的挂断请求。请用一句话自然道别（例如「好的，那就先这样，挂了」），不要再说别的，也不要调用任何工具。通话会在你说完后结束。',
+        },
+      }))
+      this.requestResponseCreate()
+    } catch {
+      /* 上游已断：下面兜底直接收线 */
+    }
+    this.hangupTimer = setTimeout(() => this.finishVoiceHangup(), 8_000)
+    this.hangupTimer.unref?.()
+  }
+
+  /**
+   * 真正通知前端收线（幂等）。
+   *
+   * 发 hangup 而不是 closed：前端还要把最后一句道别播完（播放器队列里可能还有
+   * 一两秒音频）。客户端排空后会回 stop，那才是真正的 shutdown；10 秒兜底是
+   * 防止客户端异常（页面卡死 / 断网）把上游一直挂着计费。
+   */
+  private finishVoiceHangup(): void {
+    if (this.hangupSent || this.closed) return
+    this.hangupSent = true
+    if (this.hangupTimer !== null) {
+      clearTimeout(this.hangupTimer)
+      this.hangupTimer = null
+    }
+    this.options.log?.('[realtime] 语音挂断：通知客户端收线')
+    this.send({ type: 'hangup', reason: '通话已结束' })
+    this.hangupCloseTimer = setTimeout(() => this.shutdown(), 10_000)
+    this.hangupCloseTimer.unref?.()
   }
 
   /**
@@ -950,7 +1138,11 @@ class RealtimeBridge {
   private onUpstreamClose(code: number, reason: string): void {
     this.upstream = null
     if (this.closed) return
-    if (this.stoppedByUser) {
+    /*
+     * 语音挂断中上游先断：这是正常收尾路径（不是故障）。用户已经说了挂断，
+     * 再弹一条「实时语音上游断开」的红条只会让人以为失败了。
+     */
+    if (this.stoppedByUser || this.hangupRequested) {
       this.send({ type: 'closed', reason: '通话已结束' })
     } else if (code === 1000) {
       this.send({ type: 'closed', reason: '上游正常结束会话' })
@@ -1054,8 +1246,18 @@ class RealtimeBridge {
     if (this.closed) return
     this.closed = true
     this.disarmTimers()
+    // 挂断链路的兜底定时器：会话已经关了，再触发只会和 shutdown 抢
+    if (this.hangupTimer !== null) {
+      clearTimeout(this.hangupTimer)
+      this.hangupTimer = null
+    }
+    if (this.hangupCloseTimer !== null) {
+      clearTimeout(this.hangupCloseTimer)
+      this.hangupCloseTimer = null
+    }
     // 未完成的工具调用参数一并丢掉：会话已关，再执行也没地方回灌
     this.pendingCalls.clear()
+    this.acceptedTasks.clear()
     // 待补发的 response.create 同理：会话已关，补发也没地方去了
     this.responseCreatePending = false
     this.responseCreateInFlight = false

@@ -371,7 +371,7 @@ const CSS = [
   '  border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 62%, transparent); }',
   '.dtt-iu__form-submit-btn:active { transform: scale(.98); }',
   '.dtt-iu__form-submit-btn:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary, #4176e6); outline-offset: 2px; }',
-  '@media (max-width: 480px) {',
+  '@container iu (max-width: 480px) {',
   '  .dtt-iu__form { grid-template-columns: 1fr; gap: 9px; }',
   '  .dtt-iu__checkbox { width: 100%; margin-left: 0; }',
   '  .dtt-iu__form-submit-btn { width: 100%; }',

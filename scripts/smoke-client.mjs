@@ -5555,6 +5555,7 @@ if (krEnabled) {
         link: { kind: 'link', title: EVIL, url: 'https://example.com/?q=' + encodeURIComponent(EVIL), source: EVIL, summary: EVIL, meta: EVIL, badge: EVIL },
         calculator: { kind: 'calculator', title: EVIL, desc: EVIL, submitLabel: EVIL, inputs: [{ id: 'v1', label: EVIL, value: 50, min: 0, max: 100, step: 1, unit: EVIL }], outputs: [{ label: EVIL, calc: 'v1*2', unit: EVIL, highlight: true }] },
         chart: { kind: 'chart', title: EVIL, desc: EVIL, unit: EVIL, categories: [EVIL], series: [{ name: EVIL, data: [100] }], metrics: [{ label: EVIL, value: EVIL, sub: EVIL }] },
+        compare: { kind: 'compare', title: EVIL, desc: EVIL, rows: [EVIL], products: [{ name: EVIL, price: EVIL, source: EVIL, rating: EVIL, badge: EVIL, image: 'https://example.com/a.png', values: [EVIL] }, { name: EVIL, values: [EVIL] }] },
       }
       const sample = samples[kind]
       if (sample === undefined) { reasons.push(kind + '：新增 kind 必须在转义探针里补样本（否则它的快照没人守）'); continue }

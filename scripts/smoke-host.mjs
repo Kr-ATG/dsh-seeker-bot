@@ -728,12 +728,12 @@ if (!/lang\.trim\(\)\.toLowerCase\(\) === 'iu'/.test(mdSrc)) {
   //    安全面：卡片页在 --disable-web-security 的无头 Chrome 里打开，
   //    模型文本逃出标签上下文 = 任意脚本读本地文件。
   //
-  //    数量下限：图形类（graph/arch/sequence）与 chart 已下线，现存 12 种。
+  //    数量下限：现存 18 种 kind（含新增 compare）。
   //    这个数字只在「kind 被误删」时有意义，故意卡在**当前实际值**——
   //    少一个就报，加 kind 时同步上调（漏改只会让断言偏松，不会误报）。
   const kindFiles = readdirSync(resolve(ROOT, 'src/client/iu/kinds'))
     .filter(f => f.endsWith('.ts') && !['core.ts', 'contract.ts', 'registry.ts', 'types.ts', 'bodies.ts'].includes(f))
-  if (kindFiles.length < 12) reasons.push(`kinds 目录应有 ≥12 个纯逻辑模块，实得 ${kindFiles.length}`)
+  if (kindFiles.length < 18) reasons.push(`kinds 目录应有 ≥18 个纯逻辑模块，实得 ${kindFiles.length}`)
   for (const f of kindFiles) {
     const src = stripComments(srcOf(`src/client/iu/kinds/${f}`))
     const kind = f.replace(/\.ts$/, '')

@@ -342,6 +342,63 @@ try {
     runScan.items.some((item) => item.name === 'run-report.docx' && item.category === '文档'),
     '自动归档的文件出现在产出物扫描结果里',
   )
+
+  /* ── 8. 产出物时间门槛：只读扫描不再认领历史文件 ───────────────────── */
+
+  /*
+   * 2026-11-06 实测的 bug：一轮只读侦察（run_code 里 readdir + glob）把工作区里
+   * 11-02 的 12 张旧图原样印进了结果文本，于是「12 个产出」全挂到那一轮上——
+   * 一个都不是这轮做的。修法：结果文本扫出来的路径必须晚于本轮开始时间
+   * （宽容 5s）才算产出；present 参数是模型显式声明，不受此限。
+   *
+   * 这里直接调 collectArtifacts，用一个可控的 since 验时间门槛，不依赖系统时钟。
+   */
+  const { collectArtifacts } = await import(pathToFileURL(join(ROOT, 'src', 'host', 'personal', 'agent.ts')).href)
+
+  const gateDir = join(workspace, '_tmp')
+  mkdirSync(gateDir, { recursive: true })
+  const gateOld = join(gateDir, 'gate-old.png')
+  const gateFresh = join(gateDir, 'gate-fresh.png')
+  writeFileSync(gateOld, Buffer.from('old gate payload'))
+  const hourAgo = Date.now() - 3600_000
+  utimesSync(gateOld, new Date(hourAgo), new Date(hourAgo))
+  writeFileSync(gateFresh, Buffer.from('fresh gate payload'))
+
+  const futureSince = Date.now() + 3600_000
+  const pastSince = Date.now() - 3600_000
+
+  assertEqual(
+    collectArtifacts([], `工作区里就这些：${gateOld}`, futureSince).length,
+    0,
+    '结果文本里的旧文件被时间门槛拦下（不认领历史文件）',
+  )
+  const freshOnly = collectArtifacts([], `本轮产物：${gateFresh}`, pastSince)
+  assertEqual(freshOnly.length, 1, '本轮新写的文件通过时间门槛')
+  assertEqual(freshOnly[0]?.name, 'gate-fresh.png', '通过门槛的是那个新文件')
+
+  /*
+   * present 豁免：同一张「旧」文件放进 present 参数，必须被收下。
+   * 这也是时间门槛不能做在 artifactRefFor 入口的原因——那样会把 present 一起杀了。
+   */
+  const viaPresent = collectArtifacts([gateOld], '', futureSince)
+  assertEqual(viaPresent.length, 1, 'present 参数不受时间门槛限制（模型显式声明的交付）')
+
+  /*
+   * birthtime 兜底：复制类工具（robocopy /COPY:DAT、cp -p）保留源 mtime，
+   * 只看 mtime 会把复制出来的真产出误杀。utimesSync 只回拨 mtime、不动 birthtime，
+   * 正好模拟这种文件：since 取「一小时前」，它应当通过。
+   */
+  const gateOldStat = statSync(gateOld)
+  if (gateOldStat.birthtimeMs > 0) {
+    const copiedStyle = collectArtifacts([], `已复制到 ${gateOld}`, pastSince)
+    assertEqual(copiedStyle.length, 1, 'mtime 被回拨但 birthtime 是新的文件仍通过（复制兜底）')
+  } else {
+    console.log('· 跳过 birthtime 兜底断言（当前文件系统不提供 birthtime）')
+  }
+
+  /* 去重与上限仍然成立：同一路径在 present 与结果文本里各出现一次，只算一条。 */
+  const dedup = collectArtifacts([gateFresh], `产物：${gateFresh}`, pastSince)
+  assertEqual(dedup.length, 1, 'present 与结果文本里的同一路径只算一条（去重不变）')
 } finally {
   try {
     rmSync(tempRoot, { recursive: true, force: true })
