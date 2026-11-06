@@ -3599,12 +3599,46 @@ function steerRunningTurn(agent: any, spec: BotAgentSpec, text: string): { steer
  * 边收边通过 emit 推给前端，最后返回完整 blocks。
  */
 /**
- * 把宿主 / 模型提供方的错误折叠成一句**中文**提示（界面只显示中文）。
+ * 从上游错误原文里提取可读细节（provider JSON 的 message / code 优先）。
  *
- * 上游错误经常是 `429: {"code":null,"message":"MiniMax ... insufficient balance"}`
- * 这种「状态码 + 英文 JSON」，直接抛给用户既长又难读、还是英文。这里按关键字
- * 映射成中文；无法识别的英文错误也不把原文显示给用户，只提示查看宿主日志
- * （英文原文仍写进 stderr 日志，排查时看得到）。
+ * 之前这里只按关键字折叠成一句中文概括，把具体异常吞掉了：用户看到「模型调用
+ * 失败，请稍后重试」时完全不知道是模型名写错、参数越界还是别的。现在保留原文
+ * 里最有用的部分（message + code），截断后附在中文概括后面。
+ */
+function errorDetailText(raw: string): string {
+  const text = raw.trim()
+  if (text === '') return ''
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start >= 0 && end > start) {
+    try {
+      const parsed = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>
+      const message = typeof parsed.message === 'string' ? parsed.message.trim() : ''
+      const code = parsed.code ?? parsed.type ?? parsed.param
+      const prefix = text.slice(0, start).replace(/[:：]\s*$/, '').trim()
+      const parts: string[] = []
+      if (prefix !== '') parts.push(prefix)
+      if (message !== '') parts.push(message)
+      let detail = parts.join(': ')
+      if (code !== undefined && code !== null && String(code).trim() !== '') {
+        detail = detail === '' ? `code=${String(code)}` : `${detail} [${String(code)}]`
+      }
+      if (detail !== '') return detail.length > 500 ? `${detail.slice(0, 500)}…` : detail
+    } catch {
+      /* 不是完整 JSON：按原文截断 */
+    }
+  }
+  return text.length > 500 ? `${text.slice(0, 500)}…` : text
+}
+
+/**
+ * 把宿主 / 模型提供方的错误折叠成一句**中文**提示。
+ *
+ * 中文概括负责用户可读，**具体异常原文必须保留**（2026-11-06 用户要求：
+ * 「具体什么异常要显示出来」）。上游错误经常是
+ * `429: {"code":null,"message":"MiniMax ... insufficient balance"}` 这种
+ * 「状态码 + 英文 JSON」——折叠时把 message / code 提取出来附在末尾，
+ * 用户和排查者都能直接看到真正原因。
  */
 export function toUserFacingError(raw: string): string {
   const text = raw.trim()
@@ -3612,28 +3646,138 @@ export function toUserFacingError(raw: string): string {
   // 本来就是中文的错误（插件自己抛的）原样保留
   if (/[\u4e00-\u9fa5]/.test(text)) return text
   const lower = text.toLowerCase()
+  const detail = errorDetailText(text)
+  const withDetail = (summary: string): string => detail === '' ? summary : `${summary}｜具体异常：${detail}`
   if (/(usage limit|insufficient balance|quota|balance)/.test(lower) || /\b429\b/.test(text)) {
-    return '模型额度已用尽或请求过于频繁（429），请稍后重试或更换模型'
+    return withDetail('模型额度已用尽或请求过于频繁（429），请稍后重试或更换模型')
   }
   if (/(401|unauthorized|invalid api key|authentication failed)/.test(lower)) {
-    return '模型鉴权失败（401），请检查模型配置或密钥'
+    return withDetail('模型鉴权失败（401），请检查模型配置或密钥')
   }
-  if (/(403|forbidden)/.test(lower)) return '模型拒绝访问（403），请检查权限或额度'
-  if (/(404|not found|model not found)/.test(lower)) return '模型或接口不存在（404），请检查模型配置'
-  if (/(timeout|timed out|etimedout)/.test(lower)) return '模型请求超时，请稍后重试'
+  if (/(403|forbidden)/.test(lower)) return withDetail('模型拒绝访问（403），请检查权限或额度')
+  if (/(404|not found|model not found)/.test(lower)) return withDetail('模型或接口不存在（404），请检查模型配置')
+  if (/(timeout|timed out|etimedout)/.test(lower)) return withDetail('模型请求超时，请稍后重试')
   if (/(context length|maximum context|too many tokens|token limit|exceed.*token)/.test(lower)) {
-    return '上下文超过模型上限，请整理对话后重试'
+    return withDetail('上下文超过模型上限，请整理对话后重试')
   }
   if (/(overloaded|service unavailable|503|502|500|internal server error)/.test(lower)) {
-    return '模型服务暂时不可用，请稍后重试'
+    return withDetail('模型服务暂时不可用，请稍后重试')
   }
   if (/(network|fetch failed|econnrefused|enotfound|socket|connect.*refused)/.test(lower)) {
-    return '网络连接失败，请检查网络后重试'
+    return withDetail('网络连接失败，请检查网络后重试')
   }
-  if (/(rate limit|too many requests)/.test(lower)) return '请求过于频繁，请稍后重试'
+  if (/(rate limit|too many requests)/.test(lower)) return withDetail('请求过于频繁，请稍后重试')
+  // provider 常见形态「400: {...}」「422: {...}」——状态码在句首，上面的关键字都没命中
+  const statusMatch = /^(?:status\s*[:：]?\s*)?(\d{3})\b/i.exec(text)
+  if (statusMatch !== null) {
+    const statusCode = Number(statusMatch[1])
+    if (statusCode >= 400 && statusCode <= 599) {
+      return withDetail(`模型调用失败（错误码 ${statusMatch[1]}），请稍后重试或查看宿主日志`)
+    }
+  }
   const codeMatch = /\b(?:error|code|status)[:：]?\s*(\d{3})\b/i.exec(text)
-  if (codeMatch !== null) return `模型调用失败（错误码 ${codeMatch[1]}），请稍后重试或查看宿主日志`
-  return '模型调用失败，请稍后重试或查看宿主日志'
+  if (codeMatch !== null) return withDetail(`模型调用失败（错误码 ${codeMatch[1]}），请稍后重试或查看宿主日志`)
+  return withDetail('模型调用失败，请稍后重试或查看宿主日志')
+}
+
+/**
+ * 把 `turn/end.reason.kind === 'blocked'` 展开成可排查的具体描述。
+ *
+ * 宿主的 TurnEndReasonMap 里 blocked 只有 `{ kind: 'blocked' }`——没有 reason /
+ * error 字段，所以只报「会话状态异常」会把真正的问题吞掉。这里把宿主能给的原始
+ * reason、会话 header、归档状态、会话/Agent 是否还在注册表里、pre-step 探针结果
+ * 和本轮事件序列都拼出来；有具体异常时直接显示异常原文。
+ */
+export function describeBlockedTurn(
+  ctx: any,
+  agent: any,
+  sessionId: string,
+  debug: {
+    events?: string[]
+    turnEnd?: unknown
+    preStep?: { seen?: boolean; rejected?: boolean; error?: string }
+  },
+): string {
+  const parts: string[] = []
+  const clipText = (text: string, max: number): string => text.length > max ? `${text.slice(0, max)}…` : text
+  const turnEnd = (debug?.turnEnd ?? null) as {
+    turn?: number
+    reason?: { kind?: string; error?: { message?: string; code?: string } }
+  } | null
+  const failure = turnEnd?.reason?.error
+  const failureMessage = typeof failure?.message === 'string' ? failure.message.trim() : ''
+  if (failureMessage !== '') {
+    const failureCode = typeof failure?.code === 'string' ? failure.code : ''
+    const code = failureCode !== '' ? `（${failureCode}）` : ''
+    parts.push(`宿主错误${code}：${clipText(failureMessage, 400)}`)
+  } else {
+    let rawReason = 'null'
+    try {
+      rawReason = JSON.stringify(turnEnd?.reason ?? null)
+    } catch {
+      /* reason 里可能有不可序列化字段：保留 null */
+    }
+    parts.push(`宿主未提供拒绝原因（turn/end.reason=${rawReason}）`)
+  }
+
+  const header = agent?.session?.header
+  if (header !== undefined && header !== null) {
+    const bits: string[] = [`id=${String(header.id ?? sessionId)}`]
+    if (header.origin !== undefined) bits.push(`origin=${String(header.origin)}`)
+    if (header.parentSession !== undefined) bits.push(`parentSession=${String(header.parentSession)}`)
+    if (header.delegationDepth !== undefined) bits.push(`delegationDepth=${String(header.delegationDepth)}`)
+    parts.push(`会话 header：${bits.join('，')}`)
+  }
+
+  /*
+   * 归档是宿主 archived-session-gate 唯一会主动 reject 的常见原因：它不写
+   * turn/end 的 error，界面只能看到 blocked。这里主动查一次，把「为什么」说清楚。
+   */
+  try {
+    const registry = typeof ctx?.get === 'function' ? ctx.get('workspaceRegistry') : undefined
+    const archived: readonly string[] = Array.isArray(registry?.archivedSessionIds) ? registry.archivedSessionIds : []
+    if (archived.includes(sessionId)) {
+      parts.push('该会话已被归档（宿主 archived-session-gate 会拒绝它的所有步骤），请先取消归档再重试')
+    } else {
+      const parent = header?.parentSession
+      if (typeof parent === 'string' && archived.includes(parent)) {
+        parts.push(`父会话 ${parent} 已归档（宿主 archived-session-gate 会拒绝子会话步骤），请先取消归档`)
+      }
+    }
+  } catch {
+    /* workspaceRegistry 不可用：跳过归档探测 */
+  }
+
+  try {
+    const sessions = typeof ctx?.get === 'function' ? ctx.get('sessions') : undefined
+    if (typeof sessions?.get === 'function' && sessions.get(sessionId) === undefined) {
+      parts.push('宿主会话存储里已找不到该会话（可能已被清理/重建）')
+    }
+  } catch {
+    /* 跳过会话探测 */
+  }
+
+  try {
+    const agents = typeof ctx?.get === 'function' ? ctx.get('agents') : undefined
+    if (typeof agents?.get === 'function') {
+      const live = agents.get(sessionId)
+      if (live === undefined || live === null) parts.push('宿主 agent 注册表里已找不到该 agent')
+      else if (agent !== undefined && live !== agent) parts.push('宿主 agent 注册表里已是另一个 agent（旧 agent 被替换）')
+    }
+  } catch {
+    /* 跳过 agent 探测 */
+  }
+
+  const preStep = debug?.preStep
+  if (preStep?.error !== undefined && preStep.error !== '') {
+    parts.push(`pre-step 监听器抛出异常：${clipText(preStep.error, 400)}`)
+  } else if (preStep?.rejected === true) {
+    parts.push('模型一步都没开始：pre-step 阶段被下游监听器拒绝（宿主接口不返回拒绝者名称）')
+  }
+
+  const events = Array.isArray(debug?.events) ? debug.events : []
+  if (events.length > 0) parts.push(`本轮事件：${events.join(' → ')}`)
+  return parts.join('；')
 }
 
 export async function runBotTurn(
@@ -3945,7 +4089,9 @@ export async function runBotTurn(
     events: string[]
     turnEnd: unknown
     error?: string
-  } = { sessionId, listener: '', events: [], turnEnd: null }
+    /** pre-step 探针：本轮是否走到 pre-step、是否被下游拒绝、下游是否抛错。 */
+    preStep: { seen: boolean; rejected: boolean; error?: string }
+  } = { sessionId, listener: '', events: [], turnEnd: null, preStep: { seen: false, rejected: false } }
   lastTurnDebug = debug
 
   const seenSeq = new Set<number>()
@@ -4312,6 +4458,33 @@ export async function runBotTurn(
    * 同时保留 root ctx 作为兜底，handler 内按 seq 去重。
    */
   const disposers: Array<() => void> = []
+  /**
+   * pre-step 探针：只观察、不改变决策。
+   *
+   * 宿主把 `agent/pre-step` 的 reject 收成 `turn/end { kind: 'blocked' }`，不带
+   * 任何原因字段；这个探针至少能记录「本轮确实走到了 pre-step」「被下游拒绝了」
+   * 「下游抛了什么异常」，让 blocked 的错误文案能说清楚卡在哪一层，而不是只有
+   * 一句「会话状态异常」。
+   */
+  const preStepProbe = async (payload: any, next: () => Promise<any>): Promise<any> => {
+    if (typeof next !== 'function') return undefined
+    const payloadSession = String(payload?.agent?.session?.id ?? payload?.agent?.id ?? '')
+    const mine = payload?.agent === agent || (payloadSession !== '' && payloadSession === sessionId)
+    try {
+      const decision = await next()
+      if (mine) {
+        debug.preStep.seen = true
+        if (decision?.kind === 'reject') debug.preStep.rejected = true
+      }
+      return decision
+    } catch (error: any) {
+      if (mine) {
+        debug.preStep.seen = true
+        debug.preStep.error = String(error?.message ?? error)
+      }
+      throw error
+    }
+  }
   const register = (target: any, label: string): void => {
     try {
       if (typeof target?.on !== 'function') return
@@ -4324,6 +4497,19 @@ export async function runBotTurn(
   }
   register(agent?.ctx, 'agent.ctx')
   register(ctx, 'root')
+  /*
+   * pre-step 探针只注册在 root ctx 一次：vault / memory 两个注入器同样注册在这里，
+   * 说明 root 能收到所有 agent 的 pre-step。若在两个作用域都注册，waterfall 的
+   * next() 链可能被重复走一遍（同 session/event 的重复投递问题），得不偿失。
+   */
+  try {
+    if (typeof ctx?.on === 'function') {
+      const offPre = ctx.on('agent/pre-step', preStepProbe, { prepend: true })
+      if (typeof offPre === 'function') disposers.push(offPre as () => void)
+    }
+  } catch {
+    /* root ctx 不支持 pre-step 注册：探针缺席，blocked 仍有无原因的兜底描述 */
+  }
 
   const onAbort = (): void => { settle?.() }
   signal?.addEventListener('abort', onAbort)
@@ -4431,14 +4617,16 @@ export async function runBotTurn(
         sessionId,
         reason,
         turnEnd: debug.turnEnd,
+        preStep: debug.preStep,
         events: debug.events.slice(0, 60),
         header: agent?.session?.header,
+        detail: describeBlockedTurn(ctx, agent, sessionId, debug),
       }))
     } catch {
       /* 诊断日志失败不影响返回 */
     }
     const message = reason === 'blocked'
-      ? '本轮被宿主拒绝（pre-step blocked）：会话状态异常，建议重启 DSH 或重建该 Bot 会话'
+      ? `本轮被宿主拒绝（pre-step blocked）：${describeBlockedTurn(ctx, agent, sessionId, debug)}`
       : failureText !== ''
         ? failureText
         : '本轮没有产生任何输出'

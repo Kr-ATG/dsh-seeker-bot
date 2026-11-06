@@ -19,9 +19,15 @@
  * 才补一条「变更摘要」，只列变了的那几条。这样「刚记下的密码」立刻对模型可见，
  * 而没变化的会话不会每轮重复灌同一份清单。
  *
- * ── 绝不抛穿 ────────────────────────────────────────────────────────
- * 注入失败一律记日志后原样返回下游决策：档案没注入顶多让模型多问一句，
- * 而 pre-step 抛错会毁掉用户的整个回合。
+ * ── 只吞自己的错，不吞下游的错 ──────────────────────────────────────
+ * 本插件自己的注入失败（listRecords / buildInjectionText 等）一律记日志后原样
+ * 返回下游决策：档案没注入顶多让模型多问一句，不该毁掉用户的整个回合。
+ *
+ * 但 `await next()` 抛错（下游 listener 失败）**必须原样上抛**：宿主只有收到
+ * 异常才会把 turn/end 记成 { kind: 'error', error: { message, code } } 并在界面
+ * 显示具体原因；若在这里吞成 { kind: 'reject' }，宿主记的是 { kind: 'blocked' }
+ * （该类型没有 error 字段），用户只能看到「会话状态异常」，真正的异常永远查不到。
+ * vault 是外层、记忆库是内层——外层再吞一次，内层的 rethrow 就白费了。
  */
 
 import { createUserMessage } from '../../vendor/dsh-llm/index.js'
@@ -284,8 +290,13 @@ export class VaultInjector {
     try {
       decision = await next()
     } catch (error) {
-      this.logger?.warn?.('[dsh-vault] pre-step next() failed: ' + describeError(error))
-      return { kind: 'reject' }
+      // 与 dsh-memory 同款：next() 失败必须原样上抛，宿主才会把 turn/end 记成
+      // { kind: 'error' } 并显示具体异常；吞成 reject 只会变成无原因的 blocked。
+      // 日志带 stack，便于事后从宿主日志里定位是哪个下游 listener 炸的。
+      const message = describeError(error)
+      const stack = error instanceof Error && error.stack !== undefined ? LF + error.stack : ''
+      this.logger?.warn?.('[dsh-vault] pre-step next() failed: ' + message + stack)
+      throw error
     }
     if (decision.kind !== 'enter' || payload.signal.aborted) return decision
     if (this.config.autoInject !== true) return decision

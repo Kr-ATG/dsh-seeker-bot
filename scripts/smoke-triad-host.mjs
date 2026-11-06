@@ -727,6 +727,36 @@ need(listeners.has('session/event'), 'session/event capture hooked')
 need(![...routes.keys()].some(p => p.startsWith('/api/chat-flow/') && p.includes('dsh-memory')),
   'no route collision between chat-plus and the merged workbenches')
 
+// ── pre-step 监听器：next() 的异常必须原样上抛，不能吞成 reject ──────────
+//
+// 背景：vault（外层）与 memory（内层）都曾在 `await next()` 的 catch 里
+// `return { kind: 'reject' }`。宿主把 reject 记成 turn/end `{ kind: 'blocked' }`
+// （该类型没有 error 字段），界面只能显示笼统的「会话状态异常」，真实异常被
+// 彻底吞掉。修法是记录 message + stack 后 rethrow，宿主才会记 `{ kind: 'error' }`
+// 并把 error.message 显示到界面。这里静态钉住两处源码的 catch 块。
+{
+  for (const [label, rel] of [
+    ['dsh-memory', 'src/triad/memory/engine/inject.ts'],
+    ['dsh-vault', 'src/triad/vault/inject.ts'],
+  ]) {
+    const source = readFileSync(resolve(ROOT, rel), 'utf8')
+    const nextIdx = source.indexOf('decision = await next()')
+    const catchIdx = nextIdx < 0 ? -1 : source.indexOf('} catch (error) {', nextIdx)
+    const endIdx = catchIdx < 0 ? -1 : source.indexOf("if (decision.kind !== 'enter'", catchIdx)
+    need(nextIdx >= 0 && catchIdx >= 0 && endIdx > catchIdx,
+      `${label} preStepListener 的 next() catch 可定位（结构变化时需人工复核本断言）`)
+    const catchBlock = endIdx > catchIdx ? source.slice(catchIdx, endIdx) : ''
+    need(/\bthrow\b/.test(catchBlock),
+      `${label} 在 next() 的 catch 里 rethrow（吞成 reject 会让宿主记成无 error 的 blocked）`)
+    need(!/return\s*\{\s*kind:\s*'reject'\s*\}/.test(catchBlock),
+      `${label} 的 next() catch 不再 return { kind: 'reject' }`)
+  }
+  // memory 侧还要求把异常落盘：DSH 控制台的 warn 只进内存，不写磁盘。
+  const memorySource = readFileSync(resolve(ROOT, 'src/triad/memory/engine/inject.ts'), 'utf8')
+  need(memorySource.includes("store.appendErrorLog('pre-step'"),
+    'dsh-memory 把 pre-step 异常写入 store.appendErrorLog（控制台日志不落盘）')
+}
+
 // ── MCP 状态口径：会话级 MCP 必须可见（本次修复的核心）─────────────────
 // 回归背景：官方 browser-use 用 `mountSessionMcp` 把 mcp-client 挂在**每个 Agent
 // 自己的 scope** 里，工具只在 `ctx.tools.schemas(agent)` 下可见。旧实现只扫全局

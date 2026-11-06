@@ -109,6 +109,7 @@
     "test:published-reasoning": "node scripts/test-published-reasoning.mjs",
     "build:personal-demo": "node scripts/build-personal-demo.mjs",
     "test:personal-agent": "node scripts/test-personal-agent.mjs",
+    "test:personal-error-detail": "node scripts/test-personal-error-detail.mjs",
     "test:proactive-marks": "node scripts/test-proactive-marks.mjs",
     "test:personal-recall": "node scripts/test-personal-recall.mjs && node scripts/test-personal-recall-host.mjs",
     "test:personal-quote": "node scripts/test-personal-quote.mjs",

@@ -133,12 +133,15 @@ function isDemoMode(): boolean {
  * 前端异常（fetch failed、timeout 等英文原文），避免聊天窗直接显示英文。
  */
 function userFacingErrorText(error: unknown): string {
-  const text = error instanceof Error ? error.message : String(error)
+  const raw = error instanceof Error ? error.message : String(error)
+  const text = raw.trim()
   if (/[\u4e00-\u9fa5]/.test(text)) return text
+  const detail = text.length > 400 ? `${text.slice(0, 400)}…` : text
+  const withDetail = (summary: string): string => detail === '' ? summary : `${summary}｜具体异常：${detail}`
   if (/(fetch|network|failed to fetch|timeout|econnrefused|enotfound)/i.test(text)) {
-    return '网络请求失败，请稍后重试'
+    return withDetail('网络请求失败，请稍后重试')
   }
-  return '请求失败，请稍后重试'
+  return withDetail('请求失败，请稍后重试')
 }
 
 /**

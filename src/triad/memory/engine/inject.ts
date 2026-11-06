@@ -645,12 +645,18 @@ export function createMemoryInjector(
   const preStepListener: MemoryInjector['preStepListener'] = async (payload, next) => {
     let decision: { kind: 'enter'; messages: unknown[] } | { kind: 'reject' }
     try {
-      // next() 抛错（下游 listener 失败）绝不能扩散：DSH 会把 pre-step
-      // 失败上报为 turn 错误，但我们要保证本插件永远不成为崩溃源。
       decision = await next()
     } catch (error) {
-      logger?.warn?.(`[dsh-memory] pre-step next() failed: ${error instanceof Error ? error.message : String(error)}`)
-      return { kind: 'reject' }
+      // next() 抛错（下游 listener 失败）必须原样上抛，绝不能吞成 { kind: 'reject' }：
+      // 宿主收到 reject 只会把 turn/end 记成 { kind: 'blocked' }（该类型没有 error
+      // 字段），界面只能显示笼统的「会话状态异常」，真正异常就永远查不到；只有抛出
+      // 去，宿主才会记成 { kind: 'error', error: { message, code } } 并显示具体原因。
+      // 日志要带 stack：控制台 warn 不进磁盘，appendErrorLog 才是事后排查的依据。
+      const message = error instanceof Error ? error.message : String(error)
+      const stack = error instanceof Error && error.stack !== undefined ? `\n${error.stack}` : ''
+      logger?.warn?.(`[dsh-memory] pre-step next() failed: ${message}${stack}`)
+      void store.appendErrorLog('pre-step', `${message}${stack}`).catch(() => undefined)
+      throw error
     }
     if (decision.kind !== 'enter' || payload.signal.aborted) return decision
     const sessionId = payload.agent.session.id
