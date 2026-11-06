@@ -53,13 +53,32 @@ import type { WsPeer, WsPeerHandlers } from './ws-frame.ts'
 const WAV_HEADER_BYTES = 44
 
 /**
- * 整次朗读的默认超时。
+ * 整次朗读的默认超时（按字数估算）。
  *
- * 计时的是**合成耗时**，不是音频时长：上游是流式吐音频的，400 字大概能出 1~2 分钟
- * 音频，但生成通常比实时快好几倍。30 秒是「慢到这个程度就不等了」的兜底；真要放宽
- * 走 `createRealtimeTtsHandler` 的第二个参数（tts.timeoutMs），不用改这里。
+ * 计时的是**合成耗时**，不是音频时长。中文朗读约 4 字/秒，400 字就是 100 秒音频；
+ * 上游合成本身通常只有实时的 1~3 倍，固定 30 秒会在长段合成到一半时把连接掐掉——
+ * 用户听到的就是「念到半句突然没声」，而且流式下前半截音频已经发出去，只能断流，
+ * 前端会误以为这一整段念完了。
+ *
+ * 所以按「每字 400ms」折算（4 字/秒的音频时长 × 1.6 倍余量）：300 字 → 120 秒、
+ * 400 字 → 160 秒；至少 60 秒，最多 300 秒。真要放宽/收紧走
+ * `createRealtimeTtsHandler` 的第二个参数（tts.timeoutMs），不用改这里。
  */
-const DEFAULT_TIMEOUT_MS = 30_000
+const MIN_TTS_TIMEOUT_MS = 60_000
+const TTS_TIMEOUT_PER_CHAR_MS = 400
+const MAX_TTS_TIMEOUT_MS = 300_000
+
+/**
+ * 按朗读字数估算默认超时。
+ *
+ * 导出给测试：这个数字直接决定「长段朗读会不会被拦腰截断」，必须能被断言。
+ * @param chars 本次要合成的字符数（UTF-16 长度，与前端同一口径）。
+ * @returns 合成总超时（毫秒）。
+ */
+export function defaultTtsTimeoutMs(chars: number): number {
+  const count = Number.isFinite(chars) && chars > 0 ? Math.floor(chars) : 0
+  return Math.min(MAX_TTS_TIMEOUT_MS, Math.max(MIN_TTS_TIMEOUT_MS, count * TTS_TIMEOUT_PER_CHAR_MS))
+}
 
 /**
  * 连上上游之后，等多久还没收到 `session.created` 就自己发朗读请求。
@@ -149,7 +168,7 @@ export interface TtsOptions {
   models?: () => readonly string[] | undefined
   /** 日志出口。 */
   log?: (message: string) => void
-  /** 整次朗读的总超时（建连 + 合成），默认 30 秒。 */
+  /** 整次朗读的总超时（建连 + 合成）；不传时按文本字数自适应（见 `defaultTtsTimeoutMs`）。 */
   timeoutMs?: number
 }
 
@@ -279,7 +298,7 @@ async function resolveSpeech(options: TtsOptions, request: RealtimeTtsRequest): 
   const configuredTimeout = Number(options.timeoutMs)
   const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
     ? Math.round(configuredTimeout)
-    : DEFAULT_TIMEOUT_MS
+    : defaultTtsTimeoutMs(text.length)
   return { text, vendor, key, voice, speed, profile, sampleRate, models, timeoutMs }
 }
 

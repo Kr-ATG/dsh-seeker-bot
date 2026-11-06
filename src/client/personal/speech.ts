@@ -51,12 +51,18 @@ export const SPEECH_MAX_CHARS = 2000
 /**
  * 单段朗读上限（字符）。
  *
- * 宿主端点自己有 REALTIME_TTS_MAX_CHARS（400）的硬截断：一次请求超过 400 字，
- * 宿主管线只会合成前 400 字。前端把整条消息切成 <= 380 字的小段逐段请求，
- * 每段都完整落在宿主上限内，于是整条消息可以完整念完，而不是在某个数字处
- * 戛然而止。取 380 而不是 400 是给中文标点 / 编码边界留余量。
+ * 两个上限共同决定这个数字：
+ *  1. 宿主端点有 REALTIME_TTS_MAX_CHARS（400）的硬截断——一次请求超过 400 字，
+ *     宿主管线只会合成前 400 字；
+ *  2. 实时语音上游对单次 response 的音频时长通常有上限（常见约 60 秒）——中文
+ *     朗读约 4~5 字/秒，380 字就是 80~95 秒音频，长段会被上游提前收尾，用户
+ *     听到的是「念到一半后面没了」，宿主还会把这次合成当成正常完成。
+ *
+ * 取 200 字：按 4~5 字/秒折算约 40~50 秒音频，稳稳落在 60 秒以内；同时每段
+ * 都远低于宿主 400 字上限。代价是长回复多几次请求，但每次都在用户听完当前段
+ * 之后才发，段间只多一次建连的短暂停顿。
  */
-export const SPEECH_CHUNK_CHARS = 380
+export const SPEECH_CHUNK_CHARS = 200
 
 /**
  * 等待播放队列排空的轮询间隔（毫秒）。
@@ -745,6 +751,15 @@ async function playSpeechStream(response: Response, token: number): Promise<void
       }
       carry = merged.slice(usable)
     }
+  } catch (error) {
+    /*
+     * 读到一半连接断了：宿主对「已出过音频的失败」走 destroy（不是干净的 end），
+     * fetch 的 reader.read() 会抛 TypeError。这里翻成用户能懂的一句话——否则
+     * 前端会把半截音频当成「这一段播完了」，下一段接着念，用户只觉得内容少了一截。
+     * 用户主动停止（token 已换代）不算错误。
+     */
+    if (token !== generation) return
+    throw new Error('朗读中断（音频流意外结束）')
   } finally {
     try {
       reader.releaseLock()

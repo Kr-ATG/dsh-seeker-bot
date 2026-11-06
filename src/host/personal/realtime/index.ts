@@ -1841,12 +1841,14 @@ async function respondTtsStream(
   } catch (error) {
     if (started) {
       /*
-       * 已经回了 200 和部分音频：只能断流。前端会看到「响应提前结束」（chunked 缺
-       * 结束块），按半段处理即可——**绝不能**再补一段 JSON，那会被当成 PCM 播出来
-       * （刺耳的噪声）。
+       * 已经回了 200 和部分音频：只能断流。**必须让连接异常结束**（destroy 而不是
+       * 干净的 end）：res.end() 会补上 chunked 的终止块，浏览器会把「半截音频」
+       * 当成「这一整段正常念完了」——用户听到半句就没了，还不知道出了什么事。
+       * destroy 让前端的 reader 抛错，按「朗读中断」提示用户。
+       * **绝不能**再补一段 JSON：那会被当成 PCM 播出来（刺耳的噪声）。
        */
       try {
-        res.end()
+        res.destroy()
       } catch {
         /* 已断开 */
       }

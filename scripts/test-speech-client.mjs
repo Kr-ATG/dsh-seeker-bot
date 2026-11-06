@@ -457,6 +457,26 @@ await speakText('空流', {})
 check('空流给出可读错误', String(getSpeechState().error).includes('没有返回音频'), String(getSpeechState().error))
 
 /* ------------------------------------------------------------------ */
+/* 12.5 流式中途断开：给出「朗读中断」而不是静默当播完                    */
+/* ------------------------------------------------------------------ */
+
+mock.handler = async () => new Response(new ReadableStream({
+  start(controller) {
+    controller.enqueue(pcmChunk(240))
+    setTimeout(() => controller.error(new TypeError('terminated')), 10)
+  },
+}), {
+  status: 200,
+  headers: { 'content-type': 'application/octet-stream', 'x-tts-sample-rate': '24000' },
+})
+await speakText('流断了', { messageId: 'm-cut' })
+const cutState = getSpeechState()
+check('流式中途断开：状态带「朗读中断」错误', String(cutState.error).includes('朗读中断'), String(cutState.error))
+check('流式中途断开：不会静默回到空闲而无错误', cutState.error !== null, JSON.stringify(cutState))
+// 清掉 mock 播放器里残留的队列，别影响后面的用例
+if (mock.players.at(-1) !== undefined) mock.players.at(-1).queued.length = 0
+
+/* ------------------------------------------------------------------ */
 /* 13. primeSpeech：手势里预热两条播放链路                              */
 /* ------------------------------------------------------------------ */
 
@@ -517,7 +537,7 @@ const longSentence = cleanSpeechText('第一句。' + '啊'.repeat(2100))
 check('超长文本优先按句边界截断', longSentence === '第一句。…', longSentence.slice(0, 20))
 
 // splitSpeechChunks 纯函数：句边界 / 逗号二次切 / 无标点硬切都要保证每段 <= max
-check('单段上限是 380 字', SPEECH_CHUNK_CHARS === 380, String(SPEECH_CHUNK_CHARS))
+check('单段上限是 200 字', SPEECH_CHUNK_CHARS === 200, String(SPEECH_CHUNK_CHARS))
 const sentenceChunks = splitSpeechChunks('第一句。第二句。', 6)
 check('splitSpeechChunks 按句号切句', sentenceChunks.length === 2 && sentenceChunks[0] === '第一句。' && sentenceChunks[1] === '第二句。', JSON.stringify(sentenceChunks))
 const newlineChunks = splitSpeechChunks('上半句\n下半句', 4)
@@ -532,12 +552,12 @@ const mergedChunks = splitSpeechChunks('短句一。短句二。', 380)
 check('splitSpeechChunks 短句合并成一段', mergedChunks.length === 1 && mergedChunks[0] === '短句一。短句二。', JSON.stringify(mergedChunks))
 
 /* ------------------------------------------------------------------ */
-/* 15. 长文本：分段请求、每段 <= 380、全部播完才回 idle                  */
+/* 15. 长文本：分段请求、每段 <= 200、全部播完才回 idle                  */
 /* ------------------------------------------------------------------ */
 
 mock.handler = defaultHandler
-// 三句各 300 字 + 句号：按句切成 3 段（每段 301 字，<= 380）
-const longSpeechText = '甲'.repeat(300) + '。' + '乙'.repeat(300) + '。' + '丙'.repeat(300) + '。'
+// 三句各 150 字 + 句号：按句切成 3 段（每段 151 字，<= 200）
+const longSpeechText = '甲'.repeat(150) + '。' + '乙'.repeat(150) + '。' + '丙'.repeat(150) + '。'
 // 等到「第 N 段请求已发出 + 第 N 个 WAV source 已创建」，避免拿到上一段的旧节点
 const waitForPlayback = async (fetchCount, sourceCount) => {
   const deadline = Date.now() + 2000
@@ -653,7 +673,7 @@ check('speech.ts 保留 primeSpeech 预热', speechSrc.includes('export function
 check('speech.ts 按 content-type 分流', speechSrc.includes('responseKind') && speechSrc.includes('REALTIME_TTS_STREAM_MIME'))
 check('speech.ts 用契约里的字符上限兜底', speechSrc.includes('REALTIME_TTS_MAX_CHARS'))
 check('speech.ts 整条消息上限改为 2000', /SPEECH_MAX_CHARS = 2000/.test(speechSrc))
-check('speech.ts 单段上限是 380', speechSrc.includes('SPEECH_CHUNK_CHARS = 380'))
+check('speech.ts 单段上限是 200', speechSrc.includes('SPEECH_CHUNK_CHARS = 200'))
 check('speech.ts 导出 splitSpeechChunks', speechSrc.includes('export function splitSpeechChunks'))
 check('speech.ts 截断走句边界', speechSrc.includes('truncateSpeechText'))
 check('speech.ts speakText 按 chunks 循环', speechSrc.includes('for (const chunk of chunks)'))

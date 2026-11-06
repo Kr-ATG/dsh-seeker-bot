@@ -35,7 +35,7 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { attachRealtimeRoutes } from '../src/host/personal/realtime/index.ts'
-import { encodeWav } from '../src/host/personal/realtime/tts.ts'
+import { defaultTtsTimeoutMs, encodeWav } from '../src/host/personal/realtime/tts.ts'
 import {
   REALTIME_TTS_MAX_CHARS,
   REALTIME_TTS_PATH,
@@ -253,6 +253,27 @@ await check('encodeWav：空 PCM 也是合法 WAV（只有 44 字节头）', () 
   const parsed = parseWav(wav)
   assert.equal(parsed.sampleRate, 16000)
   assert.equal(parsed.dataSize, 0)
+})
+
+/* ========================================================================== */
+/* A2. 默认超时按字数自适应                                                   */
+/* ========================================================================== */
+
+console.log('\n[A2] 默认超时：长段朗读不能被固定的 30 秒拦腰截断')
+
+await check('短文本最少给 60 秒', () => {
+  assert.equal(defaultTtsTimeoutMs(0), 60_000)
+  assert.equal(defaultTtsTimeoutMs(20), 60_000)
+  assert.equal(defaultTtsTimeoutMs(100), 60_000)
+})
+
+await check('300 字 → 120 秒（旧版固定 30 秒会在约 2 倍速时正好掐在结尾前）', () => {
+  assert.equal(defaultTtsTimeoutMs(300), 120_000)
+})
+
+await check('400 字 → 160 秒，且上限封顶 300 秒', () => {
+  assert.equal(defaultTtsTimeoutMs(400), 160_000)
+  assert.equal(defaultTtsTimeoutMs(10_000), 300_000)
 })
 
 /* ========================================================================== */
@@ -571,6 +592,40 @@ try {
   })
 } finally {
   await envStreamError.close()
+}
+
+/* 上游在已经吐过音频之后断线：必须让客户端感知「朗读中断」，不能静默当播完 */
+
+const envStreamDrop = await startEnv({
+  fakeOptions: {
+    responseAudio: RESPONSE_PCM,
+    responseChunkCount: 8,
+    responseChunkDelayMs: 80,
+    disconnectAfterMs: 120,
+  },
+})
+try {
+  const res = await postTtsRaw(envStreamDrop.proxy.ttsUrl, { text: TEXT, stream: true })
+  await check('流式中途断开（已出音频）→ 客户端读流报错，而不是被当成正常读完', async () => {
+    assert.equal(res.status, 200)
+    assert.ok(res.body !== null, '响应没有 body 流')
+    const reader = res.body.getReader()
+    let sawData = false
+    let readFailed = false
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (value !== undefined && value !== null && value.length > 0) sawData = true
+      }
+    } catch {
+      readFailed = true
+    }
+    assert.ok(sawData, '断开前没有收到任何音频，用例没覆盖「已出音频后失败」')
+    assert.equal(readFailed, true, '流式中途断开却被当成了正常读完（用户会听到半句后静默）')
+  })
+} finally {
+  await envStreamDrop.close()
 }
 
 /* 客户端中途取消：不能把上游会话晾着 */
