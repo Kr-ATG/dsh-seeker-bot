@@ -16,6 +16,7 @@ import { getService } from '../client-ctx.ts'
 import { MODAL_ANIM_MS } from '../modal-animation.ts'
 import { getGitRosterStore, useGitRosterSnapshot } from './git-roster-store.ts'
 import type { GitRosterItem } from './git-roster-store.ts'
+import { GitQuickCommitModal } from './GitQuickCommitModal.tsx'
 
 /** 兼容旧导入路径：类型已搬到 git-roster-store.ts（store 与弹窗共用）。 */
 export type { GitRosterData, GitRosterItem } from './git-roster-store.ts'
@@ -113,6 +114,8 @@ export function GitRosterModal(): ReactElement | null {
    */
   const snapshot = useGitRosterSnapshot(true)
   const [activeTab, setActiveTab] = useState<'all' | 'plugins' | 'workspaces'>('all')
+  /** 当前打开「快速提交」弹窗的仓库；null = 未打开。 */
+  const [quickCommitItem, setQuickCommitItem] = useState<GitRosterItem | null>(null)
   const open = snapshot.open
   const data = snapshot.data
   const loading = snapshot.loading
@@ -160,11 +163,12 @@ export function GitRosterModal(): ReactElement | null {
   useEffect(() => {
     if (!open) return undefined
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') requestClose()
+      // 快速提交弹窗打开时，Escape 归它自己处理；大盘不要抢关闭。
+      if (event.key === 'Escape' && quickCommitItem === null) requestClose()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => { window.removeEventListener('keydown', onKeyDown) }
-  }, [open, requestClose])
+  }, [open, quickCommitItem, requestClose])
 
   if (!open) return null
 
@@ -186,14 +190,15 @@ export function GitRosterModal(): ReactElement | null {
   const totalConflicts = snapshot.totalConflicts
 
   return (
-    <div
-      className="kr-git-roster-overlay"
-      data-closing={closing ? '1' : undefined}
-      onClick={requestClose}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="kr-git-roster-title"
-    >
+    <>
+      <div
+        className="kr-git-roster-overlay"
+        data-closing={closing ? '1' : undefined}
+        onClick={requestClose}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="kr-git-roster-title"
+      >
       <div
         className="kr-git-roster-modal"
         onClick={(e: MouseEvent) => e.stopPropagation()}
@@ -326,6 +331,21 @@ export function GitRosterModal(): ReactElement | null {
                   const isPlugin = item.category === 'plugin'
                   const hasPending = item.pendingCount > 0
                   const hasConflict = item.conflictCount > 0
+                  /*
+                   * 快速提交的可用条件：真是 Git 仓库、有改动、无冲突、无需合并 / 同步。
+                   * 其余情况按钮保留（可发现性），但禁用并给出具体原因——不把「点了没反应」
+                   * 留给用户猜。
+                   */
+                  const canQuickCommit = item.isGit && hasPending && !hasConflict && !item.needsMerge
+                  const quickCommitTitle = !item.isGit
+                    ? '不是 Git 仓库，无法提交'
+                    : hasConflict
+                      ? '存在合并冲突，请先开启会话解决'
+                      : item.needsMerge
+                        ? '仓库需要先合并 / 同步，请先开启会话处理'
+                        : !hasPending
+                          ? '工作区干净，无需提交'
+                          : '快速提交：脚本化执行 git add / commit / push，不新建会话'
 
                   return (
                     <div key={idx} className="kr-git-roster-item-row">
@@ -399,8 +419,23 @@ export function GitRosterModal(): ReactElement | null {
                         )}
                       </div>
 
-                      {/* 5. 一键建会话动作按钮 */}
+                      {/* 5. 快速提交 + 一键建会话动作按钮 */}
                       <div className="kr-git-roster-col kr-git-roster-col--action">
+                        {item.isGit && (
+                          <button
+                            type="button"
+                            className="kr-git-action-btn kr-git-action-btn--quick"
+                            disabled={!canQuickCommit}
+                            onClick={() => setQuickCommitItem(item)}
+                            title={quickCommitTitle}
+                            aria-label={`快速提交 ${item.name}`}
+                          >
+                            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <path d="M8 1.5 3 8.2h3.4L5.8 14.5 13 7.3H9.2L8 1.5Z" />
+                            </svg>
+                            <span>快速提交</span>
+                          </button>
+                        )}
                         <button
                           type="button"
                           className="kr-git-action-btn"
@@ -424,5 +459,14 @@ export function GitRosterModal(): ReactElement | null {
         </div>
       </div>
     </div>
+
+    {quickCommitItem !== null && (
+      <GitQuickCommitModal
+        item={quickCommitItem}
+        onClose={() => setQuickCommitItem(null)}
+        onCommitted={() => { void store.refresh(true) }}
+      />
+    )}
+  </>
   )
 }

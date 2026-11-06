@@ -3171,11 +3171,12 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
 
 /* 操作列：轻巧微动作胶囊 */
 .kr-git-roster-col--action {
-  width: 80px;
+  width: 168px;
   flex: none;
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  gap: 6px;
 }
 
 .kr-git-action-btn {
@@ -3194,7 +3195,7 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   transition: all var(--kr-dur-tap) var(--kr-ease-out);
 }
 
-.kr-git-action-btn:hover {
+.kr-git-action-btn:hover:not(:disabled) {
   background: var(--kr-hover-bg);
   color: var(--dsw-alias-label-primary);
   border-color: var(--dsw-alias-border-focus);
@@ -3202,6 +3203,373 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
 
 .kr-git-action-btn:active {
   transform: scale(0.96);
+}
+
+/* 快速提交：有改动时是主色胶囊，干净 / 冲突 / 非 Git 时禁用但保留入口感。 */
+.kr-git-action-btn--quick {
+  color: var(--kr-accent);
+  border-color: color-mix(in srgb, var(--kr-accent) 32%, transparent);
+  background: color-mix(in srgb, var(--kr-accent) 8%, transparent);
+}
+
+.kr-git-action-btn--quick:hover:not(:disabled) {
+  color: var(--kr-accent);
+  border-color: color-mix(in srgb, var(--kr-accent) 55%, transparent);
+  background: color-mix(in srgb, var(--kr-accent) 14%, transparent);
+}
+
+.kr-git-action-btn:disabled,
+.kr-git-action-btn:disabled:hover {
+  opacity: .38;
+  cursor: not-allowed;
+  color: var(--dsw-alias-label-tertiary);
+  border-color: var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-base);
+}
+
+/* ── 快速提交弹窗 ─────────────────────────────────────────────────────── */
+.kr-git-quick-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10002;
+  background: rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.kr-git-quick-modal {
+  position: relative;
+  width: min(520px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 14px;
+  box-shadow: 0 24px 54px -10px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(0, 0, 0, 0.04);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.kr-git-quick__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.kr-git-quick__title-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.kr-git-quick__icon {
+  color: var(--kr-accent);
+  flex: none;
+}
+
+.kr-git-quick__title {
+  font-size: var(--kr-fs-title, 13px);
+  font-weight: 600;
+  letter-spacing: -0.2px;
+  flex: none;
+}
+
+.kr-git-quick__repo {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--kr-fs-11, 11px);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.kr-git-quick__branch {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: var(--kr-fs-10-5, 10.5px);
+  font-weight: 500;
+  color: var(--kr-accent);
+  background: color-mix(in srgb, var(--kr-accent) 12%, transparent);
+}
+
+.kr-git-quick__close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  transition: background-color var(--kr-dur-tap) linear, color var(--kr-dur-tap) linear;
+}
+
+.kr-git-quick__close:hover:not(:disabled) {
+  background: var(--kr-hover-bg);
+  color: var(--dsw-alias-label-primary);
+}
+
+.kr-git-quick__close:disabled {
+  opacity: .4;
+  cursor: not-allowed;
+}
+
+.kr-git-quick__body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.kr-git-quick__summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dsw-alias-border-l2) 28%, transparent);
+}
+
+.kr-git-quick__summary-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--kr-fs-12, 12px);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.kr-git-quick__summary-main strong {
+  color: var(--dsw-alias-label-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.kr-git-quick__files-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  padding: 2px 5px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--kr-accent);
+  font: inherit;
+  font-size: var(--kr-fs-11, 11px);
+  cursor: pointer;
+}
+
+.kr-git-quick__files-toggle:hover {
+  background: color-mix(in srgb, var(--kr-accent) 10%, transparent);
+}
+
+.kr-git-quick__chevron {
+  transition: transform var(--kr-dur-tap) var(--kr-ease-out);
+}
+
+.kr-git-quick__chevron--up {
+  transform: rotate(180deg);
+}
+
+.kr-git-quick__scope {
+  margin-top: -4px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--dsw-alias-border-l2) 20%, transparent);
+  font-size: var(--kr-fs-11, 11px);
+  line-height: 1.55;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.kr-git-quick__scope code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+}
+
+.kr-git-quick__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kr-git-quick__field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.kr-git-quick__label {
+  font-size: var(--kr-fs-12, 12px);
+  font-weight: 500;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.kr-git-quick__ai {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--kr-accent) 30%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--kr-accent) 8%, transparent);
+  color: var(--kr-accent);
+  font: inherit;
+  font-size: var(--kr-fs-11, 11px);
+  cursor: pointer;
+  transition: background-color var(--kr-dur-tap) linear, border-color var(--kr-dur-tap) linear;
+}
+
+.kr-git-quick__ai:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--kr-accent) 16%, transparent);
+  border-color: var(--kr-accent);
+}
+
+.kr-git-quick__ai:disabled {
+  opacity: .6;
+  cursor: not-allowed;
+}
+
+.kr-git-quick__textarea {
+  width: 100%;
+  min-height: 126px;
+  box-sizing: border-box;
+  padding: 9px 11px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dsw-alias-bg-base) 82%, var(--dsw-alias-border-l2));
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: var(--kr-fs-body, 12.5px);
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+  transition: border-color var(--kr-dur-tap) linear, box-shadow var(--kr-dur-tap) linear;
+}
+
+.kr-git-quick__textarea:focus {
+  border-color: var(--kr-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--kr-accent) 20%, transparent);
+}
+
+.kr-git-quick__textarea:disabled {
+  opacity: .75;
+  cursor: default;
+}
+
+.kr-git-quick__check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--kr-fs-12, 12px);
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.kr-git-quick__check input[type="checkbox"] {
+  cursor: pointer;
+}
+
+.kr-git-quick__status {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--dsw-alias-border-l2) 40%, transparent);
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--kr-fs-11, 11px);
+  line-height: 1.45;
+}
+
+.kr-git-quick__status svg {
+  flex: none;
+  margin-top: 1px;
+}
+
+.kr-git-quick__status--done {
+  color: var(--dsw-alias-state-success, #22c55e);
+  background: color-mix(in srgb, var(--dsw-alias-state-success, #22c55e) 10%, transparent);
+}
+
+.kr-git-quick__status--error {
+  color: var(--dsw-alias-state-error-primary, #ef4444);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ef4444) 10%, transparent);
+}
+
+.kr-git-quick__status--warning {
+  color: var(--dsw-alias-state-warning, #f59e0b);
+  background: color-mix(in srgb, var(--dsw-alias-state-warning, #f59e0b) 10%, transparent);
+}
+
+.kr-git-quick__footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  background: color-mix(in srgb, var(--dsw-alias-bg-base) 90%, var(--dsw-alias-border-l2));
+}
+
+.kr-git-quick__btn {
+  padding: 6px 14px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: var(--kr-fs-12, 12px);
+  cursor: pointer;
+  transition: background-color var(--kr-dur-tap) linear, color var(--kr-dur-tap) linear,
+    transform var(--kr-dur-tap) var(--kr-ease-out), filter var(--kr-dur-tap) linear;
+}
+
+.kr-git-quick__btn:hover:not(:disabled) {
+  background: var(--kr-hover-bg);
+  color: var(--dsw-alias-label-primary);
+}
+
+.kr-git-quick__btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.kr-git-quick__btn:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+.kr-git-quick__btn--primary {
+  border: 0;
+  background: var(--kr-accent);
+  color: #fff;
+  font-weight: 500;
+}
+
+.kr-git-quick__btn--primary:hover:not(:disabled) {
+  background: var(--kr-accent);
+  filter: brightness(1.08);
+  color: #fff;
+}
+
+.kr-git-quick__spin {
+  animation: kr-git-spin 1s linear infinite;
 }
 
 .kr-git-roster-modal__spin {
@@ -3214,7 +3582,12 @@ body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
   .kr-git-roster-overlay[data-closing='1'],
   .kr-git-roster-overlay[data-closing='1'] .kr-git-roster-modal,
   .kr-git-roster-segmented__btn,
-  .kr-git-action-btn {
+  .kr-git-action-btn,
+  .kr-git-quick__btn,
+  .kr-git-quick__ai,
+  .kr-git-quick__close,
+  .kr-git-quick__files-toggle,
+  .kr-git-quick__chevron {
     animation: none !important;
     transition: none !important;
     transform: none !important;

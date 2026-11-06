@@ -6164,11 +6164,16 @@ if (krEnabled) {
      *   2. SeekerHead 从 git-roster-store 订阅「有未提交改动的项目数」（不是自己 fetch）；
      *   3. 角标只在 >0 时渲染、三位数折成 99+、title/aria-label 带「N 个项目有未提交改动」；
      *   4. GitRosterModal 与角标共用同一个 store（不再自己 fetch / 自己轮询）。
+     * 2026-11-06 新增「快速提交」：Git 工作台每行一个按钮，弹窗里编辑 AI 生成的 commit
+     * message，直接脚本化执行 add / commit / push（不新建会话）；旧 GitCommitModal 仍保持删除。
      * 删除项必须同时满足「组件文件不存在 + SeekerHead 不引用 + 样式不残留」，否则
      * 热重载或旧 bundle 会把它复活。
      */
     const gitRosterStoreSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/git-roster-store.ts'), 'utf8')
     const gitRosterModalSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/GitRosterModal.tsx'), 'utf8')
+    const gitQuickCommitSrc = existsSync(resolve(ROOT, 'src/client/kr-chat/GitQuickCommitModal.tsx'))
+      ? readFileSync(resolve(ROOT, 'src/client/kr-chat/GitQuickCommitModal.tsx'), 'utf8')
+      : ''
     const krStyleSrc = readFileSync(resolve(ROOT, 'src/client/kr-chat/styles.ts'), 'utf8')
     if (!/data-git-branch-icon/.test(seekerHeadSrcHere) || /M23\.546/.test(seekerHeadSrcHere)) {
       fail('Git 图标必须换成图二的 git-branch 图标（不再使用 GitHub 菱形 Logo）')
@@ -6185,6 +6190,13 @@ if (krEnabled) {
       || /SeekerGitStatus/.test(seekerHeadSrcHere)
       || /kr-plain-head__git/.test(krStyleSrc)) {
       fail('操作面板卡头的 Git 时间 / 待提交微组件（含提交弹窗）已按用户要求删除，不该残留文件、挂载点或样式')
+    } else if (!existsSync(resolve(ROOT, 'src/client/kr-chat/GitQuickCommitModal.tsx'))
+      || !/GitQuickCommitModal/.test(gitRosterModalSrc)
+      || !/快速提交/.test(gitRosterModalSrc)
+      || !/kr-git-action-btn--quick/.test(gitRosterModalSrc)
+      || !/\/api\/chat-flow\/git-commit-message/.test(gitQuickCommitSrc)
+      || !/\/api\/chat-flow\/git-commit/.test(gitQuickCommitSrc)) {
+      fail('Git 工作台必须带「快速提交」按钮与脚本化提交通道（不新建会话）')
     } else if (!/__dshChatPlusGitRosterStore__/.test(gitRosterStoreSrc) || !/STORE_BRAND/.test(gitRosterStoreSrc)) {
       fail('git-roster-store 必须挂 window + 品牌字段（否则 live reload 后两套轮询分叉）')
     } else if (!/dirtyRepoCountOf/.test(gitRosterStoreSrc) || !/return this\._snapshot/.test(gitRosterStoreSrc)) {
@@ -6194,7 +6206,7 @@ if (krEnabled) {
       || !/\.kr-plain-head__badge\s*\{[\s\S]{0,900}?animation:\s*none/.test(krStyleSrc)) {
       fail('Git 角标必须用这套简约样式（data-kind 区分色相、无弹入动画）')
     } else {
-      pass('Git 角标：卡头订阅 git-roster-store 的「有未提交改动项目数」 + 图标换 git-branch + 仅 >0 渲染 / 99+ 折叠 + 简约淡色变体 + 与大盘弹窗共用轮询（时间/待提交微组件已删除）')
+      pass('Git 角标：卡头订阅 git-roster-store 的「有未提交改动项目数」 + 图标换 git-branch + 仅 >0 渲染 / 99+ 折叠 + 简约淡色变体 + 与大盘弹窗共用轮询 + 快速提交通道（不新建会话）')
     }
 
     // 11) 共享 store 的跨 bundle 共享语义：live reload 会让模块级单例分叉，
