@@ -17,16 +17,17 @@ import { iuKindsCss } from './kinds/registry.ts'
  *
  * 官方把用户字号偏好落在 body 的 `--dsh-content-font-size`（默认 14px，
  * 见 ui-theme gradient-shadow-text.css 与 ui-layout theme-presenter.ts）。
- * 基座在 .dtt-iu 上定义：
+ * 基座在 .dtt-iu 上定义（无单位数字）：
  *
- *     --iu-text-scale: calc(var(--dsh-content-font-size, 14px) / 14px)
+ *     --iu-text-scale: calc(max(.5, min(2.5,
+ *       tan(atan2(var(--dsh-content-font-size, 14px), 14px)))) * var(--iu-zoom, 1))
  *
- * ⚠ **除数是 14px，不是 14**。CSS calc 的量纲规则：长度 ÷ 数字 = 长度，
- * 长度 ÷ 长度 = 数字。写成 `/14` 时该变量求值为 `1px`（长度），于是各 kind 的
- * `calc(12.5px * var(--iu-text-scale))` 变成 px² —— 非法量纲，**整条 font-size
- * 声明被静默丢弃**，文字回退成继承值（SVG 里 16px）。真浏览器实测：
- * `/14` → font-size 16px（失效）；`/14px` → 12.5px（正确）。
- * 症状是「字号轴完全不生效 + 图形里文字撑爆节点框」，不报任何错。
+ * ⚠ **不要写成 calc(长度 / 长度)**：CSS 规范上长度÷长度=数字，但 Electron 33 /
+ * Chrome 130 实测，把这种 calc 存进自定义属性、再用 var() 代入另一条 calc 时，
+ * 整条声明会变成 invalid（computed 里仍是 calc 表达式，font-size 静默回退成
+ * 继承值 15px）。症状是「字号轴完全不生效 + 表头/正文全部变成 15px」。
+ * 改用三角函数剥离单位：atan2(长度, 长度) → 角度，tan(角度) → 无单位数字；
+ * Chrome 111+ 支持。再用 min/max 夹在 .5~2.5，防止脏值把字号压成 0。
  *
  * 各 kind 的字号一律写 `calc(Npx * var(--iu-text-scale, 1))`——用户在官方设置
  * 里调字号，卡片文字即时无级跟随（14→17px 时 scale = 1.214…），不需要 JS
@@ -52,14 +53,15 @@ import { iuKindsCss } from './kinds/registry.ts'
  */
 const IU_BASE_CSS = [
   '/* ── 字号轴：跟随官方设置字号（见文件头注释）──────────────────────── */',
-  '/* ⚠ 除数必须带单位（14px，不是 14）：CSS calc 里「长度 / 数字」的结果仍是长度，',
-  '   而 --iu-text-scale 必须是**无单位数字**。写成 /14 时该值是 1px，于是所有',
-  '   calc(Npx * var(--iu-text-scale)) 变成 px² 这种非法量纲，整条 font-size 被',
-  '   静默丢弃、回退成继承值（SVG 里 16px）——表现为「字号轴不生效 + 文字撑爆节点框」。',
-  '   长度 / 长度 = 数字，所以除数是 14px。 */',
+  '/* ⚠ 这里必须产出**无单位数字**，且不能把「长度 / 长度」的 calc 存进自定义属性：',
+  '   Electron 33 / Chrome 130 上实测，自定义属性里的 calc(15px / 14px) 在 var() 代入',
+  '   另一条 calc 时会整条失效（computed 仍是 calc 表达式，font-size 静默回退成继承值，',
+  '   所有卡片字号轴全失效、表头直接 15px）。',
+  '   改用三角函数做「单位剥离」：atan2(长度, 长度) → 角度，tan(角度) → 无单位数字。',
+  '   Chrome 111+ 支持；再用 min/max 夹在 0.5~2.5，避免脏值把字号压成 0。 */',
   '/* --iu-zoom 是**外部注入的备用轴**（只有截图链路会写它）；对话流里的卡片',
   '   缩放按钮已移除，组件自身不再设置这个变量，取不到时恒为 1。 */',
-  '.dtt-iu { --iu-text-scale: calc((var(--dsh-content-font-size, 14px) / 14px) * var(--iu-zoom, 1));',
+  '.dtt-iu { --iu-text-scale: calc(max(0.5, min(2.5, tan(atan2(var(--dsh-content-font-size, 14px), 14px)))) * var(--iu-zoom, 1));',
   '  /* 圆角轴只跟 --iu-zoom（外部注入），不跟字号轴。',
   '     ⚠ 这里踩过：原先写 calc(14px * var(--iu-text-scale, 1))——只要字号轴变量',
   '     求值失效（宿主 --dsh-content-font-size 是脏值时，calc 里出现非法量纲，',
