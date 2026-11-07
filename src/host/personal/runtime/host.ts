@@ -26,7 +26,7 @@ import { join } from 'node:path'
 import { type BotAgentSpec, runBotTurn, botSessionId } from '../agent.ts'
 import { publish } from '../events.ts'
 import { outwardLabelsOf } from './outward.ts'
-import { personalRuntime, registerRuntime, setBotSpecForgetter, setBotSpecWriter, setRosterProvider } from './registry.ts'
+import { personalRuntime, registerRuntime, setBotSpecForgetter, setBotSpecWriter, setRosterProvider, unregisterRuntime } from './registry.ts'
 import { JobRuntime } from './runtime.ts'
 import { RuntimeStore } from './store.ts'
 import type {
@@ -348,7 +348,21 @@ let singleton: { runtime: JobRuntime; runner: PersonalTurnRunner; timer: ReturnT
  * 2s 足够发现新活又不空转。
  */
 export function startPersonalRuntime(ctx: any): { runtime: JobRuntime; runner: PersonalTurnRunner } | undefined {
-  if (singleton !== undefined) return singleton
+  /*
+   * 复用前**必须确认旧实例还活着**。
+   *
+   * 插件重挂载时 `ctx.effect` 会调 `stopPersonalRuntime()` 把 closed 置 true；
+   * 若下次挂载直接 `return singleton`，拿到的就是那个已关闭的实例——enqueue /
+   * begin / end 照常写盘，只有 `tick()` 在第一行 `if (this.closed) return`，
+   * 于是所有排队活永远不被派发，界面上表现为「任务卡显示已完成、子 Bot 一动
+   * 不动」。重挂载必须重建实例，否则一次热重载就把派发能力永久关掉。
+   */
+  if (singleton !== undefined) {
+    if (!singleton.runtime.isClosed()) return singleton
+    clearInterval(singleton.timer)
+    singleton = undefined
+    unregisterRuntime()
+  }
 
   try {
     const store = new RuntimeStore(runtimeDir())
@@ -400,6 +414,22 @@ export function startPersonalRuntime(ctx: any): { runtime: JobRuntime; runner: P
     console.warn('[personal-agent] 作业运行时启动失败（Bot 将不能派活）:', String(error?.message ?? error))
     return undefined
   }
+}
+
+/**
+ * 关闭运行时并清空单例。
+ *
+ * 由插件卸载钩子调用（`ctx.effect`）：不这么做的话，旧 timer 会继续以 250ms
+ * 空转、旧实例的 closed 标记还会让下一次挂载命中「僵尸复用」。三步顺序不能
+ * 反——先摘单例，再停表，最后关闭，任何一步中途抛错都不会留下半关状态。
+ */
+export function stopPersonalRuntime(): void {
+  const current = singleton
+  if (current === undefined) return
+  singleton = undefined
+  clearInterval(current.timer)
+  current.runtime.close()
+  unregisterRuntime()
 }
 
 export { specCache as __specCacheForTest }

@@ -70,7 +70,7 @@ import { projectHashOf } from '../../triad/memory/engine/store.ts'
 import { decodeDataUrl, extensionFor, looksLikeImage, materializeRoot } from '../../spill/materialize.ts'
 import { __test as officeInternals, officeEngineAvailable, renderOfficePages, renderOfficePdf } from '../../office/index.ts'
 import { applyPersonalAgentRealtime, type PersonalRealtimeConfig } from './realtime/mount.ts'
-import { rememberBotSpec, startPersonalRuntime } from './runtime/host.ts'
+import { rememberBotSpec, startPersonalRuntime, stopPersonalRuntime } from './runtime/host.ts'
 import { knownBots, personalRuntime } from './runtime/registry.ts'
 import { captureDesktopScreen } from './desktop-screen.ts'
 
@@ -1184,7 +1184,14 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
   try {
     const started = startPersonalRuntime(ctx)
     if (started !== undefined) {
-      ctx?.effect?.(() => started.runtime.close())
+      /*
+       * cordis 的 `ctx.effect(execute)` 是「execute 立即执行、它的**返回值**登记为
+       * 清理函数」（见 @deepseek-ai/cordis 的 fiber.ts：「execute runs immediately」）。
+       * 所以这里必须返回一个清理函数；写成 `ctx.effect(() => stopPersonalRuntime())`
+       * 会在插件加载的当下就把运行时停掉——表现为所有 Bot 都派不了活，而且
+       * `coordinate_bots` 会直接报「作业运行时没有启动」。
+       */
+      ctx?.effect?.(() => () => stopPersonalRuntime())
     }
   } catch (error) {
     console.warn('[personal-agent] 作业运行时启动失败（Bot 将不能派活）:', error instanceof Error ? error.message : error)

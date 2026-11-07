@@ -178,6 +178,16 @@ export class JobRuntime {
     this.closed = true
   }
 
+  /**
+   * 运行时是否已被宿主关闭。
+   *
+   * 关闭之后 `tick()` 直接返回，若宿主侧仍拿这个实例去注册，就会出现「一切
+   * 写入正常、只有派发停了」的僵尸运行时。启动逻辑据此决定复用还是重建。
+   */
+  isClosed(): boolean {
+    return this.closed
+  }
+
   // ── 入队 ──────────────────────────────────────────────────────────────
 
   /**
@@ -192,6 +202,18 @@ export class JobRuntime {
    * refused，预算上限根本轮不到）。
    */
   enqueue(req: EnqueueRequest): EnqueueResult {
+    /*
+     * 已关闭的运行时不能再收活：收下的活永远等不到 tick 派发，调用方却拿到
+     * ok=true——这会让「派活成功」变成一句谎话（实测：插件重挂载后 tick 停摆，
+     * 子活静默排队几十分钟，父活一直 waiting）。宁可明确拒绝，让上层看到原因。
+     */
+    if (this.closed) {
+      return {
+        ok: false,
+        reason: '作业运行时已被宿主关闭（插件重载后没有恢复），现在派活不会有人执行；重启宿主后恢复。',
+        outcome: 'refused',
+      }
+    }
     const at = this.clock.now()
     const parent = req.parentId === undefined ? undefined : this.store.get(req.parentId)
 

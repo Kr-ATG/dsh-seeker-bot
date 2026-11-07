@@ -716,7 +716,7 @@ async function playBuffer(audioContext: AudioContext, buffer: AudioBuffer, token
  *    否则每读一块都会把采样数错开一位，听起来是持续的爆音；
  *  · 读完不是结束，还要等队列播完（见 waitPlayerIdle）。
  */
-async function playSpeechStream(response: Response, token: number): Promise<void> {
+async function playSpeechStream(response: Response, token: number): Promise<boolean> {
   const body = response.body
   if (body === null) throw new Error('朗读服务没有返回音频流')
   const sampleRate = parseSampleRate(response.headers.get(REALTIME_TTS_SAMPLE_RATE_HEADER))
@@ -724,7 +724,7 @@ async function playSpeechStream(response: Response, token: number): Promise<void
   // 懒创建它自己的 AudioContext 并 resume（没有手势时内部吞掉错误，
   // 但外层已经在 speakText 里做过一次「浏览器允不允许出声」的判定）
   await pcmPlayer.ensureRunning()
-  if (token !== generation) return
+  if (token !== generation) return false
 
   const reader = body.getReader()
   let carry = new Uint8Array(0)
@@ -733,7 +733,7 @@ async function playSpeechStream(response: Response, token: number): Promise<void
   try {
     while (true) {
       const { done, value } = await reader.read()
-      if (token !== generation) return
+      if (token !== generation) return false
       if (done) break
       if (value === undefined || value.length === 0) continue
       const merged = new Uint8Array(carry.length + value.length)
@@ -758,7 +758,7 @@ async function playSpeechStream(response: Response, token: number): Promise<void
      * 前端会把半截音频当成「这一段播完了」，下一段接着念，用户只觉得内容少了一截。
      * 用户主动停止（token 已换代）不算错误。
      */
-    if (token !== generation) return
+    if (token !== generation) return false
     throw new Error('朗读中断（音频流意外结束）')
   } finally {
     try {
@@ -767,7 +767,7 @@ async function playSpeechStream(response: Response, token: number): Promise<void
       /* 已经释放 / 还有未完成的 read */
     }
   }
-  if (token !== generation) return
+  if (token !== generation) return false
   if (!started) throw new Error('朗读服务没有返回音频')
   await waitPlayerIdle(pcmPlayer, token, samples, sampleRate)
   /*
@@ -775,6 +775,7 @@ async function playSpeechStream(response: Response, token: number): Promise<void
    * 播完要保持在 speaking，等 speakText 循环把全部段都播完再统一回空闲。
    * （旧实现是单段一次请求，所以才会在这里收尾；现在收尾职责上移。）
    */
+  return true
 }
 
 /**
@@ -787,13 +788,15 @@ async function playSpeechStream(response: Response, token: number): Promise<void
  * @param text 要念的文字（会再压缩空白、按句边界截断到 SPEECH_MAX_CHARS）。
  * @param options 供应商 / 音色 / 消息 id；全部可选。
  */
-export async function speakText(text: string, options: SpeakOptions = {}): Promise<void> {
+export async function speakText(text: string, options: SpeakOptions = {}): Promise<boolean> {
   const spoken = limitSpeechText(text)
-  if (spoken === '') return
+  if (spoken === '') return false
   // 单段上限再和宿主契约取小：不管宿主上限怎么变，都不会发一个会被它截断的请求
   const chunks = splitSpeechChunks(spoken, Math.min(SPEECH_CHUNK_CHARS, REALTIME_TTS_MAX_CHARS))
-  if (chunks.length === 0) return
+  if (chunks.length === 0) return false
 
+  /** 是否真的出过声：自动播报据此决定要不要把这条记为「已播」（见 auto-speak.ts）。 */
+  let played = false
   const token = (generation += 1)
   /*
    * 先停旧的：用户点了另一条，那条就该立刻闭嘴，而不是等新的请求回来。
@@ -815,7 +818,7 @@ export async function speakText(text: string, options: SpeakOptions = {}): Promi
   if (audioContext === null) {
     // 没有 Web Audio：静默放弃（朗读是增强功能，不值得弹一条错误挡住用户）
     patchState(idleState())
-    return
+    return false
   }
   if (audioContext.state === 'suspended') {
     try {
@@ -824,10 +827,10 @@ export async function speakText(text: string, options: SpeakOptions = {}): Promi
       /* 浏览器拒绝：按被拦处理，走下面的静默失败 */
     }
   }
-  if (token !== generation) return
+  if (token !== generation) return played
   if (audioContext.state !== 'running') {
     patchState(idleState())
-    return
+    return false
   }
 
   const controller = new AbortController()
@@ -835,7 +838,7 @@ export async function speakText(text: string, options: SpeakOptions = {}): Promi
   try {
     for (const chunk of chunks) {
       // 每一段开始前都看一眼：上一段播放期间用户可能已经点了停止 / 另一条
-      if (token !== generation) return
+      if (token !== generation) return played
 
       const body: RealtimeTtsRequest = {
         text: chunk,
@@ -853,7 +856,7 @@ export async function speakText(text: string, options: SpeakOptions = {}): Promi
         signal: controller.signal,
       })
       // 等待期间用户可能已经点了别的消息 / 点了停止：迟到的响应直接丢弃
-      if (token !== generation) return
+      if (token !== generation) return played
       if (!response.ok) throw new Error(await failureReason(response))
 
       const kind = responseKind(response)
@@ -862,31 +865,34 @@ export async function speakText(text: string, options: SpeakOptions = {}): Promi
         throw new Error(await failureReason(response))
       }
       if (kind === 'stream') {
-        await playSpeechStream(response, token)
+        played = (await playSpeechStream(response, token)) || played
       } else {
         // 旧宿主：整段 WAV（或没带 content-type 的二进制）
         const data = await response.arrayBuffer()
-        if (token !== generation) return
+        if (token !== generation) return played
         if (data.byteLength === 0) throw new Error('朗读服务没有返回音频')
         const buffer = await decodeAudio(audioContext, data)
-        if (token !== generation) return
+        if (token !== generation) return played
         await playBuffer(audioContext, buffer, token)
+        played = true
       }
       /*
        * 这一段播完了。段间保持 speaking：下一段的请求 / 解码期间用户仍该看到
        * 「正在朗读」，否则按钮会闪回喇叭、状态也会来回跳。
        */
-      if (token !== generation) return
+      if (token !== generation) return played
       patchState({ speaking: true, loading: false, error: null, messageId: options.messageId ?? null })
     }
     // 所有段都播完才统一收尾（中途停止的路径由 stopSpeech 自己收状态）
-    if (token !== generation) return
+    if (token !== generation) return played
     patchState(idleState())
+    return played
   } catch (error) {
-    if (token !== generation) return
+    if (token !== generation) return played
     // 流式路径可能已经出过声：出错时把队列也收掉，避免半句卡在播放队列里
     stopPlayer()
     patchState({ speaking: false, loading: false, error: readableSpeechError(error), messageId: null })
+    return played
   } finally {
     // 只清理自己那条：期间可能已经有新的 speakText 把 requestAbort 换成了新句柄
     if (requestAbort === controller) requestAbort = null

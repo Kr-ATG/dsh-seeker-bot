@@ -740,17 +740,34 @@ check('speech.ts playBuffer 等 onended', speechSrc.includes('finishPlayback') &
 check('speech.ts stopPlayback 兑现等待中的 Promise', speechSrc.includes('resolvePlayback()'))
 
 const messageListSrc = read('src/client/personal/chat/MessageList.tsx')
+const autoSpeakLogicSrc = read('src/client/personal/chat/auto-speak.ts')
 check('MessageList 引入喇叭图标', messageListSrc.includes('IconVolume'))
 check('MessageList 引入停止图标', messageListSrc.includes('IconStop'))
 check('MessageList 有朗读 / 停止文案', messageListSrc.includes('朗读这条消息') && messageListSrc.includes('停止朗读'))
-check('MessageList 在引用按钮之后渲染朗读按钮', messageListSrc.includes("message.role === 'bot' ? <SpeakToolButton"))
+check(
+  'MessageList 在引用按钮之后渲染朗读按钮',
+  messageListSrc.includes('<SpeakToolButton')
+    && messageListSrc.indexOf('<SpeakToolButton') > messageListSrc.indexOf('<IconQuote'),
+)
 check('MessageList 朗读按钮带 data-speaking 态', messageListSrc.includes("data-speaking={active ? 'true' : 'false'}"))
-check('MessageList 自动朗读防抖 250ms', messageListSrc.includes('AUTO_SPEAK_DELAY_MS = 250'))
+check('自动朗读防抖 250ms 收口在 auto-speak', autoSpeakLogicSrc.includes('AUTO_SPEAK_DELAY_MS = 250') && messageListSrc.includes('AUTO_SPEAK_DELAY_MS'))
 check('MessageList 自动朗读只认 bot.autoSpeak', messageListSrc.includes('bot.autoSpeak === true'))
 check('MessageList 只在单聊自动播', messageListSrc.includes('room !== null'))
 check('MessageList 通话中不自动播', messageListSrc.includes("ui.call.status !== 'idle'"))
 check('MessageList 记录已播消息（首次挂载不重播历史）', messageListSrc.includes('spokenRef'))
-check('MessageList pending 消息不自动播', messageListSrc.includes('last.pending === true'))
+check('自动播报 pending 普通消息不播（auto-speak）', autoSpeakLogicSrc.includes('!ask && message.pending === true'))
+check('自动播报按消息流顺序逐条补播（不再只取最后一条）', messageListSrc.includes('pickAutoSpeakItems(') && !messageListSrc.includes('let last: Message | undefined'))
+check('自动播报串行队列（后一条等前一条播完）', messageListSrc.includes('new AutoSpeakQueue(') && autoSpeakLogicSrc.includes('class AutoSpeakQueue'))
+check('自动播报用 claimedIds 去重（含正在播的那条，防重复念）', messageListSrc.includes('queue.claimedIds()'))
+check('自动播报播完出声才记已播（拦截 / 失败不误标）', messageListSrc.includes('(item, played) =>') && messageListSrc.includes('if (!played) return'))
+check(
+  'speakText 返回「这一条有没有真的出声」',
+  speechSrc.includes('Promise<boolean>') && speechSrc.includes('let played = false'),
+)
+check('问答 / 审批卡必播在挑选器内实现', autoSpeakLogicSrc.includes("message.kind === 'need-input' || message.kind === 'approval'"))
+check('自动播报同轮没收口时普通消息延后（SSE 半句防护）', autoSpeakLogicSrc.includes('pendingTurns'))
+check('手动点喇叭会作废自动播报队列', messageListSrc.includes('onManualSpeak?.()'))
+check('自动播报队列在卸载消息流时作废', messageListSrc.includes('autoSpeakQueueRef.current?.reset()'))
 
 const settingsSrc = read('src/client/personal/shell/BotSettingsCard.tsx')
 /*

@@ -1421,7 +1421,7 @@ interface HostTurnStatus {
   status?: string
   sessionId?: string
   /** 本轮已经产出的消息快照：刷新那一刻流已断，半截正文只存在于这里。 */
-  messages?: BotMessage[]
+  messages?: HostBotMessage[]
   turnId?: string
 }
 
@@ -1476,7 +1476,7 @@ function settleStaleLocal(prev: AppState, botId: string): AppState {
  * blocks 不会凭空多出一个气泡。找不到（比如用户在这期间清空了会话）就
  * 原样返回，让 SSE 继续推进。
  */
-function revivePendingWithSnapshot(prev: AppState, botId: string, snapshot: readonly BotMessage[]): AppState {
+function revivePendingWithSnapshot(prev: AppState, botId: string, snapshot: readonly HostBotMessage[]): AppState {
   const last = snapshot[snapshot.length - 1]
   if (last === undefined || !Array.isArray(last.blocks) || last.blocks.length === 0) return prev
   let index = -1
@@ -4222,6 +4222,30 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
        */
       let lastProgressId: string | null = null
 
+      /**
+       * 把 turnId 补到本轮占位气泡上（SSE 先落地导致占位没被认领时用）。
+       *
+       * 为什么需要：host 的同一条消息会经常驻 SSE 与 /reply/stream 各推一次，
+       * 顺序不保证。SSE 先到时 host id 已经映射到 SSE 落下的那条，stream 的
+       * applyHostMessage 走 globalKnown 分支只 update、**不会认领**本轮占位；
+       * 占位就一直「pending 且没有 turnId」。自动播报靠 turnId 判断「这一轮
+       * 还没收口」（见 chat/auto-speak.ts 的 pendingTurns），缺了它就会把同轮
+       * 的 SSE 消息当成已定稿、提前念半句。这里只补字段，blocks / pending 都不动
+       * ——收口仍由 finalizeStreamMessages 统一处理。
+       */
+      const syncPendingTurnId = (id: string, turnId: string): void => {
+        setState((prev) => {
+          const target = prev.messages.find((message) => message.id === id)
+          if (target === undefined || target.turnId === turnId) return prev
+          return {
+            ...prev,
+            messages: prev.messages.map((message) => (
+              message.id === id ? { ...message, turnId } : message
+            )),
+          }
+        })
+      }
+
       const applyHostMessage = (hostMessage: HostBotMessage): void => {
         sawMessageEvent = true
         taskBlocksById.set(hostMessage.id, hostMessage.blocks)
@@ -4249,6 +4273,11 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
           // 记进本轮映射：收口时要按它把 pending 摘掉
           messageIdMap.set(hostMessage.id, globalKnown)
           updateMessageBlocks(globalKnown, hostMessage.blocks, hostMessage.kind, hostMessage.id, hostMessage.replyTo, hostMessage.turnId)
+          /*
+           * SSE 先落地时占位没被认领（见 syncPendingTurnId 的注释）：把 turnId 补上，
+           * 自动播报的同轮 pending 门禁才能挡住「这一轮还没收口」的半句正文。
+           */
+          if (hostMessage.turnId !== undefined) syncPendingTurnId(pendingId, hostMessage.turnId)
           return
         }
         const known = messageIdMap.get(hostMessage.id)

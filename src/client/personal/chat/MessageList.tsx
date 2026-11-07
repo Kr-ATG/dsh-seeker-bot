@@ -25,6 +25,7 @@ import { IconBell, IconBellOff, IconChevronDown, IconQuote, IconSparkles, IconSt
 import { formatClock, type Bot, type Message, type MessageBlock, type ProactiveMarkKind } from '../types.ts'
 import { usePersonal } from '../store.tsx'
 import { getSpeechState, speakText, speechTextOf, stopSpeech, useSpeechState } from '../speech.ts'
+import { AUTO_SPEAK_DELAY_MS, AutoSpeakQueue, pickAutoSpeakItems } from './auto-speak.ts'
 import { MessageBlockView } from './MessageBlockView.tsx'
 import { installScrollDamping } from './scroll-damping.ts'
 import {
@@ -157,14 +158,12 @@ function messagePreview(message: Message): string {
 
 /* ───────────────────────── 朗读（自动朗读 / 气泡喇叭） ───────────────────────── */
 
-/**
- * 自动朗读的 debounce（毫秒）。
- *
- * 流式回复会连续改 messages（每来一段正文就变一次引用），不加防抖就会把半句话
- * 念出去、然后被下一段打断。250ms 是「这一阵安静下来了」的量级：比一次事件循环
- * 长，又短到用户感觉不出延迟。
+/*
+ * 自动播报的挑消息与排队逻辑在 auto-speak.ts（纯逻辑、可离线测试）：
+ *  · pickAutoSpeakItems —— 按顺序挑出所有还没念过、现在能念的消息；
+ *  · AutoSpeakQueue —— 串行念，后一条等前一条播完（speakText 每次都会打断当前播放）。
+ * 本文件只负责「什么时候挑、把结果交给队列」。
  */
-const AUTO_SPEAK_DELAY_MS = 250
 
 /**
  * 气泡上的「朗读」按钮（引用按钮之后）。
@@ -173,7 +172,7 @@ const AUTO_SPEAK_DELAY_MS = 250
  * 开始 / 结束都会让**整条消息流**重渲染；抽出来之后只有这一枚按钮跟着变。
  * 文本清洗也放这里 useMemo —— 长会话里每条 bot 消息渲染时都洗一遍 Markdown 是纯浪费。
  */
-function SpeakToolButton({ message, bot, onError }: {
+function SpeakToolButton({ message, bot, onError, onManualSpeak }: {
   message: Message
   bot: Bot
   /**
@@ -183,6 +182,13 @@ function SpeakToolButton({ message, bot, onError }: {
    * 按钮失败了必须说一声——否则点了没反应，看起来像功能坏了。
    */
   onError?: (message: string) => void
+  /**
+   * 用户手动点了这枚按钮（播放 / 停止都算）。
+   *
+   * 语义是「我现在就要听这一条 / 不要听了」，自动播报排队中的其它消息必须让位，
+   * 否则用户点完停止，后台队列还会接着念下一条（实测最难解释的一种「停不下来」）。
+   */
+  onManualSpeak?: () => void
 }): JSX.Element | null {
   const speech = useSpeechState()
   const text = useMemo(() => speechTextOf(message), [message])
@@ -197,6 +203,8 @@ function SpeakToolButton({ message, bot, onError }: {
       title={active ? '停止朗读' : '朗读这条消息'}
       aria-label={active ? '停止朗读' : '朗读这条消息'}
       onClick={() => {
+        // 手动操作先作废自动播报的排队项：用户已经明确「这一条 / 停止」，队列不该接着念
+        onManualSpeak?.()
         if (active) {
           stopSpeech()
           return
@@ -473,6 +481,36 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
   const atBottomRef = useRef(true)
   /** 待撤回的消息（非 null 时在这条消息下方原地显示两枚确认按钮）。 */
   const [recallTarget, setRecallTarget] = useState<Message | null>(null)
+  /**
+   * 已播（或明确决定不自动播）的消息 id；key 是当前会话（bot / room）。
+   *
+   * 语义是「别再自动念这条」：首次挂载 / 切会话 / 拨开关时会把现有消息整批写进来
+   * （刷新不重播历史），自动播报**真正出声之后**才把新消息写进来（没出声不写，
+   * 见下面队列的 onResult）。
+   */
+  const spokenRef = useRef<{ key: string; ids: Set<string> } | null>(null)
+  /**
+   * 自动播报队列（组件内单例，串行念）。
+   *
+   * 用 ref 懒创建而不是 useMemo：它持有「正在念到哪一条」的运行时状态，重建一次
+   * 就等于把排队丢掉。真正的执行是 speech.ts 的 speakText（全局单例播放器，
+   * 每次调用都会打断上一条），所以多条消息必须串行，不能并发。
+   *
+   * onResult 只在**真的出过声**时才把消息记为已播：浏览器拦截自动播放 / 服务
+   * 不可用 / 文本为空时 speakText 返回 false，那条消息必须留着重挑，否则用户
+   * 点一下喇叭能听、自动播报却永久漏掉它。
+   */
+  const autoSpeakQueueRef = useRef<AutoSpeakQueue | null>(null)
+  if (autoSpeakQueueRef.current === null) {
+    autoSpeakQueueRef.current = new AutoSpeakQueue(
+      (text, options) => speakText(text, options),
+      (item, played) => {
+        if (!played) return
+        const spoken = spokenRef.current
+        if (spoken !== null) spoken.ids.add(item.id)
+      },
+    )
+  }
 
   /* Esc 收起原地确认：不弹窗也要留一条键盘退出路径。 */
   useEffect(() => {
@@ -586,7 +624,9 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
   useEffect(() => {
     stickRef.current = true
     forceScrollRef.current = true
-    // 切会话时停掉正在念的那一条：用户已经在看别的对话，旧消息继续响很怪
+    // 切会话时停掉正在念的那一条 / 作废自动播报队列：用户已经在看别的对话，
+    // 旧消息继续响很怪，后台还接着排队念下一条更怪
+    autoSpeakQueueRef.current?.reset()
     stopSpeech()
     // 切会话重置懒加载窗口：新会话从最新一页开始，不继承上一个会话滚到哪。
     setRenderStartId(null)
@@ -609,12 +649,18 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
    * 只拦「通话开始」这一刻，通话中用户仍然可以手动点喇叭（那是显式操作）。
    */
   useEffect(() => {
-    if (ui.call.status !== 'idle') stopSpeech()
+    if (ui.call.status !== 'idle') {
+      // 通话一开，自动播报的排队项全部作废（扬声器要留给通话）
+      autoSpeakQueueRef.current?.reset()
+      stopSpeech()
+    }
   }, [ui.call.status])
 
   // 消息流卸载（切去期刊页等）时收声：已经离开对话了还继续念属于失控
   useEffect(() => {
     return () => {
+      // 先作废队列再收声：否则正在 await 的消费循环醒来还会接着念下一条
+      autoSpeakQueueRef.current?.reset()
       stopSpeech()
       if (chunkRafRef.current !== 0) window.cancelAnimationFrame(chunkRafRef.current)
     }
@@ -663,10 +709,15 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
    * ——那条链路本来就在播语音，再叠一层会撞在一起。
    *
    * 三条防呆：
-   *  · 首次挂载 / 切换会话时把已有消息全部标记成「已播」，否则一刷新就把最后一条
-   *    历史回复念一遍（这是最容易吓到用户的一种）；
+   *  · 首次挂载 / 切换会话时把已有消息全部标记成「已播」，否则一刷新就把历史回复
+   *    从头念一遍（这是最容易吓到用户的一种）；
    *  · debounce：流式回复会连续改 messages，等这一阵安静下来再播；
-   *  · 每轮只播最后一条，且还没定稿的 pending 消息不播（念了就是半句话）。
+   *  · 还没定稿的 pending 消息不播（念了就是半句话）。
+   *
+   * **按消息流顺序逐条补播，不是「只播最后一条」**：一轮里 Bot 可能发好几条消息
+   * （progress 播报 + 问答卡 + final），旧实现只念最后一条，先落地的那条永远轮
+   * 不到——用户报的「没回复完，回复的第一条不会自动朗读」就是这个（2026-11-07）。
+   * 现在所有未播消息按顺序排进 AutoSpeakQueue，一条念完再念下一条。
    *
    * **问答 / 审批卡必播，不看自动播报开关**：这类消息就是这一轮的最终内容，宿主
    * 正挂在那里等用户决定。不播的话，没盯着屏幕的用户根本不知道 Bot 在等自己——
@@ -674,7 +725,6 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
    */
   const autoSpeak = bot.autoSpeak === true
   const autoSpeakRef = useRef(autoSpeak)
-  const spokenRef = useRef<{ key: string; ids: Set<string> } | null>(null)
   useEffect(() => {
     const key = room === null ? `bot:${bot.id}` : `room:${room.id}`
     const spoken = spokenRef.current
@@ -682,52 +732,103 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
       // 换了会话：把这一屏现有的消息全部记为已播，不补念历史
       spokenRef.current = { key, ids: new Set(messages.map((message) => message.id)) }
       autoSpeakRef.current = autoSpeak
+      autoSpeakQueueRef.current?.reset()
       return
     }
     if (autoSpeakRef.current !== autoSpeak) {
-      // 开关刚拨动：把当前消息记为已播，拨开关这个动作本身不触发朗读
+      /*
+       * 开关刚拨动：只把**已定稿**的消息记为已播。
+       *
+       * 不能整批标：用户常常在 Bot 正回复到一半时打开自动播报（想听这一轮），
+       * 整批标会把还在生成的这一轮也吞掉，收口后只剩静默——和「第一条不念」
+       * 是同一个观感问题。pending 的留给收口后正常补播。
+       */
       autoSpeakRef.current = autoSpeak
-      for (const message of messages) spoken.ids.add(message.id)
+      const queue = autoSpeakQueueRef.current
+      /* 已经排队（含正在播）的项不标：reset 之后它们未播，下一次变化还能重挑。 */
+      const queued = new Set<string>(queue?.claimedIds() ?? [])
+      for (const message of messages) {
+        if (message.role !== 'bot') continue
+        if (message.pending === true) continue
+        if (queued.has(message.id)) continue
+        spoken.ids.add(message.id)
+      }
+      queue?.reset()
       return
     }
-    if (room !== null || ui.call.status !== 'idle') return
-    const timer = window.setTimeout(() => {
+    if (room !== null || ui.call.status !== 'idle') {
       /*
-       * 从尾部找「已经能读」的一条 bot 消息（messages 可能是上千条历史，复制整份
-       * 数组再 reverse 是白费，所以倒序扫）。
-       *
-       * 空 blocks 的 pending 占位必须跳过：它只是一句「正在输入」，念出来是噪音，
-       * 而且它常常排在刚落地的问答卡后面——不跳过的话，倒着找第一条 bot 就会撞上
-       * 这个空占位，卡片永远轮不到朗读。
+       * 群聊 / 通话中不自动播：还没念完的排队项一并作废。
+       * 通话期间落地的消息记为「不补念」——通话本来就在出声，挂断后突然把通话
+       * 期间的文字一条条念出来会很吓人。群聊不需要：切回单聊时 key 变化会把
+       * 当前消息整批标掉。
        */
-      let last: Message | undefined
-      for (let index = messages.length - 1; index >= 0; index -= 1) {
-        const candidate = messages[index]
-        if (candidate?.role !== 'bot') continue
-        if (candidate.pending === true && candidate.blocks.length === 0) continue
-        last = candidate
-        break
+      autoSpeakQueueRef.current?.reset()
+      if (ui.call.status !== 'idle') {
+        for (const message of messages) {
+          if (message.role === 'bot') spoken.ids.add(message.id)
+        }
       }
-      if (last === undefined || spoken.ids.has(last.id)) return
-      /** 等你决定的卡片：问答（need-input）与审批（approval）。 */
-      const ask = last.kind === 'need-input' || last.kind === 'approval'
-      if (!ask) {
-        if (!autoSpeak) return
-        // 半句话不念：pending 的消息还在生成，念了就是半句被下一段打断
-        if (last.pending === true) return
-      }
-      const text = speechTextOf(last)
-      if (text === '') return
-      spoken.ids.add(last.id)
-      void speakText(text, {
-        messageId: last.id,
-        botId: last.botId,
-        ...(bot.voice !== undefined && bot.voice !== '' ? { voice: bot.voice } : {}),
-        ...(bot.liveVendor !== undefined && bot.liveVendor !== '' ? { vendor: bot.liveVendor } : {}),
-      })
+      return
+    }
+    const timer = window.setTimeout(() => {
+      const queue = autoSpeakQueueRef.current
+      if (queue === null) return
+      /*
+       * 按顺序挑出所有「还没念过、现在能念」的 bot 消息，交给串行队列。
+       *
+       * 去重要同时排除：已经出声播过的（spoken）与**队列已认领的**（正在播 +
+       * 还没开始念，queue.claimedIds）——流式回复会连续改 messages，不排除它们的话
+       * 同一批消息会被重复排进队列，正在播的那条也会被重新挑中念两遍。
+       *
+       * 入队本身**不**记已播：队列播完（并且真的出声）才由 onResult 标记。
+       * 这样用户中途点停止 / 切会话把队列 reset 掉时，未念到的消息不会被误记成
+       * 「播过了」，下一轮还有机会念。
+       */
+      const claimed = new Set<string>(spoken.ids)
+      for (const id of queue.claimedIds()) claimed.add(id)
+      const items = pickAutoSpeakItems(
+        messages,
+        claimed,
+        {
+          autoSpeak,
+          botId: bot.id,
+          ...(bot.voice !== undefined && bot.voice !== '' ? { voice: bot.voice } : {}),
+          ...(bot.liveVendor !== undefined && bot.liveVendor !== '' ? { vendor: bot.liveVendor } : {}),
+        },
+        speechTextOf,
+      )
+      queue.enqueue(items)
     }, AUTO_SPEAK_DELAY_MS)
     return () => window.clearTimeout(timer)
   }, [messages, room?.id, autoSpeak, bot.id, bot.voice, bot.liveVendor, ui.call.status])
+
+  /**
+   * 用户手动点气泡喇叭（播放 / 停止）：自动播报立刻让位，且不再续播。
+   *
+   * 只 reset 队列不够：下一次 messages 变化（流式还在继续）会把这些未念项重新
+   * 挑出来接着念，用户点完「停止」却停不下来。所以同时把**当前已定稿**的消息记为
+   * 「不自动播」——这是用户显式表达「我要自己点」，不是漏听。
+   *
+   * 刻意**不标 pending 消息**：用户可能只是点一条旧消息重听，而此时 Bot 正在回复；
+   * 整批标会把在途那一轮也静音，收口后一条都不念——等于把刚修好的 bug 换个入口
+   * 复现。在途轮次是「还没听到的内容」，不是「用户不想听的内容」。
+   */
+  const handleManualSpeak = (): void => {
+    autoSpeakQueueRef.current?.reset()
+    const spoken = spokenRef.current
+    if (spoken === null) return
+    /*
+     * 「正在加载 / 正在播」的那一条无条件标掉（哪怕还 pending）：用户按停的就是它，
+     * 不能因为「pending 不标」在收口后再被自动念一遍——反馈是「点了停止，声音又来了」。
+     */
+    const activeId = getSpeechState().messageId
+    for (const message of messages) {
+      if (message.role !== 'bot') continue
+      if (message.pending === true && message.id !== activeId) continue
+      spoken.ids.add(message.id)
+    }
+  }
 
   /**
    * 插入一批旧消息（最多 MESSAGE_INSERT_CHUNK 条），并记录插入前的视口锚点。
@@ -1357,7 +1458,14 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
                            * 只有 bot 消息有：自己的话不需要听一遍，念自己的消息还会让人
                            * 以为是在放语音输入。文本为空的消息由组件自己返回 null。
                            */}
-                          {message.role === 'bot' ? <SpeakToolButton message={message} bot={sender} onError={actions.toast} /> : null}
+                          {message.role === 'bot' ? (
+                            <SpeakToolButton
+                              message={message}
+                              bot={sender}
+                              onError={actions.toast}
+                              onManualSpeak={handleManualSpeak}
+                            />
+                          ) : null}
                           {message.role === 'user' ? (
                             <button
                               className="pa-msg__tool"
