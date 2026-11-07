@@ -463,6 +463,15 @@ export interface ToolRun {
   name: string
   /** 参数摘要（已截断，用于卡片标题行） */
   args?: string
+  /**
+   * 工具调用的人话动作短语（无时态），host 用**完整参数**算好。
+   *
+   * 与 `TaskRecordStep.action` 同一份规则、同一个值——Bot「动态」里正在跑的
+   * 那一行显示的就是它，读起来与 Seeker 操作面板上的那一条完全一致。
+   */
+  action?: string
+  /** 短语本身已是完整人话（终端族），显示时不拼「正在 / 已」前缀。 */
+  actionHideVerb?: true
   status: ToolRunStatus
   /** 结果摘要（已截断） */
   result?: string
@@ -608,6 +617,27 @@ export interface TaskRecordStep {
   detail?: string
   /** 工具步骤的执行状态。 */
   status?: 'running' | 'ok' | 'error'
+  /**
+   * 这一步的**人话动作短语**（无时态），如「查看文件 KrAgentPanel.tsx」
+   * 「搜索网络 万兆网速」「启动第二个 CodeArts 账号登录」。
+   *
+   * 规则表在 `src/client/kr-chat/plain-language.ts`（Work 操作面板的同一份），
+   * host 在 tool/call 时用**完整参数**算好写进 ToolRun.action（见
+   * `src/host/personal/tool-action.ts`）：卡片上那份 180 字参数摘要经常在
+   * description 之前就被切断，前端自己再从摘要里解析会拿不到真正的动作。
+   *
+   * 显示口径见 task-action.ts 的 actionLabelOf：运行中「正在 + 短语」、完成后
+   * 「已 + 短语」，hideVerb 的族（终端）直接显示短语本身。
+   */
+  action?: string
+  /**
+   * 短语本身已经是完整人话（终端族：「启动第二个 CodeArts 账号登录」），
+   * 显示时不再拼「正在 / 已」前缀。
+   *
+   * 与 plain-language 的 PlainStep.hideVerb 同一个语义：图标已经表达"让电脑干活"，
+   * 动词只会把同一句话说长一遍，还挤掉真正该读的对象。
+   */
+  actionHideVerb?: true
 }
 
 /**

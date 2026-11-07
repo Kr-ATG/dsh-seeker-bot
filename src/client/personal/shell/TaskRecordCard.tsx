@@ -17,6 +17,11 @@
  * 默认收起）。数据本来就由流式事件逐条写进 state.tasks.steps，这里只做展示：
  * 有任务在跑时每秒重渲染一次，不轮询、不发请求。
  *
+ * 2026-11-07 用户口径：「这个正在回复改为动态的显示与我们 seeker 操作面板里显示
+ * 的动作，因为正在回复看不出来他在做的工作」，以及「文字半截，我需要双行显示」。
+ * 于是 live 行的文案改成**具体动作**（与 Seeker 操作面板同一句，见 task-action.ts
+ * 的 stepActionViewOf / actionLabelOf），允许折两行，换字时交叉淡入。
+ *
  * 过滤规则（两种用法互斥）：
  *  · 传 roomId —— 群聊视角，只看这个群的任务（群任务带 roomId）；
  *  · 只传 botId —— 私聊视角，只看这个 Bot 且不带 roomId 的任务。
@@ -28,11 +33,13 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
+// 文字交叉淡入：换动作时旧字淡出、新字同时淡入，中间不出现空白帧。
+import { useCrossfadeText, useMotionAllowed } from '../../motion-utils.ts'
 import { IconChevronDown, IconListTodo } from '../icons.tsx'
 import { usePersonal } from '../store.tsx'
 import { formatDuration, type TaskRecord, type TaskRecordStep } from '../types.ts'
-// 工具名 → 中文动作只有一份规则表；详情弹窗与动态行共用。
-import { actionLabelOf, humanizeDetail } from './task-action.ts'
+// 工具名 → 中文动作只有一份规则表（plain-language）；详情弹窗与动态行共用。
+import { actionLabelOf, briefOf, humanizeDetail } from './task-action.ts'
 import { TaskStatusGlyph } from './status-glyph.tsx'
 
 /**
@@ -119,22 +126,61 @@ function doneActionCount(steps: TaskRecordStep[]): number {
   return steps.reduce((n, step) => n + (step.kind === 'tool' && step.status !== 'ok' ? 0 : 1), 0)
 }
 
+/** 运行中任务行上的一行活信息。 */
+interface LiveProgress {
+  /** 此刻在做什么：一句带具体对象的人话动作。 */
+  label: string
+  done: number
+  total: number
+}
+
 /**
  * 运行中任务的「此刻进行到哪里」。
  *
  * 数据来自 state.tasks 的 steps，由流式事件逐条追加（见 store 的
  * upsertTaskToolStep / upsertTaskTextStep），所以这里只是把最新一份读出来，
  * 不做轮询、不发请求——右栏跟着 state 每秒重渲染就是实时。
+ *
+ * 用户口径（2026-11-07）：「这个正在回复改为动态的显示与我们 seeker 操作面板里
+ * 显示的动作，因为正在回复看不出来他在做的工作」——所以文案分三层，越具体越优先：
+ *
+ *  1. 有正在跑的动作 → 那一步的人话动作（actionLabelOf，带具体对象：
+ *     「正在启动第二个 CodeArts 账号登录」），与 Seeker 操作面板同一句；
+ *  2. 没有跑的动作、但这一轮还在跑（模型在写字 / 在等结果）→ 最后一条过程
+ *     说明的首句，截到约 28 字；
+ *  3. 实在没有可说的 → 「正在思考」。
+ *
+ * 旧版兜底「正在整理回复…」已删除：它说的是**还没发生**的事，用户读了仍不知道
+ * 它此刻在干什么。
  */
-function liveProgressOf(task: TaskRecord): { label: string; done: number; total: number } | null {
+function liveProgressOf(task: TaskRecord): LiveProgress | null {
+  if (task.status !== 'running') return null
   const steps = actionStepsOf(task)
-  if (steps.length === 0) return null
   let running: TaskRecordStep | undefined
+  let lastText: TaskRecordStep | undefined
   for (let i = steps.length - 1; i >= 0; i--) {
-    if (steps[i].status === 'running') { running = steps[i]; break }
+    const step = steps[i]
+    if (running === undefined && step.status === 'running') running = step
+    if (lastText === undefined && step.kind === 'text') lastText = step
+    if (running !== undefined && lastText !== undefined) break
   }
-  const label = running !== undefined ? actionLabelOf(running) : '正在整理回复…'
+  let label: string
+  if (running !== undefined) {
+    label = actionLabelOf(running)
+  } else if (lastText !== undefined) {
+    // 只给这一行两行位置：首句太长会读不全，截到约 28 字。
+    const brief = clipBrief(briefOf(lastText.detail ?? ''), 28)
+    label = brief !== '' ? brief : '正在思考'
+  } else {
+    label = '正在思考'
+  }
   return { label, done: doneActionCount(steps), total: steps.length }
+}
+
+/** 压平空白并截断（动态行只留两行位置，长句会读不全）。 */
+function clipBrief(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length > max ? flat.slice(0, max) + '…' : flat
 }
 
 /**
@@ -147,7 +193,7 @@ function liveProgressOf(task: TaskRecord): { label: string; done: number; total:
 function taskSummary(task: TaskRecord): string {
   if (task.status === 'running') {
     const live = liveProgressOf(task)
-    return live !== null ? live.label : '正在处理…'
+    return live !== null ? live.label : '正在思考'
   }
   const reply = humanizeDetail(task.reply ?? '', 240)
   if (reply !== '') return flatText(reply)
@@ -163,14 +209,26 @@ function TaskRow({ task, now, onOpen }: {
   onOpen: (id: string) => void
 }): JSX.Element {
   const summary = taskSummary(task)
-  const live = task.status === 'running' ? liveProgressOf(task) : null
+  const live = liveProgressOf(task)
   const elapsed = formatDuration(Math.max(0, now - task.startedAt))
   const ratio = live !== null && live.total > 0
     ? Math.min(100, Math.round((live.done / live.total) * 100))
     : 0
+  /*
+   * 动作文字的换字节奏比「每秒重渲染」还快：一条工具刚跑完、下一条已经开始。
+   * 直接替换就是一次硬闪（旧字瞬失、新字瞬现），读起来像画面在打嗝。
+   * 这里两层叠在同一格里做交叉淡入：旧层淡出的同时新层淡入，任何一帧都有字。
+   * prefers-reduced-motion（或总开关关闭）时 motion 为假，useCrossfadeText
+   * 只留一层、根本不产生动画——直接替换，不做任何过渡。
+   */
+  const motion = useMotionAllowed(true)
+  const liveLabel = live?.label ?? ''
+  const labelLayers = useCrossfadeText(liveLabel, motion)
   const aria = '查看任务详情：' + (task.title !== '' ? task.title : '未命名任务')
     + '（' + STATUS_LABEL[task.status]
-    + (live !== null ? '，' + live.label + '，已做 ' + String(live.done) + ' 个动作' : '')
+    + (live !== null
+      ? '，' + live.label + (live.total > 0 ? '，已做 ' + String(live.done) + ' 个动作' : '')
+      : '')
     + '）'
   return (
     <div className="pa-taskrec__item" data-running={task.status === 'running' ? 'true' : 'false'}>
@@ -190,8 +248,28 @@ function TaskRow({ task, now, onOpen }: {
             <>
               <span className="pa-taskrec__live">
                 <span className="pa-taskrec__live-dot" aria-hidden="true" />
-                <span className="pa-taskrec__live-label">{live.label}</span>
-                <span className="pa-taskrec__live-meta">已做 {live.done}/{live.total} · {elapsed}</span>
+                {/*
+                 * 动作文案允许折两行：用户口径「文字半截，我需要双行显示」。
+                 * 手机 397px 宽时这一行右边还有「已做 N/M · 耗时」，两行才读得全
+                 * 一个具体动作（如「正在启动第二个 CodeArts 账号登录」）。
+                 */}
+                <span className="pa-taskrec__live-label">
+                  {labelLayers.map((layer) => (
+                    <span
+                      key={layer.id}
+                      className="pa-taskrec__live-text"
+                      data-phase={layer.exiting ? 'out' : 'in'}
+                      /* 退场层只是视觉残影：读屏只念当前这一句，旧动作不再念一遍。 */
+                      aria-hidden={layer.exiting ? true : undefined}
+                    >
+                      {layer.text}
+                    </span>
+                  ))}
+                </span>
+                <span className="pa-taskrec__live-meta">
+                  {live.total > 0 ? '已做 ' + String(live.done) + '/' + String(live.total) + ' · ' : ''}
+                  {elapsed}
+                </span>
               </span>
               <span className="pa-taskrec__progress" aria-hidden="true">
                 <span className="pa-taskrec__progress-fill" style={{ width: ratio + '%' }} />

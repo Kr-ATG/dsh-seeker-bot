@@ -114,6 +114,16 @@ export function useCrossfadeText(text: string, motion: boolean): readonly TextLa
 }
 
 /**
+ * 滚动列表的贴边状态：哪一侧还有内容没露出来（供渐隐遮罩用）。
+ *
+ * `both` = 上下都没到头（两端都要渐隐）；`none` = 内容没溢出或刚好贴满。
+ * 这个类型原先只在 `useSteppedFollow` 的返回签名里裸用、没有定义 ——
+ * 依赖它的文件不在类型检查图里时不会报错，一旦被引用（Bot 动态卡用同一个
+ * motion-utils）就会变成 `Cannot find name 'FollowEdges'`。
+ */
+export type FollowEdges = 'none' | 'top' | 'bottom' | 'both'
+
+/**
  * 实时跟随到底：`text` 增长且跟随意图仍在、读者停在底部（≤24px）时，
  * 实时自动跟随滚动到底部；上翻/选中即停，滚回底部自动恢复；
  * 同时报告视口溢出与边缘位置（供渐隐遮罩）。

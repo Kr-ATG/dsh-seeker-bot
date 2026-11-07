@@ -8,25 +8,15 @@
  * 所以每一条动作只讲它自己那一步查到 / 做了什么：把工具结果里的英文键
  * 换成中文标签（体感温度、云量、标题…），把英文天气词翻成中文，
  * 代码围栏整段剥掉。绝不拿后面那一步的总结来顶替前面几步。
+ *
+ * 2026-11-07 用户口径：「动态里这个正在回复改为动态显示与 seeker 操作面板里
+ * 显示的动作」——工具名 → 动作的**规则表不再在本地抄一份**，直接复用 Work
+ * 操作面板的 `src/client/kr-chat/plain-language.ts`（纯函数、无 React / DOM）：
+ * 同一句工具调用在两个界面必须读作同一句人话，两份规则表迟早会漂移成
+ * 「动态里说查看文件、操作面板说读取文件」。
  */
+import { toPlainStep, type PlainStatus } from '../../kr-chat/plain-language.ts'
 import type { TaskRecordStep } from '../types.ts'
-
-/** 工具名 → 中文动作：包含匹配，宿主常带命名空间前缀，精确名会全落到兜底。 */
-const TOOL_ACTION_RULES: Array<{ test: RegExp; action: string }> = [
-  { test: /web_search|search_web|google|bing|搜索网络/i, action: '搜索网络' },
-  { test: /web_fetch|fetch|http|curl|request|读取网页/i, action: '读取网页' },
-  { test: /weather|forecast|天气/i, action: '查天气' },
-  { test: /generate_image|image|picture|draw|photo|生图/i, action: '生成图片' },
-  { test: /generate_video|video|ffmpeg|视频/i, action: '生成视频' },
-  { test: /memory|remember|recall|记忆/i, action: '检索记忆' },
-  { test: /todo|task_state|plan|待办|清单/i, action: '更新任务清单' },
-  { test: /browser|navigate|click|screenshot|浏览器/i, action: '操作浏览器' },
-  { test: /grep|glob|find|search|query|检索|搜索/i, action: '搜索内容' },
-  { test: /read|view|cat|open_file|file|读取/i, action: '读取文件' },
-  { test: /write|create|save|mkdir|写入/i, action: '写入文件' },
-  { test: /edit|patch|replace|str_replace|修改/i, action: '修改文件' },
-  { test: /exec|command|shell|bash|pwsh|terminal|python|node|run|执行/i, action: '执行命令' },
-]
 
 /** 压平空白并截断。 */
 function clip(text: string, max: number): string {
@@ -34,21 +24,106 @@ function clip(text: string, max: number): string {
   return s.length > max ? s.slice(0, max) + '…' : s
 }
 
-/** 工具名 → 中文动作；实在不认识的才落到「执行操作」。 */
-export function toolActionOf(name: string): string {
-  const trimmed = name.trim()
-  for (const rule of TOOL_ACTION_RULES) {
-    if (rule.test.test(trimmed)) return rule.action
-  }
-  return '执行操作'
+/** TaskRecordStep 的三种工具状态 → plain-language 的三态。 */
+function plainStatusOf(step: TaskRecordStep): PlainStatus {
+  if (step.status === 'running') return 'running'
+  if (step.status === 'error') return 'failed'
+  return 'done'
 }
 
-/** 工具步骤的标题：完成「已读取文件」、进行中「正在读取文件」、失败「读取文件失败」。 */
+/**
+ * 参数摘要 → 参数对象。
+ *
+ * TaskRecordStep.detail 是宿主给的**参数摘要**（可能被截断），历史数据里也
+ * 只有它。能把整串解析成对象的就用它还原动作；解析不出来（半截 JSON / 纯
+ * 文本 / 空）一律给空对象，由 plain-language 的规则表按工具名兜底——绝不
+ * 因为一条脏数据抛异常、让整行动作消失。
+ */
+function argsOf(detail: string | undefined): Record<string, unknown> {
+  if (detail === undefined || detail.trim() === '') return {}
+  try {
+    const parsed: unknown = JSON.parse(detail)
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * 一步的「人话动作短语」（无时态）+ 是否不拼动词前缀。
+ *
+ * 两个来源，按优先级：
+ *  1. `step.action` —— host 用**完整参数**算好的那句（与 Seeker 操作面板逐字
+ *     一致），有多具体就多具体：「启动第二个 CodeArts 账号登录」；
+ *  2. 回退：历史数据 / 宿主还没接线时，用 step.title + step.detail 现算一遍。
+ *     拼接规则与 host 的 `plainActionOf` 完全相同（终端族 hideVerb 时只留
+ *     短语本身，其余是「动词 + 空格 + 对象」），保证两处不会念出两种说法。
+ */
+export function stepActionViewOf(step: TaskRecordStep): { action: string; hideVerb: boolean } {
+  const given = step.action?.trim() ?? ''
+  if (given !== '') return { action: given, hideVerb: step.actionHideVerb === true }
+  const plain = toPlainStep({
+    toolName: step.title,
+    args: argsOf(step.detail),
+    status: plainStatusOf(step),
+  })
+  const detail = plain.detail?.trim() ?? ''
+  const hideVerb = plain.hideVerb === true && detail !== ''
+  return {
+    action: hideVerb ? detail : (detail !== '' ? plain.verb + ' ' + detail : plain.verb),
+    hideVerb,
+  }
+}
+
+/** 工具名 → 中文动作（plain-language 的动词；认不出的落到「执行操作」）。 */
+export function toolActionOf(name: string): string {
+  return toPlainStep({ toolName: name, args: {}, status: 'done' }).verb
+}
+
+/**
+ * 进行中前缀。
+ *
+ * 绝大多数动作是「动词 + 对象」（「查看文件 agent.ts」），运行中读作
+ * 「正在查看文件 agent.ts」——「正在」是这一行唯一表达时态的记号。
+ *
+ * 但少数动词**本身已经是进行式**：终端的兜底动词是「在电脑上操作」，浏览器
+ * 族的「在输入框里填写」「在页面上查找」也都以「在」开头。再前置一个「正在」
+ * 就叠成「正在在电脑上操作」，读起来像口吃。判据只有一条：动词以「在」开头
+ * 就不再补前缀，直接裸用——「在电脑上操作」本身就是「它正让电脑干活」。
+ *
+ * 只作用于进行中；完成态「已在电脑上操作」、失败态「在电脑上操作失败」都不叠字。
+ */
+function runningPrefixOf(action: string): string {
+  return action.startsWith('在') ? '' : '正在'
+}
+
+/**
+ * 失败的人话说法。
+ *
+ * 纯中文动作（「查看文件」）直接接「失败」，读作「查看文件失败」；已经带到具体
+ * 对象 / 文件名的动作（「查看文件 agent.ts」）再接一个「失败」会粘成一句话
+ * （「查看文件 agent.ts失败」），所以换个说法：「查看文件 agent.ts，没做成」。
+ * 两种情况都是完整人话，不出现英文与错误码。
+ */
+function failureLabelOf(action: string): string {
+  return action.includes(' ') ? action + '，没做成' : action + '失败'
+}
+
+/**
+ * 工具步骤的标题：进行中「正在查看文件 X」、失败「查看文件 X，没做成」、
+ * 完成「已查看文件 X」；终端族（hideVerb）不拼时态前缀，短语本身已是完整人话。
+ */
 export function toolTitleOf(step: TaskRecordStep): string {
-  const action = toolActionOf(step.title)
-  if (step.status === 'running') return '正在' + action
-  if (step.status === 'error') return action + '失败'
-  return '已' + action
+  const view = stepActionViewOf(step)
+  if (step.status === 'running') {
+    return view.hideVerb ? view.action : runningPrefixOf(view.action) + view.action
+  }
+  if (step.status === 'error') {
+    return view.hideVerb ? view.action + '，没做成' : failureLabelOf(view.action)
+  }
+  return view.hideVerb ? view.action : '已' + view.action
 }
 
 /** 任意步骤的人话标题（左右两栏与动态行共用）。 */

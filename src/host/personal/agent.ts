@@ -48,6 +48,7 @@ import {
 import { admitSpillPath, spillRoots } from '../../spill/index.ts'
 import { archiveArtifactFile, ensureBotOutputDirs, sanitizeBotFolderName } from './outputs.ts'
 import { iuKindOf } from '../../client/iu/kinds/registry.ts'
+import { plainActionOf } from './tool-action.ts'
 import { installBotApproval } from './approval.ts'
 import { installBotQuestions, requestApprovalPick, requestPick } from './questions.ts'
 import { clearWorkingRecallMarks, isWorkingMessageRecalled, isWorkingTurnRecalled, readWorkingTasks, upsertWorkingTask, type WorkingTask, type WorkingTaskStep } from './working-memory.ts'
@@ -149,6 +150,16 @@ export interface ToolRun {
   id: string
   name: string
   args?: string
+  /**
+   * 工具调用的人话动作短语（无时态），由 `tool-action.ts` 用**完整参数**算出。
+   *
+   * 只用来喂 Bot「动态」里那一行「此刻在做什么」：卡片上的 180 字参数摘要经常
+   * 在 description 之前就被切断，前端只拿摘要解析不出「启动第二个 CodeArts
+   * 账号登录」这种具体动作。与前端 ToolRun 的同名字段逐字对齐。
+   */
+  action?: string
+  /** 短语本身已是完整人话（终端族），显示时不拼「正在 / 已」前缀。 */
+  actionHideVerb?: true
   status: 'running' | 'ok' | 'error'
   result?: string
   startedAt: number
@@ -4217,6 +4228,13 @@ export async function runBotTurn(
       const imageSpec = name === IMAGE_TOOL_NAME ? parseImageRequest(data?.arguments) : null
       const videoPrompt = name === VIDEO_TOOL_NAME ? argumentsRecord(data?.arguments).prompt : undefined
       /*
+       * 动作短语：Bot「动态」里那句「此刻在做什么」必须与 Seeker「操作面板」**同一句**，
+       * 所以这里不另写规则，只走 tool-action.ts → plain-language.ts 的 toPlainStep
+       * （规则表只有一份）。参数用**完整** arguments（PTC 子调用这里已是对象），
+       * 不是下面那段 clip 到 180 字的摘要。
+       */
+      const plainAction = plainActionOf(name, argumentsRecord(data?.arguments))
+      /*
        * 其余子调用（read_image / present / 普通命令…）不进对话流：Bot 消息里
        * 不出现工具卡，它们仍然只留在会话日志里供排查。
        *
@@ -4229,6 +4247,13 @@ export async function runBotTurn(
         name,
         status: 'running',
         startedAt,
+        // 动作短语（与操作面板同一句）；算不出来就不挂字段，前端退回原标题。
+        ...(plainAction.action === ''
+          ? {}
+          : {
+              action: plainAction.action,
+              ...(plainAction.hideVerb ? { actionHideVerb: true as const } : {}),
+            }),
         /*
          * 参数摘要：原生 tool/call 的 arguments 是 JSON 字符串，PTC 这里是已经
          * 解析过的对象，统一序列化后再 clip —— DocumentPendingBlock 拿它当
@@ -4381,6 +4406,13 @@ export async function runBotTurn(
        */
       const videoPrompt = name === VIDEO_TOOL_NAME ? argumentsRecord(data?.arguments).prompt : undefined
       /*
+       * 动作短语：Bot「动态」里那句「此刻在做什么」必须与 Seeker「操作面板」**同一句**，
+       * 所以这里不另写规则，只走 tool-action.ts → plain-language.ts 的 toPlainStep
+       * （规则表只有一份）。解析用完整 arguments（不是上面那段 clip 到 180 字的摘要：
+       * description / query 常在切口处，拿摘要根本算不出动作）。
+       */
+      const plainAction = plainActionOf(name, argumentsRecord(data?.arguments))
+      /*
        * present 的路径参数先记下来：tool/result 时 stat 它们，把产出物挂到同一张
        * 工具卡上。放在这里而不是结果里，是因为 present 的参数就是权威来源
        * （结果文本可能只是「已展示 2 个文件」这种摘要）。
@@ -4392,6 +4424,13 @@ export async function runBotTurn(
       pushTool({
         id: callId,
         name,
+        // 动作短语（与操作面板同一句）；算不出来就不挂字段，前端退回原标题。
+        ...(plainAction.action === ''
+          ? {}
+          : {
+              action: plainAction.action,
+              ...(plainAction.hideVerb ? { actionHideVerb: true as const } : {}),
+            }),
         ...(typeof data?.arguments === 'string' && data.arguments !== ''
           /*
            * task_state 的参数是一份任务概览（title + 2–5 个 steps），典型 200+

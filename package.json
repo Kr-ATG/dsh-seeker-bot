@@ -84,7 +84,7 @@
     "smoke:host": "node scripts/smoke-host.mjs",
     "smoke:triad-client": "node scripts/smoke-triad-client.mjs",
     "smoke:triad-host": "node scripts/smoke-triad-host.mjs",
-    "test": "node scripts/test-skill-manager.mjs && node scripts/test-skill-source-update.mjs && node scripts/test-skill-preview.mjs && node scripts/test-skill-toggles.mjs && node scripts/test-subagent-catalog.mjs && node scripts/test-capabilities-stats.mjs && node scripts/test-web-search-chain.mjs && node scripts/test-bot-create.mjs && node scripts/test-bot-delete.mjs && node scripts/test-tool-output-render.mjs",
+    "test": "node scripts/test-skill-manager.mjs && node scripts/test-skill-source-update.mjs && node scripts/test-skill-preview.mjs && node scripts/test-skill-toggles.mjs && node scripts/test-subagent-catalog.mjs && node scripts/test-capabilities-stats.mjs && node scripts/test-web-search-chain.mjs && node scripts/test-bot-create.mjs && node scripts/test-bot-delete.mjs && node scripts/test-tool-output-render.mjs && node scripts/test-task-live-action.mjs",
     "test:web-search-chain": "node scripts/test-web-search-chain.mjs",
     "test:capabilities": "node scripts/test-capabilities-stats.mjs",
     "test:skill-preview": "node scripts/test-skill-preview.mjs",
@@ -141,7 +141,8 @@
     "test:call-duration": "node scripts/test-call-duration.mjs",
     "test:mcp-pill": "node scripts/test-mcp-pill.mjs",
     "test:recall": "node scripts/test-recall.mjs",
-    "test:desktop-screen": "node scripts/test-desktop-screen.mjs"
+    "test:desktop-screen": "node scripts/test-desktop-screen.mjs",
+    "test:task-live-action": "node scripts/test-task-live-action.mjs"
   },
   "engines": {
     "node": ">=22"

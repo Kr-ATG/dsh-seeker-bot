@@ -254,38 +254,98 @@ export const PERSONAL_TASK_CSS = `
 .pa-taskrec__item { display: flex; flex-direction: column; min-width: 0; }
 .pa-taskrec__item + .pa-taskrec__item { margin-top: 1px; }
 
+/* 行：呼吸点 + 动作文案（可折两行）+ 右侧 meta。
+ * 顶部对齐而不是居中：文案两行时呼吸点要贴第一行，meta 也不该浮在两行中间。 */
 .pa-taskrec__live {
   display: flex;
-  align-items: center;
+  /*
+   * 允许换行：窄容器（手机 397px 左右分栏、或用户把右栏拖窄）下，
+   * 「已做 N/M · 耗时」宁可掉到下一行，也不能把动作文案压成一列竖排的
+   * 四个字 —— 那比截断更难读。宽容器里两者照旧同一行。
+   */
+  flex-wrap: wrap;
+  align-items: flex-start;
   gap: 5px;
   min-width: 0;
   font-size: calc(10.5px + var(--pa-font-delta));
-  line-height: 1.45;
+  line-height: 1.35;
   color: var(--pa-accent);
 }
+/*
+ * 呼吸点对齐第一行文字的中线：行高 1.35、字 10.5px 时线盒约 14px，
+ * 点 6px，所以下推约半个行高的差值（0.4em 跟着字号走，--pa-font-delta 放大后仍居中）。
+ */
 .pa-taskrec__live-dot {
   flex: none;
   width: 6px;
   height: 6px;
+  margin-top: 0.4em;
   border-radius: 50%;
   background: currentColor;
   animation: pa-taskrec-pulse 1.6s ease-in-out infinite;
 }
+/*
+ * 动作文案：**双行 + 交叉淡入**。
+ *
+ * 用户口径（2026-11-07）「文字半截，我需要双行显示」——手机 397px 宽时这一行右边
+ * 还有「已做 N/M · 耗时」，单行 nowrap 只能读到动作的前半截（「正在启动第二个
+ * CodeArts 账号登…」），看不出到底在干什么。折成两行、超过两行才省略。
+ *
+ * 结构上这一格是 grid：两层文字占**同一格**（grid-area 1/1 叠放），换字时旧层
+ * 淡出与新层淡入同时进行，任何一帧都有字可读——没有「先清空再出现」的空白帧。
+ * 换字节奏见 motion-utils 的 useCrossfadeText（180ms 进 / 70ms 交叠）。
+ */
 .pa-taskrec__live-label {
-  flex: 1;
+  /*
+   * flex-basis 给一个「至少能读」的下限（约 8 个字）：再窄就让 meta 换行，
+   * 而不是继续压缩文案宽度。flex-grow 仍是 1，宽容器里照常吃满剩余空间。
+   */
+  flex: 1 1 120px;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   font-weight: 600;
+  line-height: 1.35;
 }
+.pa-taskrec__live-text {
+  grid-area: 1 / 1;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  white-space: normal;
+  line-height: 1.35;
+  word-break: break-word;
+}
+/* 进场层：180ms（TEXT_FADE_IN_MS）减速曲线，新字先稳、轻微上浮 2px。 */
+.pa-taskrec__live-text[data-phase='in'] {
+  animation: pa-taskrec-live-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+/* 退场层：250ms（180ms 进场 + 70ms 交叠，TEXT_FADE_EXIT_MS）线性淡出；
+ * 交叠结束时它已不可见，组件到点卸载这一层不产生跳变。 */
+.pa-taskrec__live-text[data-phase='out'] {
+  animation: pa-taskrec-live-out 250ms linear both;
+  pointer-events: none;
+}
+/* meta 不收缩：动作再长也不许把「已做 N/M · 耗时」挤掉或折行。 */
 .pa-taskrec__live-meta {
   flex: none;
+  /* 换行后（窄容器）右对齐收口，与动作文案左对齐形成两端对齐的观感。 */
+  margin-left: auto;
+  align-self: flex-start;
   color: var(--pa-text-4);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 @keyframes pa-taskrec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@keyframes pa-taskrec-live-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes pa-taskrec-live-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
 
 /* 进度：已完成一段实色，末端一枚呼吸点标明「现在在这里」。 */
 .pa-taskrec__progress {
@@ -317,6 +377,15 @@ export const PERSONAL_TASK_CSS = `
 
 @media (prefers-reduced-motion: reduce) {
   .pa-taskrec__live-dot, .pa-taskrec__progress-fill::after { animation: none; }
+  /* 动作换字不做交叉淡入：直接替换（组件侧 motion 为假时本来就只留一层）。 */
+  .pa-taskrec__live-text { animation: none; }
+  /*
+   * 退场层直接不画。正常路径下减少动态效果时 useCrossfadeText 只产出一层，
+   * 根本没有退场层；但如果用户在交叉过渡进行到一半时才切系统偏好，动画被上面
+   * 那条 none 掐掉后，退场层会停在 opacity 1，和新层叠成两行重影。
+   * 这条是那个时间窗的兜底（与 kr-chat 的交叉淡入同一处理）。
+   */
+  .pa-taskrec__live-text[data-phase='out'] { display: none; }
   .pa-taskrec__progress-fill { transition: none; }
 }
 

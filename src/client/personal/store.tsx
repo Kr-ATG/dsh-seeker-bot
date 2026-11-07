@@ -3146,6 +3146,11 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
         title: run.name,
         ...(detail !== '' ? { detail: detail.slice(0, 220) } : {}),
         status: run.status,
+        // 人话动作：host 用完整参数算好（见 finishTaskRecord 里的同款字段）。
+        ...(run.action !== undefined && run.action !== ''
+          ? { action: run.action }
+          : {}),
+        ...(run.actionHideVerb === true ? { actionHideVerb: true as const } : {}),
       }
       const index = task.steps.findIndex((item) => item.kind === 'tool' && item.id === run.id)
       if (index < 0) return { ...task, steps: pushTaskStep(task.steps, step) }
@@ -3224,6 +3229,17 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
           title: run.name,
           ...(detail !== '' ? { detail: detail.slice(0, 220) } : {}),
           status: run.status,
+          /*
+           * 人话动作：host 在 tool/call 时用**完整参数**算好（tool-action.ts →
+           * plain-language 的同一份规则表），这里原样带进任务步骤。
+           *
+           * 「动态」里那行「此刻在做什么」读的就是它；旧宿主 / 旧记录没有这个
+           * 字段时，渲染层（task-action.ts）会从 detail 里尽力回退解析。
+           */
+          ...(run.action !== undefined && run.action !== ''
+            ? { action: run.action }
+            : {}),
+          ...(run.actionHideVerb === true ? { actionHideVerb: true as const } : {}),
         }
         const index = steps.findIndex((item) => item.kind === 'tool' && item.id === run.id)
         if (index < 0) steps = pushTaskStep(steps, step)
