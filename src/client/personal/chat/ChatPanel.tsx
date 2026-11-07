@@ -65,7 +65,7 @@ interface DispatchItem {
 }
 
 export function ChatPanel(): JSX.Element {
-  const { state, ui, actions, activeBot, activeRoom, activeMessages } = usePersonal()
+  const { state, ui, actions, activeBot, activeRoom, activeMessages, historyMessages } = usePersonal()
   /*
    * 投递回执（对话流里那行「已交给采集」）。
    *
@@ -705,7 +705,8 @@ export function ChatPanel(): JSX.Element {
           onMouseDown={(event) => startResize('right', event)}
           onDoubleClick={resetChatWidth}
         />
-        <MessageList messages={activeMessages} bot={activeBot} room={activeRoom} dispatches={dispatches} />
+        {/* 消息流吃完整历史，自己按页懒加载；其它面板继续用 activeMessages 的最近 200 条。 */}
+        <MessageList messages={historyMessages} bot={activeBot} room={activeRoom} dispatches={dispatches} />
         <PendingBar messages={activeMessages} />
         {relayHint !== null ? (
           <div className="pa-relay-hint" role="status" data-kind={relayHint.kind}>

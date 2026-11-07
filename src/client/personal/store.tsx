@@ -908,6 +908,14 @@ interface PersonalContextValue {
   activeBot: Bot
   activeRoom: { id: string; name: string; memberIds: string[] } | null
   activeMessages: Message[]
+  /**
+   * 当前会话的**完整**消息列表（不做 200 条截断）。
+   *
+   * 只给 Bot 消息流用：它自己按页懒加载（见 chat/message-window.ts），
+   * 上滑时再向前扩窗。其余消费者（未读角标 / 头像状态 / 待办条）继续用
+   * activeMessages 的最近 200 条，避免每次渲染都扫全量历史。
+   */
+  historyMessages: Message[]
 }
 
 const PersonalContext = createContext<PersonalContextValue | null>(null)
@@ -6514,11 +6522,19 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     return { id: room.id, name: room.name, memberIds: room.memberIds }
   }, [state.rooms, ui.selectedRoomId])
 
-  const activeMessages = useMemo(() => {
+  /*
+   * 当前会话的消息分两份暴露：
+   *   · conversationMessages —— 完整历史，只给 MessageList 做懒加载窗口；
+   *   · activeMessages       —— 最近 200 条，给未读 / 头像 / 待办 / 接力等
+   *     不需要全量历史的消费者。200 条是纯展示口径，不是数据上限——
+   *     更早的记录由 MessageList 上滑时从完整历史里取。
+   */
+  const conversationMessages = useMemo(() => {
     return state.messages
       .filter((message) => (ui.selectedRoomId ? message.roomId === ui.selectedRoomId : message.botId === ui.selectedBotId && !message.roomId))
-      .slice(-200)
   }, [state.messages, ui.selectedRoomId, ui.selectedBotId])
+
+  const activeMessages = useMemo(() => conversationMessages.slice(-200), [conversationMessages])
 
   const actions: PersonalActions = useMemo(() => ({
     selectBot,
@@ -6613,7 +6629,8 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     activeBot,
     activeRoom,
     activeMessages,
-  }), [state, ui, actions, activeBot, activeRoom, activeMessages])
+    historyMessages: conversationMessages,
+  }), [state, ui, actions, activeBot, activeRoom, activeMessages, conversationMessages])
 
   return <PersonalContext.Provider value={value}>{children}</PersonalContext.Provider>
 }

@@ -476,7 +476,65 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  /*
+   * 保留 smooth 给「回到最新 / 跳转消息 / 消息贴底」这些程序滚动用。
+   * 阻尼物理层（chat/scroll-damping.ts）在接管帧循环的那段时间会把内联样式临时
+   * 改成 auto，收口即还原 —— 否则逐帧写 scrollTop 会被浏览器再包一层补间，
+   * 和物理层互相打架。
+   */
   scroll-behavior: smooth;
+  overscroll-behavior: contain;
+}
+
+/*
+ * 消息内容的物理位移层。
+ *
+ * 滚动容器保持原生滚动（滚动条、键盘、无障碍都不变），越界时只把 inner 层
+ * translate 出去：用 transform 而不是 padding/margin，不触发布局重算，
+ * 也不会改变 scrollHeight。--pa-scroll-pull 由 scroll-damping.ts 每帧写入。
+ *
+ * clip 层是必需的：transform 会改变 Chromium 计算的「可滚动溢出区」——底部
+ * 上拉 12px 时 scrollHeight 会当场少 12px，浏览器把 scrollTop 夹回去，橡皮筋
+ * 直接失效。clip 层用 overflow: clip 把 transform 的溢出挡在滚动容器之外，
+ * 滚动条与 scrollHeight 都保持原生值。
+ */
+.pa-chat__scroll-clip {
+  /*
+   * flex: none 必须写：clip 是滚动容器的 flex 子项，旧内核把它当 overflow:hidden
+   * 的滚动容器时，automatic minimum size 会变成 0、整条消息流会被压扁成视口高，
+   * 滚动直接消失。锁住不收缩，内容高度永远由 inner 撑开。
+   */
+  flex: none;
+  overflow: hidden; /* 旧内核兜底 */
+  overflow: clip;   /* 不创建滚动容器，语义更准确 */
+}
+.pa-chat__scroll-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+}
+
+/*
+ * 越界位移只在实际拉伸时挂 transform：常驻 translate3d(0,0,0) 会把整条消息
+ * 列表提升成一个巨大合成层（长会话可高达几万 px），反而拖慢普通滚动。
+ */
+.pa-chat__scroll[data-pa-scroll-pulling] .pa-chat__scroll-inner {
+  transform: translate3d(0, var(--pa-scroll-pull, 0px), 0);
+  will-change: transform;
+}
+
+/* 顶部「还有更早消息」提示：上滑到附近会自动扩窗，不需要点击。 */
+.pa-chat__load-older {
+  flex: none;
+  align-self: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: calc(10.5px + var(--pa-font-delta));
+  line-height: calc(16px + var(--pa-font-delta));
+  color: var(--pa-text-3);
+  background: var(--pa-chat-glass);
+  user-select: none;
 }
 /*
  * 回到最新：悬浮在**输入框上方右侧**，往上翻远之后才淡入（见 MessageList 的 onScroll）。

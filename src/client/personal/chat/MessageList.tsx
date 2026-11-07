@@ -19,13 +19,22 @@
  * 就用「通话里设置的音色与供应商」把这条念出来；会话头打开「自动播报」后
  * 新回复也会自动念（只在单聊、且没有通话进行时，理由见自动播放那段注释）。
  */
-import { useEffect, useMemo, useRef, useState, type UIEvent } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
 import { IconBell, IconBellOff, IconChevronDown, IconQuote, IconSparkles, IconStop, IconUndo, IconVolume, IconX } from '../icons.tsx'
 import { formatClock, type Bot, type Message, type MessageBlock, type ProactiveMarkKind } from '../types.ts'
 import { usePersonal } from '../store.tsx'
 import { getSpeechState, speakText, speechTextOf, stopSpeech, useSpeechState } from '../speech.ts'
 import { MessageBlockView } from './MessageBlockView.tsx'
+import { installScrollDamping } from './scroll-damping.ts'
+import {
+  LOAD_OLDER_THRESHOLD,
+  MESSAGE_INSERT_CHUNK,
+  MESSAGE_PAGE_SIZE,
+  resolveMessageWindow,
+  shouldFillViewport,
+  shouldLoadOlder,
+} from './message-window.ts'
 import { hasRenderableContent } from './message-visibility.ts'
 import { pendingTasksOf } from './pending.ts'
 import { dispatchLabel, isDispatchOpen, type DispatchView } from './dispatch.ts'
@@ -106,10 +115,18 @@ function isCallSegmentMarker(message: Message): boolean {
  */
 export function jumpToMessage(id: string): void {
   const element = document.getElementById(`pa-msg-${id}`)
-  if (element === null) return
-  element.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  element.classList.add('pa-flash')
-  window.setTimeout(() => element.classList.remove('pa-flash'), 1600)
+  if (element !== null) {
+    element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    element.classList.add('pa-flash')
+    window.setTimeout(() => element.classList.remove('pa-flash'), 1600)
+    return
+  }
+  /*
+   * 目标在当前渲染窗口之外（消息流懒加载只渲染最近几页）：交给 MessageList
+   * 的监听器先扩窗，等目标真正进 DOM 后再滚。直接 return 会让引用条 / 待处理条
+   * 点旧消息时毫无反应。
+   */
+  window.dispatchEvent(new CustomEvent('pa:jump-to-message', { detail: { id } }))
 }
 
 /**
@@ -448,8 +465,12 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
   const { state, ui, actions } = usePersonal()
   const scrollRef = useRef<HTMLDivElement>(null)
   const stickRef = useRef(true)
+  /** 消息流是否有内容（空态与列表态是两棵树，切换时带动效重新安装）。 */
+  const hasMessages = messages.length > 0
   /** 是否已经滚到底部附近（false 时浮出「回到最新」按钮）。 */
   const [atBottom, setAtBottom] = useState(true)
+  /** atBottom 的同步镜像：滚动事件每帧都来，值没变就不要进 React setState。 */
+  const atBottomRef = useRef(true)
   /** 待撤回的消息（非 null 时在这条消息下方原地显示两枚确认按钮）。 */
   const [recallTarget, setRecallTarget] = useState<Message | null>(null)
 
@@ -489,10 +510,98 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
     return map
   }, [state.bots])
 
+  /* ───────────────────── 消息流懒加载窗口（2026-11-07） ───────────────────── */
+  /** 始终指向最新的 messages，供事件回调（滚动 / 跳转）读取，不依赖闭包快照。 */
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
+  /**
+   * 窗口锚点：渲染窗口第一条消息的 id；null = 跟随最新一页。
+   *
+   * 用 id 而不是下标：新消息追加时下标会整体后移，锚点 id 不变，用户正在
+   * 翻看的旧消息不会被新消息挤走；某条消息被撤回后 id 消失时自动退回最新页。
+   */
+  const [renderStartId, setRenderStartId] = useState<string | null>(null)
+  /** 窗口终点锚点；null = 一直显示到最新。跳转旧消息时用它把窗口限制成一页，避免全量渲染。 */
+  const [renderEndId, setRenderEndId] = useState<string | null>(null)
+  const windowRange = useMemo(
+    () => resolveMessageWindow(
+      messages.length,
+      renderStartId,
+      renderEndId,
+      (id) => messages.findIndex((message) => message.id === id),
+    ),
+    [messages, renderStartId, renderEndId],
+  )
+  const windowMessages = useMemo(
+    () => messages.slice(windowRange.start, windowRange.end),
+    [messages, windowRange.start, windowRange.end],
+  )
+  const hasOlder = windowRange.start > 0
+  /** 事件回调读最新窗口与加载状态（避免把整份消息数组塞进 event listener 依赖）。 */
+  const windowStartRef = useRef(windowRange.start)
+  windowStartRef.current = windowRange.start
+  const hasOlderRef = useRef(hasOlder)
+  hasOlderRef.current = hasOlder
+  /** 是否正在扩窗（防止同一轮 scroll 事件重复加载）。 */
+  const loadingOlderRef = useRef(false)
+  /** 本轮扩窗的目标起点下标（分批插入，逐帧推进到这里）。 */
+  const pendingLoadTargetRef = useRef<number | null>(null)
+  /** 分批插入的下一批 rAF。 */
+  const chunkRafRef = useRef(0)
+  /**
+   * 初始贴底完成之前不要触发上滑加载。
+   *
+   * 首帧渲染完、自动贴底还没跑的那一瞬间 scrollTop 是 0，scroll 事件会把
+   * stickRef 判成 false；若此时就允许加载，会在用户还没看到界面时白扩一页。
+   */
+  const readyForLazyRef = useRef(false)
+  /** 上一次 scrollTop，用来判断这次 scroll 是用户往上翻还是程序贴底。 */
+  const lastScrollTopRef = useRef(0)
+  /**
+   * 下一次 messages 变化是否强制贴底。
+   *
+   * 开关会话 / 首次挂载时浏览器可能先抛一个 scrollTop=0~几 px 的 scroll 事件，
+   * 把 stickRef 提前判成 false；没有这个标记，打开长会话会停在顶部而不是末尾。
+   */
+  const forceScrollRef = useRef(true)
+  /**
+   * 扩窗前的视口锚点：记录当前视口里第一条消息的 id 与屏幕坐标。
+   *
+   * 扩窗后在 DOM 里找回同一条消息，用它的位移补偿 scrollTop——比直接看
+   * scrollHeight 差值可靠：图片 / 字体晚加载导致的高度变化也能锚住。
+   */
+  const pendingPreserveRef = useRef<{
+    anchorId: string | null
+    anchorTop: number
+    top: number
+    height: number
+  } | null>(null)
+  /** 要跳转的消息 id：目标不在窗口里时先扩窗，渲染完再滚。 */
+  const pendingJumpRef = useRef<string | null>(null)
+  /** 点「回到最新」后，等窗口切回最新一页再滚到底。 */
+  const pendingBackToLatestRef = useRef(false)
+  /** 阻尼句柄：扩窗改 scrollTop 前先让它让位。 */
+  const dampingHandleRef = useRef<{ sync: () => void } | null>(null)
+
   useEffect(() => {
     stickRef.current = true
+    forceScrollRef.current = true
     // 切会话时停掉正在念的那一条：用户已经在看别的对话，旧消息继续响很怪
     stopSpeech()
+    // 切会话重置懒加载窗口：新会话从最新一页开始，不继承上一个会话滚到哪。
+    setRenderStartId(null)
+    setRenderEndId(null)
+    pendingPreserveRef.current = null
+    pendingJumpRef.current = null
+    pendingBackToLatestRef.current = false
+    loadingOlderRef.current = false
+    pendingLoadTargetRef.current = null
+    if (chunkRafRef.current !== 0) {
+      window.cancelAnimationFrame(chunkRafRef.current)
+      chunkRafRef.current = 0
+    }
+    readyForLazyRef.current = false
+    lastScrollTopRef.current = 0
   }, [room?.id, bot.id])
 
   /*
@@ -507,17 +616,45 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
   useEffect(() => {
     return () => {
       stopSpeech()
+      if (chunkRafRef.current !== 0) window.cancelAnimationFrame(chunkRafRef.current)
     }
   }, [])
 
+  /*
+   * 滚动阻尼（2026-11-07）：轮滑的平滑惯性 + 到顶/到底的橡皮筋回弹。
+   *
+   * 生命周期跟着「空态 ↔ 列表态」切换走：两棵树的滚动容器不是同一个 DOM 节点，
+   * 不在切换时重装就会把监听留在已经脱离文档的旧节点上（阻尼从此消失）。
+   * installScrollDamping 自己会在 prefers-reduced-motion 下退化成原生滚动。
+   */
   useEffect(() => {
     const element = scrollRef.current
-    if (element === null || !stickRef.current) return
-    const frame = window.requestAnimationFrame(() => {
-      element.scrollTop = element.scrollHeight
-    })
-    return () => window.cancelAnimationFrame(frame)
-  }, [messages])
+    if (element === null) return undefined
+    const handle = installScrollDamping(element)
+    dampingHandleRef.current = handle
+    return () => {
+      if (dampingHandleRef.current === handle) dampingHandleRef.current = null
+      handle.destroy()
+    }
+  }, [hasMessages])
+
+  useEffect(() => {
+    const element = scrollRef.current
+    if (element === null) return undefined
+    let frame = 0
+    const shouldStick = stickRef.current || forceScrollRef.current
+    if (shouldStick) {
+      forceScrollRef.current = false
+      frame = window.requestAnimationFrame(() => {
+        element.scrollTop = element.scrollHeight
+        stickRef.current = true
+        lastScrollTopRef.current = element.scrollTop
+      })
+    }
+    return () => {
+      if (frame !== 0) window.cancelAnimationFrame(frame)
+    }
+  }, [messages, room?.id, bot.id])
 
   /*
    * 自动朗读（会话头的「自动播报」开关，唯一入口）。
@@ -551,7 +688,11 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
     }
     if (!autoSpeak || room !== null || ui.call.status !== 'idle') return
     const timer = window.setTimeout(() => {
-      const last = [...messages].reverse().find((message) => message.role === 'bot')
+      // 从尾部倒着找：messages 可能是上千条历史，复制整份数组再 reverse 是白费。
+      let last: Message | undefined
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        if (messages[index]?.role === 'bot') { last = messages[index]; break }
+      }
       if (last === undefined || spoken.ids.has(last.id)) return
       if (last.pending === true) return
       const text = speechTextOf(last)
@@ -567,24 +708,269 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
     return () => window.clearTimeout(timer)
   }, [messages, room?.id, autoSpeak, bot.id, bot.voice, bot.liveVendor, ui.call.status])
 
+  /**
+   * 插入一批旧消息（最多 MESSAGE_INSERT_CHUNK 条），并记录插入前的视口锚点。
+   *
+   * 只改 renderStartId，不动 messages 数据本身——历史数据一直在 state 里，
+   * 这里懒的是**渲染量**，不是网络请求。
+   */
+  const insertOlderChunk = (nextStart: number): void => {
+    const element = scrollRef.current
+    const anchor = messagesRef.current[nextStart]
+    if (element === null || anchor === undefined) {
+      loadingOlderRef.current = false
+      pendingLoadTargetRef.current = null
+      return
+    }
+    /*
+     * 找视口里第一条还看得见的消息当锚点。用 getBoundingClientRect 而不是
+     * offsetTop：外层有 padding、transform 与滚动偏移，offset 系不可靠。
+     */
+    let anchorId: string | null = null
+    let anchorTop = 0
+    const viewportTop = element.getBoundingClientRect().top
+    for (const node of element.querySelectorAll('[id^="pa-msg-"]')) {
+      const rect = node.getBoundingClientRect()
+      if (rect.bottom > viewportTop + 1) {
+        anchorId = node.id.slice('pa-msg-'.length)
+        anchorTop = rect.top
+        break
+      }
+    }
+    pendingPreserveRef.current = {
+      anchorId,
+      anchorTop,
+      top: element.scrollTop,
+      height: element.scrollHeight,
+    }
+    setRenderStartId(anchor.id)
+  }
+
+  /** 继续把本轮扩窗补到目标起点（每帧最多一批）。 */
+  const continueOlderLoad = (): void => {
+    const target = pendingLoadTargetRef.current
+    if (target === null) {
+      loadingOlderRef.current = false
+      return
+    }
+    const current = windowStartRef.current
+    if (current <= target) {
+      pendingLoadTargetRef.current = null
+      loadingOlderRef.current = false
+      return
+    }
+    insertOlderChunk(Math.max(target, current - MESSAGE_INSERT_CHUNK))
+  }
+
+  /**
+   * 向前扩一页。
+   *
+   * 不是一次 setState 塞 40 条，而是 10 条一批、每批让出一帧：复杂消息
+   * （图片 / 卡片 / iframe）一次性渲染 40 条可能产生上百 ms 的长任务，手感
+   * 就是「滚一下卡一下」。分批后单帧成本被摊平，视口锚定保证不跳。
+   */
+  const loadOlder = (): void => {
+    if (loadingOlderRef.current) return
+    const current = windowStartRef.current
+    const target = Math.max(0, current - MESSAGE_PAGE_SIZE)
+    if (target >= current) return
+    loadingOlderRef.current = true
+    pendingLoadTargetRef.current = target
+    continueOlderLoad()
+  }
+
+  /*
+   * 扩窗后的视口锚定。
+   *
+   * 在消息流顶部插入 40 条消息会把 scrollHeight 撑大一截；如果不补偿，用户
+   * 眼前的正文会瞬间被顶下去，看起来像「点了一下跳了 40 条」。这里把差值补回
+   * scrollTop：新内容长在视口上方，用户盯着的仍是原来那条。
+   *
+   * 同时处理两种「窗口不够用」：
+   *   · 消息很短、40 条填不满一屏 → 继续补页，直到出现滚动条或历史取尽；
+   *   · 跳转到窗口外的旧消息 → 等它渲染出来后 scrollIntoView + 高亮。
+   */
+  useLayoutEffect(() => {
+    const element = scrollRef.current
+    if (element === null) return
+    if (pendingBackToLatestRef.current) {
+      pendingBackToLatestRef.current = false
+      loadingOlderRef.current = false
+      pendingLoadTargetRef.current = null
+      if (chunkRafRef.current !== 0) {
+        window.cancelAnimationFrame(chunkRafRef.current)
+        chunkRafRef.current = 0
+      }
+      // instant：取消可能还在跑的 scrollIntoView 平滑动画，直接落到真正的最新。
+      element.scrollTo({ top: element.scrollHeight, behavior: 'instant' })
+      lastScrollTopRef.current = element.scrollTop
+      stickRef.current = true
+      readyForLazyRef.current = true
+      return
+    }
+    const pending = pendingPreserveRef.current
+    if (pending !== null) {
+      pendingPreserveRef.current = null
+      let delta = element.scrollHeight - pending.height
+      if (pending.anchorId !== null) {
+        const anchor = document.getElementById(`pa-msg-${pending.anchorId}`)
+        if (anchor !== null) delta = anchor.getBoundingClientRect().top - pending.anchorTop
+      }
+      if (delta !== 0) {
+        dampingHandleRef.current?.sync()
+        const previous = element.style.scrollBehavior
+        element.style.scrollBehavior = 'auto'
+        element.scrollTop = pending.top + delta
+        element.style.scrollBehavior = previous
+      }
+    }
+    /*
+     * 分批插入未完：每批 DOM 提交后先让浏览器画一帧（rAF），再补下一批。
+     * 不能在这里直接 setState 连发——React 会把多批合进同一次提交，长任务
+     * 等于没拆。
+     */
+    if (loadingOlderRef.current && pendingLoadTargetRef.current !== null) {
+      if (windowStartRef.current > pendingLoadTargetRef.current) {
+        if (chunkRafRef.current === 0) {
+          chunkRafRef.current = window.requestAnimationFrame(() => {
+            chunkRafRef.current = 0
+            continueOlderLoad()
+          })
+        }
+        return
+      }
+      pendingLoadTargetRef.current = null
+      loadingOlderRef.current = false
+    }
+    if (shouldFillViewport({
+      hasOlder: hasOlderRef.current,
+      scrollHeight: element.scrollHeight,
+      clientHeight: element.clientHeight,
+      loading: loadingOlderRef.current,
+    })) {
+      loadOlder()
+      return
+    }
+    const jumpId = pendingJumpRef.current
+    if (jumpId !== null) {
+      const target = document.getElementById(`pa-msg-${jumpId}`)
+      if (target !== null) {
+        pendingJumpRef.current = null
+        // 跨窗口跳转用 instant：目标刚渲染、布局还在变，平滑动画容易被后续
+        // 布局调整打断，落点反而不可控。
+        target.scrollIntoView({ behavior: 'instant', block: 'center' })
+        target.classList.add('pa-flash')
+        window.setTimeout(() => target.classList.remove('pa-flash'), 1600)
+      }
+    }
+  }, [windowRange.start, windowRange.end, windowMessages.length])
+
+  /** 跳转到窗口外的旧消息：先扩窗，等目标渲染出来再滚（jumpToMessage 的兜底）。 */
+  useEffect(() => {
+    const onJump = (event: Event): void => {
+      const detail = (event as CustomEvent<{ id?: unknown }>).detail
+      const id = detail?.id
+      if (typeof id !== 'string' || id === '') return
+      const source = messagesRef.current
+      const index = source.findIndex((message) => message.id === id)
+      if (index < 0) return
+      if (index >= windowStartRef.current) {
+        const target = document.getElementById(`pa-msg-${id}`)
+        if (target !== null) {
+          target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          target.classList.add('pa-flash')
+          window.setTimeout(() => target.classList.remove('pa-flash'), 1600)
+          return
+        }
+      }
+      /*
+       * 窗口限制成一页：目标居中，终点也钉在 id 上。只把 start 往前挪会让
+       * 「目标 → 最新」之间的全部消息都渲染出来，几千条时跳一下直接卡死。
+       */
+      const half = Math.floor(MESSAGE_PAGE_SIZE / 2)
+      const startIndex = Math.max(0, index - half)
+      const endIndex = Math.min(source.length - 1, startIndex + MESSAGE_PAGE_SIZE - 1)
+      const startAnchor = source[startIndex]
+      const endAnchor = source[endIndex]
+      if (startAnchor === undefined || endAnchor === undefined) return
+      pendingJumpRef.current = id
+      pendingPreserveRef.current = null
+      loadingOlderRef.current = false
+      pendingLoadTargetRef.current = null
+      if (chunkRafRef.current !== 0) {
+        window.cancelAnimationFrame(chunkRafRef.current)
+        chunkRafRef.current = 0
+      }
+      setRenderStartId(startAnchor.id)
+      setRenderEndId(endAnchor.id)
+    }
+    window.addEventListener('pa:jump-to-message', onJump)
+    return () => window.removeEventListener('pa:jump-to-message', onJump)
+  }, [])
+
   const onScroll = (event: UIEvent<HTMLDivElement>): void => {
     const element = event.currentTarget
     const distance = element.scrollHeight - element.scrollTop - element.clientHeight
-    stickRef.current = distance < 160
     /*
-     * 「回到最新」按钮的显隐：贴底 24px 以内算在底部（隐藏），否则浮出来。
+     * 只有「用户往上翻」才允许懒加载：scrollTop 变小就是向上。
+     *
+     * 不能只看 scrollTop 是否接近顶部——首屏自动贴底、容器重建、浏览器恢复
+     * 滚动位置都会产生 top≈0 的 scroll 事件；若把它当用户意图，会在用户还
+     * 没来得及看界面时白扩一两页，懒加载就失效了。
+     */
+    if (element.scrollTop < lastScrollTopRef.current - 2) readyForLazyRef.current = true
+    lastScrollTopRef.current = element.scrollTop
+    /*
+     * 「底部」必须同时满足：滚到了当前渲染窗口末尾、且窗口末尾就是最新一条。
+     * 跳转到旧消息时窗口终点被钉住，滚到窗口底也不等于「回到最新」。
+     */
+    const atRealBottom = distance < 160 && windowRange.end >= messages.length
+    stickRef.current = atRealBottom
+    /*
+     * 「回到最新」按钮的显隐：贴底 24px 以内且窗口真的到最新（隐藏），否则浮出来。
      * 用独立阈值而不是复用 stickRef 的 160px：吸附要在接近底部时就生效，
      * 按钮则要在真的翻远了才出现，两个判定不该共用一个数。
      */
-    setAtBottom(distance < 24)
+    const nextAtBottom = distance < 24 && windowRange.end >= messages.length
+    if (atBottomRef.current !== nextAtBottom) {
+      atBottomRef.current = nextAtBottom
+      setAtBottom(nextAtBottom)
+    }
+    if (readyForLazyRef.current && shouldLoadOlder({
+      hasOlder: hasOlderRef.current,
+      atBottom: stickRef.current,
+      loading: loadingOlderRef.current,
+      scrollTop: element.scrollTop,
+      threshold: LOAD_OLDER_THRESHOLD,
+    })) {
+      loadOlder()
+    }
   }
 
-  /** 一键回到最新：滚动到底并恢复自动吸附（否则下一条新消息不会跟着滚）。 */
+  /** 一键回到最新：恢复最新一页窗口并滚到底（否则下一条新消息不会跟着滚）。 */
   const scrollToBottom = (): void => {
     const element = scrollRef.current
     if (element === null) return
     stickRef.current = true
-    element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
+    readyForLazyRef.current = true
+    loadingOlderRef.current = false
+    pendingLoadTargetRef.current = null
+    if (chunkRafRef.current !== 0) {
+      window.cancelAnimationFrame(chunkRafRef.current)
+      chunkRafRef.current = 0
+    }
+    /*
+     * 如果当前是跳转旧消息留下的有界窗口，先切回「最新一页」：直接滚当前
+     * scrollHeight 只会滚到那页历史的底部，不是真正的最新。
+     */
+    pendingBackToLatestRef.current = true
+    setRenderStartId(null)
+    setRenderEndId(null)
+    // 窗口本来就是最新一页时上面两个 setState 不会触发重渲染，直接滚即可。
+    if (windowRange.end >= messages.length) {
+      pendingBackToLatestRef.current = false
+      element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
+    }
   }
 
   const suggestions = room !== null
@@ -606,11 +992,11 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
    * pending 消息不走这个判据：它还没定稿，哪怕暂时只有被过滤掉的工具块，也要留在
    * 流里显示「正在输入」的三点占位（见 MessageBlockView 的空态兜底）。
    */
-  const visible = useMemo(() => messages.filter((message) => {
+  const visible = useMemo(() => windowMessages.filter((message) => {
     if (message.callSegment !== undefined && collapsedSegments.has(message.callSegment)) return false
     if (message.role === 'bot' && message.pending !== true && !hasRenderableContent(message)) return false
     return true
-  }), [messages, collapsedSegments])
+  }), [windowMessages, collapsedSegments])
 
   const visibleIndex = useMemo(() => {
     const map = new Map<string, number>()
@@ -727,257 +1113,275 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
   return (
     <>
       <div className="pa-chat__scroll" ref={scrollRef} onScroll={onScroll}>
-        {items.map((item) => {
-          /*
-           * 轮次头 / 尾 / 收起提示：都不包消息，各自是一条独立元素（理由见
-           * RenderItem 的注释）。头尾各一条发丝线，中间就是普通消息。
-           */
-          if (item.kind === 'dispatch') {
-            return <DispatchRow key={item.key} view={item.dispatch} />
-          }
-          if (item.kind === 'turn-head') {
-            return (
-              <div className="pa-turn__head" key={item.key} data-state={item.running ? 'running' : 'done'}>
-                <span className="pa-turn__time">{item.startLabel}</span>
-                <span className="pa-turn__rule" aria-hidden="true" />
-                <span className="pa-turn__state">{item.running ? '进行中' : '完成'}</span>
-                {item.collapsible ? (
+        {/*
+         * 越界位移的两层结构：clip 层把 transform 产生的「滚动溢出」挡在滚动容器
+         * 之外（否则 Chromium 认为 scrollHeight 变小，底部越界会被当场夹回去，
+         * 橡皮筋完全失效）；inner 层才是真正被 translate 的内容层。
+         */}
+        <div className="pa-chat__scroll-clip">
+          <div className="pa-chat__scroll-inner">
+            {/*
+             * 顶部提示：还有更早的消息没有渲染。它同时是「上滑加载」的可见提示，
+             * 滚到接近顶部时会自动扩窗，用户不需要点按钮。
+             */}
+            {hasOlder ? (
+              <div className="pa-chat__load-older" role="status">
+                上滑加载更早消息
+              </div>
+            ) : null}
+            {items.map((item) => {
+              /*
+               * 轮次头 / 尾 / 收起提示：都不包消息，各自是一条独立元素（理由见
+               * RenderItem 的注释）。头尾各一条发丝线，中间就是普通消息。
+               */
+              if (item.kind === 'dispatch') {
+                return <DispatchRow key={item.key} view={item.dispatch} />
+              }
+              if (item.kind === 'turn-head') {
+                return (
+                  <div className="pa-turn__head" key={item.key} data-state={item.running ? 'running' : 'done'}>
+                    <span className="pa-turn__time">{item.startLabel}</span>
+                    <span className="pa-turn__rule" aria-hidden="true" />
+                    <span className="pa-turn__state">{item.running ? '进行中' : '完成'}</span>
+                    {item.collapsible ? (
+                      <button
+                        className="pa-turn__toggle"
+                        type="button"
+                        aria-expanded="true"
+                        title="收起这一轮"
+                        onClick={() => toggleTurn(item.turnId)}
+                      >
+                        收起
+                        <IconChevronDown size={11} />
+                      </button>
+                    ) : null}
+                  </div>
+                )
+              }
+              if (item.kind === 'turn-foot') {
+                return (
+                  <div className="pa-turn__foot" key={item.key}>
+                    <span>{item.stats.messages} 条消息</span>
+                    {item.stats.outputs > 0 ? <span>{item.stats.outputs} 个产出</span> : null}
+                    {item.stats.pending > 0 ? <span>{item.stats.pending} 个待办</span> : null}
+                  </div>
+                )
+              }
+              if (item.kind === 'turn-collapsed') {
+                return (
                   <button
-                    className="pa-turn__toggle"
+                    className="pa-turn__collapsed"
+                    key={item.key}
                     type="button"
-                    aria-expanded="true"
-                    title="收起这一轮"
+                    title="展开这一轮"
                     onClick={() => toggleTurn(item.turnId)}
                   >
-                    收起
+                    这一轮有 {item.count} 条消息，已收起
                     <IconChevronDown size={11} />
                   </button>
-                ) : null}
-              </div>
-            )
-          }
-          if (item.kind === 'turn-foot') {
-            return (
-              <div className="pa-turn__foot" key={item.key}>
-                <span>{item.stats.messages} 条消息</span>
-                {item.stats.outputs > 0 ? <span>{item.stats.outputs} 个产出</span> : null}
-                {item.stats.pending > 0 ? <span>{item.stats.pending} 个待办</span> : null}
-              </div>
-            )
-          }
-          if (item.kind === 'turn-collapsed') {
-            return (
-              <button
-                className="pa-turn__collapsed"
-                key={item.key}
-                type="button"
-                title="展开这一轮"
-                onClick={() => toggleTurn(item.turnId)}
-              >
-                这一轮有 {item.count} 条消息，已收起
-                <IconChevronDown size={11} />
-              </button>
-            )
-          }
-          const message = item.message
-          const index = visibleIndex.get(message.id) ?? 0
-          const previous = index > 0 ? visible[index - 1] : undefined
-          const separator = item.hideSeparator !== true && shouldShowSeparator(previous, message)
-          const style = { animationDelay: `${Math.min(index, 12) * 20}ms` }
-          /*
-           * 通话折叠条：轻量分隔行，不带头像 / 气泡 / 撤回入口。
-           * 它与段内消息共享同一个「消息」容器，所以时间分隔胶囊照常出现在它上方。
-           */
-          if (isCallSegmentMarker(message)) {
-            return (
-              <div key={message.id}>
-                {separator ? <div className="pa-chat__sep"><span>{separatorLabel(previous, message)}</span></div> : null}
-                <div className="pa-callseg-row" style={style}>
-                  <MessageBlockView message={message} />
-                </div>
-              </div>
-            )
-          }
-          /*
-           * 压缩标记（1.1）：不画时间分隔胶囊——它自己就是「某一个时刻」的标记，
-           * 再套一层时间分隔会变成两条并排的小字。
-           */
-          const compaction = message.blocks.find(
-            (block): block is Extract<MessageBlock, { type: 'compaction' }> => block.type === 'compaction',
-          )
-          if (compaction !== undefined) {
-            return (
-              <div key={message.id} className="pa-compaction-row" style={style}>
-                <CompactionMark block={compaction} />
-              </div>
-            )
-          }
-          if (message.role === 'system') {
-            return (
-              <div key={message.id}>
-                {separator ? <div className="pa-chat__sep"><span>{separatorLabel(previous, message)}</span></div> : null}
-                <div className="pa-msg pa-msg--system" style={style}>
-                  <div className="pa-msg__system-text">{systemText(message)}</div>
-                </div>
-              </div>
-            )
-          }
-          const sender = message.role === 'bot'
-            ? (botsById.get(message.senderId ?? message.botId) ?? bot)
-            : bot
-          const senderName = message.senderName ?? sender.name
-          const tag = sourceLabel(message)
-          /** 引用条数据（2.3）；没引用时 undefined。 */
-          const replyTo = message.replyTo
-          /*
-           * 多消息类别：need-input / approval 是「等用户动作」的卡片，finding 是
-           * 需要留意的提示。只在 bot 消息上生效——用户消息永远没有 kind。
-           */
-          const kindClass = message.role === 'bot' && message.kind !== undefined
-            ? ` pa-msg--${message.kind}`
-            : ''
-          const kindLabel = message.role === 'bot' && message.kind === 'need-input'
-            ? '需要你定'
-            : message.role === 'bot' && message.kind === 'approval'
-              ? '待确认'
-              : message.role === 'bot' && message.kind === 'finding'
-                ? '发现'
-                : null
-          /*
-           * 纯文本消息（只有一段正文，或者还没吐字的 typing 气泡）：气泡容器收成
-           * 气泡宽度，侧边操作图标才能贴住气泡右沿。卡片类消息（交互卡 / 生图卡 /
-           * 任务卡）保持整列宽度，它们自己要按 100% 算宽度。
-           */
-          const tight = message.blocks.length === 0
-            || (message.blocks.length === 1 && message.blocks[0]?.type === 'text')
-          return (
-            <div key={message.id} id={`pa-msg-${message.id}`}>
-              {separator ? <div className="pa-chat__sep"><span>{separatorLabel(previous, message)}</span></div> : null}
-              <div className={`pa-msg pa-msg--${message.role}${kindClass}`} style={style}>
-                {/*
-                 * 头像只留给群聊。单聊里整条流都是同一个 bot，每句都挂一次头像
-                 * 只会把气泡往右推一截；群聊里它仍然是「谁在说话」的第一眼线索。
-                 */}
-                {message.role === 'bot' && room !== null ? (
-                  <div className="pa-msg__avatar">
-                    <BotAvatar avatar={sender.avatar} size={32} />
-                  </div>
-                ) : null}
-                <div className="pa-msg__content">
-                  {/*
-                   * 气泡上方只留「来源 / 类别」标签（来自通话、需要你定…）。
-                   * 发送者名字同样只在群聊里出现：单聊里它每句重复一遍，是纯噪音。
-                   * 一个标签都没有时整行不渲染，消息就是干净的一条气泡。
-                   */}
-                  {message.role === 'bot' && (room !== null || kindLabel !== null || tag !== null) ? (
-                    <div className="pa-msg__sender">
-                      {room !== null ? <span className="pa-msg__sender-name">{senderName}</span> : null}
-                      {kindLabel !== null ? <span className={`pa-msg__kind pa-msg__kind--${message.kind}`}>{kindLabel}</span> : null}
-                      {tag !== null && kindLabel === null ? <span className="pa-msg__tag">{tag}</span> : null}
-                      {message.role === 'bot' && message.source === 'proactive' ? <ProactiveMarkButton message={message} /> : null}
+                )
+              }
+              const message = item.message
+              const index = visibleIndex.get(message.id) ?? 0
+              const previous = index > 0 ? visible[index - 1] : undefined
+              const separator = item.hideSeparator !== true && shouldShowSeparator(previous, message)
+              const style = { animationDelay: `${Math.min(index, 12) * 20}ms` }
+              /*
+               * 通话折叠条：轻量分隔行，不带头像 / 气泡 / 撤回入口。
+               * 它与段内消息共享同一个「消息」容器，所以时间分隔胶囊照常出现在它上方。
+               */
+              if (isCallSegmentMarker(message)) {
+                return (
+                  <div key={message.id}>
+                    {separator ? <div className="pa-chat__sep"><span>{separatorLabel(previous, message)}</span></div> : null}
+                    <div className="pa-callseg-row" style={style}>
+                      <MessageBlockView message={message} pagesByBot={state.pagesByBot} />
                     </div>
-                  ) : null}
-                  {/*
-                   * 引用条（2.3）：一条浅色细条，左侧一道竖线。点它跳回被引用的消息——
-                   * 多条消息的流里，光看摘要没法确认「引用的是哪一条」。
-                   */}
-                  {replyTo !== undefined ? (
-                    <button
-                      className="pa-quote"
-                      type="button"
-                      title="跳到被引用的消息"
-                      onClick={() => jumpToMessage(replyTo.id)}
-                    >
-                      <span className="pa-quote__rule" aria-hidden="true" />
-                      <span className="pa-quote__label">引用</span>
-                      <span className="pa-quote__text">{replyTo.preview}</span>
-                    </button>
-                  ) : null}
-                  {/*
-                   * 气泡 + 侧边操作图标包进同一个定位容器：图标要相对**气泡**垂直居中。
-                   * 直接挂内容列的话，有「来自通话」标签或引用条时内容列被顶高一截，
-                   * 图标会浮到气泡中心上方（用户反馈「有的居中有的没居中」）。
-                   */}
-                  <div className={`pa-msg__body${tight ? ' pa-msg__body--tight' : ''}`}>
+                  </div>
+                )
+              }
+              /*
+               * 压缩标记（1.1）：不画时间分隔胶囊——它自己就是「某一个时刻」的标记，
+               * 再套一层时间分隔会变成两条并排的小字。
+               */
+              const compaction = message.blocks.find(
+                (block): block is Extract<MessageBlock, { type: 'compaction' }> => block.type === 'compaction',
+              )
+              if (compaction !== undefined) {
+                return (
+                  <div key={message.id} className="pa-compaction-row" style={style}>
+                    <CompactionMark block={compaction} />
+                  </div>
+                )
+              }
+              if (message.role === 'system') {
+                return (
+                  <div key={message.id}>
+                    {separator ? <div className="pa-chat__sep"><span>{separatorLabel(previous, message)}</span></div> : null}
+                    <div className="pa-msg pa-msg--system" style={style}>
+                      <div className="pa-msg__system-text">{systemText(message)}</div>
+                    </div>
+                  </div>
+                )
+              }
+              const sender = message.role === 'bot'
+                ? (botsById.get(message.senderId ?? message.botId) ?? bot)
+                : bot
+              const senderName = message.senderName ?? sender.name
+              const tag = sourceLabel(message)
+              /** 引用条数据（2.3）；没引用时 undefined。 */
+              const replyTo = message.replyTo
+              /*
+               * 多消息类别：need-input / approval 是「等用户动作」的卡片，finding 是
+               * 需要留意的提示。只在 bot 消息上生效——用户消息永远没有 kind。
+               */
+              const kindClass = message.role === 'bot' && message.kind !== undefined
+                ? ` pa-msg--${message.kind}`
+                : ''
+              const kindLabel = message.role === 'bot' && message.kind === 'need-input'
+                ? '需要你定'
+                : message.role === 'bot' && message.kind === 'approval'
+                  ? '待确认'
+                  : message.role === 'bot' && message.kind === 'finding'
+                    ? '发现'
+                    : null
+              /*
+               * 纯文本消息（只有一段正文，或者还没吐字的 typing 气泡）：气泡容器收成
+               * 气泡宽度，侧边操作图标才能贴住气泡右沿。卡片类消息（交互卡 / 生图卡 /
+               * 任务卡）保持整列宽度，它们自己要按 100% 算宽度。
+               */
+              const tight = message.blocks.length === 0
+                || (message.blocks.length === 1 && message.blocks[0]?.type === 'text')
+              return (
+                <div key={message.id} id={`pa-msg-${message.id}`}>
+                  {separator ? <div className="pa-chat__sep"><span>{separatorLabel(previous, message)}</span></div> : null}
+                  <div className={`pa-msg pa-msg--${message.role}${kindClass}`} style={style}>
                     {/*
-                     * pending 只说明「这一轮还没结束」，不代表「还没有内容」：
-                     * 流式回复里 text / tool 事件一到，pending 消息的 blocks 就已经有
-                     * 东西了（正文逐段出现、生图点阵卡实时出现），这时要渲染真实内容，
-                     * 不能再盖一层三点 typing。只有 blocks 还空着才显示「正在输入」。
+                     * 头像只留给群聊。单聊里整条流都是同一个 bot，每句都挂一次头像
+                     * 只会把气泡往右推一截；群聊里它仍然是「谁在说话」的第一眼线索。
                      */}
-                    {message.pending === true && message.blocks.length === 0 ? (
-                      <div className="pa-bubble pa-bubble--bot pa-typing" aria-label="正在输入">
-                        <i /><i /><i />
+                    {message.role === 'bot' && room !== null ? (
+                      <div className="pa-msg__avatar">
+                        <BotAvatar avatar={sender.avatar} size={32} />
                       </div>
-                    ) : (
-                      <MessageBlockView message={message} />
-                    )}
-                    {/*
-                     * 气泡侧边的操作图标：hover / 键盘聚焦才浮现，纯图标不带文字。
-                     * bot 消息挂在气泡右侧（气泡左对齐，右边是空白），用户消息挂在左侧。
-                     * 引用两边都有（把自己刚说的话带进上下文同样成立）；朗读只对 bot 消息；
-                     * 撤回只对自己的消息。
-                     * 绝对定位不占布局：常驻占位会把气泡和消息间距一起撑开。
-                     */}
-                    <div className="pa-msg__tools">
-                      <button
-                        className="pa-msg__tool"
-                        type="button"
-                        title="引用"
-                        aria-label="引用这条消息"
-                        onClick={() => actions.setReplyTo({ id: message.id, preview: messagePreview(message) })}
-                      >
-                        <IconQuote size={18} strokeWidth={2} />
-                      </button>
+                    ) : null}
+                    <div className="pa-msg__content">
                       {/*
-                       * 朗读按钮紧跟在引用之后（用户要求「引用后面加扬声器标识」）。
-                       * 只有 bot 消息有：自己的话不需要听一遍，念自己的消息还会让人
-                       * 以为是在放语音输入。文本为空的消息由组件自己返回 null。
+                       * 气泡上方只留「来源 / 类别」标签（来自通话、需要你定…）。
+                       * 发送者名字同样只在群聊里出现：单聊里它每句重复一遍，是纯噪音。
+                       * 一个标签都没有时整行不渲染，消息就是干净的一条气泡。
                        */}
-                      {message.role === 'bot' ? <SpeakToolButton message={message} bot={sender} onError={actions.toast} /> : null}
-                      {message.role === 'user' ? (
+                      {message.role === 'bot' && (room !== null || kindLabel !== null || tag !== null) ? (
+                        <div className="pa-msg__sender">
+                          {room !== null ? <span className="pa-msg__sender-name">{senderName}</span> : null}
+                          {kindLabel !== null ? <span className={`pa-msg__kind pa-msg__kind--${message.kind}`}>{kindLabel}</span> : null}
+                          {tag !== null && kindLabel === null ? <span className="pa-msg__tag">{tag}</span> : null}
+                          {message.role === 'bot' && message.source === 'proactive' ? <ProactiveMarkButton message={message} /> : null}
+                        </div>
+                      ) : null}
+                      {/*
+                       * 引用条（2.3）：一条浅色细条，左侧一道竖线。点它跳回被引用的消息——
+                       * 多条消息的流里，光看摘要没法确认「引用的是哪一条」。
+                       */}
+                      {replyTo !== undefined ? (
                         <button
-                          className="pa-msg__tool"
+                          className="pa-quote"
                           type="button"
-                          title="撤回"
-                          aria-label="撤回这条消息"
-                          onClick={() => setRecallTarget((prev) => (prev?.id === message.id ? null : message))}
+                          title="跳到被引用的消息"
+                          onClick={() => jumpToMessage(replyTo.id)}
                         >
-                          <IconUndo size={18} strokeWidth={2} />
+                          <span className="pa-quote__rule" aria-hidden="true" />
+                          <span className="pa-quote__label">引用</span>
+                          <span className="pa-quote__text">{replyTo.preview}</span>
                         </button>
+                      ) : null}
+                      {/*
+                       * 气泡 + 侧边操作图标包进同一个定位容器：图标要相对**气泡**垂直居中。
+                       * 直接挂内容列的话，有「来自通话」标签或引用条时内容列被顶高一截，
+                       * 图标会浮到气泡中心上方（用户反馈「有的居中有的没居中」）。
+                       */}
+                      <div className={`pa-msg__body${tight ? ' pa-msg__body--tight' : ''}`}>
+                        {/*
+                         * pending 只说明「这一轮还没结束」，不代表「还没有内容」：
+                         * 流式回复里 text / tool 事件一到，pending 消息的 blocks 就已经有
+                         * 东西了（正文逐段出现、生图点阵卡实时出现），这时要渲染真实内容，
+                         * 不能再盖一层三点 typing。只有 blocks 还空着才显示「正在输入」。
+                         */}
+                        {message.pending === true && message.blocks.length === 0 ? (
+                          <div className="pa-bubble pa-bubble--bot pa-typing" aria-label="正在输入">
+                            <i /><i /><i />
+                          </div>
+                        ) : (
+                          <MessageBlockView message={message} pagesByBot={state.pagesByBot} />
+                        )}
+                        {/*
+                         * 气泡侧边的操作图标：hover / 键盘聚焦才浮现，纯图标不带文字。
+                         * bot 消息挂在气泡右侧（气泡左对齐，右边是空白），用户消息挂在左侧。
+                         * 引用两边都有（把自己刚说的话带进上下文同样成立）；朗读只对 bot 消息；
+                         * 撤回只对自己的消息。
+                         * 绝对定位不占布局：常驻占位会把气泡和消息间距一起撑开。
+                         */}
+                        <div className="pa-msg__tools">
+                          <button
+                            className="pa-msg__tool"
+                            type="button"
+                            title="引用"
+                            aria-label="引用这条消息"
+                            onClick={() => actions.setReplyTo({ id: message.id, preview: messagePreview(message) })}
+                          >
+                            <IconQuote size={18} strokeWidth={2} />
+                          </button>
+                          {/*
+                           * 朗读按钮紧跟在引用之后（用户要求「引用后面加扬声器标识」）。
+                           * 只有 bot 消息有：自己的话不需要听一遍，念自己的消息还会让人
+                           * 以为是在放语音输入。文本为空的消息由组件自己返回 null。
+                           */}
+                          {message.role === 'bot' ? <SpeakToolButton message={message} bot={sender} onError={actions.toast} /> : null}
+                          {message.role === 'user' ? (
+                            <button
+                              className="pa-msg__tool"
+                              type="button"
+                              title="撤回"
+                              aria-label="撤回这条消息"
+                              onClick={() => setRecallTarget((prev) => (prev?.id === message.id ? null : message))}
+                            >
+                              <IconUndo size={18} strokeWidth={2} />
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                      {/*
+                       * 撤回原地确认：不弹窗、不遮罩，就贴在这条消息下面给两枚按钮。
+                       * 用户要的就是「点一下确认 / 取消」，标题、说明、关闭 X 一律不要。
+                       */}
+                      {message.role === 'user' && recallTarget?.id === message.id ? (
+                        <div className="pa-recall-inline" role="group" aria-label="确认撤回这条消息">
+                          <button
+                            className="pa-btn pa-btn--ghost pa-btn--sm"
+                            type="button"
+                            onClick={() => setRecallTarget(null)}
+                          >
+                            取消
+                          </button>
+                          <button
+                            className="pa-btn pa-btn--danger pa-btn--sm"
+                            type="button"
+                            onClick={() => {
+                              setRecallTarget(null)
+                              actions.recallMessage(message.id)
+                            }}
+                          >
+                            确认撤回
+                          </button>
+                        </div>
                       ) : null}
                     </div>
                   </div>
-                  {/*
-                   * 撤回原地确认：不弹窗、不遮罩，就贴在这条消息下面给两枚按钮。
-                   * 用户要的就是「点一下确认 / 取消」，标题、说明、关闭 X 一律不要。
-                   */}
-                  {message.role === 'user' && recallTarget?.id === message.id ? (
-                    <div className="pa-recall-inline" role="group" aria-label="确认撤回这条消息">
-                      <button
-                        className="pa-btn pa-btn--ghost pa-btn--sm"
-                        type="button"
-                        onClick={() => setRecallTarget(null)}
-                      >
-                        取消
-                      </button>
-                      <button
-                        className="pa-btn pa-btn--danger pa-btn--sm"
-                        type="button"
-                        onClick={() => {
-                          setRecallTarget(null)
-                          actions.recallMessage(message.id)
-                        }}
-                      >
-                        确认撤回
-                      </button>
-                    </div>
-                  ) : null}
                 </div>
-              </div>
-            </div>
-          )
-        })}
+              )
+            })}
+          </div>
+        </div>
       </div>
 
       {/*

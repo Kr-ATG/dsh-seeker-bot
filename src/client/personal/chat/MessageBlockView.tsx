@@ -16,7 +16,7 @@
  * 正文里「整段只有文件路径 / 下载链接」的段落渲染成产出物卡（ArtifactCard），
  * 视频 / 音频 / PDF / Office / 网页都能在对话流里直接预览或下载。
  */
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { usePersonal } from '../store.tsx'
 import {
   IconBook,
@@ -37,6 +37,7 @@ import {
   formatClock,
   formatDuration,
   type ArtifactRef,
+  type AppState,
   type Message,
   type MessageBlock,
   type MessageRole,
@@ -76,6 +77,14 @@ import type { GeneratedImageCall } from '../../generated-images/use-generated-im
 
 export interface MessageBlockViewProps {
   message: Message
+  /**
+   * 当前 Bot 的 Pages 运行时缓存。
+   *
+   * 由 MessageList 从 context 统一传入，而不是本组件自己 usePersonal()：
+   * 后者会让**每一条消息**都订阅整份 store，任何流式 delta 都把几百个消息组件
+   * 全部重渲染。传引用 + memo 之后，未变化的消息直接跳过。
+   */
+  pagesByBot?: AppState['pagesByBot']
 }
 
 /* ───────────────────────── 轻量 Markdown ───────────────────────── */
@@ -272,7 +281,7 @@ function Paragraph({ text, prefix, stalePages }: { text: string; prefix: string;
   )
 }
 
-function MarkdownText({ text, stalePages }: { text: string; stalePages?: StalePageMap }): JSX.Element {
+const MarkdownText = memo(function MarkdownText({ text, stalePages }: { text: string; stalePages?: StalePageMap }): JSX.Element {
   const paragraphs = useMemo(() => text.split(/\n{2,}/).filter((part) => part.trim() !== ''), [text])
   return (
     <div className="pa-md">
@@ -281,7 +290,7 @@ function MarkdownText({ text, stalePages }: { text: string; stalePages?: StalePa
       ))}
     </div>
   )
-}
+})
 
 /* ───────────────────── 生成式 UI：围栏切分 ───────────────────── */
 
@@ -313,7 +322,7 @@ function splitRich(text: string): Array<IuPart | HtmlPart> {
  * 之所以在 TextBubble 里整体替换而不是在 Paragraph 里插入：卡片是块级元素，
  * 夹在段落内部会被 `<p>` 的排版规则挤坏；整段切开后每张卡自己占一块。
  */
-function RichText({ text, stalePages }: { text: string; stalePages?: StalePageMap }): JSX.Element {
+const RichText = memo(function RichText({ text, stalePages }: { text: string; stalePages?: StalePageMap }): JSX.Element {
   const parts = useMemo(() => splitRich(text), [text])
   const plain = parts.length === 1 && parts[0]?.kind === 'md'
   if (plain) return <MarkdownText text={text} stalePages={stalePages} />
@@ -333,11 +342,11 @@ function RichText({ text, stalePages }: { text: string; stalePages?: StalePageMa
       })}
     </div>
   )
-}
+})
 
 /* ───────────────────────── 文本气泡 ───────────────────────── */
 
-function TextBubble({ text, role, stalePages }: { text: string; role: MessageRole; stalePages?: StalePageMap }): JSX.Element {
+const TextBubble = memo(function TextBubble({ text, role, stalePages }: { text: string; role: MessageRole; stalePages?: StalePageMap }): JSX.Element {
   const [open, setOpen] = useState(false)
   const lineCount = useMemo(() => text.split('\n').length, [text])
   /*
@@ -363,7 +372,7 @@ function TextBubble({ text, role, stalePages }: { text: string; role: MessageRol
       ) : null}
     </div>
   )
-}
+})
 
 /* ───────────────────────── Task 卡 ───────────────────────── */
 
@@ -1179,8 +1188,7 @@ function mergeTextBlocks(blocks: MessageBlock[]): MessageBlock[] {
   return merged
 }
 
-export function MessageBlockView({ message }: MessageBlockViewProps): JSX.Element {
-  const { state } = usePersonal()
+export const MessageBlockView = memo(function MessageBlockView({ message, pagesByBot }: MessageBlockViewProps): JSX.Element {
   /*
    * 旧页面索引（3.1）：这个 Bot 的 Pages 里，更新时间**晚于本条消息**的页面 →
    * 本条消息里的同名页面卡是旧版，卡片上标「已更新到下方」。
@@ -1190,13 +1198,13 @@ export function MessageBlockView({ message }: MessageBlockViewProps): JSX.Elemen
    */
   const stalePages = useMemo<StalePageMap>(() => {
     const map = new Map<string, { url: string; updatedAt: number }>()
-    for (const page of state.pagesByBot?.[message.botId] ?? []) {
+    for (const page of pagesByBot?.[message.botId] ?? []) {
       if (page.updatedAt <= message.at) continue
       if (page.path === undefined || page.path === '') continue
       map.set(pathKeyOf(page.path), { url: page.url, updatedAt: page.updatedAt })
     }
     return map
-  }, [state.pagesByBot, message.botId, message.at])
+  }, [pagesByBot, message.botId, message.at])
 
   /*
    * 工具调用块默认**不渲染**（用户要求：bot 消息里不要出现工具调用卡片）。
@@ -1363,4 +1371,4 @@ export function MessageBlockView({ message }: MessageBlockViewProps): JSX.Elemen
       })}
     </>
   )
-}
+})
