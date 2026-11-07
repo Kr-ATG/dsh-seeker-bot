@@ -23,7 +23,7 @@
  * 变成抢话）。群里摆一个拨了也没用的开关，比不摆更糟。
  */
 import { useCallback, useEffect, useRef, useState, type FocusEvent as ReactFocusEvent } from 'react'
-import { IconVolume, IconVolumeOff } from '../icons.tsx'
+import { IconVolumeOffSolid, IconVolumeSolid } from '../icons.tsx'
 import { usePersonal } from '../store.tsx'
 import { getSpeechVolume, setSpeechVolume } from '../speech.ts'
 import { VolumeSlider } from '../shared/VolumeSlider.tsx'
@@ -108,7 +108,7 @@ export function AutoSpeakButton(): JSX.Element | null {
         aria-label={on ? '关闭自动播报' : '开启自动播报'}
         onClick={toggle}
       >
-        {on ? <IconVolume size={18} /> : <IconVolumeOff size={18} />}
+        {on ? <IconVolumeSolid size={19} /> : <IconVolumeOffSolid size={19} />}
       </button>
 
       {open ? (

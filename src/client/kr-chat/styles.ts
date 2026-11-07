@@ -2351,9 +2351,11 @@ body[data-ds-dark-theme] .kr-card--reasoning[data-inline] {
  * 基础尺寸 = **Hero（新对话页）**：96×96。原来 Hero 那块竖版立绘是 92×164，
  * 换成方形头像后卡头自然矮了 68px，但「她在这儿」的观感靠的是画面本身，不靠高度。
  *
- * 为什么是圆角方形而不是圆形：原图是 256×256 的方形构图（人物 + 花束铺满四角），
- * 裁成圆形会把两侧的构图切掉、显得局促；圆角取边长的约 28%，既柔化直角，
- * 又保住整幅画面。
+ * 形状（2026-11-07 定稿，按主题分叉）：
+ *  · **浅色主题**：不包裹 —— 恢复 2026-11-05 的透明底直出（圆角方形 + 按
+ *    alpha 描边的柔光投影）。浅底上人物对比本来就够，白盘多余。
+ *  · **深色主题**：圆形白底包裹 —— 深蓝头发 / 藏青裙装与深色卡底同色系，
+ *    轮廓会消失（用户描述「透明」）；白圆盘把人物固定在白底上，对比天然足够。
  */
 .kr-plain-head__avatar {
   grid-area: stage;
@@ -2362,10 +2364,11 @@ body[data-ds-dark-theme] .kr-card--reasoning[data-inline] {
   align-self: center;
   display: block;
   /*
-   * 透明底动图不能给矩形底色 / 盒阴影（2026-11-05）：三张 WebP 的人物之外
-   * 全是 alpha=0，背景色会在人物周围露出一块圆角方块，深色主题下尤其像贴歪
-   * 的补丁。改用 filter: drop-shadow —— 它按像素 alpha 描边，只给人物轮廓投
-   * 一层柔光，透明区域仍然透出侧栏背景。
+   * 浅色（默认）：透明底直出，不套白底 / 不做圆形裁切。
+   *
+   * 圆角 26px + cover + drop-shadow：2026-11-05 的原设计。透明区域不会被染成
+   * 方块（背景色会露出圆角矩形），投影按像素 alpha 描边，只给人物一层柔光。
+   * 深色主题另见下面的 body[data-ds-dark-theme] 覆盖规则。
    */
   border-radius: 26px;
   object-fit: cover;
@@ -2383,23 +2386,27 @@ body[data-ds-dark-theme] .kr-card--reasoning[data-inline] {
 }
 
 /*
- * 深色主题下这三张透明底动图会「融进」深色侧栏：人物本身是深蓝头发 + 深藏青
- * 女仆裙，深底上只剩轮廓，看起来像半透明。2026-11-05 用户点名「太透明了」。
+ * 深色主题：圆形白底包裹（2026-11-07）。
  *
- * 处理分两层，都不改变透明底这件事：
- *  1. 人物身后给一圈非常淡的冷色径向光（径向渐变到 72% 处全透明，四角不会
- *     出现方形底色板）——只把人物轮廓从深底里托出来；
- *  2. 对动图本身轻微提亮 / 加饱和 / 加对比，压住深色衣料与头发。
- * 亮色主题不加这两层（那边本来对比就够，加了反而显脏）。
+ * 白底固定白色、不取主题变量；外缘用一层很淡的灰白暗角收边（#f6f8fc →
+ * #e3e9f2，保持不透明），去掉 1px 描边与重投影——纯白硬边 + 描边会被看成
+ * 「贴了一面小镜子」。不做羽化到透明：深底上那会变成一圈过曝光晕。
+ * contain + 内边距保住 160×160 完整构图，圆形裁切只落在白底留白上。
  */
 body[data-ds-dark-theme] .kr-plain-head__avatar {
-  background: radial-gradient(circle at 50% 55%, rgba(206, 230, 255, .22) 0%, rgba(206, 230, 255, .08) 46%, rgba(206, 230, 255, 0) 72%);
-  filter: brightness(1.12) saturate(1.06) contrast(1.03) drop-shadow(0 3px 10px rgba(0, 0, 0, .5));
+  background: radial-gradient(circle closest-side at 50% 50%, #ffffff 0%, #ffffff 70%, #f6f8fc 86%, #eef2f9 94%, #e3e9f2 100%);
+  border-radius: 50%;
+  object-fit: contain;
+  padding: 7px;
+  box-sizing: border-box;
+  filter: none;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .12);
 }
 
 body[data-ds-dark-theme] .kr-plain-head--compact .kr-plain-head__avatar {
-  background: radial-gradient(circle at 50% 55%, rgba(206, 230, 255, .20) 0%, rgba(206, 230, 255, .07) 48%, rgba(206, 230, 255, 0) 72%);
-  filter: brightness(1.12) saturate(1.06) contrast(1.03) drop-shadow(0 2px 8px rgba(0, 0, 0, .5));
+  padding: 5px;
+  border-radius: 50%;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .12);
 }
 
 .kr-plain-head--compact .kr-plain-head__name-row {

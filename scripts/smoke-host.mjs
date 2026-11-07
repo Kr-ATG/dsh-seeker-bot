@@ -349,11 +349,13 @@ else pass('deferred webServer callback executed')
 // 空态/骨架，或者卡里图片 404 只剩节日大字占位 —— 只能靠计数与路径断言钉住。
 // 2026-11-06：每日情报卡新增 1 条 prefix 路由（brief/image，按 date 流式返回 AI
 // 情报卡顶部的横版生图），35 → 36。漏注册表现是 AI 情报卡顶部没有横幅大图。
+// 2026-11-07：聊天贴纸新增 1 条 prefix 路由（stickers，Muse「爱发表情包」预设的
+// 素材），36 → 37。漏注册表现是贴纸全部渲染成破图且控制台一片 404。
 // 这些路由漏注册的表现全是静默的：胶囊不出现、通知不弹、录屏面板只剩整屏、
 // 情报卡永远转圈、头像退回静态图、节日卡永远停在「准备节日卡」—— 只有计数与
 // 路径断言能钉住它们。
-if (registered.length !== 36) {
-  fail(`expected exactly 36 route registrations, got ${registered.length}: ${JSON.stringify(registered)}`)
+if (registered.length !== 37) {
+  fail(`expected exactly 37 route registrations, got ${registered.length}: ${JSON.stringify(registered)}`)
 } else {
   if (!registered.some(spec => spec?.path === '/api/dsh-done-pill/brief/today')) {
     fail('missing daily-brief today route (exact /api/dsh-done-pill/brief/today)')
@@ -383,6 +385,8 @@ if (registered.length !== 36) {
     fail(`missing session-admin route (prefix /api/session-admin): ${JSON.stringify(prefix)}`)
   } else if (!prefix.some(spec => spec?.path === '/api/chat-flow/avatars')) {
     fail(`missing avatar asset route (prefix /api/chat-flow/avatars): ${JSON.stringify(prefix)}`)
+  } else if (!prefix.some(spec => spec?.path === '/api/chat-flow/stickers')) {
+    fail(`missing sticker asset route (prefix /api/chat-flow/stickers): ${JSON.stringify(prefix)}`)
   } else if (!exacts.some(spec => spec?.path === '/api/chat-flow/components')) {
     fail(`missing feature switches route (exact /api/chat-flow/features): ${JSON.stringify(exacts)}`)
   } else if (!exacts.some(spec => spec?.path === '/api/chat-flow/generated-images')) {

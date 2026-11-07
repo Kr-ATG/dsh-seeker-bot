@@ -18,40 +18,44 @@
 export const PERSONAL_OUTPUTS_CSS = `
 /* ── 右栏顶部：Bot 资料区 ─────────────────────────────────────────────
  * 用户口径（2026-11-04 澄清）：分类 tab 的「三分之一」是高度位置，不是宽度。
- * 资料区撑到面板约 30%（tab 条顶部因此落在 1/3 高度附近），自上而下是：
- * 居中头像 + 右下编辑铅笔 + 名称。「关闭右栏」仍在右上角。 */
+ * 2026-11-07 两次改版：资料区那枚 92px 三态动图迁到对话卡顶部正中悬浮（用户要求）；
+ * 同日再按用户要求删掉右栏右上角的「关闭右栏」按钮——关 / 开只剩会话头「更多」
+ * 左侧那枚切换按钮。这里因此只剩「居中名称 + 名称右侧的编辑铅笔」，群聊再加成员网格。
+ *
+ * 高度**内容自适应**（原来用 clamp(230px, 30vh, 340px) 把 tab 条顶到面板约 30%
+ * 高度）：动图一走，再用 30vh 兜底就会在名称下方压出一大块空白。
+ *
+ * 私聊排法：只有名称行（上下各 14px），资料区约 56px 高，tab 条紧接其后。
+ * 群聊排法：成员网格在上、名称行在下，从顶部往下排（[data-room] 覆盖）。 */
 .pa-right .pa-right__profile {
   position: relative;
   flex: none;
-  min-height: clamp(230px, 30vh, 340px);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   min-width: 0;
-  padding: 34px 16px 16px;
+  /* 上下各 14px：名称行 28px 高，资料区收成 56px，tab 条紧接其后。 */
+  padding: 14px 16px;
   overflow: hidden;
 }
-/* 群聊：成员网格在上、大头像在下，从顶部往下排。
- * 私聊不挂 data-room，仍是原来的居中「大头像 + 名称」。
- * padding-top 44px 而不是 34px：右上角「关闭右栏」按钮占 10–38px，第一行头像
- * 从 34px 起会被按钮压住右上角 4px，抬高 10px 让两者彻底分开。 */
+/* 群聊：成员网格在上、名称行在下，从顶部往下排；私聊不挂 data-room，是居中一行。
+ * 顶距与私聊同为 14px —— 右栏里已经没有右上角关闭钮要避让。 */
 .pa-right .pa-right__profile[data-room='true'] {
   justify-content: flex-start;
   gap: 18px;
-  padding-top: 44px;
 }
 /* ── 群聊成员网格（2026-11-05） ─────────────────────────────────────
  * 用户要求「bot 群聊在右侧侧边栏的动图上面增加类似微信这种，但是头像是圆形的」。
  * 5 列等分、头像圆形、名字在下方，最后一格是添加按钮。
  *
  * **区域感**（2026-11-05 用户反馈「有一个巨大的问题没有区域感」）：成员网格不能
- * 裸铺在面板上，否则会和下方的大头像糊成一片。这里给它一块独立的圆角浅色底
+ * 裸铺在面板上，否则会和下方名称行糊成一片。这里给它一块独立的圆角浅色底
  * （--pa-card-2，深浅主题各自适配）+ 一行「群成员 / N 个」小标题，和下面的
- * Bot 资料区用 18px 间距隔开——一眼就能看出「这是群成员，那是当前 Bot」。
+ * 名称行用 18px 间距隔开——一眼就能看出「这是群成员，那是当前 Bot」。
  *
  * 高度只留两行（64 × 2 + 14 = 142px）：成员再多就在网格内部滚动，不把资料区
- * 撑高、也不把下面的头像动图与分类 tab 推出面板。右栏最窄 240px 时列宽约 39px，
+ * 撑高、也不把下面的名称行与分类 tab 推出面板。右栏最窄 240px 时列宽约 39px，
  * 头像用 width:100% + max-width 跟着列宽缩小，不会挤破格子。 */
 .pa-right .pa-right__members-card {
   width: 100%;
@@ -162,33 +166,26 @@ export const PERSONAL_OUTPUTS_CSS = `
   background: rgba(255, 159, 10, 0.08);
   color: var(--pa-accent);
 }
+/* 资料区主行：居中「名称 + 编辑铅笔」一行（动图迁走后不再上下堆叠）。 */
 .pa-right .pa-right__profile-main {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 9px;
-  min-width: 0;
-  max-width: 100%;
-}
-.pa-right .pa-right__avatar-wrap {
-  position: relative;
-  display: inline-flex;
+  flex-direction: row;
   align-items: center;
   justify-content: center;
-  flex: none;
-  margin-bottom: 2px;
+  gap: 8px;
+  min-width: 0;
+  /* 关闭钮删掉后整行可以铺满资料区：长名称只在资料区自己的内边距处省略。 */
+  max-width: 100%;
 }
-/* 编辑铅笔：压在头像右下角，用面板底色描一圈，避免和头像贴死。 */
+/* 编辑铅笔：并到名称右侧的小圆形按钮（原来压在大头像右下角，动图已迁到对话卡）。 */
 .pa-root .pa-right__edit-btn {
-  position: absolute;
-  right: -2px;
-  bottom: 1px;
+  flex: none;
   width: 28px;
   height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 2px solid var(--pa-right);
+  border: 0;
   border-radius: 50%;
   background: var(--pa-card-3);
   color: var(--pa-text-2);
@@ -209,30 +206,9 @@ export const PERSONAL_OUTPUTS_CSS = `
   background: #ffffff;
   box-shadow: 0 1px 4px rgba(15, 17, 21, 0.16);
 }
-.pa-root .pa-right__profile-close {
-  position: absolute;
-  top: 10px;
-  right: 12px;
-  width: 28px;
-  height: 28px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  color: var(--pa-text-2);
-  background: rgba(128, 132, 140, 0.13);
-  transition: background 120ms ease, color 120ms ease, transform 120ms ease;
-}
-.pa-root .pa-right__profile-close:hover {
-  background: rgba(128, 132, 140, 0.26);
-  color: var(--pa-text);
-}
-.pa-root .pa-right__profile-close:active { transform: scale(0.94); }
-.pa-root .pa-right__profile-close:focus-visible {
-  outline: 2px solid var(--pa-accent);
-  outline-offset: 1px;
-}
 .pa-right .pa-right__profile-name {
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;

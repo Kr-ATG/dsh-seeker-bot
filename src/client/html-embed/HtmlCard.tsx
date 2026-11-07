@@ -27,10 +27,36 @@ import { noteConversationScrollIntent } from '../kr-chat/scroll-guard.ts'
 /** 主题属性（与官方 ui-theme boot 脚本一致）。 */
 const THEME_ATTR = 'data-ds-dark-theme'
 
-/** 判断当前是否暗色主题。 */
+/**
+ * 判断当前是否暗色主题。
+ *
+ * Bot 模式（`.pa-root` 可见）下要按 **Bot 界面的有效主题** 判断，而不是宿主属性：
+ * Bot 外观里有「跟随 / 深色 / 浅色」三档，用户选深色时宿主可能仍是浅色，这时
+ * 卡片必须跟 Bot 一起变深，否则深色对话里嵌一张白卡（2026-11-07 用户反馈
+ * 「深色模式下所有的背景都没有同步主题」）。
+ */
 function isDarkNow(): boolean {
   if (typeof document === 'undefined') return false
+  const paRoot = document.querySelector('.pa-root')
+  if (paRoot !== null && document.body.getAttribute('data-skb-mode') === 'bot') {
+    const paTheme = paRoot.getAttribute('data-pa-theme')
+    if (paTheme === 'dark') return true
+    if (paTheme === 'light') return false
+  }
   return document.body.hasAttribute(THEME_ATTR)
+}
+
+/**
+ * 需要观察的节点：宿主主题属性在 `body` 上，Bot 的有效主题写在 `.pa-root`
+ * 的 `data-pa-theme` 上 —— 两者任一变化都要重新判一次明暗。
+ */
+function watchThemeSources(onChange: () => void): () => void {
+  if (typeof document === 'undefined' || typeof MutationObserver !== 'function') return () => {}
+  const observer = new MutationObserver(onChange)
+  observer.observe(document.body, { attributes: true, attributeFilter: [THEME_ATTR] })
+  const paRoot = document.querySelector('.pa-root')
+  if (paRoot !== null) observer.observe(paRoot, { attributes: true, attributeFilter: ['data-pa-theme'] })
+  return () => { observer.disconnect() }
 }
 
 /**
@@ -41,12 +67,7 @@ function isDarkNow(): boolean {
  */
 function useDarkTheme(): boolean {
   const [dark, setDark] = useState<boolean>(() => isDarkNow())
-  useEffect(() => {
-    if (typeof document === 'undefined') return
-    const observer = new MutationObserver(() => { setDark(isDarkNow()) })
-    observer.observe(document.body, { attributes: true, attributeFilter: [THEME_ATTR] })
-    return () => { observer.disconnect() }
-  }, [])
+  useEffect(() => watchThemeSources(() => { setDark(isDarkNow()) }), [])
   return dark
 }
 
@@ -69,6 +90,9 @@ function useSurfaceTick(): number {
     if (typeof document === 'undefined' || typeof MutationObserver !== 'function') return
     const observer = new MutationObserver(() => { setTick(prev => prev + 1) })
     observer.observe(document.body, { attributes: true, attributeFilter: ['style', THEME_ATTR] })
+    /* Bot 的有效主题写在 .pa-root 上（手动深色/浅色时宿主属性不是这个界面的明暗）。 */
+    const paRoot = document.querySelector('.pa-root')
+    if (paRoot !== null) observer.observe(paRoot, { attributes: true, attributeFilter: ['data-pa-theme'] })
     return () => { observer.disconnect() }
   }, [])
   return tick

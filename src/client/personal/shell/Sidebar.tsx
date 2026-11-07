@@ -48,6 +48,7 @@ import { ConnectorPill } from '../../triad/connectors/sidebar-pill.js'
 import { blocksToText, usePersonal } from '../store.tsx'
 import { DEFAULT_GROUP_ID, voiceLabel, type Bot, type Room } from '../types.ts'
 import { BrandMark, BrandWordmark, IconPanelLeft } from './Brand.tsx'
+import { HeroSlotCell } from './HeroSlots.tsx'
 import { NewRoomModal } from './NewRoomModal.tsx'
 import {
   REALTIME_CONFIG_PATH,
@@ -184,7 +185,7 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
   const [now, setNow] = useState(() => Date.now())
   const [menu, setMenu] = useState<RowMenu | null>(null)
   /** 顶部「+」弹出的新建菜单；right/y 是视口坐标（fixed 定位，右缘贴住按钮）。 */
-  const [createMenu, setCreateMenu] = useState<{ right: number; y: number } | null>(null)
+  const [createMenu, setCreateMenu] = useState<{ left: number; bottom: number } | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   /*
    * 全局设置抽屉的退场状态：关闭时先播 240ms 退场（遮罩淡出 + 抽屉右移 46px），
@@ -278,7 +279,17 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
     return out
   }, [state.messages, ui.readAt])
 
-  const subBots = state.bots.filter((bot) => !bot.isMain)
+  /*
+   * 助手列表与折叠轨道都从这里取子 Bot，所以**护法必须在这里就排掉**。
+   *
+   * 左右两格的 Bot 已经在顶部有固定位置，再在名册里出现一遍就是同一个人两个入口：
+   * 删列表那条，顶部那格还在；删顶部那格，列表这条还在——用户完全不知道该删哪个
+   * （2026-11-07 实测反馈：「左右两个点击后不应该在助手里面出现」）。
+   */
+  const heroIds = new Set(
+    [state.hero?.left, state.hero?.right].filter((slotBotId): slotBotId is string => typeof slotBotId === 'string'),
+  )
+  const subBots = state.bots.filter((bot) => !bot.isMain && !heroIds.has(bot.id))
   const rooms = state.rooms
 
   const menuBot = menu !== null && menu.kind === 'bot' ? state.bots.find((bot) => bot.id === menu.id) : undefined
@@ -454,7 +465,19 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
     actions.setView('journal')
   }
 
-  /** 顶部「+」：贴按钮左下方展开，右缘与按钮对齐。 */
+  /**
+   * 「新建」入口：菜单从按钮**上方**展开（左缘对齐）。
+   *
+   * 2026-11-07 按用户要求把入口从主 Bot 卡片右下角挪到底部「期刊日记」上方：
+   * 它已经在侧栏最底下，往下弹会直接出屏，所以改成向上展开；左缘对齐是因为
+   * 按钮现在靠左，右缘对齐会把菜单推出侧栏。
+   *
+   * **为什么用 bottom 而不是 top + translateY(-100%)**：.pa-popover 挂着入场动画
+   * `pa-pop`，而它的 keyframes 里操作了 transform。CSS 动画里声明的 transform
+   * 优先级高于普通声明，我上一版加的 translateY(-100%) 被动画覆盖、完全没生效，
+   * 菜单又变回从按钮顶部往下弹，底部冲出视口被裁掉（用户实测截图）。用 bottom
+   * 定位绕开这个坑，动画该怎么播还怎么播。
+   */
   const toggleCreateMenu = (event: ReactMouseEvent<HTMLButtonElement>): void => {
     event.stopPropagation()
     if (createMenu !== null) {
@@ -462,7 +485,7 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
       return
     }
     const rect = event.currentTarget.getBoundingClientRect()
-    setCreateMenu({ right: Math.max(8, window.innerWidth - rect.right), y: rect.bottom + 8 })
+    setCreateMenu({ left: Math.max(8, rect.left), bottom: Math.max(8, window.innerHeight - rect.top + 8) })
   }
 
   /** 新建菜单里的两个入口：都先收起菜单，再打开对应弹窗。 */
@@ -903,6 +926,13 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
 
       {collapsed ? renderRail() : (
       <div className="pa-sidebar__scroll">
+          {/*
+            * 三格一排：左护法 / 主位 / 右护法。
+            * 主位一直是 Seeker（isMain），两侧是 `state.hero` 的映射；空槽画的是
+            * 出厂预设的召唤态（点一下就地建出来），不是「新建 Bot」按钮的第二个入口。
+            */}
+          <div className="pa-hero">
+          <HeroSlotCell slot="left" />
           <div
             className="pa-mainbot"
             data-selected={ui.selectedBotId === mainBot.id && ui.selectedRoomId === null ? 'true' : 'false'}
@@ -914,27 +944,16 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
             <BotAvatar avatar={mainBot.avatar} size={48} motionState="idle" />
             <span className="pa-mainbot__name">{mainBot.name}</span>
             {/*
-             * 新建入口：用户要求从顶部挪到主 Bot 卡片的右下角（2026-11-02）。
-             * 放在这里而不是主区：新建出来的对象是 Bot / 群聊，归属侧栏名册，
-             * 与主 Bot 卡片同区才符合「在这里长出新东西」的直觉。
+             * 新建入口已于 2026-11-07 从这张卡片挪到底部「期刊日记」上方（见下）。
+             * 卡片上不再留任何按钮：主位三格（护法 / Seeker / 护法）现在是一整块
+             * 可拖动的头部，右下角再挂一个圆形按钮会跟拖动热区打架。
              */}
-            <button
-              className="pa-mainbot__add"
-              type="button"
-              title="添加 Bot 或群聊"
-              aria-label="添加 Bot 或群聊"
-              aria-haspopup="menu"
-              aria-expanded={createMenu !== null}
-              data-open={createMenu !== null ? 'true' : 'false'}
-              data-pa-create-trigger="true"
-              onClick={toggleCreateMenu}
-            >
-              <IconPlus size={16} />
-            </button>
             {/*
              * 主 Bot 卡片不给「...」菜单：它固定排在第一位（置顶没有意义）、
              * 不能删除，菜单里没有一项适用。它的设置在会话头「更多 → Bot 设置」。
              */}
+          </div>
+          <HeroSlotCell slot="right" />
           </div>
 
           {sortedGroups.map((group) => {
@@ -982,7 +1001,7 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
           </div>
 
           {subBots.length === 0 && rooms.length === 0 ? (
-            <div className="pa-sidebar-empty">还没有内容。点主 Bot 右下角的 + 新建 Bot 或群聊。</div>
+            <div className="pa-sidebar-empty">还没有内容。点左下角「新建」添加 Bot 或群聊。</div>
           ) : null}
         </div>
       )}
@@ -990,6 +1009,18 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
       <div className="pa-sidebar__bottom" data-collapsed={collapsed ? 'true' : 'false'}>
         {collapsed ? (
           <>
+            <button
+              className="pa-rail-btn"
+              type="button"
+              title="添加 Bot 或群聊"
+              aria-label="添加 Bot 或群聊"
+              aria-haspopup="menu"
+              aria-expanded={createMenu !== null}
+              data-pa-create-trigger="true"
+              onClick={toggleCreateMenu}
+            >
+              <IconPlus size={18} />
+            </button>
             <button className="pa-rail-btn" type="button" title="期刊日记" aria-label="期刊日记" onClick={openJournal}>
               <IconBook size={18} />
             </button>
@@ -999,6 +1030,27 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
           </>
         ) : (
           <>
+            {/*
+             * 新建入口（2026-11-07 从主 Bot 卡片右下角迁来）。
+             *
+             * 为什么放在「期刊日记」上方而不是继续留在主位卡片上：主位那三格现在
+             * 是一整块可拖动区域（长按换边），角落里再挂一个圆钮会和拖动热区抢
+             * 手势；而「新建」本来就是侧栏名册的入口，落到名册底部一行更顺。
+             */}
+            <button
+              className="pa-side-bottom-item pa-side-bottom-item--create"
+              type="button"
+              title="添加 Bot 或群聊"
+              aria-label="添加 Bot 或群聊"
+              aria-haspopup="menu"
+              aria-expanded={createMenu !== null}
+              data-open={createMenu !== null ? 'true' : 'false'}
+              data-pa-create-trigger="true"
+              onClick={toggleCreateMenu}
+            >
+              <IconPlus size={18} />
+              <span>新建</span>
+            </button>
             <button className="pa-side-bottom-item" type="button" title="期刊日记" onClick={openJournal}>
               <IconBook size={18} />
               <span>期刊日记</span>
@@ -1031,7 +1083,7 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
       {createMenu !== null ? (
         <div
           className="pa-popover pa-create-menu"
-          style={{ right: createMenu.right, top: createMenu.y }}
+          style={{ left: createMenu.left, bottom: createMenu.bottom }}
           role="menu"
           aria-label="新建"
           onMouseDown={(event) => event.stopPropagation()}
@@ -1085,7 +1137,7 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
             <div className="pa-sheet__head">
               <div className="pa-sheet__head-text">
                 <div className="pa-sheet__title">设置</div>
-                <div className="pa-sheet__sub">外观 · 右栏 · 通话 · 分组 · 期刊</div>
+                <div className="pa-sheet__sub">外观 · 通话 · 期刊 · 分组</div>
               </div>
               <button className="pa-sheet__close" type="button" onClick={requestCloseSettings} title="关闭" aria-label="关闭设置">
                 <IconX size={16} />
@@ -1129,22 +1181,6 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
                     <IconSun size={13} />浅色
                   </button>
                 </div>
-              </div>
-
-              <div className="pa-settings-row">
-                <div className="pa-settings-row__main">
-                  <b>右侧详情栏</b>
-                  <span>在聊天区右侧显示 Bot 浏览器、产出物与任务记录</span>
-                </div>
-                <button
-                  className="pa-switch"
-                  type="button"
-                  data-on={ui.rightPanelOpen ? 'true' : 'false'}
-                  aria-label="切换右侧详情栏"
-                  onClick={() => actions.toggleRightPanel(!ui.rightPanelOpen)}
-                >
-                  <i />
-                </button>
               </div>
 
               <div className="pa-settings-row">
@@ -1204,7 +1240,8 @@ export function Sidebar({ onExitWork }: { onExitWork: () => void }): JSX.Element
               </div>
               <div className="pa-group-list">
                 {sortedGroups.map((group) => {
-                  const count = state.bots.filter((bot) => !bot.isMain && bot.groupId === group.id).length
+                  // 计数与列表同一口径：护法不算进任何分组（否则标题上的数字和实际行数对不上）
+                  const count = state.bots.filter((bot) => !bot.isMain && !heroIds.has(bot.id) && bot.groupId === group.id).length
                   return (
                     <div className="pa-group-row" key={group.id}>
                       <span className="pa-group-row__name">{group.name}<em>{count}</em></span>

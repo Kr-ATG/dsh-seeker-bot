@@ -255,6 +255,7 @@ export function PersonalApp({ forceMode = false, onExitWork }: PersonalAppProps)
       data-mode="bot"
       data-force-mode={forceMode ? 'true' : 'false'}
       data-pa-theme={theme}
+      data-pa-theme-mode={state.settings.theme}
       data-shell-embed={isEmbeddedShell() ? 'true' : 'false'}
       data-call-minimized={ui.call.status !== 'idle' && ui.call.minimized ? 'true' : 'false'}
     >
@@ -277,6 +278,11 @@ export function PersonalApp({ forceMode = false, onExitWork }: PersonalAppProps)
          *
          * 同理也不能给主列加 key 重播：换 Bot / 换群聊只换内容，Composer 的草稿
          * 存在组件本地 state，重挂载会把没发出去的字丢掉。
+         */}
+        {/*
+         * --pa-chat-w = 气泡列目标宽度（px，0/缺省 = 铺满）。
+         * 2026-11-07 起它只作用于 .pa-chat__scroll 的左右边距（收窄气泡），
+         * 不再改变卡片 / 会话头 / 输入框的宽度与外观。
          */}
         <main
           className="pa-main-col"

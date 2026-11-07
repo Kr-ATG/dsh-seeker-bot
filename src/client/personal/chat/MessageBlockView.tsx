@@ -38,6 +38,7 @@ import {
   formatDuration,
   type ArtifactRef,
   type AppState,
+  type ChatSticker,
   type Message,
   type MessageBlock,
   type MessageRole,
@@ -49,6 +50,7 @@ import { InteractiveCard } from './InteractiveCard.tsx'
 import { ConnectorSuggestCard } from './ConnectorSuggestCard.tsx'
 import { ArtifactCard } from './ArtifactCard.tsx'
 import { VideoGenerationBlock } from './VideoGenerationBlock.tsx'
+import { splitStickerMarks, stickerUrl } from '../../../shared/stickers.ts'
 import {
   artifactKindOf,
   errorMessageOf,
@@ -142,14 +144,47 @@ function MarkdownImage({ src, alt, block }: { src: string; alt: string; block?: 
   )
 }
 
+/**
+ * 正文链接的安全收口。
+ *
+ * 轻量 Markdown 原先只认图片 / 粗体 / 行内代码，模型写的 `[MDN 文档](url)`
+ * 会原样显示成方括号文本——看起来像「渲染坏了」，用户也没法点。
+ *
+ * 这里只做**语法还原**，不做地址解析：放行 http(s)、mailto 与站内绝对路径
+ * （`/api/...` 这类），其余协议（javascript: / data: / vbscript: / file:）
+ * 一律返回 null，交回纯文本渲染。模型输出是不可信内容，链接是它最容易
+ * 被用来发起「假登录页 / 本地文件读取」的入口，白名单比黑名单可靠。
+ */
+function safeHref(raw: string): string | null {
+  const url = raw.trim()
+  if (url === '') return null
+  if (/^(?:https?:\/\/|mailto:)/i.test(url)) return url
+  if (/^\/[^/]/.test(url)) return url
+  return null
+}
+
+/** `[文字](url)`：文字不允许嵌套方括号，地址不允许空白与右括号。 */
+const LINK_PATTERN = /^\[([^\]]+)\]\(([^)\s]+)\)$/
+
+/**
+ * 裸 URL（`https://…`）也顺手接住：模型在正文里直接贴地址是常态，用户消息里
+ * 也一样；不能点的地址和不渲染的链接是同一类缺口。只在行内出现时匹配，
+ * 行内代码（反引号）里的地址因为先被 code 分支吃掉，不会变成链接。
+ */
+const BARE_URL = /^https?:\/\/[^\s<>"')]+$/
+
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
   const nodes: ReactNode[] = []
   /*
    * 图片优先于粗体 / 行内代码：`![a](b.png)` 里若先匹配星号或反引号，
    * 图片 token 会被切碎成普通文字（现状就是「只显示文字」）。src 允许空格
    * 与中文，所以用「除右括号外任意字符」收口。
+   *
+   * 顺序（同一轮扫描里靠「先命中者赢」）：图片 → 粗体 → 行内代码 → 链接 →
+   * 裸 URL。链接排在行内代码之后，保证 `` `[x](y)` `` 里的字面量不会被
+   * 变成可点链接。
    */
-  const pattern = /(!\[[^\]]*\]\([^)]+\)|\*\*[^*]+\*\*|`[^`]+`)/g
+  const pattern = /(!\[[^\]]*\]\([^)\s]+\)|\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)\s]+\)|https?:\/\/[^\s<>"')]+)/g
   let last = 0
   let match: RegExpExecArray | null = pattern.exec(text)
   let index = 0
@@ -163,6 +198,37 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
       nodes.push(<MarkdownImage key={`${keyPrefix}-i-${index}`} src={toImageSrc(src)} alt={alt} />)
     } else if (token.startsWith('**')) {
       nodes.push(<strong key={`${keyPrefix}-b-${index}`}>{token.slice(2, -2)}</strong>)
+    } else if (token.startsWith('[')) {
+      /*
+       * `[文字](url)`：白名单不过就按纯文本吐回原 token —— 不吞内容、不猜意图。
+       * 新窗口打开 + noopener：外链不能拿到宿主窗口的 window.opener。
+       */
+      const link = LINK_PATTERN.exec(token)
+      const label = link?.[1] ?? token
+      const href = safeHref(link?.[2] ?? '')
+      nodes.push(href === null
+        ? token
+        : (
+          <a
+            key={`${keyPrefix}-a-${index}`}
+            className="pa-md__link"
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={href}
+          >{label}</a>
+        ))
+    } else if (BARE_URL.test(token)) {
+      nodes.push(
+        <a
+          key={`${keyPrefix}-u-${index}`}
+          className="pa-md__link pa-md__link--bare"
+          href={token}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={token}
+        >{token}</a>,
+      )
     } else {
       nodes.push(<code key={`${keyPrefix}-c-${index}`}>{token.slice(1, -1)}</code>)
     }
@@ -1141,6 +1207,28 @@ function ImageBlock({ block }: { block: Extract<MessageBlock, { type: 'image' }>
   )
 }
 
+/**
+ * 聊天贴纸（表情包）。
+ *
+ * 与 ImageBlock 刻意不同：点不开、不下载、不加边框——贴纸是语气不是文件。
+ * 用 `title` 给一个语义提示，纯装饰的贴纸对读屏用户没有任何信息，所以保留了 alt。
+ * 宽高交给 CSS（132px 上限 + 60% 容器宽），图片本身不写死尺寸，避免加载前后的
+ * 布局跳动把下面的消息顶一下。
+ */
+function StickerBlock({ sticker }: { sticker: ChatSticker }): JSX.Element {
+  return (
+    <img
+      className="pa-sticker"
+      src={sticker.url}
+      alt={sticker.alt}
+      title={sticker.alt}
+      loading="lazy"
+      decoding="async"
+      draggable={false}
+    />
+  )
+}
+
 function VoiceBlock({ block }: { block: Extract<MessageBlock, { type: 'voice' }> }): JSX.Element {
   const [playing, setPlaying] = useState(false)
   const timerRef = useRef<number | null>(null)
@@ -1305,6 +1393,29 @@ export const MessageBlockView = memo(function MessageBlockView({ message, pagesB
     const out: MessageBlock[] = []
     for (const block of blocks) {
       if (block.type === 'tool' && !isStandaloneToolRun(block.run)) continue
+      /*
+       * 贴纸展开：模型在正文里写 `[[sticker:<id>]]`，这里有两条路——
+       *  · 只含正常标记 → 拆成「文字 / 贴纸」交替的独立块，贴纸不进气泡；
+       *  · 标记里的 id 不认识 → splitStickerMarks 把它原样留在文字里，
+       *    用户看到一行方括号，而不是一张破图或一段消失的话。
+       * 展开必须放在渲染前（与上面的工具过滤同一个循环），否则一个 text 块里
+       * 两张贴纸会被同一个 TextBubble 一次性吃掉。
+       */
+      if (block.type === 'text' && block.text.includes('[[sticker:')) {
+        for (const segment of splitStickerMarks(block.text)) {
+          if (segment.kind === 'text') {
+            out.push({ type: 'text', text: segment.text })
+            continue
+          }
+          const url = stickerUrl(segment.entry.id)
+          if (url === null) continue
+          out.push({
+            type: 'sticker',
+            sticker: { id: segment.entry.id, url, alt: segment.entry.alt, group: segment.entry.group },
+          })
+        }
+        continue
+      }
       out.push(block)
     }
     return out
@@ -1360,6 +1471,7 @@ export const MessageBlockView = memo(function MessageBlockView({ message, pagesB
         if (block.type === 'call-segment') return <CallSegmentBar key={`callseg-${block.segment}`} block={block} />
         if (block.type === 'journal') return <JournalCard key={`journal-${index}`} block={block} />
         if (block.type === 'image') return <ImageBlock key={`img-${index}`} block={block} />
+        if (block.type === 'sticker') return <StickerBlock key={`sticker-${index}`} sticker={block.sticker} />
         if (block.type === 'voice') return <VoiceBlock key={`voice-${index}`} block={block} />
         /*
          * 走到这里只剩 compaction 标记。它不是卡片：对话流里那行居中小字由

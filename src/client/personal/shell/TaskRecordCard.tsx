@@ -39,7 +39,7 @@ import { IconChevronDown, IconListTodo } from '../icons.tsx'
 import { usePersonal } from '../store.tsx'
 import { formatDuration, type TaskRecord, type TaskRecordStep } from '../types.ts'
 // 工具名 → 中文动作只有一份规则表（plain-language）；详情弹窗与动态行共用。
-import { actionLabelOf, briefOf, humanizeDetail } from './task-action.ts'
+import { actionLabelOf, actionStepsOf, briefOf, doneActionCount, humanizeDetail, liveProgressOf } from './task-action.ts'
 import { TaskStatusGlyph } from './status-glyph.tsx'
 
 /**
@@ -113,76 +113,11 @@ function flatText(text: string, max = 64): string {
   return flat.length > max ? flat.slice(0, max) + '…' : flat
 }
 
-/**
- * 只把「真正干活」的步骤算作动作：工具调用、阶段说明、产出物。
- * start / end 是首尾标记，不算进动作计数，免得「已开始」也占一格进度。
+/*
+ * 任务行「此刻在做什么」的纯逻辑（actionStepsOf / doneActionCount / liveProgressOf）
+ * 已移到 task-action.ts：那里没有 React 依赖，回归脚本（test-task-live-action.mjs）
+ * 可以直接真跑，而不是只做源码断言。
  */
-function actionStepsOf(task: TaskRecord): TaskRecordStep[] {
-  return task.steps.filter((step) => step.kind === 'tool' || step.kind === 'text' || step.kind === 'output')
-}
-
-/** 已完成的动作数：工具步看状态，阶段文字与产出物一到就算完成。 */
-function doneActionCount(steps: TaskRecordStep[]): number {
-  return steps.reduce((n, step) => n + (step.kind === 'tool' && step.status !== 'ok' ? 0 : 1), 0)
-}
-
-/** 运行中任务行上的一行活信息。 */
-interface LiveProgress {
-  /** 此刻在做什么：一句带具体对象的人话动作。 */
-  label: string
-  done: number
-  total: number
-}
-
-/**
- * 运行中任务的「此刻进行到哪里」。
- *
- * 数据来自 state.tasks 的 steps，由流式事件逐条追加（见 store 的
- * upsertTaskToolStep / upsertTaskTextStep），所以这里只是把最新一份读出来，
- * 不做轮询、不发请求——右栏跟着 state 每秒重渲染就是实时。
- *
- * 用户口径（2026-11-07）：「这个正在回复改为动态的显示与我们 seeker 操作面板里
- * 显示的动作，因为正在回复看不出来他在做的工作」——所以文案分三层，越具体越优先：
- *
- *  1. 有正在跑的动作 → 那一步的人话动作（actionLabelOf，带具体对象：
- *     「正在启动第二个 CodeArts 账号登录」），与 Seeker 操作面板同一句；
- *  2. 没有跑的动作、但这一轮还在跑（模型在写字 / 在等结果）→ 最后一条过程
- *     说明的首句，截到约 28 字；
- *  3. 实在没有可说的 → 「正在思考」。
- *
- * 旧版兜底「正在整理回复…」已删除：它说的是**还没发生**的事，用户读了仍不知道
- * 它此刻在干什么。
- */
-function liveProgressOf(task: TaskRecord): LiveProgress | null {
-  if (task.status !== 'running') return null
-  const steps = actionStepsOf(task)
-  let running: TaskRecordStep | undefined
-  let lastText: TaskRecordStep | undefined
-  for (let i = steps.length - 1; i >= 0; i--) {
-    const step = steps[i]
-    if (running === undefined && step.status === 'running') running = step
-    if (lastText === undefined && step.kind === 'text') lastText = step
-    if (running !== undefined && lastText !== undefined) break
-  }
-  let label: string
-  if (running !== undefined) {
-    label = actionLabelOf(running)
-  } else if (lastText !== undefined) {
-    // 只给这一行两行位置：首句太长会读不全，截到约 28 字。
-    const brief = clipBrief(briefOf(lastText.detail ?? ''), 28)
-    label = brief !== '' ? brief : '正在思考'
-  } else {
-    label = '正在思考'
-  }
-  return { label, done: doneActionCount(steps), total: steps.length }
-}
-
-/** 压平空白并截断（动态行只留两行位置，长句会读不全）。 */
-function clipBrief(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, ' ').trim()
-  return flat.length > max ? flat.slice(0, max) + '…' : flat
-}
-
 /**
  * 任务行的摘要文案。
  *

@@ -128,6 +128,14 @@ export interface Bot {
    * **默认开**：缺省或为 true 时注入通俗表达契约；显式设为 false 时关闭。
    */
   eli5Mode?: boolean
+  /**
+   * 爱发表情包（贴纸）。
+   *
+   * **默认关**：只有亲密位（闺蜜 / 搭子这类）才打开。打开后宿主会注入「贴纸契约」，
+   * 模型可以在正文里写 `[[sticker:<id>]]`，前端渲染成贴纸（见 shared/stickers.ts）。
+   * 工作型的 Bot 保持关闭——回复里突然弹出一张图，会立刻显得不专业。
+   */
+  stickerMode?: boolean
   proactive: ProactiveConfig
   createdAt: number
   createdBy: string | null
@@ -766,6 +774,27 @@ export interface ChatImage {
 }
 
 /**
+ * 一条聊天贴纸（表情包）。
+ *
+ * 与 {@link ChatImage} 的区别：用户发的图是**内容**（可点开看原图、可下载），
+ * 贴纸是**语气**——它在气泡里只占一小块、点不开、也不进产出物。所以它是独立的
+ * 块类型，而不是 image 块的变体：渲染尺寸、点击行为、无障碍文案全都不一样。
+ *
+ * 只存 id 不够：清单会随版本增删，历史消息里的贴纸必须永远能显示出来，所以
+ * url 与 alt 在落块时就一起写死。
+ */
+export interface ChatSticker {
+  /** 贴纸 id（清单见 shared/stickers.ts）。 */
+  id: string
+  /** 同源 URL（/api/chat-flow/stickers/<file>?v=…）。 */
+  url: string
+  /** 无障碍文案与悬停提示。 */
+  alt: string
+  /** 中文梗 / 英文反应。 */
+  group: 'zh' | 'en'
+}
+
+/**
  * 助手主动推荐的一个「可连接的应用」。
  *
  * 字段与宿主连接器目录（assets/mcp-catalog/catalog.json）对齐但**只取展示所需**：
@@ -792,6 +821,7 @@ export interface ConnectorItem {
 export type MessageBlock =
   | { type: 'text'; text: string }
   | { type: 'image'; image: ChatImage }
+  | { type: 'sticker'; sticker: ChatSticker }
   | { type: 'tool'; run: ToolRun }
   /**
    * 执行态块：bot 在电脑 / 浏览器里操作时，对话流里那张「正在做什么」的卡片。
@@ -1105,10 +1135,11 @@ export interface PersonalUi {
    */
   rightPanelWidth: number
   /**
-   * 对话主列宽度（px）；0 = 自动铺满（默认）。
+   * 气泡列目标宽度（px）；0 = 铺满卡片（默认）。
    *
-   * 用户从对话流两侧拖拽调整：只改中间对话区宽度，左右侧栏宽度不变。
-   * 拖拽过程直接改 `--pa-chat-w`，松手后写进 `pa:ui:v1`。
+   * 2026-11-07 起语义变了：两侧拖拽只收窄**气泡列**（消息气泡的可用宽度），
+   * 对话卡片、悬浮会话头、输入框的整体外观一律不动。旧版本存的是「对话列
+   * 宽度」，读回后按新语义解释：值接近满宽时等同于铺满。
    */
   chatWidth: number
   /**
@@ -1142,6 +1173,24 @@ export interface PersonalUi {
    * 清掉，刷新后也不该恢复（恢复出一条指向旧消息的引用反而更困惑）。
    */
   replyTo: { id: string; preview: string } | null
+}
+
+/** 护法槽位：以主位（Seeker）为轴，左 / 右两格。 */
+export type HeroSlot = 'left' | 'right'
+
+/**
+ * 左右两个固定槽位挂的是谁。
+ *
+ * 为什么存「槽位 → botId」而不是给 Bot 加一个 slot 字段：人格跟着**槽位**走，不跟着
+ * **位置**走。用户拖动交换时改的是这两条映射，Bot 记录（名字、头像、记忆归属）
+ * 一根手指都没碰；自定义位换人格也不会把槽位弄丢。
+ *
+ * null = 空槽：界面画的是出厂预设的「召唤态」（见 presets.ts），点一下就建出来占位。
+ * 旧 localStorage 没有这个字段 → 两格都空，按预设显示，不需要迁移脚本。
+ */
+export interface HeroSlots {
+  left: string | null
+  right: string | null
 }
 
 export interface AppState {
@@ -1192,6 +1241,8 @@ export interface AppState {
    * 读的地方一律兜底成空数组。
    */
   pagesByBot?: Record<string, PageItem[]>
+  /** 左右护法槽位（v2 起的新字段；旧状态缺省 = 两格都空）。 */
+  hero?: HeroSlots
   settings: PersonalSettings
   lastUserMessageAt: number
 }
@@ -1212,6 +1263,10 @@ export interface NewBotInput {
   liveVendor?: string
   /** 通俗解释（ELI5 模式）；默认开启（true）。 */
   eli5Mode?: boolean
+  /** 爱发表情包；默认关闭，只有亲密位（闺蜜 / 搭子）才开。 */
+  stickerMode?: boolean
+  /** 主动关心的默认档位；缺省按「每天 09:00–22:00」。护法预设要在这里给不同作息。 */
+  proactive?: ProactiveConfig
 }
 
 export const MAIN_BOT_ID = 'bot-main-xiaomo'

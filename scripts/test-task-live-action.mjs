@@ -54,7 +54,7 @@ let mod
     entry,
     [
       `export { plainActionOf } from '${slash(resolve(ROOT, 'src/host/personal/tool-action.ts'))}'`,
-      `export { actionLabelOf, stepActionViewOf, toolActionOf, briefOf } from '${slash(resolve(ROOT, 'src/client/personal/shell/task-action.ts'))}'`,
+      `export { actionLabelOf, stepActionViewOf, toolActionOf, briefOf, liveProgressOf } from '${slash(resolve(ROOT, 'src/client/personal/shell/task-action.ts'))}'`,
       '',
     ].join('\n'),
     'utf8',
@@ -72,7 +72,7 @@ let mod
   mod = await import(pathToFileURL(bundle).href)
 }
 
-const { plainActionOf, actionLabelOf, stepActionViewOf, toolActionOf, briefOf } = mod
+const { plainActionOf, actionLabelOf, stepActionViewOf, toolActionOf, briefOf, liveProgressOf } = mod
 
 const toolStep = (over = {}) => ({
   at: 0,
@@ -156,6 +156,49 @@ console.log('[task-live-action] 历史数据：没有 action 字段时从 detail
   check(briefOf(textStep.detail).length > 0, '过程说明能取到首句（动态行的第二档文案）')
 }
 
+console.log('[task-live-action] 动态行：此刻在做什么（四档，越具体越优先）')
+{
+  const taskOf = (steps, status = 'running') => ({ id: 't', botId: 'b', title: 't', prompt: 'p', status, startedAt: 0, steps })
+  const start = { at: 0, kind: 'start', title: '开始处理' }
+
+  const runningTask = liveProgressOf(taskOf([
+    start,
+    { at: 1, kind: 'tool', id: 'c1', title: 'pwsh', status: 'running', action: '启动第二个 CodeArts 账号登录', actionHideVerb: true },
+  ]))
+  check(runningTask !== null && runningTask.label === '启动第二个 CodeArts 账号登录',
+    '第一档：有动作在跑 → 直接说那个动作', runningTask?.label)
+
+  const finishedTask = liveProgressOf(taskOf([
+    start,
+    { at: 1, kind: 'tool', id: 'c1', title: 'web_fetch', status: 'ok', action: '读取网页 github.com' },
+    { at: 2, kind: 'tool', id: 'c2', title: 'read', status: 'ok', action: '查看文件 README.md' },
+  ]))
+  check(finishedTask !== null && finishedTask.label === '刚才查看文件 README.md',
+    '第三档（用户二次反馈那条）：动作都做完但本轮还在跑 → 显示刚做完的那一步，不是「正在思考」', finishedTask?.label)
+  check(finishedTask !== null && finishedTask.done === 2 && finishedTask.total === 2,
+    '同时给对「已做 2/2」', finishedTask === null ? 'null' : String(finishedTask.done) + '/' + String(finishedTask.total))
+
+  const textTask = liveProgressOf(taskOf([
+    start,
+    { at: 1, kind: 'text', title: '分析', detail: '我先去看看这个 superagent 项目解决了什么问题，再决定怎么跟进。' },
+  ]))
+  check(textTask !== null && textTask.label.startsWith('我先去看看'),
+    '第二档：有过程说明 → 取它的首句', textTask?.label)
+
+  const outputTask = liveProgressOf(taskOf([
+    start,
+    { at: 1, kind: 'output', title: 'report.docx', status: 'ok' },
+  ]))
+  check(outputTask !== null && outputTask.label === '刚才产出 report.docx',
+    '产出物单独说「刚才产出 xxx」', outputTask?.label)
+
+  const emptyTask = liveProgressOf(taskOf([start]))
+  check(emptyTask !== null && emptyTask.label === '正在思考',
+    '第四档：一条动作都没有才说「正在思考」', emptyTask?.label)
+
+  check(liveProgressOf(taskOf([], 'done')) === null, '已收口的任务不再返回活信息')
+}
+
 console.log('[task-live-action] 源码契约')
 {
   const card = read('src/client/personal/shell/TaskRecordCard.tsx')
@@ -163,12 +206,13 @@ console.log('[task-live-action] 源码契约')
   check(!/['"\u2018\u2019]正在整理回复/.test(card), '动态卡不再有「正在整理回复…」兜底')
   check(card.includes('useCrossfadeText') && card.includes('useMotionAllowed'), '换动作走交叉淡入（motion-utils）')
   check(card.includes('正在思考'), '没有任何动作时给「正在思考」，不是「正在处理」')
-  check(card.includes('briefOf('), '没有 running 动作时取最后一条过程说明的首句')
-  check(card.includes('actionLabelOf('), 'running 动作走 actionLabelOf（同一份规则表）')
+  check(card.includes('liveProgressOf'), '动态卡使用 task-action 的 liveProgressOf（纯函数，可被测试真跑）')
 
   const action = read('src/client/personal/shell/task-action.ts')
   check(action.includes("from '../../kr-chat/plain-language.ts'"), '动作规则表复用 plain-language（只有一份）')
   check(action.includes('export function stepActionViewOf('), '对外导出 stepActionViewOf')
+  check(action.includes('export function liveProgressOf('), '活信息逻辑在纯模块里导出（回归脚本可直接跑）')
+  check(action.includes("label = '刚才'") || action.includes("'刚才' + view.action"), '第四档：动作都完成时显示「刚才 + 动作」')
   check(action.includes('step.action') && action.includes('actionHideVerb'), '优先用 host 算好的 action')
 
   const css = read('src/client/personal/shell/tasks.css.ts')

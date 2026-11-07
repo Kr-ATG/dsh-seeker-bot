@@ -232,6 +232,10 @@ export const PERSONAL_SHELL_CSS = `
   text-align: left;
   transition: background 120ms ease, color 120ms ease, transform 120ms ease;
 }
+/* 「新建」是侧栏名册唯一的增长入口，给一点权重：文字与图标都比其它两行亮一档。 */
+.pa-root .pa-side-bottom-item--create { color: var(--pa-text); }
+.pa-root .pa-side-bottom-item--create svg { color: var(--pa-accent); }
+.pa-root .pa-side-bottom-item[data-open='true'] { background: rgba(128, 132, 140, 0.14); color: var(--pa-text); }
 .pa-root .pa-side-bottom-item:hover { background: rgba(128, 132, 140, 0.14); color: var(--pa-text); }
 .pa-root .pa-side-bottom-item:active { transform: scale(0.985); }
 .pa-sidebar__bottom--rail .pa-side-bottom-item {
@@ -319,6 +323,12 @@ export const PERSONAL_SHELL_CSS = `
   padding: 8px;
   border-radius: 14px;
 }
+/*
+ * 向上展开（2026-11-07）：定位由 Sidebar 用 bottom 坐标给，这里不碰 transform。
+ * 早先试过 top + translateY(-100%)，被 .pa-popover 的 pa-pop 动画（keyframes 里
+ * 有 transform）覆盖掉，菜单照样往下弹、底部冲出视口——动画与普通声明抢同一个
+ * 属性时永远是动画赢，别再走这条路。
+ */
 .pa-create-menu__title {
   padding: 3px 10px 7px;
   font-size: calc(10px + var(--pa-font-delta));
@@ -447,30 +457,6 @@ export const PERSONAL_SHELL_CSS = `
   animation: pa-spin 700ms linear infinite;
 }
 
-/* 开关 */
-.pa-switch {
-  position: relative;
-  width: 34px;
-  height: 20px;
-  border-radius: 999px;
-  background: var(--pa-card-3);
-  transition: background 150ms ease;
-  flex: none;
-}
-.pa-switch i {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: #ffffff;
-  transition: transform 150ms ease;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
-}
-.pa-switch[data-on='true'] { background: var(--pa-accent); }
-.pa-switch[data-on='true'] i { transform: translateX(14px); }
-
 /* 模型选择器：原生 select，但外观跟右栏其它控件一致 */
 .pa-model-select {
   width: 100%;
@@ -533,7 +519,12 @@ export const PERSONAL_SHELL_CSS = `
   min-height: 0;
   min-width: 0;
   background: var(--pa-right);
-  border-left: 1px solid var(--pa-line);
+  /*
+   * 2026-11-07：右栏与中列之间的**分隔竖线已隐藏**（用户要求）。
+   * 用透明边框而不是直接删掉：保留 1px 占位，右栏内容宽度与拖拽宽度换算不变。
+   * 拖拽手柄 .pa-right__resizer 及其悬停提示线不受影响。
+   */
+  border-left: 1px solid transparent;
   position: relative;
 }
 

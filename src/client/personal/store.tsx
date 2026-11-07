@@ -64,6 +64,8 @@ import {
   type BotMessageKind,
   type CallRecord,
   type ChatImage,
+  type HeroSlot,
+  type HeroSlots,
   type InteractiveUi,
   type Journal,
   type Message,
@@ -322,9 +324,10 @@ function clampRightWidth(value: unknown): number {
 }
 
 /*
- * 对话主列宽度：0 = 自动铺满；手动拖拽后保存具体像素。
+ * 气泡列宽度：0 = 铺满卡片；手动拖拽后保存具体像素（= 气泡可用宽度）。
  *
- * 只限制中间对话列，左右侧栏保持各自宽度——侧栏折叠 / 拖拽不会改变这里的值。
+ * 2026-11-07：拖拽只收窄气泡列，卡片 / 悬浮会话头 / 输入框外观不受影响。
+ * 左右侧栏宽度各自独立——侧栏折叠 / 拖拽不会改变这里的值。
  */
 const MIN_CHAT_WIDTH = 520
 const MAX_CHAT_WIDTH = 1600
@@ -764,6 +767,15 @@ export interface PersonalActions {
    * 纯视图动作：只写 `ui.collapsedSections`，不动分组数据与选中的会话。
    */
   toggleSection(sectionId: string): void
+  /**
+   * 把某个 Bot 挂到左 / 右护法槽（传 null 清空这一格）。
+   *
+   * 同一个 Bot 不会同时占两格：挂到左边时，右边如果还是它就先摘掉——否则删除 /
+   * 隐藏时会留下「一格删了另一格还是幽灵」。
+   */
+  assignHeroSlot(slot: HeroSlot, botId: string | null): void
+  /** 交换左右两个槽位（拖动换位；任一侧为空时等于把那个 Bot 挪过去）。 */
+  swapHeroSlots(): void
   openNewBot(open: boolean): void
   /** 打开某个 Bot 的设置卡（null = 关闭）。 */
   openBotSettings(botId: string | null): void
@@ -1102,6 +1114,32 @@ function normalizeAssignmentView(raw: unknown): AssignmentView | null {
  * 子 Bot、协作小组、示例期刊、示例记忆与示例例行任务全部清掉；只保留主 Bot
  * 和用户自己创建的 Bot / 群聊 / 记忆 / 任务。旧版 `version:1` 一并升级到 2。
  */
+/**
+ * 归一化护法槽位。
+ *
+ * 这段是 2026-11-07 补的，起因很具体：normalizeState 起初**根本没把 hero 带回
+ * 返回对象里**，于是每次页面加载槽位都被丢弃 → 侧栏两格又变回「召唤态」→ 用户
+ * 再点一次，又建出一个同名 Bot。实测出现过两个「Muse 闺蜜」并排躺在助手列表里。
+ * 新增的持久化字段一定要同时出现在 normalizeState 的返回值里，否则它只在内存里
+ * 活到下一次刷新。
+ *
+ * 同时纠正两类脏数据：
+ *  · 槽位指向一个已经不存在的 Bot（删过 Bot / 老 localStorage 残留）→ 清成 null；
+ *  · 同一个 Bot 同时占两格（早期手改或竞态）→ 保留左格。
+ * @param raw - localStorage 里读出来的原始值（可能缺失 / 不是对象）。
+ * @param bots - 归一化后的 Bot 列表（用它的 id 集合校验槽位）。
+ * @returns 永远合法的两个槽位。
+ */
+function normalizeHero(raw: unknown, bots: Bot[]): HeroSlots {
+  const source = raw !== null && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  const ids = new Set(bots.map(bot => bot.id))
+  const pick = (value: unknown): string | null =>
+    typeof value === 'string' && value !== '' && ids.has(value) ? value : null
+  const left = pick(source.left)
+  const right = pick(source.right)
+  return { left, right: right === left ? null : right }
+}
+
 function normalizeState(parsed: AppState): AppState {
   const legacyBots = new Set<string>(LEGACY_SEED_BOT_IDS)
   const legacyRooms = new Set<string>(LEGACY_SEED_ROOM_IDS)
@@ -1262,6 +1300,8 @@ function normalizeState(parsed: AppState): AppState {
     journalLogs: normalizeJournalLogs(raw.journalLogs),
     tasks,
     archivedSessions,
+    // 左右护法槽位必须原样带回去（漏掉它 = 每次刷新都把槽位清空，见 normalizeHero）
+    hero: normalizeHero(raw.hero, bots),
     // 运行时缓存：每次加载都从空对象开始，等 activeBot 的 assignments 拉回来再填
     assignmentsByBot: {},
     settings,
@@ -1901,6 +1941,7 @@ function replyRequestBody(
       instructions: bot.instructions,
       model,
       eli5Mode: bot.eli5Mode !== false,
+      stickerMode: bot.stickerMode === true,
       /*
        * 主 Bot 标记：宿主据此决定给谁挂 `bot_create`（只有主 Bot 能建子 Bot）。
        *
@@ -1938,6 +1979,7 @@ function replyRequestBody(
       instructions: item.instructions,
       model: item.model,
       eli5Mode: item.eli5Mode !== false,
+      stickerMode: item.stickerMode === true,
       // 同上：宿主建子 Bot 时要靠花名册认出「谁是主 Bot」，其余成员一律不是
       isMain: item.isMain === true,
     })),
@@ -4352,6 +4394,36 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     markRead('bot', id)
   }, [clearUnread, markRead])
 
+  /**
+   * 把某个 Bot 挂到护法槽。
+   *
+   * 只改 `state.hero` 两条映射：Bot 记录本身一根手指都不碰，所以改名、换头像、
+   * 改记忆归属都不影响它占哪一格。往某格挂同一个 Bot 时顺手摘掉对面那格，
+   * 保证「一个人物只占一个位置」这条不变量在任何入口都成立。
+   */
+  const assignHeroSlot = useCallback((slot: HeroSlot, botId: string | null): void => {
+    setState((prev) => {
+      const hero: HeroSlots = prev.hero ?? { left: null, right: null }
+      const other: HeroSlot = slot === 'left' ? 'right' : 'left'
+      const next: HeroSlots = { ...hero, [slot]: botId }
+      if (botId !== null && hero[other] === botId) next[other] = null
+      return { ...prev, hero: next }
+    })
+  }, [])
+
+  /**
+   * 交换左右两格。
+   *
+   * 拖动换位调的就是它：交换是「同时生效」的——不存在中间态，所以动画可以随便播，
+   * 数据永远不会停在「两个都在左边」这种半路状态上。
+   */
+  const swapHeroSlots = useCallback((): void => {
+    setState((prev) => {
+      const hero: HeroSlots = prev.hero ?? { left: null, right: null }
+      return { ...prev, hero: { left: hero.right, right: hero.left } }
+    })
+  }, [])
+
   const selectRoom = useCallback((id: string): void => {
     const room = stateRef.current.rooms.find((item) => item.id === id)
     setUi((prev) => ({
@@ -4729,7 +4801,8 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       ...(input.liveVendor !== undefined && input.liveVendor !== '' ? { liveVendor: input.liveVendor } : {}),
       permission: 'full',
       eli5Mode: input.eli5Mode ?? true,
-      proactive: { enabled: true, freq: 'daily', from: '09:00', to: '22:00' },
+      stickerMode: input.stickerMode === true,
+      proactive: input.proactive ?? { enabled: true, freq: 'daily', from: '09:00', to: '22:00' },
       createdAt: Date.now(),
       createdBy: MAIN_BOT_ID,
     }
@@ -4781,6 +4854,18 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
        * 就是一条点开没有归属的孤儿记录（用户实测删完 Bot 后还看到它）。
        */
       archivedSessions: prev.archivedSessions.filter((session) => session.botId !== id),
+      /*
+       * 护法槽位跟着清空：删掉的正好是左/右护法时，那一格必须回到「召唤态」，
+       * 否则侧栏会留一个指向不存在 id 的空槽，点下去什么都不会发生。
+       */
+      ...(prev.hero !== undefined
+        ? {
+            hero: {
+              left: prev.hero.left === id ? null : prev.hero.left,
+              right: prev.hero.right === id ? null : prev.hero.right,
+            },
+          }
+        : {}),
     }))
     setUi((prev) => ({ ...prev, selectedBotId: prev.selectedBotId === id ? MAIN_BOT_ID : prev.selectedBotId }))
     /*
@@ -6555,6 +6640,8 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
   const actions: PersonalActions = useMemo(() => ({
     selectBot,
     selectRoom,
+    assignHeroSlot,
+    swapHeroSlots,
     setView: (view) => setUi((prev) => ({ ...prev, view })),
     setTheme,
     setRightTab: (rightTab) => setUi((prev) => ({ ...prev, rightTab })),

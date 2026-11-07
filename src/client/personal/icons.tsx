@@ -30,8 +30,57 @@ function Svg({ size = 18, className, strokeWidth = 1.7, children }: IconProps & 
   )
 }
 
+/**
+ * 实心图标（Solid）的统一壳。
+ *
+ * 用户 2026-11-07 看图后要求「把这几个按钮去掉，变成实心的 svg」：会话头那五个
+ * 动作（自动播报 / 通话 / 截图 / 右侧详情栏 / 更多）不再画 1.7px 描边，改用填充块。
+ * 18px 下实心形状比细描边「坐得住」——细线缩到 18px 会因为抗锯齿糊成灰边，
+ * 而实心块只靠轮廓就能读出是什么。
+ *
+ * 与上面的描边版本**并存**：14px 的菜单条目仍用描边（那一档要细节不要重量），
+ * 只有会话头这种「图标就是按钮本身」的场景用实心。
+ */
+function SvgSolid({ size = 18, className, children }: IconProps & { children: ReactNode }): JSX.Element {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      stroke="none"
+      className={className}
+      aria-hidden="true"
+    >
+      {children}
+    </svg>
+  )
+}
+
 export function IconSidebar({ size, className }: IconProps): JSX.Element {
   return <Svg size={size} className={className}><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M9 4v16" /><path d="M14.5 10.5 17 12l-2.5 1.5" /></Svg>
+}
+
+/**
+ * 右侧详情栏（会话头切换按钮用）：矩形 + 右侧竖向分隔线。
+ * 与 IconSidebar 同一套网格，只是分隔线在右边——一眼能看出「这是右栏」。
+ */
+export function IconPanelRight({ size, className }: IconProps): JSX.Element {
+  return <Svg size={size} className={className}><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M15 4v16" /></Svg>
+}
+
+/**
+ * 实心版右侧详情栏：整块面板 + 右侧一道**细缝**做分栏。
+ *
+ * 第一版把右侧那格整个挖空，19px 下读起来像「缺了一角的方块」；改成细缝之后
+ * 仍然是「一块面板被分成左右两栏」，与描边版（矩形 + 竖分隔线）同一个意思。
+ */
+export function IconPanelRightSolid({ size, className }: IconProps): JSX.Element {
+  return (
+    <SvgSolid size={size} className={className}>
+      <path fillRule="evenodd" d="M6.2 3.9h11.6c2 0 3.6 1.6 3.6 3.6v8.9c0 2-1.6 3.6-3.6 3.6H6.2c-2 0-3.6-1.6-3.6-3.6V7.5c0-2 1.6-3.6 3.6-3.6Zm7.7 2.7c-.5 0-.9.4-.9.9v8.9c0 .5.4.9.9.9h1.1c.5 0 .9-.4.9-.9V7.5c0-.5-.4-.9-.9-.9h-1.1Z" />
+    </SvgSolid>
+  )
 }
 
 export function IconSearch({ size, className }: IconProps): JSX.Element {
@@ -64,6 +113,15 @@ export function IconPhoneOff({ size, className }: IconProps): JSX.Element {
   return <Svg size={size} className={className}><path d="M5.2 3.8h3.1l1.4 3.9-2 1.4a12.5 12.5 0 0 0 5.2 5.2l1.4-2 3.9 1.4v3.1a2.4 2.4 0 0 1-2.6 2.4C9.3 18.7 5.3 14.7 2.8 6.4a2.4 2.4 0 0 1 2.4-2.6Z" /><path d="m4 20 16-16" /></Svg>
 }
 
+/** 实心版话筒听筒：整只手柄填满（会话头「呼叫」按钮）。 */
+export function IconPhoneSolid({ size, className }: IconProps): JSX.Element {
+  return (
+    <SvgSolid size={size} className={className}>
+      <path d="M5.2 3.8h3.1l1.4 3.9-2 1.4a12.5 12.5 0 0 0 5.2 5.2l1.4-2 3.9 1.4v3.1a2.4 2.4 0 0 1-2.6 2.4C9.3 18.7 5.3 14.7 2.8 6.4a2.4 2.4 0 0 1 2.4-2.6Z" />
+    </SvgSolid>
+  )
+}
+
 export function IconMic({ size, className }: IconProps): JSX.Element {
   return <Svg size={size} className={className}><rect x="9" y="3.5" width="6" height="11" rx="3" /><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0" /><path d="M12 18v3" /></Svg>
 }
@@ -76,6 +134,38 @@ export function IconWave({ size, className }: IconProps): JSX.Element {
   return <Svg size={size} className={className}><path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4" /></Svg>
 }
 
+/**
+ * 实心版喇叭：音箱实体 + 两道**填充**声波（不是描边弧线）。
+ *
+ * 声波用外弧→内弧收口的月牙形，纯 fill 画出来——与描边版本混排时会显得更重，
+ * 正是「实心」这一档想要的重量。
+ */
+export function IconVolumeSolid({ size, className }: IconProps): JSX.Element {
+  return (
+    <SvgSolid size={size} className={className}>
+      <path d="M11.9 5.2 7.4 9.2H5.6A1.6 1.6 0 0 0 4 10.8v2.4a1.6 1.6 0 0 0 1.6 1.6h1.8l4.5 4Z" />
+      <path d="M14.73 8.63A4.4 4.4 0 0 1 14.73 15.37L13.57 13.99A2.6 2.6 0 0 0 13.57 10.01Z" />
+      <path d="M16.34 6.72A6.9 6.9 0 0 1 16.34 17.28L15.18 15.91A5.1 5.1 0 0 0 15.18 8.09Z" />
+    </SvgSolid>
+  )
+}
+
+/** 实心版静音：同上，声波换成一个粗实心叉。 */
+export function IconVolumeOffSolid({ size, className }: IconProps): JSX.Element {
+  return (
+    <SvgSolid size={size} className={className}>
+      <path d="M11.9 5.2 7.4 9.2H5.6A1.6 1.6 0 0 0 4 10.8v2.4a1.6 1.6 0 0 0 1.6 1.6h1.8l4.5 4Z" />
+      <path
+        d="M15.9 9.9 20.6 14.6M20.6 9.9 15.9 14.6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </SvgSolid>
+  )
+}
+
 export function IconPaperclip({ size, className }: IconProps): JSX.Element {
   return <Svg size={size} className={className}><path d="M20.4 11.3 12 19.7a5.5 5.5 0 0 1-7.8-7.8l8.4-8.4a3.7 3.7 0 0 1 5.2 5.2L9.4 17a1.8 1.8 0 0 1-2.6-2.6l7.8-7.8" /></Svg>
 }
@@ -86,6 +176,17 @@ export function IconSend({ size, className }: IconProps): JSX.Element {
 
 export function IconMore({ size, className }: IconProps): JSX.Element {
   return <Svg size={size} className={className} strokeWidth={2}><circle cx="5" cy="12" r=".7" /><circle cx="12" cy="12" r=".7" /><circle cx="19" cy="12" r=".7" /></Svg>
+}
+
+/** 实心版「更多」：三个实心圆点（描边版的小点是 0.7 半径 + 2 描边，实心用纯圆）。 */
+export function IconMoreSolid({ size, className }: IconProps): JSX.Element {
+  return (
+    <SvgSolid size={size} className={className}>
+      <circle cx="5" cy="12" r="1.7" />
+      <circle cx="12" cy="12" r="1.7" />
+      <circle cx="19" cy="12" r="1.7" />
+    </SvgSolid>
+  )
 }
 
 export function IconX({ size, className }: IconProps): JSX.Element {
@@ -300,6 +401,20 @@ export function IconMonitor({ size, className }: IconProps): JSX.Element {
       <rect x="2" y="3" width="20" height="14" rx="2" />
       <path d="M8 21h8M12 17v4" />
     </Svg>
+  )
+}
+
+/**
+ * 实心版相机：机身整块填充，镜头用 evenodd **挖空**。
+ *
+ * 实心相机如果给镜头再填一个圆，18px 下会变成一块没有细节的方块；挖空之后
+ * 机身与镜头之间留出的是卡面本身的颜色，两种主题下都成立。
+ */
+export function IconCameraSolid({ size, className }: IconProps): JSX.Element {
+  return (
+    <SvgSolid size={size} className={className}>
+      <path fillRule="evenodd" d="M4.6 7.4h3.2l1.4-2.2c.2-.3.5-.5.9-.5h4.2c.4 0 .7.2.9.5l1.4 2.2h3.2c1.3 0 2.4 1.1 2.4 2.4v8.4c0 1.3-1.1 2.4-2.4 2.4H4.6c-1.3 0-2.4-1.1-2.4-2.4V9.8c0-1.3 1.1-2.4 2.4-2.4Zm7.4 2.3a4.3 4.3 0 1 0 0 8.6 4.3 4.3 0 0 0 0-8.6Z" />
+    </SvgSolid>
   )
 }
 

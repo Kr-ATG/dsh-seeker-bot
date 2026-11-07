@@ -138,6 +138,7 @@ export const FEATURES: ReadonlyArray<FeatureDef> = [
   { id: 'host.open-file', group: 'host', label: '系统默认应用打开', desc: '产出物 / 画廊 / 弹窗里点一下用系统默认应用打开。', default: true, apply: 'host' },
   { id: 'host.fonts', group: 'host', label: '字体资产', desc: '/api/chat-flow/fonts/*：霞鹜文楷 / 霞鹜新致宋 woff2、HarmonyOS Sans TTF 与许可原文。', default: true, apply: 'host' },
   { id: 'host.avatars', group: 'host', label: '头像动图资产', desc: '/api/chat-flow/avatars/*：卡头三态透明 WebP 动图（无动作 / 生成中 / 执行中）。', default: true, apply: 'host' },
+  { id: 'host.stickers', group: 'host', label: '聊天贴纸资产', desc: '/api/chat-flow/stickers/*：Muse「爱发表情包」预设用的中英文贴纸。', default: true, apply: 'host' },
   { id: 'host.done-pill-media', group: 'host', label: '胶囊录屏 / 音效', desc: '录屏窗口枚举、逐帧抓取与提示音静态资源。', default: true, apply: 'host' },
   { id: 'host.office-preview', group: 'host', label: 'Office / PDF 预览', desc: 'ppt/word/pdf 的页图渲染与侧栏接管。', default: true, apply: 'host' },
   { id: 'host.running-apps', group: 'host', label: '运行中程序采集器', desc: '常驻 PowerShell 子进程，枚举可见窗口（@ 菜单与浏览器窗口激活共用）。', default: true, apply: 'host' },

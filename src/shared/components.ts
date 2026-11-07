@@ -169,6 +169,7 @@ export const FEATURE_COMPONENT: Readonly<Record<string, ComponentId>> = {
   'host.open-file': 'host',
   'host.fonts': 'host',
   'host.avatars': 'host',
+  'host.stickers': 'host',
   'host.office-preview': 'host',
   'host.browser-activity': 'host',
   'host.browser-on-demand': 'host',

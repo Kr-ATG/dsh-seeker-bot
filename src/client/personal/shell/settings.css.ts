@@ -992,8 +992,6 @@ export const SETTINGS_CSS = `
 /* 开关（关闭态轨道） */
 .pa-root .pa-sheet .pa-bset-switch { background: var(--pa-card-3); }
 .pa-root .pa-sheet .pa-bset-switch[data-on='true'] { background: var(--pa-accent); }
-.pa-root .pa-sheet .pa-switch { background: var(--pa-card-3); }
-.pa-root .pa-sheet .pa-switch[data-on='true'] { background: var(--pa-accent); }
 
 /* 记忆来源筛选 chips */
 .pa-root .pa-sheet .pa-bset-filter-chip {

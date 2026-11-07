@@ -1044,6 +1044,25 @@ export function BotSettingsCard(): JSX.Element | null {
                 <i />
               </button>
             </div>
+            <div className="pa-bset-row" style={{ marginTop: 10, marginBottom: 8 }}>
+              <div className="pa-bset-row__main">
+                <b>爱发表情包</b>
+                <span>回复里会甩贴纸接话（中文梗 + 英文反应，共 26 张）。工作型 Bot 建议关掉——正事说到一半弹出一张图会很轻浮；亲密位（闺蜜 / 搭子）才打开</span>
+              </div>
+              <button
+                className="pa-bset-switch"
+                type="button"
+                data-on={bot.stickerMode === true ? 'true' : 'false'}
+                aria-label={bot.stickerMode === true ? '关闭表情包' : '开启表情包'}
+                onClick={() => {
+                  const next = bot.stickerMode !== true
+                  actions.updateBot(bot.id, { stickerMode: next })
+                  actions.toast(next ? '已开启：它会发表情包了' : '已关闭表情包')
+                }}
+              >
+                <i />
+              </button>
+            </div>
             <div className="pa-sheet-inline-actions">
               <button className="pa-btn pa-btn--primary pa-btn--sm" type="button" onClick={saveProfile}>
                 保存资料

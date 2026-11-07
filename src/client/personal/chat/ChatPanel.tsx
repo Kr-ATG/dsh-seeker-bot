@@ -10,7 +10,21 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
-import { IconBook, IconCamera, IconChevronRight, IconListTodo, IconMore, IconPhone, IconSettings, IconTrash, IconUsers, IconX } from '../icons.tsx'
+import { botAvatarStateOf } from '../avatar-state.ts'
+import {
+  IconBook,
+  IconCamera,
+  IconCameraSolid,
+  IconChevronRight,
+  IconListTodo,
+  IconMoreSolid,
+  IconPanelRightSolid,
+  IconPhoneSolid,
+  IconSettings,
+  IconTrash,
+  IconUsers,
+  IconX,
+} from '../icons.tsx'
 import { PaShotModal } from '../shot/PaShotModal.tsx'
 import { blocksToText, usePersonal } from '../store.tsx'
 import type { AssignmentView, Bot, Message, TaskRecordStep } from '../types.ts'
@@ -18,6 +32,19 @@ import type { RelayBrief } from '../../../shared/relay.ts'
 import { AutoSpeakButton } from './AutoSpeakButton.tsx'
 import { Composer } from './Composer.tsx'
 import { MessageList, jumpToMessage } from './MessageList.tsx'
+import { ReminderBand } from './ReminderBand.tsx'
+import {
+  endOfToday,
+  fetchVaultReminder,
+  muteReminder,
+  restReminderOf,
+  routineReminderOf,
+  REST_AUTO_HIDE_MS,
+  REST_IDLE_RESET_MS,
+  REST_MUTE_MS,
+  type ReminderActionId,
+  type ReminderItem,
+} from './reminder.ts'
 import { pendingSummaryOf, pendingTasksOf } from './pending.ts'
 import { dispatchViewsOf } from './dispatch.ts'
 import { evaluateRelayTrigger, normalizeRelayAuto, relayHintKey, type RelayTrigger } from '../relay-trigger.ts'
@@ -95,6 +122,23 @@ export function ChatPanel(): JSX.Element {
   const [moreOpen, setMoreOpen] = useState(false)
   const [shotOpen, setShotOpen] = useState(false)
   const moreRef = useRef<HTMLDivElement>(null)
+  /*
+   * 提醒带（2026-11-07）：动图让位到卡片左侧，右侧长出一块「文字 + 选项」面板。
+   *
+   * 状态只有三档，全部围绕「同一条时间线」：
+   *   · reminder 为 null     —— 不在提醒态，动图在中间，面板不渲染；
+   *   · shown === false      —— 面板已挂载但还是收起态（clip 全裁），下一帧才置 true，
+   *                             clip-path 才有「从无到有」的过渡；
+   *   · closing === true     —— 退场：面板先收 200ms，320ms 后整块卸载（与 CSS 对齐）。
+   */
+  const [reminder, setReminder] = useState<ReminderItem | null>(null)
+  const [reminderShown, setReminderShown] = useState(false)
+  const [reminderClosing, setReminderClosing] = useState(false)
+  const reminderTimerRef = useRef<number | null>(null)
+  /** 当前提醒（异步检查里判断「有没有正在播」，ref 避免闭包读到旧值）。 */
+  const reminderRef = useRef<ReminderItem | null>(null)
+  /** 对话卡本体：提醒位移量按它的实际宽度算。 */
+  const chatCardRef = useRef<HTMLDivElement>(null)
   /** 待清空对话的目标 bot（非 null 时显示确认卡片）。 */
   const [clearTarget, setClearTarget] = useState<Bot | null>(null)
   /** 历史对话面板是否打开（只读回看归档）。 */
@@ -226,6 +270,143 @@ export function ChatPanel(): JSX.Element {
     }, 240)
   }, [])
 
+  /*
+   * 提醒：出现 / 退场 / 动作。
+   *
+   * 出现时面板先以「收起态」挂载，再用双 rAF 置 shown=true —— 单 rAF 在部分情况下
+   * 会和挂载提交合并进同一帧，clip-path 不会过渡（直接跳到位，等于没有动效）。
+   */
+  const presentReminder = useCallback((item: ReminderItem): void => {
+    if (reminderRef.current !== null) {
+      // 已在提醒态：原地换内容，不重播动图位移（动效规格里的「中断」口径）。
+      reminderRef.current = item
+      setReminder(item)
+      return
+    }
+    reminderRef.current = item
+    setReminder(item)
+    setReminderShown(false)
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => { setReminderShown(true) })
+    })
+  }, [])
+
+  const closeReminder = useCallback((after?: () => void): void => {
+    if (reminderTimerRef.current !== null) return
+    setReminderShown(false)
+    setReminderClosing(true)
+    reminderTimerRef.current = window.setTimeout(() => {
+      reminderTimerRef.current = null
+      setReminderClosing(false)
+      setReminder(null)
+      reminderRef.current = null
+      after?.()
+    }, 320)
+  }, [])
+
+  const runReminderAction = useCallback((item: ReminderItem, actionId: ReminderActionId): void => {
+    if (actionId === 'run-now' && item.kind === 'routine') {
+      actions.runRoutine(item.id.slice('routine:'.length))
+      // 立刻跑过之后半小时内不再提同一条：否则任务还在 nextAt 窗口里，会马上又弹。
+      muteReminder(item.id, Date.now() + 30 * 60_000)
+    } else if (actionId === 'know') {
+      /*
+       * 「知道了」也要压：休息提示 1 小时（它本来就是「该起来了」），
+       * 档案 3 天（不压的话下一轮 5 分钟检查又会捡回来）。
+       */
+      muteReminder(item.id, item.kind === 'rest' ? Date.now() + REST_MUTE_MS : Date.now() + 3 * 24 * 60 * 60_000)
+    } else if (actionId === 'dismiss') {
+      // 关掉 = 今天不再提（例行任务）/ 7 天后再提（档案到期）/ 1 小时内不再提（休息）。
+      muteReminder(item.id, item.kind === 'routine'
+        ? endOfToday()
+        : item.kind === 'rest' ? Date.now() + REST_MUTE_MS : Date.now() + 7 * 24 * 60 * 60_000)
+    }
+    closeReminder()
+  }, [actions, closeReminder])
+
+  /*
+   * 提醒态的两个几何量，全部由 JS 按卡片真实宽度算一次写成 CSS 变量：
+   *   · --pa-remind-w    面板宽（360–720px，宽屏固定 720，窄卡按比例收）；
+   *   · --pa-remind-shift 动图让位量 = (面板宽 + 20) / 2 —— 让「角色 + 面板」整组居中。
+   * CSS 端只做 transform 平移、不碰 left/width，位移全程在合成层上。
+   */
+  useEffect(() => {
+    const element = chatCardRef.current
+    if (element === null) return
+    const sync = (): void => {
+      const panelWidth = Math.round(Math.min(520, Math.max(320, element.clientWidth * 0.38)))
+      element.style.setProperty('--pa-remind-w', `${String(panelWidth)}px`)
+      element.style.setProperty('--pa-remind-shift', `${String(Math.round((panelWidth + 20) / 2))}px`)
+    }
+    sync()
+    const observer = new ResizeObserver(sync)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
+  /*
+   * 提醒来源：例行任务（提前 10 分钟窗口内最近一条）+ 档案到期（宿主清单里最近的）。
+   * 启动 2.5s 后查一次（避开首屏渲染高峰），之后每 5 分钟一次。
+   * routines 用 ref 读：数组每次渲染都可能重建，直接进依赖会让定时器反复重建。
+   */
+  const routines = state.routines
+  const routinesRef = useRef(routines)
+  routinesRef.current = routines
+  /*
+   * 连续工作时长（休息提示用）：用户超过 REST_IDLE_RESET_MS（15 分钟）没说话，
+   * 就当中间离开过，起点重置回现在。lastUserMessageAt 用 ref 读最新值，
+   * 不塞进 effect 依赖，避免每轮消息都重建定时器。
+   */
+  const restSinceRef = useRef<number>(Date.now())
+  const lastUserAtRef = useRef<number>(state.lastUserMessageAt)
+  lastUserAtRef.current = state.lastUserMessageAt
+  useEffect(() => {
+    if (activeRoom !== null) return
+    let cancelled = false
+    const check = async (): Promise<void> => {
+      if (cancelled || reminderRef.current !== null) return
+      const routine = routineReminderOf(routinesRef.current)
+      if (routine !== null) {
+        presentReminder(routine)
+        return
+      }
+      const vault = await fetchVaultReminder()
+      if (cancelled) return
+      if (vault !== null) {
+        presentReminder(vault)
+        return
+      }
+      // 休息提示优先级最低：真有任务/档案的事，先把那两件说完。
+      const now = Date.now()
+      if (now - lastUserAtRef.current > REST_IDLE_RESET_MS) restSinceRef.current = now
+      const rest = restReminderOf(now, restSinceRef.current)
+      if (rest !== null) presentReminder(rest)
+    }
+    const kick = window.setTimeout(() => { void check() }, 2500)
+    const poll = window.setInterval(() => { void check() }, 5 * 60_000)
+    return () => {
+      cancelled = true
+      window.clearTimeout(kick)
+      window.clearInterval(poll)
+    }
+  }, [activeRoom, presentReminder])
+
+  /*
+   * 休息提示「不点 3 分钟自动消失」：只有 rest 类带这个计时——任务/档案提醒要等
+   * 用户处理，自己消失等于「提醒了又当没提醒」。自动收的同时压一小时，
+   * 否则下一轮检查（5 分钟一次）会立刻把它捡回来。
+   */
+  const reminderKind = reminder?.kind
+  const reminderId = reminder?.id
+  useEffect(() => {
+    if (reminderKind !== 'rest' || reminderId === undefined) return
+    const timer = window.setTimeout(() => {
+      muteReminder(reminderId, Date.now() + REST_MUTE_MS)
+      closeReminder()
+    }, REST_AUTO_HIDE_MS)
+    return () => { window.clearTimeout(timer) }
+  }, [reminderKind, reminderId, closeReminder])
+
   /**
    * 点「整理并开新会话」：调 store 生成接力摘要，成功后卡片内展示预览。
    *
@@ -261,31 +442,52 @@ export function ChatPanel(): JSX.Element {
     if (confirmTimerRef.current !== null) window.clearTimeout(confirmTimerRef.current)
     if (historyTimerRef.current !== null) window.clearTimeout(historyTimerRef.current)
     if (assignmentsTimerRef.current !== null) window.clearTimeout(assignmentsTimerRef.current)
+    if (reminderTimerRef.current !== null) window.clearTimeout(reminderTimerRef.current)
   }, [])
 
   /**
-   * 拖拽对话列左右边缘调整宽度。
+   * 拖拽对话列左右边缘，**只收缩气泡列**（用户 2026-11-07 要求）。
    *
-   * 只改中间 `.pa-chat` 的宽度（`--pa-chat-w`），左右侧栏保持原样——用户明确
-   * 要求「不要被侧边栏影响」。拖动过程中直接改 CSS 变量、不 setState，松手才
-   * 写回 `pa:ui:v1`，避免每帧重渲染整个对话流。
+   * 以前拖的是整张对话卡片的宽度：卡片一窄，圆角、投影、悬浮会话头跟着动，
+   * 上方布局与整体外观都受影响。现在卡片恒铺满，拖拽只写 `--pa-chat-w`
+   * （= 目标气泡列宽，px）：
+   *   · CSS 侧 .pa-chat__scroll 的左右边距 = max(基线, (容器宽 − 目标宽)/2)，
+   *     于是只有气息列里的气泡收窄；
+   *   · 会话头宽度写死在 calc(100% - gap*2 - 24px)，完全不参与；
+   *   · 输入框、待处理条、卡片本身都不动。
+   *
+   * 拖动过程中直接改 CSS 变量、不 setState，松手才写回 `pa:ui:v1`，
+   * 避免每帧重渲染整个对话流。
    */
   const startResize = (side: 'left' | 'right', event: ReactMouseEvent<HTMLDivElement>): void => {
     event.preventDefault()
     event.stopPropagation()
     const chat = event.currentTarget.closest('.pa-chat')
     const main = chat?.parentElement
-    if (!(chat instanceof HTMLElement) || !(main instanceof HTMLElement)) return
+    const scroll = chat instanceof HTMLElement ? chat.querySelector('.pa-chat__scroll') : null
+    if (!(chat instanceof HTMLElement) || !(main instanceof HTMLElement) || !(scroll instanceof HTMLElement)) return
     const startX = event.clientX
-    const startWidth = chat.getBoundingClientRect().width
-    const mainWidth = main.getBoundingClientRect().width
-    const upper = Math.min(MAX_CHAT_WIDTH, mainWidth)
+    const scrollStyle = getComputedStyle(scroll)
+    /*
+     * 边距基线写在 CSS 变量上（宽屏 30 / 中屏 20 / 窄屏 14）：
+     * 拖到最宽时气泡列 = 容器宽 − 2×基线，再宽就没有视觉变化，按「满宽」存 0。
+     */
+    const gutter = Number.parseFloat(scrollStyle.getPropertyValue('--pa-chat-bubble-gutter')) || 30
+    const fullContentWidth = Math.max(0, scroll.clientWidth - gutter * 2)
+    const upper = Math.min(MAX_CHAT_WIDTH, fullContentWidth)
     const lower = Math.min(MIN_CHAT_WIDTH, upper)
-    let latest = Math.round(startWidth)
+    const startContentWidth = Math.min(
+      fullContentWidth,
+      Math.max(0,
+        scroll.clientWidth
+          - Number.parseFloat(scrollStyle.paddingLeft || '0')
+          - Number.parseFloat(scrollStyle.paddingRight || '0')),
+    )
+    let latest = Math.round(startContentWidth)
     const onMove = (moveEvent: MouseEvent): void => {
-      // 两侧对称收放：边缘跟手需要 2 倍位移（居中列两边同时移动）。
+      // 两侧对称收放：边缘跟手需要 2 倍位移（气泡列左右同时内收）。
       const delta = side === 'left' ? startX - moveEvent.clientX : moveEvent.clientX - startX
-      latest = Math.round(Math.min(upper, Math.max(lower, startWidth + delta * 2)))
+      latest = Math.round(Math.min(upper, Math.max(lower, startContentWidth + delta * 2)))
       main.style.setProperty('--pa-chat-w', `${latest}px`)
     }
     const onUp = (): void => {
@@ -299,7 +501,7 @@ export function ChatPanel(): JSX.Element {
     window.addEventListener('mouseup', onUp)
   }
 
-  /** 双击恢复自动铺满（0 = 不限制宽度）。 */
+  /** 双击恢复满宽（0 = 气泡列不额外收窄）。 */
   const resetChatWidth = (): void => {
     actions.setChatWidth(0)
   }
@@ -318,6 +520,12 @@ export function ChatPanel(): JSX.Element {
   const subtitle = activeRoom !== null ? `${roomBots.length} 个 Bot · 群聊` : activeBot.role
   const callBotId = activeRoom !== null ? (roomBots.find((bot) => bot.isMain) ?? roomBots[0] ?? activeBot).id : activeBot.id
   const callBot = state.bots.find((bot) => bot.id === callBotId) ?? activeBot
+  /*
+   * 对话卡顶部悬浮动图的三态（2026-11-07）：从右栏资料区迁到这里，判定口径完全
+   * 沿用 botAvatarStateOf —— 群聊看整场群聊、私聊看该 Bot；切换 Bot / 群聊时
+   * activeBot / activeRoom / activeMessages 一起变化，状态与取图 URL 自动重算。
+   */
+  const avatarState = botAvatarStateOf(activeBot, activeMessages, state.tasks, activeRoom?.id)
   /** 当前私聊 Bot 的历史对话归档（新→旧；右栏面板只读回看）。 */
   const archivedSessions = useMemo(() => {
     return (state.archivedSessions ?? [])
@@ -521,6 +729,8 @@ export function ChatPanel(): JSX.Element {
        * 两端与左右侧栏之间露出一截缺口——用户实测点名要它「永远占满」。
        * 头部内容再套一层 .pa-chat__head-inner 按对话列宽度居中，对齐方式保持不变。
        */}
+      {/* 会话头在提醒态**不动**（2026-11-07 用户要求「左侧的这个别动」）：
+          面板只占中间那一段，与左右两端的头像/名称、按钮组水平方向不重叠。 */}
       <header className="pa-chat__header">
         <div className="pa-chat__head-inner">
         <div className="pa-chat__head-avatar">
@@ -556,7 +766,7 @@ export function ChatPanel(): JSX.Element {
             aria-label={ui.call.status !== 'idle' ? '返回通话' : `呼叫 ${callBot.name}`}
             onClick={handleCall}
           >
-            <IconPhone size={18} />
+            <IconPhoneSolid size={19} />
           </button>
           <button
             className="pa-chat__head-btn"
@@ -565,7 +775,28 @@ export function ChatPanel(): JSX.Element {
             aria-label="一键截图"
             onClick={() => setShotOpen(true)}
           >
-            <IconCamera size={18} />
+            <IconCameraSolid size={19} />
+          </button>
+          {/*
+           * 右侧详情栏切换（2026-11-07 从设置面板迁来这里）。
+           *
+           * 用户原话：「bot 设置的改到对话界面的更多的左侧，并且不是开关，变成切换」。
+           *  · 位置：紧贴「更多」左边，与通话 / 截图同为 32px 小方块，不额外加容器；
+           *  · 形态：按钮式切换，**不是滑块开关** —— 展开时 data-on 点亮品牌色，
+           *    收起时与其它按钮同色，用户一眼能读出「现在开没开」；
+           *  · 状态唯一来源：ui.rightPanelOpen。按钮本身不存状态，右栏的显隐、
+           *    图标点亮、aria-pressed 永远同一帧变化（状态不撒谎）。
+           */}
+          <button
+            className="pa-chat__head-btn"
+            type="button"
+            title={ui.rightPanelOpen ? '收起右侧详情栏' : '展开右侧详情栏'}
+            aria-label="右侧详情栏"
+            aria-pressed={ui.rightPanelOpen}
+            data-on={ui.rightPanelOpen ? 'true' : 'false'}
+            onClick={() => actions.toggleRightPanel()}
+          >
+            <IconPanelRightSolid size={19} />
           </button>
           <div className="pa-chat__more" ref={moreRef}>
             <button
@@ -584,7 +815,7 @@ export function ChatPanel(): JSX.Element {
                 else setMoreOpen(true)
               }}
             >
-              <IconMore size={18} />
+              <IconMoreSolid size={19} />
             </button>
             {moreOpen ? (
               <div className="pa-chat__menu" role="menu" data-closing={menuClosing ? '1' : undefined}>
@@ -685,7 +916,7 @@ export function ChatPanel(): JSX.Element {
         </div>
       </header>
 
-      <div className="pa-chat">
+      <div className="pa-chat" ref={chatCardRef} data-reminding={reminder !== null && !reminderClosing ? 'true' : 'false'}>
         {/* 对话列两侧拖拽手柄：悬停亮线，拖动调宽度，双击恢复铺满。 */}
         <div
           className="pa-chat__resizer pa-chat__resizer--left"
@@ -705,6 +936,39 @@ export function ChatPanel(): JSX.Element {
           onMouseDown={(event) => startResize('right', event)}
           onDoubleClick={resetChatWidth}
         />
+        {/*
+         * 对话卡**最上沿**正中悬浮的 Bot 三态动图（2026-11-07 用户先要求「把右侧
+         * 侧边栏的动图也移动到对话，放在对话的正上方中间悬浮」，再要求「把中间这个
+         * 动图移动到最上面」——现在 top: 0，顶到卡片内沿顶端、与会话头同一水平线）
+         * ——与右栏资料区原来那枚完全同一枚（同一个 avatarState / BotAvatar / 92px 尺寸）。
+         *
+         * 悬浮层语义：绝对定位、不占布局高度、容器完全透明、pointer-events: none，
+         * 消息从它后面穿过。位置与首条消息的让位都在 chat.css.ts 的
+         * .pa-chat__mascot / .pa-chat__scroll-inner（--pa-chat-mascot-*）里推导。
+         */}
+        {/*
+         * 空对话不渲染这枚悬浮动图：MessageList 的空态本来就在卡片中央画了同一只
+         * Bot 头像（.pa-chat-empty__avatar），两处同时出现会变成两只一样的角色。
+         * 判据用 historyMessages（与 MessageList 的 messages.length === 0 同一份数据）。
+         */}
+        {historyMessages.length > 0 ? (
+          <div className="pa-chat__mascot" aria-hidden="true">
+            <BotAvatar avatar={activeBot.avatar} size={92} muted={!activeBot.enabled} motionState={avatarState} />
+          </div>
+        ) : null}
+        {/*
+         * 提醒带：面板与动图同一条时间线——动图在 [data-reminding] 下往左让，
+         * 面板从它右侧 clip 揭示出来（见 chat.css.ts 的「提醒态」段）。
+         * 会话头同时淡出让位；处理完一起收回、动图滑回中线。
+         */}
+        {reminder !== null ? (
+          <ReminderBand
+            item={reminder}
+            shown={reminderShown}
+            closing={reminderClosing}
+            onAction={(actionId) => { runReminderAction(reminder, actionId) }}
+          />
+        ) : null}
         {/* 消息流吃完整历史，自己按页懒加载；其它面板继续用 activeMessages 的最近 200 条。 */}
         <MessageList messages={historyMessages} bot={activeBot} room={activeRoom} dispatches={dispatches} />
         <PendingBar messages={activeMessages} />

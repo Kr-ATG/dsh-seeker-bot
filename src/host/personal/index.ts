@@ -483,6 +483,8 @@ interface ReplyBody {
     isMain?: boolean
     /** 通俗解释（ELI5 模式）；默认开启，显式传 false 时关闭。 */
     eli5Mode?: boolean
+    /** 爱发表情包（贴纸）；显式传 true 才注入贴纸契约与可用清单。 */
+    stickerMode?: boolean
   }
   text?: string
   /**
@@ -514,6 +516,7 @@ interface ReplyBody {
     model?: { provider?: string; model?: string; effort?: string }
     isMain?: boolean
     eli5Mode?: boolean
+    stickerMode?: boolean
   }>
   /**
    * 本轮用户附带的图片（前端先走 /upload 落盘，这里只带相对路径）。
@@ -561,6 +564,7 @@ function toBotSpec(body: ReplyBody): BotAgentSpec {
     permission: body.permission === 'approval' ? 'approval' : 'full',
     isMain: bot.isMain === true,
     eli5Mode: bot.eli5Mode !== false,
+    stickerMode: bot.stickerMode === true,
     memories: Array.isArray(body.memories)
       ? body.memories.filter((item): item is string => typeof item === 'string')
       : undefined,
@@ -587,6 +591,7 @@ function rememberRoster(roster: ReplyBody['roster']): void {
       ...(item?.model === undefined ? {} : { model: item.model }),
       isMain: item?.isMain === true,
       eli5Mode: item?.eli5Mode !== false,
+      stickerMode: item?.stickerMode === true,
     })
   }
 }

@@ -59,6 +59,7 @@ import { publish } from './events.ts'
 import { installBotCreateTool } from './bot-create.ts'
 import { installCoordinateTool } from './runtime/coordinate.ts'
 import { knownBots } from './runtime/registry.ts'
+import { buildStickerCatalogPrompt } from '../../shared/stickers.ts'
 
 /**
  * bot 会话 id 前缀（宿主里一眼能认出这是 Personal Agent 的会话）。
@@ -122,6 +123,11 @@ export interface BotAgentSpec {
    * 缺省或 true 为开启，显式为 false 时关闭。
    */
   eli5Mode?: boolean
+  /**
+   * 爱发表情包（贴纸）：打开后模型会在正文里写 `[[sticker:<id>]]` 标记，前端渲染成贴纸。
+   * 与 eli5Mode 同一套约定：缺省或 false 为关闭，只有显式打开才注入契约。
+   */
+  stickerMode?: boolean
 }
 
 /** 工具产出的可预览文件类型（按扩展名归族，决定卡片图标与预览方式）。 */
@@ -697,6 +703,35 @@ export const BOT_ELI5_CONTRACT: string = [
 ].join('\n')
 
 /**
+ * 贴纸契约（爱发表情包的 Bot，如闺蜜位的 Muse）。
+ *
+ * 三条设计取舍写在这里，改动前先读：
+ *  · **不做工具**：不新增 `send_sticker` 之类工具，只让模型在正文写标记。工具要
+ *    过权限、要进工具流水、要处理「调了工具但没说完话」的各种边角；而贴纸本质上
+ *    是正文的一部分（语气），不是一次动作。
+ *  · **清单必须真的非空**：没有可用素材时整段契约不注入，否则模型会照着一个空
+ *    承诺去写 id，最后全部退化成方括号文字。
+ *  · **写死频率与禁区**：模型对「适度」的理解远比人保守/激进两个极端，不给数字
+ *    就会变成每句一张，或者一张都不发。
+ * @returns 契约文本；清单为空时返回空串（调用方 filter 掉即可）。
+ */
+export function buildStickerContract(): string {
+  const catalog = buildStickerCatalogPrompt()
+  if (catalog === '') return ''
+  return [
+    '## 发表情包（你特别爱用这个）',
+    '- 你是那种「聊着聊着甩一张图」的人：大约每 3～5 条回复带一张，情绪明显的时候（好笑、无语、震惊、心疼、得意）优先带。',
+    '- 写法：在正文里**单独一行**写 `[[sticker:<id>]]`，界面会把它渲染成贴纸；同一句里不要夹标记。',
+    '- 只能用下面清单里的 id。写错 id 不会报错，但会原样显示成一对方括号，很难看。',
+    '- 贴纸是语气不是内容：不要用它代替回答，也不要在一条消息里堆两张以上。',
+    '- 不该发的时候别发：对方在说坏消息、涉及钱 / 健康 / 安全、或者在谈正经事时，一张都别发。',
+    '',
+    '可用贴纸：',
+    catalog,
+  ].join('\n')
+}
+
+/**
  * bot 的系统提示词：它是什么、能干什么、怎么说话。
  *
  * ## 为什么「说话方式」写得这么硬
@@ -792,6 +827,8 @@ function buildBotPrompt(spec: BotAgentSpec): string {
     BOT_ASSIGN_CONTRACT,
     '',
     spec.eli5Mode !== false ? BOT_ELI5_CONTRACT : '',
+    // 贴纸契约只在 Bot 显式打开 stickerMode 且清单非空时出现（亲密位的人格，不是全局默认）。
+    spec.stickerMode === true ? buildStickerContract() : '',
   ].filter((line) => line !== '').join('\n')
 }
 

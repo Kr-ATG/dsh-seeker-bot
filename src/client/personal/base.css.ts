@@ -137,6 +137,60 @@ body[data-skb-mode='work'] .pa-root:not([data-force-mode='true']) { display: non
   color-scheme: light;
 }
 
+/*
+ * 手动主题（设置里选「深色」/「浅色」，而不是「跟随」）的底色覆盖。
+ *
+ * --pa-sidebar / --pa-main 默认引用宿主 token（--dsw-specific-sidebar-fill /
+ * --dsw-alias-bg-base），这样「跟随」态与 Work 模式同源同色、切模式不出现色块。
+ * 但宿主 token 只反映**宿主当前**的主题：手动主题跟宿主反着走时（宿主浅色、
+ * 用户在 Bot 设置里选「深色」），底色还是宿主那套浅色，而文字/卡片已经换成
+ * 深色 —— 用户看到的就是「深色模式下所有背景都没同步主题」。
+ *
+ * 所以手动态把底色钉在该主题自己的值上；「跟随」态（data-pa-theme-mode='auto'）
+ * 不命中这两条规则，继续借宿主 token 与 Work 同色。
+ */
+.pa-root[data-pa-theme-mode='dark'] {
+  --pa-sidebar: #17181a;
+  --pa-main: #181819;
+  --pa-right: var(--pa-sidebar);
+  /*
+   * 少数控件直接读宿主 alias（品牌行 / 侧栏按钮 / 截图弹窗 / iu 卡片卡面），
+   * 手动态同样要脱离宿主：iu 卡片的卡面就是 --dsw-alias-bg-base，不覆盖的话
+   * 宿主浅色时会留下一张白卡、而文字已经按 Bot 深色变浅，白底白字直接看不见。
+   */
+  --dsw-alias-bg-base: var(--pa-card);
+  --dsw-alias-bg-layer-1: var(--pa-card);
+  --dsw-alias-bg-layer-2: var(--pa-card-2);
+  --dsw-alias-bg-layer-3: var(--pa-card-3);
+  --dsw-alias-label-primary: var(--pa-text);
+  --dsw-alias-label-secondary: var(--pa-text-2);
+  --dsw-alias-label-tertiary: var(--pa-text-3);
+  --dsw-alias-border-l1: var(--pa-line);
+  --dsw-alias-border-l2: var(--pa-line-2);
+  --dsw-elevation-stroke: 0 0 0 0.5px var(--pa-line-2);
+  --dsw-alias-interactive-bg-hover: rgba(128, 132, 140, 0.16);
+  --dsw-alias-state-business-primary: var(--pa-blue);
+  --dsw-alias-state-error-primary: var(--pa-red);
+}
+.pa-root[data-pa-theme-mode='light'] {
+  --pa-sidebar: #f9fafb;
+  --pa-main: #ffffff;
+  --pa-right: var(--pa-sidebar);
+  --dsw-alias-bg-base: var(--pa-card);
+  --dsw-alias-bg-layer-1: var(--pa-card);
+  --dsw-alias-bg-layer-2: var(--pa-card-2);
+  --dsw-alias-bg-layer-3: var(--pa-card-3);
+  --dsw-alias-label-primary: var(--pa-text);
+  --dsw-alias-label-secondary: var(--pa-text-2);
+  --dsw-alias-label-tertiary: var(--pa-text-3);
+  --dsw-alias-border-l1: var(--pa-line);
+  --dsw-alias-border-l2: var(--pa-line-2);
+  --dsw-elevation-stroke: 0 0 0 0.5px var(--pa-line-2);
+  --dsw-alias-interactive-bg-hover: rgba(15, 17, 21, 0.06);
+  --dsw-alias-state-business-primary: var(--pa-blue);
+  --dsw-alias-state-error-primary: var(--pa-red);
+}
+
 .pa-app-shell { display: flex; flex: 1; min-width: 0; min-height: 0; }
 .pa-col { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .pa-grow { flex: 1; min-height: 0; }
@@ -156,12 +210,16 @@ body[data-skb-mode='work'] .pa-root:not([data-force-mode='true']) { display: non
   min-height: 0;
   background: var(--pa-sidebar);
   /*
-   * 分隔线用内阴影画，不用 border-right：border 会占掉 1px 内容宽度，导致
-   * Bot 侧栏的品牌行、收起按钮、模式分段比 Work 模式整体左移 1px（Work 的
-   * 官方侧栏没有 border，分隔线画在 frame 的 grid 上）。换成 inset 阴影后
-   * 两边内容宽度完全一致，切换模式时这些元素不会「跳一下」。
+   * 2026-11-07：左侧栏与中列之间的**分隔竖线已隐藏**（用户要求「隐藏左侧与
+   * 右侧侧边栏的竖条」）。中列画布本来就和侧栏同色（--pa-chat-bg 读的是
+   * --pa-sidebar），去掉线后两栏连成一整块底，只有对话卡片浮在上面。
+   *
+   * 拖拽不受影响：手柄 .pa-sidebar__resizer 与它 hover 时亮起的那条提示线
+   * 都还在（那条线只在悬停/拖拽时出现，不是常驻竖条）。
+   * 用 inset 阴影而不是 border 画线的历史原因保留在此：border-right 会占掉
+   * 1px 内容宽度，品牌行 / 收起按钮 / 模式分段会比 Work 模式整体左移 1px。
    */
-  box-shadow: inset -1px 0 0 var(--pa-line);
+  box-shadow: none;
   position: relative;
   /* 收起 / 展开与官方侧栏同一节奏（官方收口 150ms）。 */
   transition: width 160ms cubic-bezier(0.22, 0.8, 0.24, 1), flex-basis 160ms cubic-bezier(0.22, 0.8, 0.24, 1);
@@ -378,7 +436,66 @@ body[data-pa-sidebar-resizing='true'] {
 .pa-root[data-pa-theme='light'] .pa-mode-seg button[data-on='true'] { color: #14161a; }
 
 .pa-sidebar__scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 2px 10px 10px; min-height: 0; }
-.pa-sidebar__bottom { flex: none; padding: 8px 12px 12px; border-top: 1px solid var(--pa-line); }
+/*
+ * 2026-11-07 用户要求去掉「期刊日记」上方那条横线。
+ * 去掉之后底部区靠留白和 hover 底色区分，不再用一条贯穿的分隔线切一刀——
+ * 侧栏整体是连续的名册，底部三个入口本来也属于同一块。
+ */
+.pa-sidebar__bottom { flex: none; padding: 8px 12px 12px; }
+
+/* ---------- 三格一排：左护法 / 主位 / 右护法 ---------- */
+/*
+ * 网格三列：两侧等分（1fr），中间主位按内容撑开（auto）。
+ * 侧栏 260px 时两格各约 80px，足够「40px 头像 + 一行 10.5px 名字」。
+ */
+.pa-hero {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 0 6px;
+}
+.pa-hero-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 4px 6px;
+  border-radius: 12px;
+  cursor: pointer;
+  user-select: none;
+  /*
+   * 拖动期间必须 1:1 跟手：这里只过渡背景与透明度，**绝不过渡 transform**——
+   * 给位移加缓动，卡片就会追着手指跑，手感立刻从「拿着」变成「拽着」。
+   */
+  transition: background 130ms ease, opacity 130ms ease;
+  touch-action: none;
+}
+.pa-hero-slot:hover { background: rgba(255, 255, 255, 0.04); }
+.pa-hero-slot[data-empty='true'] { opacity: 0.7; }
+.pa-hero-slot[data-empty='true']:hover { opacity: 1; }
+.pa-hero-slot[data-selected='true'] { background: transparent; }
+.pa-hero-slot[data-dragging='true'] {
+  z-index: 3;
+  cursor: grabbing;
+  background: var(--pa-card-2);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.38);
+  /* 抬起感：1.04 是视觉提示，位移量完全由手指决定，两者互不干扰。 */
+  scale: 1.04;
+  opacity: 0.96;
+}
+.pa-hero-slot__name {
+  font-size: calc(10.5px + var(--pa-font-delta));
+  font-weight: 550;
+  color: var(--pa-text-2);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pa-hero-slot[data-empty='true'] .pa-hero-slot__name { color: var(--pa-text-3); }
+/* 主位在中间列：收窄内边距，让三格的视觉重心齐平。 */
+.pa-hero > .pa-mainbot { padding: 8px 6px 10px; min-width: 78px; }
 
 /* ---------- 主 bot ---------- */
 .pa-mainbot {
@@ -399,41 +516,12 @@ body[data-pa-sidebar-resizing='true'] {
   font-weight: 600;
   color: var(--pa-text);
   letter-spacing: 0.01em;
-  /* 右下角是「+ 新建」按钮，名字给按钮让出 30px，避免长名字压到按钮上。 */
-  max-width: calc(100% - 30px);
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/*
- * 主 Bot 卡片右下角的「+」：新建 Bot / 群聊的唯一入口（2026-11-02 从顶部挪来）。
- *
- * 常驻可见而不是 hover 才出现：新建是低频但「找得到」比「不碍眼」重要，
- * 主 Bot 卡片又只有这一处入口，藏起来会让用户以为功能没了。
- */
-.pa-mainbot__add {
-  position: absolute;
-  right: 8px;
-  bottom: 8px;
-  width: 28px;
-  height: 28px;
-  z-index: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: var(--pa-card-2);
-  border: 1px solid var(--pa-line-2);
-  color: var(--pa-text-2);
-  transition: background 120ms ease, color 120ms ease, border-color 120ms ease, transform 120ms ease;
-}
-.pa-mainbot__add:hover { background: var(--pa-card-3); color: var(--pa-text); border-color: transparent; }
-.pa-mainbot__add:active { transform: scale(0.94); }
-.pa-mainbot__add[data-open='true'] {
-  background: var(--pa-accent);
-  border-color: transparent;
-  color: #1a1206;
-}
+/* 主 Bot 卡片右下角的「+」已删除（2026-11-07 迁到侧栏底部「新建」行）。 */
 .pa-mainbot__meta { font-size: calc(10.5px + var(--pa-font-delta)); color: var(--pa-text-3); margin-top: -4px; }
 
 /* ---------- 头像 ---------- */
@@ -450,9 +538,12 @@ body[data-pa-sidebar-resizing='true'] {
 /*
  * 三态透明 WebP 动图（2026-11-05，Bot 右栏资料区）。
  *
- * 动图是透明底，不能再套圆形裁切 / 矩形底色：那会在人物周围露出一个圆角方块
- * （与 Work 卡头同一个坑）。用 contain 保住完整构图，投影改用 filter: drop-shadow
- * ——它按像素 alpha 描边，只给人物轮廓一层柔光，透明区仍透出侧栏背景。
+ * 2026-11-07 定稿：按主题分叉（用户第三轮指令：「浅色主题不需要包裹圆形」）。
+ *   · **浅色**：透明底直出，不套白底 / 不裁圆 —— 浅底上人物对比本来够，
+ *     只留一层按 alpha 描边的柔光投影（drop-shadow）；
+ *   · **深色**：圆形白底包裹 —— 白底固定白色，外缘一层很淡的灰白暗角收边，
+ *     去掉描边与重投影（纯白硬边 + 描边会被看成「贴了一面小镜子」）。
+ * 与 Work 卡头（kr-chat/styles.ts 的 .kr-plain-head__avatar）同一口径。
  */
 .pa-avatar--motion {
   display: inline-flex;
@@ -471,17 +562,17 @@ body[data-pa-sidebar-resizing='true'] {
 .pa-root[data-pa-theme='light'] .pa-avatar__motion {
   filter: drop-shadow(0 4px 10px rgba(60, 110, 170, .22));
 }
-/*
- * 深色主题：透明底动图直接贴在深色侧栏上时，深蓝头发 / 藏青裙装会融进底色，
- * 看起来像人物被调成了半透明（2026-11-05 用户反馈）。给一个到 72% 就全透明的
- * 冷色径向光托底 + 轻微提亮，既保住透明背景，也让人物从深底里立起来。
- */
+/* 深色：圆形白底包裹（详见上面的说明）。 */
 .pa-root[data-pa-theme='dark'] .pa-avatar--motion {
-  background: radial-gradient(circle at 50% 56%, rgba(206, 230, 255, .20) 0%, rgba(206, 230, 255, .07) 48%, rgba(206, 230, 255, 0) 72%);
+  background: radial-gradient(circle closest-side at 50% 50%, #ffffff 0%, #ffffff 70%, #f6f8fc 86%, #eef2f9 94%, #e3e9f2 100%);
   border-radius: 50%;
+  padding: 8%;
+  box-sizing: border-box;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .12);
 }
 .pa-root[data-pa-theme='dark'] .pa-avatar__motion {
-  filter: brightness(1.12) saturate(1.06) contrast(1.03) drop-shadow(0 4px 12px rgba(0, 0, 0, .5));
+  border-radius: 50%;
+  filter: none;
 }
 
 /* ---------- 头像选择器（新建 Bot / 群聊、设置卡共用） ---------- */

@@ -16,15 +16,90 @@ export const PERSONAL_CHAT_CSS = `
   --pa-chat-glass-2: rgba(255, 255, 255, 0.055);
   --pa-chat-sender: #a7abb2;
   /*
+   * 对话卡外观（2026-11-07，按用户给的参考图）。
+   *
+   * 中列从「铺满版面的一条分栏」改成**一张浮在画布上的四角圆润卡片**：
+   *   · --pa-chat-bg       卡片外面那层画布（比卡面暗一档，卡片才浮得起来）
+   *   · --pa-chat-surface  卡面底色（深色沿用 --pa-main，气泡色差不被破坏）
+   *   · --pa-chat-gap      卡片四周留白
+   *   · --pa-chat-float-*  会话头 / 输入框这两块「悬浮层」的玻璃底、发丝边、投影
+   * 亮色主题在下面整组覆盖：只换值，不换结构。
+   */
+  /*
+   * 卡片四角外围的画布 = **左侧栏底色**（用户 2026-11-07 要求「外围背景与左侧
+   * 侧边栏一致」）：中列不再自成一块色面，左右侧栏与卡片外侧连成同一个底，
+   * 只有卡片浮在上面。右栏用的是同一个 --pa-sidebar 变量，因此三处天然同色。
+   */
+  --pa-chat-bg: var(--pa-sidebar);
+  /*
+   * 深色下卡面从 --pa-main 提亮 10%：画布与侧栏同色后，卡面若还用原值两者只差
+   * 1 级灰阶，圆角轮廓就看不出来了；提亮后仍低于 bot 气泡（--pa-bubble-bot-bg），
+   * 气泡的色差层次不被破坏。亮色主题用纯白，见下面覆盖。
+   */
+  --pa-chat-surface: color-mix(in srgb, var(--pa-main) 90%, #ffffff 10%);
+  --pa-chat-radius: 22px;
+  --pa-chat-gap: 10px;
+  /* 悬浮会话头的高度：玻璃条与滚动区顶部留白共用，改一处两边同时跟着走。 */
+  --pa-chat-head-h: 46px;
+  /*
+   * 对话卡**最上沿**正中悬浮的 Bot 三态动图（2026-11-07，从右栏资料区迁来；
+   * 同日再按用户「把中间这个动图移动到最上面」把它顶到卡片最上层）。
+   *
+   *   · --pa-chat-mascot-size   动图边长：与右栏资料区原来那枚 92px 同尺寸；
+   *   · --pa-chat-scroll-breath 动图下沿到首条消息的呼吸（宽屏 22px，窄屏按媒体
+   *                             查询回收成 18 / 14）。
+   * 动图顶 = 卡片内沿顶端（top: 0）：与会话头（8px 起、46px 高）同一水平线，
+   * 从顶部栏中央探出来；首条消息的顶部让位 = 动图边长 + 呼吸，全部从这两个
+   * 变量推导（见 .pa-chat__mascot / .pa-chat__scroll-inner），不写死像素魔数。
+   */
+  --pa-chat-mascot-size: 92px;
+  --pa-chat-scroll-breath: 22px;
+  /*
+   * 会话头按钮**没有底色变量**（2026-11-07 晚：用户要求「把这几个按钮去掉，变成
+   * 实心的 svg」）。原先深浅各一套的 --pa-chat-float-btn-bg 随按钮框一起删掉了，
+   * 现在只有 hover / 按下时的通用 --pa-chat-hover / --pa-chat-hover-strong。
+   */
+  --pa-chat-card-shadow: 0 16px 40px rgba(0, 0, 0, 0.38);
+  --pa-chat-input-shadow: 0 8px 22px rgba(0, 0, 0, 0.34);
+  /*
+   * 提醒条底色（2026-11-07 用户要求）：亮色白底、深色黑底，不再用灰色的 --pa-card-2。
+   * 黑底在深色卡面（--pa-chat-surface ≈ #1a1a1b）上靠更大的色差浮出来，
+   * 白底在亮色卡面（纯白）上只能靠描边 + 阴影区分，所以阴影也一并换成更强的一档。
+   */
+  --pa-remind-surface: #000000;
+  --pa-remind-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  /* 纯黑底 + 16% 白描边：深色卡面上靠这一圈发丝线把边界勾出来。 */
+  --pa-remind-border: rgba(255, 255, 255, 0.16);
+
+  /*
    * 气泡配色（对齐参考图：bot 中性底、用户品牌蓝、四角同半径的大圆角）。
+   *
    * 深色下 bot 气泡比画布（--pa-main #181819）亮一档，靠色差浮出来而不是描边；
-   * 用户气泡是品牌蓝 + 白字。亮色主题在下面整组换成浅灰 / 浅蓝 + 深字。
+   * 用户气泡是品牌蓝 + 白字。深色底子上色差本身就够，所以**描边变量在深色是
+   * transparent**——结构上留着，值上不显形，深色观感与以前完全一致。
+   *
+   * 亮色主题（2026-11-07 修版）：浅色下白卡面 + 中性底气泡只差 1 级灰阶，气泡
+   * 会糊成一块「脏灰面板」，和用户的浅蓝气泡并排时一个太灰、一个太艳，这就是
+   * 「浅色气泡不协调」的根因。做法是：
+   *   · bot 底改成带一丝冷蓝的雾灰（与用户气泡同色相，sat 远低）；
+   *   · 用户蓝降低饱和度，从「亮蓝」退成「雾蓝」；
+   *   · 两只气泡都补一道 1px 发丝边——浅色下形状靠描边定，而不是靠把底色压深；
+   *   · 文字色统一到 --pa-text，不再让气泡 fg 成为第二套黑。
+   * 描边规则只写在浅色选择器上（见气泡段）：深色的 border 仍是 0，
+   * 不会出现 1px 透明边框占位，深色尺寸与观感分毫不动。
    */
   --pa-bubble-radius: 20px;
   --pa-bubble-bot-bg: #1f1f20;
   --pa-bubble-bot-fg: #ffffff;
   --pa-bubble-user-bg: #0074e8;
   --pa-bubble-user-fg: #ffffff;
+  /*
+   * 正文链接色（轻量 Markdown 的 [文字](url) 与裸 URL）。
+   * 深色下用品牌蓝的亮化档：--pa-blue #0a84ff 直接当文字色在 #1f1f20 上只有
+   * 3.2:1，14px 正文读起来发虚；提亮到 #6cb0ff 后约 6.3:1，且仍与品牌蓝同族。
+   */
+  --pa-link: #6cb0ff;
+  --pa-link-hover: #a5ccff;
 }
 .pa-root[data-pa-theme='light'] {
   --pa-chat-hover: rgba(15, 17, 21, 0.05);
@@ -32,38 +107,302 @@ export const PERSONAL_CHAT_CSS = `
   --pa-chat-glass: rgba(15, 17, 21, 0.035);
   --pa-chat-glass-2: rgba(15, 17, 21, 0.06);
   --pa-chat-sender: #5d6269;
-  --pa-bubble-bot-bg: #e9eaeb;
-  --pa-bubble-bot-fg: #111112;
-  --pa-bubble-user-bg: #b8dbfe;
-  --pa-bubble-user-fg: #111112;
+  /* 亮色：外围画布与左侧栏同色（--pa-sidebar，跟随官方侧栏底色），卡片是纯白。 */
+  --pa-chat-bg: var(--pa-sidebar);
+  --pa-chat-surface: #ffffff;
+  /* 卡片投影刻意压轻：亮色底本身就是浅灰，阴影一重就在卡片边缘压出一道暗带。 */
+  --pa-chat-card-shadow: 0 10px 30px rgba(15, 17, 21, 0.055);
+  --pa-chat-input-shadow: 0 8px 22px rgba(15, 17, 21, 0.08);
+  /* 提醒条：白底 + 比卡片强一档的阴影（白底浮在纯白卡面上，只靠阴影和描边撑出边界）。 */
+  --pa-remind-surface: #ffffff;
+  --pa-remind-shadow: 0 8px 24px rgba(15, 17, 21, 0.12);
+  --pa-remind-border: rgba(15, 17, 21, 0.12);
+  /*
+   * 浅色气泡（2026-11-07 修版，取值见上面深色块的长注释）。
+   * 旧的 #e9eaeb / #b8dbfe 组合的问题：bot 是中性冷灰、user 是饱和度 96% 的亮蓝，
+   * 同一片白卡面上「一脏一艳」；现在两只都收到低饱和的同一色相里：
+   *   · bot #EEF1F5：白卡面上的雾灰（h≈214, s≈23%），比旧值轻一档，内容当主体；
+   *   · user #CFE2FA：同色相的雾蓝（h≈214, s≈81%），比旧值低饱和，不抢眼。
+   * 描边只在浅色出现（深色是 transparent），让气泡在浅底上有一道可读的边界。
+   */
+  --pa-bubble-bot-bg: #eef1f5;
+  --pa-bubble-bot-fg: #14161a;
+  --pa-bubble-bot-border: rgba(15, 17, 21, 0.06);
+  --pa-bubble-user-bg: #cfe2fa;
+  --pa-bubble-user-fg: #14161a;
+  --pa-bubble-user-border: rgba(20, 60, 110, 0.05);
+  /* 浅色链接压深到 #0a63c9（白底约 5.9:1、雾灰气泡上约 5.5:1），不借用亮蓝。 */
+  --pa-link: #0a63c9;
+  --pa-link-hover: #084a99;
 }
 
-/* ---------- 聊天主列 ---------- */
+/* ---------- 聊天主列 ----------
+ * 中列是一块「画布」：自己不着色成对话区，而是垫在对话卡下面。
+ * 与左右侧栏之间留 --pa-chat-gap 的缝，卡片四角才看得出圆。
+ */
 .pa-main-col {
   flex: 1;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--pa-main);
+  padding: var(--pa-chat-gap);
+  background: var(--pa-chat-bg);
   position: relative;
 }
+/*
+ * 对话列 = 一张四角圆润的卡片（用户 2026-11-07 给的参考图）。
+ *
+ * 卡片自带圆角 / 发丝描边 / 大投影，overflow:hidden 让消息流、浮层都收进圆角内；
+ * 会话头**不在这张卡片里**（见上方 .pa-chat__header 的说明），所以不会被裁。
+ */
 .pa-chat {
   flex: 1;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--pa-main);
+  background: var(--pa-chat-surface);
   color: var(--pa-text);
   /*
-   * 对话列宽度：默认 100%（铺满主列），用户从两侧拖拽后收窄并居中。
-   * 只读 --pa-chat-w，不碰左右侧栏——侧栏折叠 / 拖拽不会改变这里。
-   * 高度交给 flex 撑满（会话头移出后这里只剩消息流 + 输入区，不能再写 height:100%）。
+   * 不画 1px 描边（用户 2026-11-07：「界面边边的这个阴影太重了」）：
+   * 在浅灰画布上，白卡片 + 1px 深色描边会在边缘压出一条锐利的暗线；
+   * 轮廓交给圆角与轻投影，卡片仍是浮起的，但边不再是「一条黑边」。
    */
-  width: min(100%, var(--pa-chat-w, 100%));
-  align-self: center;
+  border: 0;
+  border-radius: var(--pa-chat-radius);
+  box-shadow: var(--pa-chat-card-shadow);
+  overflow: hidden;
+  /*
+   * 对话列**永远铺满卡片**：两侧拖拽收窄的是气泡列（见 .pa-chat__scroll 的
+   * --pa-chat-bubble-gutter / --pa-chat-w），不再改卡片自身的宽度 ——
+   * 用户 2026-11-07 明确要求「拖拽不要影响上方布局、也不影响对话整体外观，
+   * 只是收缩对话气泡」。卡片宽度一变，圆角、投影、会话头都会跟着动。
+   */
+  width: 100%;
+  align-self: stretch;
   position: relative;
+  /*
+   * 卡片是浮起的独立面：用 isolation 把内部浮层（输入区 @ 菜单、待处理条）的
+   * 合成层关在卡片里，不让它们跑到画布上与侧栏抢层级。
+   */
+  isolation: isolate;
+}
+
+/*
+ * 对话卡**最上沿**正中悬浮的 Bot 动图（2026-11-07 用户要求：「把右侧侧边栏的动图
+ * 也移动到对话，放在对话的正上方中间悬浮」；同日再要求「把中间这个动图移动到最
+ * 上面」——原来是会话头（46px 条）下沿再让 8px 间隙，现在直接顶到卡片内沿顶端）。
+ *
+ * 悬浮层语义，与悬浮会话头同一套规矩：
+ *  · 绝对定位、不占布局高度 —— 卡片 / 会话头 / 输入框的尺寸一概不变；
+ *  · 容器完全透明：没有底色、描边、投影、毛玻璃（动图本身是透明 WebP；深色主题
+ *    下人物外圈那层径向光来自 base.css 的 .pa-avatar--motion，与右栏原样一致，
+ *    不在这里再加任何包裹观感）；
+ *  · pointer-events: none —— 绝不拦截对话流：滚动、选中、气泡里的链接照常；
+ *  · 位置：top: 0（卡片内沿顶端）—— 与会话头同一水平线、比 46px 条再高出 8px，
+ *    从顶部栏中央探出来；left: 50% + translateX(-50%) 与卡片同轴；顶部栏左右
+ *    两端的「头像 + 名称」与按钮组不会被它压住（z-index 12 < 会话头 20）；
+ *  · 首条消息的让位在 .pa-chat__scroll-inner 的 padding-top 里按变量推导；滚动
+ *    经过时消息从动图后面穿过 —— 这正是悬浮层该有的语义。
+ */
+.pa-chat__mascot {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: var(--pa-chat-mascot-size);
+  height: var(--pa-chat-mascot-size);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /*
+   * 提醒态要让位到卡片左侧：位移值由 ChatPanel 按卡片宽度写进 --pa-remind-shift
+   * （0.3 × 卡宽），这里只用 transform 平移 —— 不改 left / width，位移全程在
+   * 合成层上，92px 的动图不会发飘。
+   * 曲线是 340ms 的减速弹簧近似（cubic-bezier 不能过冲，末端收得干净）。
+   */
+  transition: transform 340ms cubic-bezier(0.32, 0.72, 0, 1);
+  will-change: transform;
+  /* 层级：消息流之上、拖拽手柄（14）/ 回到最新（15）/ 会话头（20）之下。 */
+  z-index: 12;
+  background: none;
+  border: 0;
+  box-shadow: none;
+  pointer-events: none;
+  user-select: none;
+}
+/*
+ * 动图填满占位：尺寸由 --pa-chat-mascot-size 统管（BotAvatar 内联的 size 只作
+ * 没有 CSS 时的回退值），窄屏想整体缩一档时只改这个变量即可。
+ */
+.pa-chat__mascot > .pa-avatar {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/*
+ * ---------- 提醒条：动图让位 + 一条极简倒计时 ----------
+ *
+ * 形态（2026-11-07 用户推翻第一版卡片后的要求）：「需要简洁，有倒计时，与立即执行
+ * 就行了」。所以这里不是面板，而是一条 56px 高的胶囊：
+ *   状态点 → 倒计时（例行任务秒级跳动 / 档案显示「还剩 N 天」）→ 任务名 → 立即执行 → ×
+ * 一条提醒只回答两件事：还有多久、现在动不动手。
+ *
+ * 布局：「动图 + 20px + 胶囊」作为一组水平居中；--pa-remind-w / --pa-remind-shift
+ * 都由 ChatPanel 按卡片真实宽度算好，CSS 只读。会话头（左侧头像/名称、右侧按钮组）
+ * 全程不动——胶囊只占中间一段，与两端水平方向不重叠。
+ *
+ * 动效：胶囊 clip-path 从左向右揭示 300ms；内部 5 个元素按 --i 30ms 错峰；
+ * 退场收回 200ms；动图位移 340ms 弹簧近似（回位也是同一条曲线）。
+ */
+.pa-chat__remind {
+  position: absolute;
+  /* 与 92px 动图垂直居中：56px 胶囊的上沿落在 18px。 */
+  top: calc((var(--pa-chat-mascot-size) - 56px) / 2);
+  /*
+   * 整组居中：组合宽 = 92 + 20 + 胶囊宽；
+   * 胶囊左边界 = 50% + (组合宽 - 胶囊宽 - 92 - 20) / 2 = 50% + (112 - 胶囊宽) / 2。
+   */
+  left: calc(50% + (112px - var(--pa-remind-w, 460px)) / 2);
+  width: var(--pa-remind-w, 460px);
+  height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px 0 14px;
+  border-radius: 999px;
+  /* 亮色白底 / 深色黑底（见 --pa-remind-surface 的两套值）。 */
+  background: var(--pa-remind-surface, #ffffff);
+  border: 1px solid var(--pa-remind-border, var(--pa-line-2));
+  box-shadow: var(--pa-remind-shadow, var(--pa-chat-card-shadow));
+  color: var(--pa-text);
+  /* 层级：在动图（12）之上、会话头（20）之下。 */
+  z-index: 13;
+  pointer-events: auto;
+  /* 收起态 = 从左侧整条被裁掉；展开态见 [data-shown]。 */
+  clip-path: inset(0 100% 0 0 round 999px);
+  transition: clip-path 300ms cubic-bezier(0.40, 0, 0.20, 1);
+  will-change: clip-path;
+}
+.pa-chat__remind[data-shown='true'] { clip-path: inset(0 0 0 0 round 999px); }
+.pa-chat__remind[data-closing='true'] {
+  clip-path: inset(0 100% 0 0 round 999px);
+  transition: clip-path 200ms cubic-bezier(0.40, 0, 1, 1);
+}
+/* 内容错峰：--i 由组件按序写入；退场一律 0 延迟立刻淡出。 */
+.pa-chat__remind > * {
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 150ms ease, transform 200ms cubic-bezier(0.40, 0, 0.20, 1);
+  transition-delay: calc(var(--i, 0) * 30ms + 60ms);
+}
+.pa-chat__remind[data-shown='true'] > * { opacity: 1; transform: none; }
+.pa-chat__remind[data-closing='true'] > * {
+  opacity: 0;
+  transform: translateY(3px);
+  transition: opacity 110ms ease, transform 110ms ease;
+  transition-delay: 0ms;
+}
+/* 状态点：例行任务橙、档案蓝、已过期红。 */
+.pa-chat__remind__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--pa-accent); flex: none; }
+.pa-chat__remind[data-tone='info'] .pa-chat__remind__dot { background: #0074e8; }
+.pa-chat__remind[data-tone='danger'] .pa-chat__remind__dot { background: #ff453a; }
+/* 倒计时：等宽数字，秒级跳动时宽度不抖。 */
+.pa-chat__remind__count {
+  flex: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, "Cascadia Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: calc(15px + var(--pa-font-delta));
+  font-weight: 600;
+  color: var(--pa-accent);
+  letter-spacing: 0.01em;
+}
+.pa-chat__remind__count[data-live='false'] {
+  font-size: calc(12.5px + var(--pa-font-delta));
+  font-weight: 500;
+  color: var(--pa-text-2);
+}
+/* 倒计时前缀「还剩」：和后面的开始时间区分开，两个数字不混。 */
+.pa-chat__remind__pre {
+  flex: none;
+  font-size: calc(11.5px + var(--pa-font-delta));
+  color: var(--pa-text-3);
+}
+/* 到点时间：与倒计时并排，弱化一档（用户反馈「什么时间的没有显示，只是倒计时了」）。 */
+.pa-chat__remind__at {
+  flex: none;
+  font-size: calc(11.5px + var(--pa-font-delta));
+  color: var(--pa-text-3);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+.pa-chat__remind__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: calc(13px + var(--pa-font-delta));
+  color: var(--pa-text);
+}
+.pa-chat__remind__act {
+  flex: none;
+  height: 36px;
+  padding: 0 16px;
+  border-radius: 999px;
+  background: var(--pa-accent);
+  color: #ffffff;
+  font-size: calc(12.5px + var(--pa-font-delta));
+  font-weight: 600;
+  transition: filter 130ms ease, transform 100ms ease;
+}
+.pa-chat__remind__act:hover { filter: brightness(1.06); }
+.pa-chat__remind__act:active { transform: scale(0.97); }
+.pa-chat__remind__close {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--pa-text-3);
+  transition: background 130ms ease, color 130ms ease;
+}
+.pa-chat__remind__close:hover { background: var(--pa-chat-glass-2); color: var(--pa-text); }
+/*
+ * 让位：动图往卡片左侧走。--pa-remind-shift 由 ChatPanel 写成正的像素值
+ * （(胶囊宽 + 20) / 2），这里取负号平移。
+ */
+.pa-chat[data-reminding='true'] .pa-chat__mascot {
+  transform: translateX(calc(-50% - var(--pa-remind-shift, 0px)));
+}
+/*
+ * 窄屏（卡片摆不下「角色 + 胶囊」横排）：胶囊沉到会话头下面、左右各 14px 接近
+ * 全宽并改回 18px 圆角，动图回中线不再让位。这是布局降级，不是动效降级。
+ */
+@media (max-width: 900px) {
+  .pa-chat__remind {
+    top: 58px;
+    left: 14px;
+    right: 14px;
+    width: auto;
+    height: auto;
+    min-height: 56px;
+    padding: 8px 10px 8px 14px;
+    border-radius: 18px;
+    clip-path: inset(0 100% 0 0 round 18px);
+  }
+  .pa-chat__remind[data-shown='true'] { clip-path: inset(0 0 0 0 round 18px); }
+  .pa-chat__remind[data-closing='true'] { clip-path: inset(0 100% 0 0 round 18px); }
+  .pa-chat[data-reminding='true'] .pa-chat__mascot { transform: translateX(-50%); }
+}
+/* 系统开了「减少动态效果」：去掉位移与揭示，只留短淡入淡出。 */
+@media (prefers-reduced-motion: reduce) {
+  .pa-chat__mascot { transition: none; }
+  .pa-chat__remind { clip-path: none; transition: opacity 120ms ease; }
+  .pa-chat__remind > * { transition: none; }
 }
 
 /*
@@ -98,43 +437,76 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
   background: var(--pa-line-2);
 }
 @media (max-width: 900px) {
-  /* 窄屏没有拖拽手柄，直接铺满，避免宽屏留下的自定义宽度在小窗里挤出空白。 */
-  .pa-chat { width: 100%; }
-  /* 会话头内容同步铺满：不跟 --pa-chat-w 走，否则窄屏下头像与消息列对不齐。 */
-  .pa-chat__head-inner { width: 100%; }
+  /* 窄屏没有拖拽手柄，气泡列固定铺满（卡片本来就铺满，这里只需要禁掉手柄）。 */
   .pa-chat__resizer { display: none; }
+  /* 窄屏留白收一档：卡片仍然圆润，但不挤掉聊天宽度（main-col 的 padding 读这个变量）。 */
+  .pa-root { --pa-chat-gap: 6px; }
 }
 
-/* ---------- 会话头 ----------
- * 高度与 Work 模式的官方会话标题栏（.wSkVaW_header，44px）一致：两个模式
- * 切换时消息流的第一行不会上下跳。左内边距也对齐官方那 20px。
+/* ---------- 会话头：悬浮的裸内容（无包裹层） ----------
+ * 2026-11-07 一版曾把会话头做成一条玻璃条；用户看图后要求「这一段包裹去掉」，
+ * 二版去掉了玻璃底，三版再按用户「不应该有背景、不应该覆盖对话流」删掉了最后的
+ * 顶部渐隐遮罩 —— 现在的实现只剩内容本身：
+ *  · 会话头**仍然是悬浮层**——绝对定位、不占布局高度，消息流从它下面滚过去，
+ *    滚动区顶部按 --pa-chat-head-h（加上顶部悬浮动图）让位（见 .pa-chat__scroll-inner）；
+ *  · **完全没有背景层**：无底色、无描边、无投影、无毛玻璃，::before 的顶部渐隐带
+ *    也已一并删除；头像 / 名称 / 按钮直接浮在对话内容之上，看到的是卡片本身的卡面；
+ *  · 整条 pointer-events: none —— 它是浮层，不许拦截对话流（滚动 / 选中 / 气泡链接
+ *    照常），只有真正需要交互的按钮 / 自动播报 / 「更多」菜单单独恢复 auto（见下一条）；
+ *  · 它仍挂在 .pa-main-col 下、.pa-chat 外面（卡片的 overflow:hidden 会裁掉贴边的
+ *    内容，放外面才贴得住卡角）。
  *
- * 这一条横在对话列**外面**（.pa-main-col 的直接子级）：下边框必须从左栏一路
- * 顶到右栏。以前它住在 .pa-chat 里，对话列一拖窄（--pa-chat-w < 100%）边框就
- * 跟着缩，两端露出缺口——用户明确要求「永远占满，不要两端与侧边栏有间隙」。
- * 头部内容由 .pa-chat__head-inner 按对话列宽度居中，所以对齐方式没有变化。 */
+ * 定位 left:50% + translateX(-50%) 与卡片同轴，宽度**恒为卡片宽 - 24px**：
+ * 两侧拖拽只收窄气泡列，会话头的布局与外观不受影响（用户 2026-11-07 要求）。
+ * 高度 46px 与 Work 官方会话标题栏（44px）只差 2px，切换模式时消息流不会明显跳。 */
 .pa-chat__header {
-  flex: none;
-  height: 44px;
+  position: absolute;
+  top: calc(var(--pa-chat-gap) + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: calc(100% - var(--pa-chat-gap) * 2 - 24px);
+  height: var(--pa-chat-head-h);
   display: flex;
-  align-items: stretch;
-  border-bottom: 1px solid var(--pa-line);
-  background: var(--pa-main);
-  position: relative;
-  z-index: 12;
+  align-items: center;
+  z-index: 20;
+  /*
+   * 三版（用户 2026-11-07 看图后要求「不应该有背景、不应该覆盖对话流」）：
+   * 彻底没有背景层 —— 没有底色、描边、投影、毛玻璃，也**没有顶部渐隐遮罩**。
+   * 头像 / 名称 / 按钮只是浮在对话内容之上；按钮各自保留浮起的小色块。
+   *
+   * 整条设 pointer-events: none —— 它是浮层，不许拦截对话流：消息仍可正常滚动、
+   * 可选中、气泡里的链接仍可点；只有真正需要交互的元素（按钮 / 自动播报 /
+   * 「更多」菜单）单独恢复 auto，见下面几条规则。
+   */
+  background: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  pointer-events: none;
 }
-/* 内容容器：宽度跟对话列走，水平居中；header 自身永远铺满主列。
- * flex 用 0 1 auto（不是 1）——写成 flex:1 会被 flex-grow 撑满，width 形同虚设，
- * 对话列拖窄后头像和按钮仍贴在主列两端，跟下面的消息流对不齐。 */
+/*
+ * 提醒态：会话头**不动**（2026-11-07 用户看效果后要求「左侧的这个别动」）。
+ *
+ * 提醒面板只占卡片 20%~52% 那一段（顶栏左侧的头像/名称在 0~12%、右侧按钮在
+ * 80% 之后），三者水平方向本来就不重叠，所以会话头完全不需要让位：
+ * 左边「头像 + Seeker 主助手」原样留着，右边按钮照旧可点，面板从它们中间长出来。
+ * 面板 z-index 13 < 会话头 20，即使窄屏下擦到边，可点的按钮也永远在上面。
+ */
+/* 浮层里真正可点的元素：只让它们接收指针事件，其余区域一律穿透到对话流。 */
+.pa-chat__head-actions,
+.pa-chat__head-btn,
+.pa-autospeak,
+.pa-chat__more { pointer-events: auto; }
+/* 内容容器：宽度跟悬浮条走（不再跟 --pa-chat-w 单独算），左右各内收一点。 */
 .pa-chat__head-inner {
-  flex: 0 1 auto;
-  width: min(100%, var(--pa-chat-w, 100%));
+  flex: 1 1 auto;
+  width: 100%;
   min-width: 0;
-  margin: 0 auto;
+  margin: 0;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 28px 0 20px;
+  padding: 0 9px 0 12px;
 }
 .pa-chat__head-avatar { flex: none; display: flex; align-items: center; }
 .pa-chat__stack {
@@ -181,20 +553,53 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
   text-overflow: ellipsis;
 }
 .pa-chat__head-actions { margin-left: auto; display: flex; align-items: center; gap: 4px; flex: none; }
+/*
+ * 会话头动作：**没有「按钮」，只剩实心图标**（用户 2026-11-07 晚看图后要求
+ * 「把这几个按钮去掉，变成实心的 svg」）。
+ *
+ * 历史三版：透明圆形 → 二版各自浮起的小圆角块（底色 + 投影 + 主题同步）→
+ * 现在这一版把底色 / 投影 / 圆角块一起删掉，只在悬停与按下时给回应。图标本身
+ * 换成 icons.tsx 的 *Solid 一组（实心块）——没有底色兜着，细描边图标在 19px
+ * 下会发虚，实心形状才立得住。
+ *
+ * 手感（harmonyos-motion）：
+ *  · 静止无框，hover 只提亮图标色 + 一层极淡的 hover 底（没有它光标划过毫无回应，
+ *    「点了没反馈」和「什么都没发生」是同一件坏事）；
+ *  · 按下立刻缩到 0.9，抬指回弹，不排队、不带尾程——反馈必须在 100ms 内到达；
+ *  · 热区仍是 32px：视觉上没有框，手指不该跟着一个看不见的框一起变小。
+ */
 .pa-chat__head-btn {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: var(--pa-text-2);
-  background: transparent;
-  transition: background 130ms ease, color 130ms ease, transform 100ms ease;
+  background: none;
+  box-shadow: none;
+  transition:
+    color 140ms cubic-bezier(0.22, 1, 0.36, 1),
+    background 140ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 120ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
 }
-.pa-chat__head-btn:hover { background: var(--pa-chat-hover); color: var(--pa-text); }
-.pa-chat__head-btn:active { transform: scale(0.94); }
-.pa-chat__head-btn[data-on='true'] { color: var(--pa-accent); }
+.pa-chat__head-btn:hover {
+  color: var(--pa-text);
+  background: var(--pa-chat-hover);
+}
+.pa-chat__head-btn:active {
+  transform: scale(0.9);
+  background: var(--pa-chat-hover-strong);
+}
+/* 开启态只靠图标色（品牌色）说话：没有底色，就不再用一层色块重复同一个状态。 */
+.pa-chat__head-btn[data-on='true'] {
+  color: var(--pa-accent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .pa-chat__head-btn { transition: color 0ms, background 0ms; }
+  .pa-chat__head-btn:active { transform: none; }
+}
 .pa-chat__more { position: relative; display: flex; }
 .pa-chat__menu {
   position: absolute;
@@ -233,8 +638,8 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
 .pa-chat__menu button.pa-chat__menu-danger:hover { background: rgba(255, 69, 58, 0.12); color: var(--pa-red); }
 
 /* ---------- 会话头：自动播报开关 + 悬停音量条 ----------
- * 开关与通话 / 截图 / 更多共用 .pa-chat__head-btn（30px 圆形、hover 变色），
- * 打开态靠 data-on 用品牌色——四个按钮里只有它和通话按钮有「状态」。
+ * 开关与通话 / 截图 / 右栏 / 更多共用 .pa-chat__head-btn（32px 透明热区、裸实心图标），
+ * 打开态靠 data-on 用品牌色——四个动作里只有它和通话按钮有「状态」。
  * 音量浮层挂在开关自己身上（不是「更多」菜单）：调音量是即时动作，点两层才够到
  * 就失去意义。交互细节见 AutoSpeakButton.tsx 的文件头。 */
 .pa-autospeak { position: relative; display: flex; align-items: center; }
@@ -472,7 +877,17 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 20px 30px 26px;
+  /*
+   * 左右留白留在滚动容器上（不随内容滚动）；**上下留白放到 .pa-chat__scroll-inner**
+   * ——那是内容层，滚动时会一起滚走。这正是「会话头悬浮在内容之上」的关键：
+   * 消息往上滚会钻到会话头下面并淡出，而不是永远停在它下沿。
+   *
+   * 这里也是**气泡列宽度**的唯一开关：两侧拖拽写 --pa-chat-w（目标内容宽，
+   * 单位 px）后，左右边距取 max(基线, (100% - 目标宽) / 2) —— 收窄的只有气息
+   * 列里的气泡，卡片、会话头、输入框的整体外观一律不动。
+   */
+  --pa-chat-bubble-gutter: 30px;
+  padding: 0 max(var(--pa-chat-bubble-gutter), calc((100% - var(--pa-chat-w, 100%)) / 2));
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -484,6 +899,34 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
    */
   scroll-behavior: smooth;
   overscroll-behavior: contain;
+  /*
+   * 顶部渐隐带（2026-11-07 晚，用户反馈「消息滚上来会被会话头覆盖」）。
+   *
+   * 会话头是**无底色浮层**（用户此前明确要求「不应该有背景」），它的头像、名称、
+   * 角色标签与右侧那排动作直接压在消息流上——消息一往上滚，文字就被这些元素
+   * 「盖住」：头像吃掉气泡左沿，名字压在第一行字上。
+   *
+   * 解法不是再补一层底色，而是让**内容自己淡出**：mask 渐变到透明。
+   *  · 渐变终点 = 卡内 y 8px（会话头顶）+ 头高 46px + 10px 余量 = 64px，
+   *    正好是会话头下沿再留一口气的位置；起点比终点早 22px，过渡不生硬；
+   *  · 用 mask 而不是实体渐变条：实体条在暗色主题 / 手动主题下会露出色差，
+   *    而且那正是用户上一次点名删掉的「背景」；mask 只让内容透明度归零，
+   *    卡面、动图、会话头一个像素都不用画。
+   *  · 滚动条在顶部那一小段也会一起淡出——与内容同一套语义，不算副作用。
+   */
+  --pa-chat-head-fade-end: calc(8px + var(--pa-chat-head-h) + 10px);
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent calc(var(--pa-chat-head-fade-end) - 22px),
+    #000 var(--pa-chat-head-fade-end)
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent calc(var(--pa-chat-head-fade-end) - 22px),
+    #000 var(--pa-chat-head-fade-end)
+  );
 }
 
 /*
@@ -513,6 +956,14 @@ body[data-pa-resizing='true'] .pa-chat__resizer::after {
   flex-direction: column;
   gap: 16px;
   min-height: 0;
+  /*
+   * 上下留白跟着内容滚：滚到顶/底时把悬浮会话头、顶部动图与输入区让出来。
+   * 顶部的让位 = 动图（top: 0 起）--pa-chat-mascot-size + 动图下沿到首条消息
+   *              --pa-chat-scroll-breath。动图本身已经覆盖会话头那 54px 条，
+   *              所以不再叠加「卡顶到会话头 8px + --pa-chat-head-h」。
+   * 全部按变量推导：改动图尺寸 / 呼吸时首条消息的让位自动跟上。
+   */
+  padding: calc(var(--pa-chat-mascot-size) + var(--pa-chat-scroll-breath)) 0 22px;
 }
 
 /*
@@ -1185,10 +1636,35 @@ button.pa-quote:hover .pa-quote__rule { background: var(--pa-text-4); }
 .pa-bubble--user {
   background: var(--pa-bubble-user-bg);
   color: var(--pa-bubble-user-fg);
+  border: 0;
   border-radius: var(--pa-bubble-radius);
+  /*
+   * 深色保持原来的 10px 16px（深色气泡的松紧是调过的，不因为「统一」被动）。
+   * 浅色在下面单独覆写成与 bot 气泡一致的视觉内距，见浅色描边那组规则。
+   */
   padding: 10px 16px;
   font-size: calc(13px + var(--pa-font-delta));
   line-height: 1.55;
+}
+/*
+ * 浅色专属的 1px 发丝边（2026-11-07 修版）。
+ *
+ * 为什么只写浅色：深色底子上气泡靠色差就浮得起来，加边框是多余的，而且
+ * border 1px solid transparent 会占掉 2px 盒模型——深色气泡尺寸会悄悄变大。
+ * 这里用浅色选择器追加描边，内边距各减 1px 补回边框，内容宽度与深色完全一致。
+ */
+.pa-root[data-pa-theme='light'] .pa-bubble--bot {
+  border: 1px solid var(--pa-bubble-bot-border);
+  padding: 11px 15px;
+}
+/*
+ * 浅色下 user 气泡的视觉内距与 bot 拉平：基础值是 10px 16px，这里 11px 15px
+ * 再加 1px 描边 —— 视觉上落在 12px 16px，与 bot 气泡同一条基线。两行以上的
+ * user 消息不会再比同内容的 bot 气泡矮一截，并排看才是一条流水。
+ */
+.pa-root[data-pa-theme='light'] .pa-bubble--user {
+  border: 1px solid var(--pa-bubble-user-border);
+  padding: 11px 15px;
 }
 .pa-msg--user .pa-bubble { background: var(--pa-bubble-user-bg); color: var(--pa-bubble-user-fg); }
 .pa-bubble--plain { background: transparent; border: 0; padding: 0; }
@@ -1205,8 +1681,31 @@ button.pa-quote:hover .pa-quote__rule { background: var(--pa-text-4); }
   background: var(--pa-chat-glass-2);
   border-radius: 4px;
   padding: 1px 5px;
-  color: var(--pa-text);
+  /*
+   * 行内 code 的文字色跟随气泡 fg（继承），而不是钉死 --pa-text：
+   * 气泡底色换主题后，code 与正文字重才不会出现「同一气泡里两种黑」。
+   */
+  color: inherit;
 }
+/* ---------- 正文链接 ----------
+ * 轻量 Markdown 的 [文字](url) 与裸 URL 都落到这里。
+ * 下划线用「主题链接色 40% 透明度」而不是默认 currentColor 实线：正文里的链接
+ * 要能一眼认出来，但不该在气泡里画出一条比正文还重的线；hover 才收成实线。
+ * 裸 URL 常常很长（GitHub 地址、带 query 的链接），允许任意位置断行，
+ * 否则单条地址会把气泡顶出可用宽度。
+ */
+.pa-md__link {
+  color: var(--pa-link);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, var(--pa-link) 40%, transparent);
+  transition: color 120ms ease, text-decoration-color 120ms ease;
+}
+.pa-md__link:hover { color: var(--pa-link-hover); text-decoration-color: currentColor; }
+.pa-md__link:focus-visible { outline: 2px solid var(--pa-link); outline-offset: 2px; border-radius: 3px; }
+.pa-md__link--bare { word-break: break-all; }
+@media (prefers-reduced-motion: reduce) { .pa-md__link { transition: none; } }
 .pa-md ul, .pa-md ol { margin: 6px 0; padding-left: 20px; }
 .pa-md li { margin: 3px 0; }
 .pa-md li::marker { color: var(--pa-text-3); }
@@ -1216,7 +1715,12 @@ button.pa-quote:hover .pa-quote__rule { background: var(--pa-text-4); }
   border-left: 2px solid rgba(255, 159, 10, 0.5);
   color: var(--pa-text-2);
 }
-.pa-root[data-pa-theme='light'] .pa-md blockquote { border-left-color: rgba(255, 139, 0, 0.55); }
+/*
+ * 浅色下引用条换成中性发丝线（2026-11-07 修版）：原来的琥珀色竖线是整片
+ * 灰蓝界面里唯一的高饱和色，每段引用都在喊「注意」，配色因此显得吵；浅色里
+ * 强调色只留给「发现 / 待确认 / 主动消息」这类真正需要注意的状态。
+ */
+.pa-root[data-pa-theme='light'] .pa-md blockquote { border-left-color: rgba(15, 17, 21, 0.16); }
 
 /* ---------- 正文图片（模型写的 Markdown 图片语法） ----------
  * ![alt](src) 现在渲染成真实图片。地址归一化（相对路径 → 宿主文件路由）在
@@ -2131,7 +2635,12 @@ select.pa-int__input { appearance: none; background-image: linear-gradient(45deg
 .pa-int__custom .pa-int__button { flex: none; padding: 6px 12px; }
 
 /* ---------- 输入区 ---------- */
-.pa-composer { flex: none; padding: 6px 26px 18px; background: var(--pa-main); }
+/*
+ * 输入区：整块也是悬浮层（用户 2026-11-07 的参考图）。
+ * 外层完全透明，只负责留白；可见的「浮起」全部由 .pa-composer__box 承担 ——
+ * 胶囊输入框自带发丝边 + 投影，浮在卡片底部之上。
+ */
+.pa-composer { flex: none; padding: 2px 14px 14px; background: transparent; }
 .pa-composer__chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 4px 8px; }
 /* 引用提示条（2.3）：与待处理上浮条同一套玻璃底，说明「这条消息在回复谁」。 */
 .pa-composer__reply {
@@ -2233,6 +2742,24 @@ select.pa-int__input { appearance: none; background-image: linear-gradient(45deg
 .pa-voicebar__send:active { transform: scale(0.94); }
 .pa-voicebar__send:disabled { background: rgba(10, 132, 255, 0.26); color: rgba(255, 255, 255, 0.45); cursor: default; }
 
+/* ---------- 聊天贴纸（表情包） ---------- */
+/*
+ * 尺寸上限 132px：微信式表情包的观感区间，再大就变成「发了一张图」。
+ * 不写死宽高比、只锁宽，图片加载完不会把下面的消息顶一下。
+ * max-width: 60% 是为了窄侧栏里两张并排也不溢出。
+ */
+.pa-sticker {
+  display: block;
+  width: 132px;
+  max-width: 60%;
+  height: auto;
+  border-radius: 10px;
+  background: transparent;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.pa-msg--user .pa-sticker { align-self: flex-end; }
+
 /* ---------- 消息里的用户图片 ---------- */
 .pa-image {
   display: block;
@@ -2303,10 +2830,18 @@ select.pa-int__input { appearance: none; background-image: linear-gradient(45deg
   border-radius: 24px;
   background: var(--pa-card);
   border: 1px solid var(--pa-line);
+  box-shadow: var(--pa-chat-input-shadow);
   position: relative;
   transition: border-color 130ms ease, box-shadow 130ms ease;
 }
-.pa-composer__box:focus-within { border-color: var(--pa-line-2); box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.035); }
+/* 聚焦时保留浮起投影，只再叠一圈焦点环（不能把投影整个换掉，否则输入框会「落地」）。 */
+.pa-composer__box:focus-within {
+  border-color: var(--pa-line-2);
+  box-shadow: var(--pa-chat-input-shadow), 0 0 0 3px rgba(255, 255, 255, 0.035);
+}
+.pa-root[data-pa-theme='light'] .pa-composer__box:focus-within {
+  box-shadow: var(--pa-chat-input-shadow), 0 0 0 3px rgba(15, 17, 21, 0.05);
+}
 .pa-composer__plus {
   width: 36px;
   height: 36px;
@@ -2478,7 +3013,10 @@ select.pa-int__input { appearance: none; background-image: linear-gradient(45deg
 
 /* base.css 的 .pa-root button 重置（0,1,1）会压过纯类选择器（0,1,0）。
    这里用 button.class（同为 0,1,1，靠后生效）把按钮外观补回来。 */
-button.pa-chat__head-btn { color: var(--pa-text-2); background: transparent; }
+/* 会话头动作：base.css 的 button 重置在这里被补回**只有颜色**——没有底色、没有投影，
+ *  按钮框已在 2026-11-07 晚按用户要求整体去掉（只剩实心图标）。 */
+button.pa-chat__head-btn { color: var(--pa-text-2); background: none; box-shadow: none; }
+button.pa-chat__head-btn[data-on='true'] { color: var(--pa-accent); }
 button.pa-chat-empty__chip {
   display: inline-flex;
   align-items: center;
@@ -3040,7 +3578,7 @@ button.dgi__save-button:disabled { opacity: 0.6; cursor: default; }
   display: flex;
   align-items: center;
   gap: 7px;
-  margin: 0 26px 8px;
+  margin: 0 14px 8px;
   padding: 7px 12px;
   border-radius: 10px;
   background: var(--pa-chat-glass);
@@ -3166,7 +3704,7 @@ button.dgi__save-button:disabled { opacity: 0.6; cursor: default; }
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0 26px 8px;
+  margin: 0 14px 8px;
   padding: 7px 10px 7px 12px;
   border-radius: 10px;
   background: var(--pa-chat-glass);
@@ -3243,18 +3781,22 @@ button.dgi__save-button:disabled { opacity: 0.6; cursor: default; }
 }
 
 @media (max-width: 1100px) {
-  .pa-chat__scroll { padding: 18px 20px 24px; }
-  .pa-composer { padding: 6px 18px 16px; }
-  .pa-pending { margin-left: 18px; margin-right: 18px; }
-  .pa-relay-hint { margin-left: 18px; margin-right: 18px; }
+  .pa-chat__scroll { --pa-chat-bubble-gutter: 20px; }
+  /* 呼吸回收一档（22px → 18px）：窄屏顶部不占那么多空。 */
+  .pa-chat__scroll-inner { --pa-chat-scroll-breath: 18px; padding-bottom: 20px; }
+  .pa-composer { padding: 2px 12px 12px; }
+  .pa-pending { margin-left: 12px; margin-right: 12px; }
+  .pa-relay-hint { margin-left: 12px; margin-right: 12px; }
   .pa-msg--bot { padding-right: 6%; }
   .pa-msg--user { padding-left: 10%; }
 }
 @media (max-width: 760px) {
-  .pa-chat__scroll { padding: 14px 14px 20px; }
-  .pa-composer { padding: 6px 12px 14px; }
-  .pa-pending { margin-left: 12px; margin-right: 12px; }
-  .pa-relay-hint { margin-left: 12px; margin-right: 12px; }
+  .pa-chat__scroll { --pa-chat-bubble-gutter: 14px; }
+  /* 最窄一档：呼吸再回收（18px → 14px），动图与首条消息仍不贴死。 */
+  .pa-chat__scroll-inner { --pa-chat-scroll-breath: 14px; padding-bottom: 18px; }
+  .pa-composer { padding: 2px 10px 10px; }
+  .pa-pending { margin-left: 10px; margin-right: 10px; }
+  .pa-relay-hint { margin-left: 10px; margin-right: 10px; }
   .pa-msg--bot { padding-right: 0; }
   .pa-msg--user { padding-left: 0; }
   .pa-msg__content { max-width: calc(100% - 42px); }

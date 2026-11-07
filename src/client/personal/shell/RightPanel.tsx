@@ -1,5 +1,5 @@
 /**
- * Personal Agent — 右侧栏（v5：Bot 资料区 + 动态 / 产出物分段 tab）。
+ * Personal Agent — 右侧栏（v6：Bot 资料区 + 动态 / 产出物分段 tab）。
  *
  * 用户口径（2026-11-04 澄清）：「三分之一」指的是 tab 条落在面板约 1/3 高度处，
  * 不是 tab 条宽度。参考图的右栏自上而下是：
@@ -8,13 +8,17 @@
  *      独立滑块（左右滑动 240ms，与 Work ⇄ Bot 分段同一套手感）；
  *   3. 分类内容 —— 动态：定时任务区 + 任务记录；产出物：页面卡 + 产出物卡。
  *
- * 资料区高度用 clamp(230px, 30vh, 340px)：tab 条顶部因此落在面板约 30% 高度，
- * 小窗口有 230px 兜底，大窗口最多 340px，不会把内容区挤没。
+ * 2026-11-07 改版（用户：「把右侧侧边栏的动图也移动到对话，放在对话的正上方
+ * 中间悬浮」）：资料区那枚 92px 三态动图整个迁到对话卡顶部正中悬浮（见
+ * chat/ChatPanel.tsx 的 .pa-chat__mascot）。资料区因此只剩「名称 + 编辑铅笔」
+ * （群聊再加成员网格），高度改成**内容自适应**——动图走了还继续用 30vh 兜底，
+ * 名称下方就会压出一大块空白，tab 条顶到 1/3 高度也失去了视觉依据。
  *
  * 最终结构（自上而下）：
  *   1. 通话收起条 —— 仅在通话最小化时出现；
  *   2. Bot 资料区 —— 群聊时先排一块 5 列成员网格（圆形头像 + 名字 + 添加），
- *      下面仍是群主头像 / 编辑 / 名称；私聊时只有头像 / 编辑 / 名称。右上角关闭右栏；
+ *      下面是名称 + 编辑铅笔；私聊时只有名称 + 编辑铅笔。**右栏内不再放关闭钮**
+ *      （2026-11-07 用户要求：关闭入口只有会话头「更多」左侧那枚切换按钮）；
  *   3. 分类 tab —— 「动态」（默认）/「产出物」，分段控件；
  *   4. 分类面板 —— 动态：ActivityTab（定时任务区 + 任务记录）；
  *      产出物：PagesCard + BotOutputsCard。
@@ -23,10 +27,9 @@
  * 任务卡样式在 tasks.css.ts，两者都由 index.tsx / standalone.tsx 统一注入。
  */
 import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react'
-import { botAvatarStateOf } from '../avatar-state.ts'
 import { BotAvatar } from '../Avatar.tsx'
 import { PAGE_MOTION_IN, PAGE_MOTION_STAGGER } from '../../motion/overlay-motion.ts'
-import { IconEdit, IconExpand, IconFolder, IconListTodo, IconPhoneOff, IconPlus, IconX } from '../icons.tsx'
+import { IconEdit, IconExpand, IconFolder, IconListTodo, IconPhoneOff, IconPlus } from '../icons.tsx'
 import { usePersonal } from '../store.tsx'
 import { formatDuration, type Bot } from '../types.ts'
 import { ActivityTab } from './ActivityTab.tsx'
@@ -55,7 +58,7 @@ const RIGHT_TABS: ReadonlyArray<{ id: RightTabId; label: string; icon: JSX.Eleme
 ]
 
 export function RightPanel(): JSX.Element {
-  const { state, ui, actions, activeBot, activeRoom, activeMessages } = usePersonal()
+  const { state, ui, actions, activeBot, activeRoom } = usePersonal()
   /** 当前分类；默认「动态」，不落盘（每次拉开右栏都从动态开始）。 */
   const [tab, setTab] = useState<RightTabId>('activity')
   /**
@@ -141,13 +144,10 @@ export function RightPanel(): JSX.Element {
   }
 
   /*
-   * 资料区头像的三态（2026-11-05）：与 Work 操作面板同一套透明 WebP 动图。
-   *
-   * 作用域交给 botAvatarStateOf：群聊看整场群聊（activeBot 只是当前选中的成员），
-   * 私聊看该 Bot。切换 Bot / 群聊时 activeBot / activeRoom / activeMessages 一起
-   * 变化，头像状态与取图 URL 也跟着重算，不需要额外的同步逻辑。
+   * 资料区的三态动图已于 2026-11-07 迁到对话卡顶部悬浮（用户要求「把右侧侧边栏
+   * 的动图也移动到对话，放在对话的正上方中间悬浮」）：三态推导与 BotAvatar
+   * 调用现在都在 chat/ChatPanel.tsx 的 .pa-chat__mascot，本文件不再持有头像状态。
    */
-  const avatarState = botAvatarStateOf(activeBot, activeMessages, state.tasks, activeRoom?.id)
 
   /*
    * 群聊成员（2026-11-05）：用户要求「bot 群聊在右侧侧边栏的动图上面增加类似
@@ -155,7 +155,7 @@ export function RightPanel(): JSX.Element {
    *
    * 数据口径与 ChatPanel / Sidebar 的群成员完全一致：按 room.memberIds 的顺序取
    * state.bots，找不到的（成员已被删除的脏数据）直接跳过，不在界面上留空位。
-   * 只有群聊会渲染这块网格，私聊保持原来的「大头像 + 名称」。
+   * 只有群聊会渲染这块网格，私聊只有「名称 + 编辑铅笔」。
    */
   const roomMembers: Bot[] = activeRoom === null
     ? []
@@ -214,24 +214,18 @@ export function RightPanel(): JSX.Element {
       ) : null}
 
       {/*
-       * Bot 资料区：高度约面板 30%（tab 条顶部落在约 1/3 高度处）。
-       * 参考图：居中头像 + 右下编辑铅笔 + 名称；关闭钮仍在右上。2026-11-05 按用户
-       * 要求删掉了「已连接」文字与状态指示灯。
+       * Bot 资料区（2026-11-07 起高度内容自适应）：居中「名称 + 编辑铅笔」。
+       * 关闭钮仍在右上（这是右栏唯一的关闭入口；本轮的改动只迁移了动图，
+       * 没有动关闭入口）。2026-11-05 按用户要求删掉了「已连接」文字与状态指示灯。
        *
-       * 群聊时在头像动图**上面**多排一块成员网格（微信聊天信息页的 5 列排法，
-       * 但头像做成圆形）：它是「这个群有谁」的入口，所以跟在大头像同一块资料区里，
+       * 原来那枚 92px 三态动图已经迁到对话卡顶部悬浮（见 chat/ChatPanel.tsx 的
+       * .pa-chat__mascot），资料区不再放头像，所以也不再拿 30vh 撑出 1/3 高度。
+       *
+       * 群聊时在名称行**上面**多排一块成员网格（微信聊天信息页的 5 列排法，
+       * 但头像做成圆形）：它是「这个群有谁」的入口，所以跟名称同一块资料区里，
        * 而不是另起一张卡。data-room 只负责切换资料区的纵向排布，私聊样式不动。
        */}
       <div className="pa-right__profile" data-room={activeRoom === null ? undefined : 'true'}>
-        <button
-          className="pa-right__profile-close"
-          type="button"
-          title="关闭右栏"
-          aria-label="关闭右栏"
-          onClick={() => actions.toggleRightPanel(false)}
-        >
-          <IconX size={15} />
-        </button>
         {activeRoom === null ? null : (
           /*
            * 群成员网格：5 列，每格「圆形头像 + 名字」，最后一格是「+」。
@@ -243,7 +237,7 @@ export function RightPanel(): JSX.Element {
            * · 「+」直接打开群设置：添加成员就在那张卡的「成员」区，不再另造一个
            *   只有两个输入框的小弹层。
            * · 只读成员名字 / 角色，不改任何数据；成员按 memberIds 原顺序展示，
-           *   群主（第一个成员）排在最前，和右栏资料区的大头像同一个人。
+           *   群主（第一个成员）排在最前，与会话头显示的是同一个群。
            */
           <div className="pa-right__members-card">
             <div className="pa-right__members-head">
@@ -286,22 +280,24 @@ export function RightPanel(): JSX.Element {
             </div>
           </div>
         )}
+        {/*
+         * 资料区只剩「名称 + 编辑铅笔」（2026-11-07）：原来压在大头像右下角的
+         * 编辑按钮并到名称右侧，两者成为同一个居中行；动图已经迁到对话卡顶部，
+         * 这里不再放头像，避免资料区留出一大块空位。
+         */}
         <div className="pa-right__profile-main">
-          <div className="pa-right__avatar-wrap">
-            <BotAvatar avatar={activeBot.avatar} size={92} muted={!activeBot.enabled} motionState={avatarState} />
-            <button
-              className="pa-right__edit-btn"
-              type="button"
-              title="编辑 Bot 资料"
-              aria-label="编辑 Bot 资料"
-              onClick={() => actions.openBotSettings(activeBot.id)}
-            >
-              <IconEdit size={13} />
-            </button>
-          </div>
           <div className="pa-right__profile-name" title={`${activeBot.name} · ${activeBot.role}`}>
             {activeBot.name}
           </div>
+          <button
+            className="pa-right__edit-btn"
+            type="button"
+            title="编辑 Bot 资料"
+            aria-label="编辑 Bot 资料"
+            onClick={() => actions.openBotSettings(activeBot.id)}
+          >
+            <IconEdit size={13} />
+          </button>
         </div>
       </div>
 

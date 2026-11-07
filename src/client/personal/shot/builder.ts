@@ -442,6 +442,15 @@ export function buildPersonalAgentHtml(input: PaShotInput): string {
   }
 
   const messagesHtml = validMessagesHtml.join('\n')
+  // 卡顶正中悬浮的 Bot 动图占位（2026-11-07 从右栏迁来）：与真实页面同一判据——
+  // 空对话不渲染，否则会和空态中央那枚同一只 Bot 头像重复。导出图只做静态占位。
+  const mascotHtml = validMessagesHtml.length > 0
+    ? [
+      '        <div class="pa-chat__mascot" aria-hidden="true">',
+      '          ' + renderAvatarHtml(activeBot.avatar, 92, activeBot.status === 'online'),
+      '        </div>',
+    ].join('\n') + '\n'
+    : ''
   const frameWidth = Math.max(1024, width)
 
   // 品牌 SVG
@@ -545,7 +554,8 @@ iuKindsCss() + '\n' +
 '  min-height: 100% !important;\n' +
 '  overflow: visible !important;\n' +
 '  background: var(--pa-sidebar) !important;\n' +
-'  box-shadow: inset -1px 0 0 var(--pa-line) !important;\n' +
+'  /* 侧栏与画布同色，常驻分隔竖线已隐藏（与真实页面一致）；拖拽提示线不受影响。 */\n' +
+'  box-shadow: none !important;\n' +
 '  display: flex !important;\n' +
 '  flex-direction: column !important;\n' +
 '}\n' +
@@ -562,6 +572,24 @@ iuKindsCss() + '\n' +
 '  flex-direction: column !important;\n' +
 '  overflow: visible !important;\n' +
 '}\n' +
+'/* ---------- 对话卡外观（2026-11-07 参考图） ----------\n' +
+' * 真实页面已把中列改成「画布 + 四角圆润的浮起卡片 + 悬浮会话头 + 浮起输入框」，\n' +
+' * 规则都落在 chat.css.ts 里。截图面板为了长图展开重写了这几块的布局（flex 撑开、\n' +
+' * overflow 展开、滚动区不限高），外观必须在这里补回去，否则导出图仍是旧的分栏观感。\n' +
+' * 特异性：.pa-shot-frame .x（0,2,0）> 真实的 .x（0,1,0），且写在 PERSONAL_CHAT_CSS\n' +
+' * 之后，叠加 !important 后覆盖顺序稳定。\n' +
+' */\n' +
+'/* 导出图卡面色：只钉对话卡面，不动 --dsw-alias-bg-base（IU 卡片配色依赖它）。\n' +
+' * 真实宿主里 --pa-main 取宿主 --dsw-alias-bg-base（暗色约 #181819）；\n' +
+' * 截图面板为让 IU 卡片吃到设计系统色，把 --dsw-alias-bg-base 映射到了 --pa-card(#202124)，\n' +
+' * 会让 color-mix 出来的卡面偏亮一档（#36373a vs 约 #2f2f30）——这里按真实宿主口径钉住。\n' +
+' */\n' +
+'.pa-shot-frame {\n' +
+'  --pa-chat-surface: color-mix(in srgb, #181819 90%, #ffffff 10%) !important;\n' +
+'}\n' +
+'.pa-shot-frame[data-pa-theme=\'light\'] {\n' +
+'  --pa-chat-surface: #ffffff !important;\n' +
+'}\n' +
 '.pa-shot-frame .pa-main-col {\n' +
 '  flex: 1 !important;\n' +
 '  width: 100% !important;\n' +
@@ -570,7 +598,10 @@ iuKindsCss() + '\n' +
 '  overflow: visible !important;\n' +
 '  display: flex !important;\n' +
 '  flex-direction: column !important;\n' +
-'  background: var(--pa-main) !important;\n' +
+'  position: relative !important;\n' +
+'  /* 画布露出来：卡片四周留 --pa-chat-gap 的缝，四角才看得出圆。 */\n' +
+'  padding: var(--pa-chat-gap) !important;\n' +
+'  background: var(--pa-chat-bg) !important;\n' +
 '}\n' +
 '.pa-shot-frame .pa-chat {\n' +
 '  flex: 1 !important;\n' +
@@ -581,17 +612,66 @@ iuKindsCss() + '\n' +
 '  margin: 0 auto !important;\n' +
 '  display: flex !important;\n' +
 '  flex-direction: column !important;\n' +
+'  /* 卡片本体：卡面底 + 大投影 + 22px 圆角（不画描边，见下一条注释）。\n' +
+'   * overflow 仍是 visible（长图要整条撑开、不能被圆角裁掉），圆角视觉由背景绘制保证。 */\n' +
+'  position: relative !important;\n' +
+'  background: var(--pa-chat-surface) !important;\n' +
+'  /* 与真实页面一致：不画 1px 描边（浅色画布上会压出锐利暗边），轮廓靠圆角 + 轻投影。 */\n' +
+'  border: 0 !important;\n' +
+'  border-radius: var(--pa-chat-radius) !important;\n' +
+'  box-shadow: var(--pa-chat-card-shadow) !important;\n' +
+'  isolation: isolate !important;\n' +
 '}\n' +
+'/* 会话头：悬浮的裸内容（与真实页面 2026-11-07 三版一致）—— 没有任何背景层\n' +
+' * （无底色 / 描边 / 投影 / 毛玻璃 / 顶部渐隐遮罩），也不拦截指针事件。\n' +
+' * 真实规则第二项读 --pa-chat-w（真实页面由拖拽写入）；截图面板把卡片锁成 880px，\n' +
+' * 所以宽度按同一口径推算 = min(画布宽 - 2gap - 24, 880 - 24)。 */\n' +
+'.pa-shot-frame .pa-chat__header {\n' +
+'  position: absolute !important;\n' +
+'  top: calc(var(--pa-chat-gap) + 8px) !important;\n' +
+'  left: 50% !important;\n' +
+'  transform: translateX(-50%) !important;\n' +
+'  width: min(calc(100% - var(--pa-chat-gap) * 2 - 24px), calc(880px - 24px)) !important;\n' +
+'  height: 46px !important;\n' +
+'  z-index: 20 !important;\n' +
+'  background: none !important;\n' +
+'  border: 0 !important;\n' +
+'  border-radius: 0 !important;\n' +
+'  box-shadow: none !important;\n' +
+'  pointer-events: none !important;\n' +
+'}\n' +
+'/* 内容容器跟着悬浮条铺满（不再单独按卡片宽算，否则头像与消息列对不齐）。 */\n' +
 '.pa-shot-frame .pa-chat__head-inner {\n' +
-'  width: min(100%, 880px) !important;\n' +
-'  margin: 0 auto !important;\n' +
+'  width: 100% !important;\n' +
+'  margin: 0 !important;\n' +
+'}\n' +
+'/* 卡顶最上沿正中悬浮的 Bot 动图（2026-11-07 从右栏迁来，同日再顶到卡片最上层）：\n' +
+' * 导出图补一个静态占位节点，几何口径与真实页面一致（absolute / top = 0 = 卡片\n' +
+' * 内沿顶端 / 92×92 / left 50% + translateX(-50%) 与卡片同轴），容器全透明、\n' +
+' * 不拦截指针。真实规则已带一遍，这里再钉死一次，避免继承差异把占位挤歪。 */\n' +
+'.pa-shot-frame .pa-chat__mascot {\n' +
+'  position: absolute !important;\n' +
+'  top: 0 !important;\n' +
+'  left: 50% !important;\n' +
+'  transform: translateX(-50%) !important;\n' +
+'  width: var(--pa-chat-mascot-size) !important;\n' +
+'  height: var(--pa-chat-mascot-size) !important;\n' +
+'  z-index: 12 !important;\n' +
+'  background: none !important;\n' +
+'  border: 0 !important;\n' +
+'  box-shadow: none !important;\n' +
+'  pointer-events: none !important;\n' +
 '}\n' +
 '.pa-shot-frame .pa-chat__scroll {\n' +
 '  flex: none !important;\n' +
 '  height: auto !important;\n' +
 '  max-height: none !important;\n' +
 '  overflow: visible !important;\n' +
-'  padding: 24px 28px 16px !important;\n' +
+'  /* 导出面板没有 .pa-chat__scroll-inner 结构（消息直接挂在滚动容器下），\n' +
+'   * 上下留白只能落在容器自己身上：顶部 114px = 动图 92（top: 0 起，已覆盖会话头\n' +
+'   * 那 54px 条）+ 动图到首条消息 22（呼吸），底部 22px 是卡片内边距。\n' +
+'   * 窄屏的呼吸回收（18/14）在导出面板不是重点，只写这一档。 */\n' +
+'  padding: 114px 30px 22px !important;\n' +
 '  display: flex !important;\n' +
 '  flex-direction: column !important;\n' +
 '  gap: 16px !important;\n' +
@@ -599,10 +679,15 @@ iuKindsCss() + '\n' +
 '.pa-shot-frame .pa-composer {\n' +
 '  flex: none !important;\n' +
 '  position: static !important;\n' +
-'  margin-top: 16px !important;\n' +
-'  margin-bottom: 24px !important;\n' +
-'  padding: 0 28px !important;\n' +
+'  margin: 0 !important;\n' +
+'  /* 与真实页面一致：外层只负责留白，可见的「浮起」全部由 .pa-composer__box 承担。 */\n' +
+'  padding: 2px 14px 14px !important;\n' +
 '  background: transparent !important;\n' +
+'}\n' +
+'/* 输入区浮起的圆角胶囊：投影读 --pa-chat-input-shadow（真实规则已带，这里再钉一次）。 */\n' +
+'.pa-shot-frame .pa-composer__box {\n' +
+'  border-radius: 24px !important;\n' +
+'  box-shadow: var(--pa-chat-input-shadow) !important;\n' +
 '}\n' +
 '.pa-code-block {\n' +
 '  background: var(--pa-card-2); border-radius: 8px; padding: 10px 14px; margin: 8px 0; overflow-x: auto; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.55;\n' +
@@ -660,6 +745,7 @@ iuKindsCss() + '\n' +
 '        </div>\n' +
 '      </header>\n' +
 '      <div class="pa-chat">\n' +
+      mascotHtml +
 '        <div class="pa-chat__scroll">\n' +
 '          <div class="pa-chat__sep"><span>会话记录</span></div>\n' +
 '          ' + (messagesHtml || '<div class="pa-chat-empty__desc" style="text-align:center;padding:40px;">还没有消息</div>') + '\n' +

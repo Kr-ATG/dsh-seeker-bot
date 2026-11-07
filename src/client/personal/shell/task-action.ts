@@ -16,7 +16,7 @@
  * 「动态里说查看文件、操作面板说读取文件」。
  */
 import { toPlainStep, type PlainStatus } from '../../kr-chat/plain-language.ts'
-import type { TaskRecordStep } from '../types.ts'
+import type { TaskRecord, TaskRecordStep } from '../types.ts'
 
 /** 压平空白并截断。 */
 function clip(text: string, max: number): string {
@@ -262,4 +262,93 @@ export function briefOf(detail: string): string {
   const text = humanizeDetail(detail, 240)
   if (text === '') return ''
   return clip(text.split(' · ')[0] ?? '', 40)
+}
+
+/* -------------------------------------------------------------------------- */
+/* 任务行「此刻在做什么」（纯函数；右栏动态卡与回归脚本共用）                    */
+/* -------------------------------------------------------------------------- */
+
+/** 只把「真正干活」的步骤算作动作：工具调用、阶段说明、产出物。 */
+export function actionStepsOf(task: TaskRecord): TaskRecordStep[] {
+  return task.steps.filter((step) => step.kind === 'tool' || step.kind === 'text' || step.kind === 'output')
+}
+
+/** 已完成的动作数：工具步看状态，阶段文字与产出物一到就算完成。 */
+export function doneActionCount(steps: TaskRecordStep[]): number {
+  return steps.reduce((n, step) => n + (step.kind === 'tool' && step.status !== 'ok' ? 0 : 1), 0)
+}
+
+/** 运行中任务行上的一行活信息。 */
+export interface LiveProgress {
+  /** 此刻在做什么：一句带具体对象的人话动作。 */
+  label: string
+  done: number
+  total: number
+}
+
+/**
+ * 运行中任务的「此刻进行到哪里」（纯函数，不读 DOM、不发请求）。
+ *
+ * 文案按「越具体越优先」分四层：
+ *
+ *  1. 有正在跑的动作 → 那一步的人话动作（actionLabelOf，带具体对象：
+ *     「正在启动第二个 CodeArts 账号登录」），与 Seeker 操作面板同一句；
+ *  2. 没有跑的动作、但这一轮还在跑（模型在写字 / 在等结果）→ 最后一条过程
+ *     说明的首句，截到约 28 字；
+ *  3. **所有动作都完成了、这一轮还没收口**（用户 2026-11-07 二次反馈：「怎么
+ *     还是正在思考呢」——截图里「已做 2/2 · 0:46」却显示「正在思考」，等于
+ *     什么都没说）→ 显示**刚做完的那一步**：「刚才查看文件 README.md」
+ *     「刚才读取网页 github.com」。读的人立刻知道这一轮在做什么事；
+ *  4. 真的一个动作都没有 → 「正在思考」。
+ *
+ * 旧的「正在整理回复…」「正在处理…」都已删除：它们说的是**还没发生**的事。
+ */
+export function liveProgressOf(task: TaskRecord): LiveProgress | null {
+  if (task.status !== 'running') return null
+  const steps = actionStepsOf(task)
+  let running: TaskRecordStep | undefined
+  for (let i = steps.length - 1; i >= 0; i--) {
+    if (steps[i].status === 'running') { running = steps[i]; break }
+  }
+  let label: string
+  if (running !== undefined) {
+    // 有正在跑的动作：说它自己（「正在查看文件 x」）。
+    label = actionLabelOf(running)
+  } else {
+    /*
+     * 没有在跑的动作：从最新一条往前找，谁能说出一句具体的话就用谁。
+     *
+     *  · 过程说明（text）→ 它自己的首句（模型刚说的话，最像"正在干什么"）；
+     *  · 已完成的工具 / 产出 → 「刚才 + 动作短语」，说明这一轮刚做了什么；
+     *  · 一条都不剩 → 才轮到「正在思考」。
+     */
+    label = '正在思考'
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const step = steps[i]
+      if (step.kind === 'text') {
+        // 只给这一行两行位置：首句太长会读不全，截到约 28 字。
+        const brief = clip(briefOf(step.detail ?? ''), 28)
+        if (brief !== '') { label = brief; break }
+        continue
+      }
+      label = justFinishedLabelOf(step)
+      break
+    }
+  }
+  return { label, done: doneActionCount(steps), total: steps.length }
+}
+
+/**
+ * 「刚做完的那一步」怎么读。
+ *
+ * 用「刚才 + 动作短语（无时态）」而不是「已 + 动作」：这一行整行的语境是
+ * 「这轮还在跑」，再叠一个「已」会和右侧「已做 2/2」重复，也容易让人误以为
+ * 整轮已经结束。产出物单独说「刚才产出 xxx」（它的 title 是文件名，套工具规则
+ * 会被翻成「执行 xxx」）。
+ */
+function justFinishedLabelOf(step: TaskRecordStep): string {
+  if (step.kind === 'output') return '刚才产出 ' + clip(step.title, 20)
+  const view = stepActionViewOf(step)
+  const suffix = step.status === 'error' ? '，没做成' : ''
+  return '刚才' + view.action + suffix
 }
