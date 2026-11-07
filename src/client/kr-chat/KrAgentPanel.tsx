@@ -29,6 +29,7 @@ import { subscribeToolCallsVisible, toolCallsVisible } from '../tool-calls-visib
 import { KrPanelSettings } from './KrPanelSettings.tsx'
 import { installConversationScrollGuard } from './scroll-guard.ts'
 import { installConversationScrollbarAutoHide } from './scrollbar-autohide.ts'
+import { installTurnRailReveal } from './turn-rail.ts'
 import { useOfficialWidthHandleFix } from './official-width-handles.ts'
 import { useFeature } from '../features/gate.tsx'
 
@@ -146,6 +147,11 @@ export const KrAgentPanel = memo(function KrAgentPanel({
   // 对话流滚动条自动隐藏（2026-10-29 用户要求）：滚动时显形，停止 3 秒后
   // 淡出；槽位由官方 scrollbar-gutter 保留，不引起内容跳动。
   useEffect(() => installConversationScrollbarAutoHide(), [])
+
+  // 官方「轮次导航」轨（对话列右侧每轮一条短横线）在 Seeker 视图里会被官方
+  // 自己的容器查询藏掉（@container width<=900px —— 双栏后对话列只剩 ~712px）。
+  // 这里只给那枚元素打标记，显示权交给样式层；退出 Seeker 自动回到官方原样。
+  useEffect(() => installTurnRailReveal(), [])
 
   // 官方「正文宽度」两条拖拽手柄按**容器中心**定位（见 official-width-handles.ts）。
   // Seeker 把容器改成 flex row 并塞进本面板后，容器比对话流宽出一个面板，手柄于是

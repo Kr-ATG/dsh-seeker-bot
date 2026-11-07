@@ -25,6 +25,34 @@ body[data-dsh-kr-chat="true"] [data-conversation-scroll] {
   flex-direction: column !important;
 }
 
+/*
+ * ══ 官方「轮次导航」轨：Seeker 窄栏里把它放回来 ════════════════════════════
+ *
+ * 官方 ChatView 右侧那列「每轮一条短横线」（组件 TurnNavigator，aria-label
+ * 「轮次导航」）在「对话」tab 里是有的，切到 Seeker 视图就整块消失 ——
+ * 不是插件删的，是官方自己写的响应式：
+ *
+ *     @container (width<=900px) { .frame { display: none } }
+ *
+ * 实测对话列宽：「对话」tab 1157px（显示）／Seeker 视图 712px（隐藏）。
+ * Seeker 一定要给右侧大盘让出宽度，于是永远踩在这条 900px 线下。
+ * 用户要的口径很明确：那列横线是「按轮次跳」的入口，双栏视图更需要它。
+ *
+ * 这里只在 KR 模式下把显示权抢回来，选择器认的是插件自己打的属性
+ * （见 turn-rail.ts），不认官方 hash 类名；官方其它规则一律不动，
+ * 退出 Seeker 视图（body 上没了 data-dsh-kr-chat）自动回到官方原样。
+ * 位置与尺寸仍由官方 CSS 决定：rail 宽 28px、贴对话列右缘内 12px，
+ * 短横线实际只占右侧 20px，正文右边界之外，不会压字。
+ *
+ * 双条件缺一不可：body 上的 data-dsh-kr-chat 是 **KR store 记住的视图选择**
+ * （切到 Bot 模式后它仍是 true，只是整个 Work 视图被 Bot 面板盖住），所以必须
+ * 再叠一层 data-skb-mode=work，否则这枚「隐藏视图里的 rail」会在 Bot 模式下
+ * 一并被点亮 —— 视觉上暂时被 Bot 面板挡住，但那是靠上层遮挡兜的，不结实。
+ */
+body[data-dsh-kr-chat="true"][data-skb-mode="work"] [data-dsh-turn-rail] {
+  display: block !important;
+}
+
 /* 隐藏旧的折叠行与折叠 chip，以及在 KR 模式下左侧隐藏原生工具树与紧凑控制行（详情收敛至右侧大盘）。
    ⚠ [data-turn-process] **不在这张表里**（2026-10-05）：它就是官方那条
    「已完成，用时 13分14秒」的回合过程行 —— 用户点名要的正是官方这个读数，
