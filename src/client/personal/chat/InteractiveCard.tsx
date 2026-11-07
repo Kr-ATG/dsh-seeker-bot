@@ -251,8 +251,16 @@ export function InteractiveCard({ message, block }: InteractiveCardProps): JSX.E
   const [selected, setSelected] = useState<string[]>([])
   const [custom, setCustom] = useState('')
   const [locked, setLocked] = useState(false)
-  /** 自定义输入框是否已展开（收起态显示的是「其他（自己输入）」那张虚线框）。 */
-  const [customOpen, setCustomOpen] = useState(false)
+  /**
+   * 自定义输入框是否已展开（收起态显示的是「其他（自己输入）」那张虚线框）。
+   *
+   * 选项为空时直接展开：宿主只有开放问题时才会这样产卡（「你的项目叫什么？」），
+   * 此时卡片上除了这段输入框什么都没有，收起态会只剩一个需要再点一下的虚线框，
+   * 看着像坏掉的空卡。
+   */
+  const [customOpen, setCustomOpen] = useState(
+    block.ui.kind === 'options' && block.ui.options.length === 0 && block.ui.allowCustom === true,
+  )
   /** 多选时这段自定义文字是否已经算作一项（决定收起后那张框要不要带勾）。 */
   const [customDone, setCustomDone] = useState(false)
 
@@ -277,10 +285,12 @@ export function InteractiveCard({ message, block }: InteractiveCardProps): JSX.E
     const values = [...selected]
     // 用户填了自定义、却没点那次「发送」就直接确认时，这段文字仍然要算进去——
     // 否则它只活在输入框里，用户以为自己答了两件事，实际只提交了勾选的那些。
-    if (custom.trim() !== '') values.push(custom.trim())
-    if (values.length === 0) return
+    // 但它走 custom 而不是塞进 values：宿主按「selected = 勾选的标签、custom =
+    // 额外补充」解析，混在一起模型会把它当成一个叫这段文字的选项。
+    const customText = custom.trim()
+    if (values.length === 0 && customText === '') return
     setLocked(true)
-    actions.answerInteractive(message.id, values)
+    actions.answerInteractive(message.id, values, customText === '' ? undefined : customText)
   }
 
   /**
@@ -310,7 +320,11 @@ export function InteractiveCard({ message, block }: InteractiveCardProps): JSX.E
       return
     }
     setLocked(true)
-    actions.answerInteractive(message.id, text)
+    /*
+     * 单选自定义 = 最终答案，但它不是选项之一：value 传空数组、文字走 custom，
+     * 与宿主「单选 custom 覆盖选中项、selected 为空」的契约对齐。
+     */
+    actions.answerInteractive(message.id, [], text)
   }
 
   const title = ui.title

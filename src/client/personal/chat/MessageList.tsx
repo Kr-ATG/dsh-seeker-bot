@@ -657,7 +657,7 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
   }, [messages, room?.id, bot.id])
 
   /*
-   * 自动朗读（会话头的「自动播报」开关，唯一入口）。
+   * 自动朗读（会话头的「自动播报」开关；问答卡另有必播通道，见下）。
    *
    * 只在单聊里生效：群聊是多个 Bot 轮流说话，自动念会变成抢话；通话进行中也不念
    * ——那条链路本来就在播语音，再叠一层会撞在一起。
@@ -666,7 +666,11 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
    *  · 首次挂载 / 切换会话时把已有消息全部标记成「已播」，否则一刷新就把最后一条
    *    历史回复念一遍（这是最容易吓到用户的一种）；
    *  · debounce：流式回复会连续改 messages，等这一阵安静下来再播；
-   *  · 每轮只播最后一条，且 pending 的消息不播（它还没定稿，念了就是半句话）。
+   *  · 每轮只播最后一条，且还没定稿的 pending 消息不播（念了就是半句话）。
+   *
+   * **问答 / 审批卡必播，不看自动播报开关**：这类消息就是这一轮的最终内容，宿主
+   * 正挂在那里等用户决定。不播的话，没盯着屏幕的用户根本不知道 Bot 在等自己——
+   * 「需要你定」却静悄悄，是这个功能最没意义的形态（2026-11-07 用户报）。
    */
   const autoSpeak = bot.autoSpeak === true
   const autoSpeakRef = useRef(autoSpeak)
@@ -686,15 +690,32 @@ export function MessageList({ messages, bot, room, dispatches = [] }: MessageLis
       for (const message of messages) spoken.ids.add(message.id)
       return
     }
-    if (!autoSpeak || room !== null || ui.call.status !== 'idle') return
+    if (room !== null || ui.call.status !== 'idle') return
     const timer = window.setTimeout(() => {
-      // 从尾部倒着找：messages 可能是上千条历史，复制整份数组再 reverse 是白费。
+      /*
+       * 从尾部找「已经能读」的一条 bot 消息（messages 可能是上千条历史，复制整份
+       * 数组再 reverse 是白费，所以倒序扫）。
+       *
+       * 空 blocks 的 pending 占位必须跳过：它只是一句「正在输入」，念出来是噪音，
+       * 而且它常常排在刚落地的问答卡后面——不跳过的话，倒着找第一条 bot 就会撞上
+       * 这个空占位，卡片永远轮不到朗读。
+       */
       let last: Message | undefined
       for (let index = messages.length - 1; index >= 0; index -= 1) {
-        if (messages[index]?.role === 'bot') { last = messages[index]; break }
+        const candidate = messages[index]
+        if (candidate?.role !== 'bot') continue
+        if (candidate.pending === true && candidate.blocks.length === 0) continue
+        last = candidate
+        break
       }
       if (last === undefined || spoken.ids.has(last.id)) return
-      if (last.pending === true) return
+      /** 等你决定的卡片：问答（need-input）与审批（approval）。 */
+      const ask = last.kind === 'need-input' || last.kind === 'approval'
+      if (!ask) {
+        if (!autoSpeak) return
+        // 半句话不念：pending 的消息还在生成，念了就是半句被下一段打断
+        if (last.pending === true) return
+      }
       const text = speechTextOf(last)
       if (text === '') return
       spoken.ids.add(last.id)

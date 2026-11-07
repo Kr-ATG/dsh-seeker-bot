@@ -278,6 +278,12 @@ Bot 复用宿主的 agent loop，但输出形态必须按**对话**设计，不�
     左侧没有 radio 圆点——单选是「点一下即提交」，那个圆点表达不了中间态。
   - `allowCustom: true` 时列表末尾追加「其他（自己输入）」虚线框，点开就地展开
     无边框输入框 + 发送；单选输入完即提交，多选只记为一项、仍走「确认选择」。
+    自由文本按宿主答案契约走 `custom` 字段（单选覆盖 `selected`、多选在 `selected` 之外
+    补充），不要混进选项标签数组——混进来模型会当成一个「选项」。
+  - 问答卡（`buildQuestionMessage`）默认打开自定义入口；审批卡（`allowCustom=false`）
+    **不打开**——审批只回答「准不准」，自由输入等于把授权风险交给一句随手打的文字。
+    无选项的开放问题同样走 options 形态（选项为空 + allowCustom），前端看到空选项会把
+    输入框直接展开，不再只给一个「知道了」。
   - 提交后**保留清单**：选中项亮勾、其余压暗（`data-locked`），下方再给一行「已提交」。
     整卡收成一个小绿框会让用户没法回看自己挑了哪个；`buttons`（审批 / 确认）仍走旧形态。
 - **连接器推荐卡** `blocks: [{ type: 'connectors', title?, items: [{ id, name, description?, icon?, installed? }] }]`
@@ -335,15 +341,21 @@ Bot 复用宿主的 agent loop，但输出形态必须按**对话**设计，不�
 
 - **入口 1（手动）**：Bot 消息气泡侧边、引用按钮**之后**一枚喇叭按钮（`IconVolume`），
   播放中换成停止图标 + `data-speaking='true'`（`--pa-accent` 常亮 + 1.6s 脉冲，
-  `prefers-reduced-motion` 下关动画）。只对**有可朗读正文的 bot 消息**渲染；
-  用户消息不给入口（自己的话不需要听，也容易让人以为在放语音输入）。
+  `prefers-reduced-motion` 下关动画）。只对**能念出内容的 bot 消息**渲染（正文，或
+  交互卡的问题 + 选项）；用户消息不给入口（自己的话不需要听，也容易让人以为在放
+  语音输入）。
 - **入口 2（自动）**：**会话头**通话按钮**左侧**的喇叭按钮（`AutoSpeakButton.tsx`），
   **唯一入口**（2026-11-05 起，Bot 设置卡语音页里那个重复开关已撤掉；那一页只留音色与
   Live 供应商）。拨的是 `Bot.autoSpeak`（默认关；`normalizeState` 只认显式 `true`）；
   群聊不渲染——群里自动播报不生效，摆一个拨了没用的入口比不摆更糟。打开态
   `data-on='true'`（`--pa-accent`），图标在 `IconVolume` / `IconVolumeOff` 之间切换。
-  生效条件：单聊（`room === null`）+ 开关打开 + `ui.call.status === 'idle'`。
-  触发：messages 变化后 debounce 250ms，取**最后一条** bot 消息，`pending` 不播；
+  普通回复的生效条件：单聊（`room === null`）+ 开关打开 + `ui.call.status === 'idle'`。
+  **问答（need-input）/ 审批（approval）卡例外：必播，不看开关**——那张卡就是这一轮
+  的最终内容，宿主正挂着等用户决定；静默等于「需要你定」却没人知道（2026-11-07 用户报
+  「需要我定的时候需要给朗读出来」）。仍受单聊与通话中不播的约束。
+  触发：messages 变化后 debounce 250ms，**倒序取最后一条能读的 bot 消息**——`blocks`
+  为空的 pending 占位要跳过（它只是一句「正在输入」，而且常排在刚落地的问答卡之后，
+  不跳过卡片永远轮不到朗读）；普通回复 `pending` 不播（半句话），问答 / 审批卡照播。
   `spokenRef` 记录已播消息，首次挂载 / 切会话 / 拨开关时把现有消息全部标记为已播
   （刷新不重播历史）。切会话、通话开始、消息流卸载都会 `stopSpeech()`。
 - **朗读音量**：会话头开关 **hover / 键盘聚焦** 浮出音量浮层（移开 160ms 后收起，
@@ -375,8 +387,10 @@ Bot 复用宿主的 agent loop，但输出形态必须按**对话**设计，不�
   丢弃迟到响应；`AbortController` 取消在途合成。被拦时**静默**回空闲；
   手动点播失败才 `toast` 原因（`SpeakToolButton` 的 `onError`）。
 - **文本清洗**：`cleanSpeechText` 去代码块 / 行内反引号 / 图片 / 链接地址（留文字）/
-  标题列表引用符号 / 表格分隔行 / 加粗星号 / HTML 标签，压缩空白，截到 240 字
-  （宿主 `REALTIME_TTS_MAX_CHARS` = 400 兜底）。
+  标题列表引用符号 / 表格分隔行 / 加粗星号 / HTML 标签，压缩空白，整条上限 2000 字、
+  按 200 字分段逐段合成（宿主 `REALTIME_TTS_MAX_CHARS` = 400 兜底）。
+  交互卡没有 text 块，`speechTextOf` 另取 interactive 块：标题 + 问题正文 + 选项标签
+  （最多 4 个、超出用「等」），表单只念标题与说明、不念字段（字段多，念出来是表格播报）。
 - 回归：`scripts/test-realtime-tts.mjs`（宿主端到端，假上游）、
   `scripts/test-speech-client.mjs`（esbuild 打包真实 speech.ts + mock fetch/AudioContext）。
 

@@ -35,7 +35,7 @@ import {
   type RealtimeTtsRequest,
 } from '../../shared/realtime-protocol.ts'
 import { AUDIO_SAMPLE_RATE, PcmPlayer } from './call/realtime-audio.ts'
-import type { Message } from './types.ts'
+import type { Message, MessageBlock } from './types.ts'
 
 /**
  * 整条消息的朗读总上限（字符）。
@@ -940,15 +940,57 @@ export function cleanSpeechText(raw: string): string {
 }
 
 /**
+ * 交互卡（问答 / 审批 / 表单）的可朗读文本。
+ *
+ * 卡片没有 text 块——问题在 block.prompt、标题在 ui.title、候选项在 ui.options。
+ * 只念 text 块的话这类消息永远是空串：用户明明被要求「定一下」，却什么都听不到
+ * （2026-11-07 用户报「需要我定的时候需要给朗读出来啊」）。
+ *
+ * 念什么：
+ *  · 标题 + 问题正文（含 detail）——「需要你确认。你说的 superagent 项目是指哪个？」；
+ *  · 选项标签（最多 4 个，超出的用「等」带过）——语音场景下不看屏幕也要知道能选什么；
+ *  · 表单不念字段：字段多，念出来是表格播报，只给标题与说明。
+ */
+function speechAskText(block: Extract<MessageBlock, { type: 'interactive' }>): string {
+  const parts: string[] = []
+  const title = block.ui.title !== undefined ? block.ui.title.trim() : ''
+  if (title !== '') parts.push(title)
+  const prompt = block.prompt !== undefined ? block.prompt.trim() : ''
+  if (prompt !== '') parts.push(prompt)
+  if (block.ui.kind !== 'form') {
+    const labels = block.ui.options.map((option) => option.label.trim()).filter((label) => label !== '')
+    if (labels.length > 0) {
+      const shown = labels.slice(0, 4)
+      parts.push(labels.length > shown.length ? '选项：' + shown.join('，') + '等' : '选项：' + shown.join('，'))
+    }
+  }
+  /*
+   * 用换行而不是句号拼：问题本身常已带「？」「。」，再补一个句号会出现「？。」
+   * 这种念起来很别扭的双标点；换行最后会被 cleanSpeechText 压成空格，
+   * 停顿交给问题自带的标点。
+   */
+  return parts.join('\n')
+}
+
+/**
  * 一条消息的可朗读文本（空串 = 这条消息不可朗读）。
  *
- * 只取 text 块：工具卡、生图卡、交互卡都不是「一段话」，念出来只会是噪音。
- * 多段正文按行拼接，交给 cleanSpeechText 统一压缩。
+ * text 块是正文；interactive 块是「等你决定」的卡片——它没有正文块，但问题本身
+ * 就是最该被念出来的那句话（自动朗读规则也据此给它开了必播通道，见 MessageList）。
+ * 工具卡、生图卡不是「一段话」，念出来只会是噪音。
+ * 多段内容按行拼接，交给 cleanSpeechText 统一压缩。
  */
 export function speechTextOf(message: Message): string {
   const parts: string[] = []
   for (const block of message.blocks) {
-    if (block.type === 'text' && block.text.trim() !== '') parts.push(block.text)
+    if (block.type === 'text' && block.text.trim() !== '') {
+      parts.push(block.text)
+      continue
+    }
+    if (block.type === 'interactive') {
+      const ask = speechAskText(block)
+      if (ask !== '') parts.push(ask)
+    }
   }
   if (parts.length === 0) return ''
   return cleanSpeechText(parts.join('\n'))

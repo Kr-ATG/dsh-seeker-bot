@@ -816,7 +816,15 @@ export interface PersonalActions {
   /** 置顶 / 取消置顶一个群聊：侧栏「群聊」区块里置顶的排最前。 */
   setRoomPinned(id: string, pinned: boolean): void
   deleteRoom(id: string): void
-  answerInteractive(messageId: string, value: AnswerValue): void
+  /**
+   * 回答一张交互卡。
+   *
+   * custom 是用户在「其他（自己输入）」里打的那段自由文本。它**不能**混进
+   * value：宿主的问答答案契约是——单选时 custom 覆盖选中项且 selected 为空，
+   * 多选时 custom 补充在 selected 之外。混进来模型会以为用户从它给的选项里
+   * 挑了一个叫「…随便一句话…」的选项，答案语义就散了（宿主 README 明确要求分开）。
+   */
+  answerInteractive(messageId: string, value: AnswerValue, custom?: string): void
   /**
    * 撤回一条用户消息：删掉这一轮的界面消息与本地记忆，插一条系统提示，
    * 并尽力通知宿主把模型上下文也遮蔽掉（失败静默，不影响本地结果）。
@@ -5249,7 +5257,7 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
     setUi((prev) => ({ ...prev, selectedRoomId: prev.selectedRoomId === id ? null : prev.selectedRoomId }))
   }, [])
 
-  const answerInteractive = useCallback((messageId: string, value: AnswerValue): void => {
+  const answerInteractive = useCallback((messageId: string, value: AnswerValue, custom?: string): void => {
     const current = stateRef.current
     const message = current.messages.find((item) => item.id === messageId)
     if (!message) return
@@ -5298,7 +5306,11 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           questionId,
-          selected: typeof value === 'string' && value !== '' ? [value] : [],
+          selected: typeof value === 'string' && value !== ''
+            ? [value]
+            : Array.isArray(value) ? value : [],
+          // 单选自定义：selected 为空 + custom 有值，与宿主答案契约一致。
+          ...(custom !== undefined && custom.trim() !== '' ? { custom: custom.trim() } : {}),
         }),
       })
         .then((response) => {
@@ -5307,7 +5319,15 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
         .catch(() => toast('回答回传失败'))
       return
     }
-    const label = uiTextForAnswer(block.ui, value)
+    /*
+     * 自定义文本同样要进「用户说了什么」：本地卡片（演示 / 历史数据）没有宿主
+     * 回传那一路，答案只能靠这里拼出来。多选时它是追加在已选项之后的一项。
+     */
+    const pickedText = uiTextForAnswer(block.ui, value)
+    const customText = custom !== undefined ? custom.trim() : ''
+    const label = customText === ''
+      ? pickedText
+      : pickedText === '' ? customText : `${pickedText}、${customText}`
     const bot = current.bots.find((item) => item.id === message.botId)
     if (!bot) return
 

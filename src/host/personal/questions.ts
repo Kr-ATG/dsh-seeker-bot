@@ -65,7 +65,19 @@ const installedSessions = new Set<string>()
  * 卡片自带标题 + 正文 + 选项三层（`ui.title` / `block.prompt` / 选项列表），
  * 外面再套一段文本就会变成「文字浮在卡片上」的双层结构（实测被用户说丑）。
  */
-export function buildQuestionMessage(questionId: string, questions: HostQuestion[]): BotMessage {
+export function buildQuestionMessage(
+  questionId: string,
+  questions: HostQuestion[],
+  /**
+   * 是否在选项之外再给一个「其他（自己输入）」入口。
+   *
+   * 问答与审批走同一套卡片结构，但**语义完全不同**：审批问的是「准不准」，
+   * 只有允许 / 拒绝两种答案，多给一个自由输入框等于把授权风险交给一句随手打的
+   * 文字；问答问的是「你说的是哪一个」，模型的选项永远覆盖不全用户脑子里的答案。
+   * 所以默认开、审批显式关。
+   */
+  allowCustom = true,
+): BotMessage {
   const first = questions[0]
   const head = first.header !== undefined && first.header !== '' ? first.header : '需要你确认'
   const detail = first.detail !== undefined && first.detail !== '' ? `\n\n${first.detail}` : ''
@@ -88,13 +100,22 @@ export function buildQuestionMessage(questionId: string, questions: HostQuestion
            * 有选项时用 `options`（竖向列表）而不是 `buttons`（一排药丸）：
            * 模型给的选项文案通常偏长，横向排列会换行成一堆碎块，竖向列表
            * 才是可读的形态。单选点一下即提交。
+           *
+           * allowCustom 打开「其他（自己输入）」：模型列的三个选项经常是它猜的
+           * 方向，用户真正想说的往往不在里面。宿主答案结构本来就带 `custom`
+           * （单选覆盖、多选补充），SPEC 6.4.2 也写明了这个形态——这里只是把
+           * 它在 Bot 自绘卡上真正打开（此前一直是关的，卡片只有选项可点）。
            */
-          ? { kind: 'options', title: head, options }
+          ? { kind: 'options', title: head, options, ...(allowCustom ? { allowCustom: true } : {}) }
           /*
-           * 没有选项时给一个「知道了」——空白卡片没法点，用户会以为界面坏了。
-           * 真正的自由文本回答走输入框（用户在对话里直接打字）。
+           * 没有选项：以前只给一个「知道了」，点下去等于告诉模型「用户答了知道了」，
+           * 而开放问题（「你的项目叫什么？」）根本没有可答之处。现在同样走 options
+           * 形态、选项为空 + allowCustom，前端看到空选项会把输入框直接展开。
+           * 审批不允许自定义，退回到只能点的「知道了」。
            */
-          : { kind: 'buttons', title: head, options: [{ id: '知道了', label: '知道了' }] },
+          : allowCustom
+            ? { kind: 'options', title: head, options: [], allowCustom: true }
+            : { kind: 'buttons', title: head, options: [{ id: '知道了', label: '知道了' }] },
       },
     ],
     at: Date.now(),
@@ -116,7 +137,8 @@ export function requestApprovalPick(botId: string, text: string): Promise<'allow
     question: text,
     options: [{ label: '允许' }, { label: '拒绝' }],
   }]
-  return requestQuestion(botId, questions).then((answer) => {
+  // 审批是「准不准」：只给允许 / 拒绝，不给自由输入（见 buildQuestionMessage 的 allowCustom）。
+  return requestQuestion(botId, questions, undefined, false).then((answer) => {
     const first = answer.answers[0]
     const picked = first?.custom !== undefined && first.custom !== ''
       ? first.custom
@@ -153,12 +175,17 @@ export function requestPick(botId: string, text: string, options: string[]): Pro
  * 返回 Promise 而不是回调，是因为宿主的 seam 就是 `Promise<AskUserQuestionAnswer>`；
  * 挂起期间 `ask_user_question` 那一轮会一直等着（这正是「提问」的语义）。
  */
-export function requestQuestion(botId: string, questions: HostQuestion[], signal?: AbortSignal): Promise<HostAnswer> {
+export function requestQuestion(
+  botId: string,
+  questions: HostQuestion[],
+  signal?: AbortSignal,
+  allowCustom = true,
+): Promise<HostAnswer> {
   if (questions.length === 0) {
     return Promise.resolve({ answers: [] })
   }
   const questionId = `q-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-  const message = buildQuestionMessage(questionId, questions)
+  const message = buildQuestionMessage(questionId, questions, allowCustom)
   /*
    * 带上所属群：问答卡同样由宿主异步发，不带 roomId 就落进私聊，群里那个
    * 回复气泡会一直转圈。展开写法让私聊回合真的不带这个键。
@@ -183,6 +210,16 @@ export function requestQuestion(botId: string, questions: HostQuestion[], signal
        * 自己刚才那一下到底生效没有。
        */
       const answered = answer.answers.find((item) => item.selected.length > 0 || item.custom !== undefined)
+      /*
+       * 回显要同时保留「勾了哪几项」和「自己打了什么」：单选自定义时 selected 为空、
+       * 只有 custom；多选则是两者都有。此前只取 custom ?? selected，多选一填自定义
+       * 就把勾选项整段吞掉，用户回看时看不到自己选了什么。
+       */
+      const decidedParts: string[] = []
+      if (answered !== undefined) {
+        decidedParts.push(...answered.selected)
+        if (answered.custom !== undefined && answered.custom.trim() !== '') decidedParts.push(answered.custom.trim())
+      }
       const decided: BotMessage = {
         ...message,
         blocks: message.blocks.map((block) => (
@@ -190,9 +227,7 @@ export function requestQuestion(botId: string, questions: HostQuestion[], signal
             ? {
               ...block,
               submitted: true,
-              result: answered !== undefined
-                ? answered.custom ?? answered.selected.join('、')
-                : '已跳过',
+              result: decidedParts.length > 0 ? decidedParts.join('、') : '已跳过',
             }
             : block
         )),

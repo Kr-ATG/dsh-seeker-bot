@@ -76,6 +76,9 @@ import { applyRecallHost, recallInjects } from './recall/host/index.ts'
 export { applyRecallHost, recallInjects, isSelfAgentBusy, isCrossAgentBusy } from './recall/host/index.ts'
 export { RecallConfig, RecallDefaults } from './recall/host/index.ts'
 export { applyPersonalAgentHost } from './host/personal/index.ts'
+// 问答卡的纯函数构造导出给测试：卡片形态（有没有选项 / 有没有「其他（自己输入）」）
+// 只能断言——它不抛错，判错的表现是「模型给了选项，用户却答不出自己想说的」。
+export { buildQuestionMessage as personalQuestionMessage } from './host/personal/questions.ts'
 export { applyDownloadRoutes, downloadTool, readDownloadState, watchShellDownload } from './download/index.ts'
 export { applyFontRoutes, FONT_ROUTE } from './fonts/index.ts'
 export { applyAvatarRoutes, AVATAR_ROUTE } from './avatar/index.ts'

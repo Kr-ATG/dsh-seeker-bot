@@ -617,6 +617,63 @@ check('多段 text 块拼接', speechTextOf({
   blocks: [{ type: 'text', text: '第一段' }, { type: 'text', text: '第二段' }],
 }) === '第一段 第二段')
 
+/*
+ * 交互卡（问答 / 审批 / 表单）：卡片没有 text 块，问题在 prompt、选项在 ui.options。
+ * 只念 text 块时这类消息永远是空串——「需要你定」静悄悄，用户根本不知道 Bot 在等。
+ */
+const askCard = {
+  ...botMessage,
+  kind: 'need-input',
+  blocks: [{
+    type: 'interactive',
+    prompt: '你说的 superagent 项目是指哪个？',
+    ui: {
+      kind: 'options',
+      title: '需要你确认',
+      allowCustom: true,
+      options: [
+        { id: 'a', label: 'dsh-superagent-prototype' },
+        { id: 'b', label: 'Superagent（开源 AI agent 平台）' },
+        { id: 'c', label: '字节跳动 DeerFlow 2.0' },
+      ],
+    },
+  }],
+  at: 0,
+}
+check(
+  '问答卡：念标题 + 问题 + 选项',
+  speechTextOf(askCard) === '需要你确认 你说的 superagent 项目是指哪个？ 选项：dsh-superagent-prototype，Superagent（开源 AI agent 平台），字节跳动 DeerFlow 2.0',
+  speechTextOf(askCard),
+)
+check('开放问题（无选项）只念标题 + 问题', speechTextOf({
+  ...askCard,
+  blocks: [{ type: 'interactive', prompt: '你的项目叫什么名字？', ui: { kind: 'options', title: '需要你确认', allowCustom: true, options: [] } }],
+}) === '需要你确认 你的项目叫什么名字？', speechTextOf({
+  ...askCard,
+  blocks: [{ type: 'interactive', prompt: '你的项目叫什么名字？', ui: { kind: 'options', title: '需要你确认', allowCustom: true, options: [] } }],
+}))
+check('审批卡：念按钮（允许 / 拒绝）', speechTextOf({
+  ...askCard,
+  kind: 'approval',
+  blocks: [{ type: 'interactive', prompt: '要删除这张表吗？', ui: { kind: 'buttons', title: '需要你确认', options: [{ id: 'allow', label: '允许' }, { id: 'deny', label: '拒绝' }] } }],
+}) === '需要你确认 要删除这张表吗？ 选项：允许，拒绝')
+check('表单卡：只念标题与说明，不念字段', speechTextOf({
+  ...askCard,
+  blocks: [{
+    type: 'interactive',
+    prompt: '每天几点提醒？',
+    ui: { kind: 'form', title: '建一个提醒', fields: [{ id: 'time', label: '时间', type: 'time' }] },
+  }],
+}) === '建一个提醒 每天几点提醒？')
+check('正文 + 卡片混排：两段都念', speechTextOf({
+  ...askCard,
+  blocks: [{ type: 'text', text: '我看了下，得先确认。' }, askCard.blocks[0]],
+}) === '我看了下，得先确认。 需要你确认 你说的 superagent 项目是指哪个？ 选项：dsh-superagent-prototype，Superagent（开源 AI agent 平台），字节跳动 DeerFlow 2.0')
+check('卡片已提交不影响朗读文本（回看时仍可念）', speechTextOf({
+  ...askCard,
+  blocks: [{ ...askCard.blocks[0], submitted: true, result: 'dsh-superagent-prototype' }],
+}).startsWith('需要你确认'))
+
 /* ------------------------------------------------------------------ */
 /* 17. 朗读音量（会话头音量浮层控制的就是这个值）                        */
 /* ------------------------------------------------------------------ */
