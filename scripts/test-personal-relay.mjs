@@ -5,7 +5,9 @@
  * 三层检查：
  *  1. **shared 纯逻辑**：normalizeRelayBrief 的合法 / 缺字段 / 非字符串数组 /
  *     全空→null / 超长截断；buildRelayBlock 的空摘要→'' 与字段顺序；
- *     fallbackRelayBrief 的空输入→null 与「最后 user + 最近 bot」规则。
+ *     fallbackRelayBrief 的空输入→null 与「最后 user + 最近 bot」规则；
+ *     reconcileRelayBrief 把「下一步 = 已完成」的重复动作剔掉（含换动词重述），
+ *     同时不误删专有名词反复出现的合法下一步。
  *  2. **host 行为**：用临时 DSH_HOME 测 relay 文件的 write / read / clear（含
  *     botId 文件名清洗、source / edited 保留）；mock agent.inject 测「内容变化
  *     才注入、相同内容不重复、reset 后重新注入」；mock llm.stream 测模型成功、
@@ -20,7 +22,7 @@
  * Usage: node scripts/test-personal-relay.mjs
  */
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -162,6 +164,54 @@ try {
     }
   })
 
+  check('注入块带「不要重做」硬约束与「延续」声明', () => {
+    const block = shared.buildRelayBlock({
+      goal: '盯梢 Mimi',
+      done: ['基线检查已完成'],
+      decisions: [],
+      pending: ['等待项目出现实质动静'],
+      next: [],
+      files: [],
+      updatedAt: 1,
+    })
+    assert.ok(block.includes('同一项工作的延续，不是新任务'), '有未完成事项时应声明是同一项工作的延续')
+    assert.ok(block.includes('不要重做'), '缺少「不要重做」硬约束')
+    assert.ok(block.includes('不要重新验证'), '缺少「不要重新验证」硬约束')
+    assert.ok(block.includes('增量对比'), '缺少「只做增量对比」约束')
+    // 没有未完成事项时不该声称「延续」：那是一次已经收尾的对话
+    const finished = shared.buildRelayBlock({
+      goal: '收尾', done: ['跑完测试'], decisions: [], pending: [], next: [], files: [], updatedAt: 1,
+    })
+    assert.ok(!finished.includes('同一项工作的延续'), '没有 pending 时不应声明延续')
+  })
+
+  /* ───────────────── shared · reconcileRelayBrief ───────────────── */
+
+  console.log('\n[shared · reconcileRelayBrief]')
+  check('「下一步」里已经做完的动作被剔除', () => {
+    const brief = shared.reconcileRelayBrief(shared.normalizeRelayBrief({
+      goal: '盯梢 Mimi 直到有动静',
+      done: ['已把持续盯梢任务完整派给子Bot小秘，并明确长期节奏'],
+      decisions: ['发现新仓库 / 代码 / 官网上线才算有动静'],
+      pending: ['等待项目出现实质进展'],
+      next: ['子Bot小秘执行基线检查并持续盯梢', '一旦 Mimi 有实质动静就汇报给用户'],
+    }))
+    assert.deepEqual(brief.next, ['一旦 Mimi 有实质动静就汇报给用户'])
+  })
+  check('换动词重述的同一动作也能识别', () => {
+    assert.equal(shared.isAlreadyDoneStep('执行基线检查', ['已完成基线检查']), true)
+  })
+  check('专有名词反复出现不算同一件事（不误删合法下一步）', () => {
+    const done = ['确认项目名为秘秘（Mimi），作者组织为 Mimi-personal-agent']
+    assert.equal(shared.isAlreadyDoneStep('一旦 Mimi 有实质动静，第一时间汇报给用户', done), false)
+  })
+  check('next / done 任一为空时原样返回', () => {
+    const noDone = { goal: 'x', done: [], decisions: [], pending: [], next: ['做事'], files: [], updatedAt: 1 }
+    assert.equal(shared.reconcileRelayBrief(noDone), noDone)
+    const noNext = { goal: 'x', done: ['做完了'], decisions: [], pending: [], next: [], files: [], updatedAt: 1 }
+    assert.equal(shared.reconcileRelayBrief(noNext), noNext)
+  })
+
   /* ───────────────── shared · fallbackRelayBrief ───────────────── */
 
   console.log('\n[shared · fallbackRelayBrief]')
@@ -212,6 +262,21 @@ try {
     const dir = join(HOME, 'storages', 'dsh-seeker-bot', 'personal-agent', 'relay')
     assert.ok(file.startsWith(dir), `文件跑出 relay 目录：${file}`)
     assert.ok(!file.includes('..'), `文件名未清洗：${file}`)
+  })
+  await checkAsync('读取旧摘要时清掉「下一步 = 已完成」的重复项', async () => {
+    // 模拟提示词修复之前落盘的文件：done 里写完了基线检查，next 里又写了一遍
+    writeFileSync(host.relayFile('bot-legacy'), JSON.stringify({
+      goal: '旧摘要',
+      done: ['已完成基线检查'],
+      decisions: [],
+      pending: [],
+      next: ['执行基线检查', '等子 Bot 回报'],
+      files: [],
+      updatedAt: 5,
+    }), 'utf8')
+    const read = await host.readRelayBrief('bot-legacy')
+    assert.deepEqual(read.next, ['等子 Bot 回报'], '读旧文件也应剔掉重复的下一步')
+    await host.clearRelayBrief('bot-legacy')
   })
   await checkAsync('clear 后读回 null、文件消失', async () => {
     await host.clearRelayBrief('bot-a')
@@ -325,6 +390,24 @@ try {
     assert.equal(result.ok, true)
     assert.equal(result.degraded, true)
     assert.ok(result.error.includes('llm'))
+  })
+  await checkAsync('模型把已完成的动作写进 next → 生成时被清掉', async () => {
+    const llm = {
+      stream: async function* () {
+        yield {
+          type: 'text-delta',
+          text: '{"goal":"继续盯梢","done":["已把持续盯梢任务派给子Bot小秘"],"decisions":[],'
+            + '"pending":["等待动静"],"next":["子Bot小秘执行基线检查并持续盯梢","等子Bot回报后汇报给用户"],"files":[]}',
+        }
+      },
+    }
+    const ctx = { get(name) { return name === 'llm' ? llm : undefined } }
+    const result = await host.generateRelayBrief(ctx, {
+      botModel: { provider: 'test', model: 'm1' },
+      messages: MESSAGES,
+    })
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.brief.next, ['等子Bot回报后汇报给用户'], '重复的 next 应在生成结果里就消失')
   })
   await checkAsync('messages 为空 → ok:false', async () => {
     const result = await host.generateRelayBrief({ get() { return undefined } }, { messages: [] })

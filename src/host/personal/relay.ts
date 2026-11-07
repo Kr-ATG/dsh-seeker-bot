@@ -32,6 +32,7 @@ import {
   buildRelayBlock,
   fallbackRelayBrief,
   normalizeRelayBrief,
+  reconcileRelayBrief,
   type RelayBrief,
   type RelayMessage,
 } from '../../shared/relay.ts'
@@ -95,7 +96,12 @@ export async function readRelayBrief(botId: string): Promise<RelayBrief | null> 
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
     const brief = normalizeRelayBrief(parsed)
     if (brief === null) return null
-    return restoreBriefExtras(brief, parsed as Record<string, unknown>)
+    /*
+     * 旧文件里可能还留着「下一步 = 已完成」的重复条目（生成提示词修复之前落盘的）。
+     * 读的时候统一清一次，否则这次修复只对之后新生成的摘要生效，正在跑的会话
+     * 仍会被旧摘要诱导重做。
+     */
+    return restoreBriefExtras(reconcileRelayBrief(brief), parsed as Record<string, unknown>)
   } catch {
     return null
   }
@@ -129,12 +135,16 @@ export function relaySystemPrompt(): string {
     '数字、文件路径、命令、接口名、变量名、命名必须原样保留：不要改写、不要翻译、不要补全。',
     '素材不足以支撑某个字段时，对应字段给空数组或空字符串，不要补空话套话。',
     '',
+    '最重要的一条：下一个会话会照着这份摘要继续干活，所以**已经做完的事不能被写成待办**。',
+    'done 与 next / pending 必须互斥：同一个动作只能出现在一个字段里。',
+    '如果上一段已经把某件事派给子 Bot、已经建好定时检查、或者正在等外部事件，把它写进 done（写明「已启动」），next 里只写后续动作（等回报、做增量对比、向用户汇报），绝不能再写一次「执行检查」「重新开始」「重建基线」这类重复动作。',
+    '',
     '字段要求：',
     '- goal：这一段对话要完成的目标（一句话，<=120 字）。',
-    '- done：已经完成的事（1–8 条，每条 <=120 字）。',
-    '- decisions：已确认的决策与约束（数字、路径、命名、接口；0–8 条）。',
-    '- pending：未完成 / 等用户处理的事（0–8 条）。',
-    '- next：下一步建议（0–8 条）。',
+    '- done：已经完成的事（1–8 条，每条 <=120 字）。已经启动并在进行的持续任务也算完成，不要因为它还在等结果就写进 next。',
+    '- decisions：已确认的决策与约束（数字、路径、命名、接口；0–8 条）。用户明确确认过的口径（例如「什么情况算有动静」）必须原样记在这里，下一个会话不用再问一遍。',
+    '- pending：未完成 / 等外部事件或用户处理的事（0–8 条）。',
+    '- next：下一步建议（0–8 条）。只写**还没开始**的动作；已经被 done 覆盖的动作一条都不能再写。',
     '- files：相关的文件 / 命令 / 链接（0–12 条，保持原文）。',
     '',
     '输出格式（硬要求）：',
@@ -251,8 +261,14 @@ async function runRelayModelOnce(
     if (raw.trim() === '') throw new Error('模型没有返回内容')
 
     const payload = parseJournalJson(raw)
-    const brief = normalizeRelayBrief(payload)
-    if (brief === null) throw new Error('模型返回的接力摘要为空')
+    const normalized = normalizeRelayBrief(payload)
+    if (normalized === null) throw new Error('模型返回的接力摘要为空')
+    /*
+     * 确定性兜底：提示词已经要求 done / next 互斥，但模型仍会把「已派给子 Bot」
+     * 写进 done 又把「子 Bot 执行检查」写进 next。这里按字面证据再清一遍，
+     * 保证落盘和新会话注入的都是「已完成不会出现在下一步」的版本。
+     */
+    const brief = reconcileRelayBrief(normalized)
     return { brief, model: `${route.provider}/${route.model}` }
   } catch (error: any) {
     throw new Error(controller.signal.aborted

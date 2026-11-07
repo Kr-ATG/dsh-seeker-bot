@@ -165,6 +165,35 @@ async function fetchState(): Promise<Record<string, InstalledState>> {
   }
 }
 
+/** `/api/triad/mcp-status` 里本模块用到的字段（其余忽略）。 */
+interface LocalMcpServer {
+  serverName: string
+  toolCount: number
+}
+
+/**
+ * 本机已装、但**不在精选目录**里的 MCP 连接器。
+ *
+ * 目录卡片只覆盖 assets/mcp-catalog/catalog.json 里的条目；手动写进
+ * cordis.patch.yml 的私有连接器（例如 VPS 上自托管的 magpie-image）不在目录里，
+ * 于是面板上完全看不到——用户 2026-11-07 正是这么反馈的。这里从 mcp-status
+ * 读「已装 ∪ 运行中」的 serverName，把目录里没有的那些单独列出来（只读展示，
+ * 不展示凭据：mcp-status 不回 headers）。
+ */
+async function fetchLocalMcp(): Promise<LocalMcpServer[]> {
+  try {
+    const res = await fetch('/api/triad/mcp-status', { headers: { accept: 'application/json' }, cache: 'no-store' })
+    if (!res.ok) return []
+    const body = (await res.json()) as { servers?: Array<{ serverName?: unknown; toolCount?: unknown }> }
+    const servers = Array.isArray(body.servers) ? body.servers : []
+    return servers
+      .map((item) => ({ serverName: String(item.serverName ?? ''), toolCount: Number(item.toolCount ?? 0) }))
+      .filter((item) => item.serverName !== '')
+  } catch {
+    return []
+  }
+}
+
 /** 拉目录。 */
 async function fetchCatalog(): Promise<CatalogFile> {
   const res = await fetch('/api/triad/mcp-catalog', { headers: { accept: 'application/json' } })
@@ -285,6 +314,8 @@ export function ConnectorsPanel({ embedded = false, inCard = false, headerExtraS
   const [phase, setPhase] = useState<Phase>('loading')
   const [catalog, setCatalog] = useState<CatalogFile | null>(null)
   const [installedState, setInstalledState] = useState<Record<string, InstalledState>>({})
+  /** 本机已装、但不在精选目录里的 MCP（只读展示）。 */
+  const [localMcp, setLocalMcp] = useState<LocalMcpServer[]>([])
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
   const [chip, setChip] = useState('全部')
@@ -320,10 +351,11 @@ export function ConnectorsPanel({ embedded = false, inCard = false, headerExtraS
   const load = useCallback(() => {
     setPhase('loading')
     setError('')
-    Promise.all([fetchCatalog(), fetchState()])
-      .then(([cat, ins]) => {
+    Promise.all([fetchCatalog(), fetchState(), fetchLocalMcp()])
+      .then(([cat, ins, local]) => {
         setCatalog(cat)
         setInstalledState(ins)
+        setLocalMcp(local)
         setPhase('ready')
       })
       .catch((err: unknown) => {
@@ -364,6 +396,18 @@ export function ConnectorsPanel({ embedded = false, inCard = false, headerExtraS
       return hay.includes(q)
     })
   }, [catalog, chip, query, installFilter, installedState])
+
+  /**
+   * 目录里没有、但本机 patch 里已经装着的 MCP。
+   *
+   * serverName 的生成规则与宿主 toServerName 一致（目录 id 的非 [A-Za-z0-9_-]
+   * 换成短横线），否则同一个连接器会被误判成「不在目录」重复展示。
+   */
+  const localOnly = useMemo(() => {
+    if (catalog === null) return []
+    const known = new Set((catalog.entries ?? []).map((entry) => entry.id.replace(/[^A-Za-z0-9_-]/g, '-')))
+    return localMcp.filter((item) => !known.has(item.serverName))
+  }, [catalog, localMcp])
 
   /** 按大组分组（「全部」时分组显示；选了某个筛选后平铺）。 */
   const groups = useMemo(() => {
@@ -589,6 +633,37 @@ export function ConnectorsPanel({ embedded = false, inCard = false, headerExtraS
             </div>
           </div>
         ))}
+        {phase === 'ready' && installFilter !== 'uninstalled' && localOnly.length > 0 && (
+          <div className={css.section}>
+            <div className={css.sectionHead}>
+              <span className={css.sectionTitle}>本机已装 · 不在精选目录</span>
+              <span className={css.count}>{String(localOnly.length)}</span>
+            </div>
+            <div className={css.grid}>
+              {localOnly.map((item) => (
+                <div
+                  key={item.serverName}
+                  className={css.card}
+                  role="button"
+                  tabIndex={0}
+                  title="写在 cordis.patch.yml 里的本机连接器：不在随包目录中，所以没有可安装卡片。凭据留在本机，不进仓库。"
+                  onClick={() => { setQuery(item.serverName) }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setQuery(item.serverName) }
+                  }}
+                >
+                  <div className={css.cardBody}>
+                    <span className={css.cardName}>{item.serverName}</span>
+                    <span className={css.cardTag}>
+                      {item.toolCount > 0 ? String(item.toolCount) + ' 个工具 · 本机配置' : '已配置 · 尚无工具'}
+                    </span>
+                  </div>
+                  <div className={css.cardAction}><span className={css.installedBtn}>已安装</span></div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {detail !== null && (

@@ -36,11 +36,21 @@ import { join } from 'node:path'
 // 落盘根与 magic 判据直接复用 spill 侧的实现：两处口径一旦漂移，前端就是
 // 「图在磁盘上但打不开」（/api/personal-agent/file 的准入只认 materializeRoot()）。
 import { looksLikeImage, materializeRoot } from '../spill/materialize.ts'
+// 生图来源策略（纯函数）：供应商内置工具 vs magpie-image MCP，二选一生效。
+import { filterImageTools, imageSourceNotice, normalizeImageSource } from './image-source.mjs'
 
 function dshHome() {
   const env = process.env.DSH_HOME
   if (typeof env === 'string' && env.trim() !== '') return env.trim()
   return join(homedir(), '.dsh')
+}
+
+/** 组装出口读取生图来源偏好的入口（由 apply 时绑定到本模块的 settings 闭包）。 */
+let readImageSourceImpl = () => 'provider'
+
+/** 当前生图来源偏好：'provider' | 'mcp'。tools-gate 的 assemble 监听器从这里读。 */
+export function readImageSource() {
+  return readImageSourceImpl()
 }
 
 export const name = 'dsh-model-capabilities'
@@ -153,6 +163,9 @@ export function apply(ctx) {
     })).default({}),
     imageActive: z.string().default(''),
     videoActive: z.string().default(''),
+    // 生图工具来源：provider（内置 generate_image，缺省）| mcp（magpie-image）。
+    // 两者只能生效一套，见 image-source.mjs 与 assemble 出口的过滤。
+    imageSource: z.string().default('provider'),
     // 生图/视频接口路径（相对 provider baseURL）。不同网关差异很大，做成可配。
     imagePath: z.string().default('images/generations'),
     videoPath: z.string().default('videos/generations'),
@@ -176,6 +189,7 @@ export function apply(ctx) {
       flags: {},
       imageActive: '',
       videoActive: '',
+      imageSource: 'provider',
       imagePath: 'images/generations',
       videoPath: 'videos/generations',
       proxyUrl: '',
@@ -189,6 +203,7 @@ export function apply(ctx) {
               flags: raw.flags && typeof raw.flags === 'object' ? raw.flags : {},
               imageActive: typeof raw.imageActive === 'string' ? raw.imageActive : '',
               videoActive: typeof raw.videoActive === 'string' ? raw.videoActive : '',
+              imageSource: typeof raw.imageSource === 'string' ? raw.imageSource : 'provider',
               imagePath: typeof raw.imagePath === 'string' ? raw.imagePath : 'images/generations',
               videoPath: typeof raw.videoPath === 'string' ? raw.videoPath : 'videos/generations',
               proxyUrl: typeof raw.proxyUrl === 'string' ? raw.proxyUrl : '',
@@ -227,7 +242,7 @@ export function apply(ctx) {
         if (isPlainObject(value)) return value
       } catch { /* fallthrough */ }
     }
-    return { flags: {}, imageActive: '', videoActive: '', imagePath: 'images/generations', videoPath: 'videos/generations', proxyUrl: '' }
+    return { flags: {}, imageActive: '', videoActive: '', imageSource: 'provider', imagePath: 'images/generations', videoPath: 'videos/generations', proxyUrl: '' }
   }
 
   /**
@@ -596,6 +611,7 @@ export function apply(ctx) {
       levels: SELECTABLE_LEVELS,
       imageActive: own.imageActive ?? '',
       videoActive: own.videoActive ?? '',
+      imageSource: normalizeImageSource(own.imageSource),
       imagePath: own.imagePath ?? 'images/generations',
       videoPath: own.videoPath ?? 'videos/generations',
       proxyUrl: own.proxyUrl ?? '',
@@ -1235,6 +1251,10 @@ export function apply(ctx) {
 
   // ── 7. 工具注册 ─────────────────────────────────────────────────────────
 
+  // 生图来源=mcp 时不注册内置工具：两套同时可见会让模型摇摆，这一项就是二选一
+  // 的开关。注意是**启动期判定**——UI 切换来源后重启一次宿主才生效。
+  const imageSourceAtBoot = normalizeImageSource(ownConfig().imageSource)
+  if (imageSourceAtBoot !== 'mcp') {
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'generate_image',
     description: '调用用户已开启「生图」能力并设为当前的模型生成图片（OpenAI 兼容 images/generations 接口）。'
@@ -1262,7 +1282,9 @@ export function apply(ctx) {
       return slimImageResult(result)
     },
   })), 'model-capabilities: generate_image')
+  }
 
+  if (imageSourceAtBoot !== 'mcp') {
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'generate_video',
     description: '调用用户已开启「视频」能力并设为当前的模型生成视频。'
@@ -1286,8 +1308,16 @@ export function apply(ctx) {
       return slimVideoResult(result)
     },
   })), 'model-capabilities: generate_video')
+  }
 
   // ── 8. HTTP 路由 ────────────────────────────────────────────────────────
+
+  // 生图来源的过滤不放这里：本模块的 ctx 是 providerHub 的 inject fork，
+  // system-prompt/assemble 的 scope target 是各 agent 的 scope，收不到——
+  // 统一由 host 侧（与 tools-gate 同一个根 ctx）的监听器处理，见
+  // src/tools-gate/index.ts 的 readImageSource 选项。
+  readImageSourceImpl = () => normalizeImageSource(ownConfig().imageSource)
+
 
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
@@ -1369,6 +1399,7 @@ export function apply(ctx) {
       if (rest === '/settings') {
         if (scope === undefined) { json(res, 400, { ok: false, error: `设置命名空间 "${NS}" 不可用。` }); return }
         const patch = {}
+        if (typeof body?.imageSource === 'string') patch.imageSource = normalizeImageSource(body.imageSource)
         if (typeof body?.imagePath === 'string') patch.imagePath = body.imagePath
         if (typeof body?.videoPath === 'string') patch.videoPath = body.videoPath
         if (typeof body?.proxyUrl === 'string') patch.proxyUrl = body.proxyUrl

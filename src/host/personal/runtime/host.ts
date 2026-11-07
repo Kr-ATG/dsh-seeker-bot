@@ -192,6 +192,33 @@ class PersonalTurnRunner implements TurnRunner {
     }
 
     this.currentAssignment.set(a.assignee.botId, a.id)
+    /*
+     * 派活的第一条：把「谁派的、要做什么」投进**子 Bot 自己的对话流**。
+     *
+     * 不投的话，用户切到子 Bot 那边只看得到它以前的聊天，完全没有「主 Bot
+     * 给我派了活」这条——活干完了、结果也回了，子 Bot 的界面却像什么都没发生。
+     * 这条消息走的是前端已经认识的 `message` 事件（parseSseEvent 支持），所以
+     * 不需要前端改代码就能显示；`source: 'coordinate'` 让渲染层能区分「这是
+     * 派活」而不是普通聊天。
+     */
+    const requesterName =
+      (a.requester.botId === undefined ? undefined : specCache.get(a.requester.botId)?.name) ?? '上级 Bot'
+    publish(a.assignee.botId, {
+      type: 'message',
+      botId: a.assignee.botId,
+      message: {
+        id: `task-${a.id}`,
+        kind: 'progress',
+        blocks: [
+          {
+            type: 'text',
+            text: `【来自 ${requesterName} 的任务】\n${a.brief}${a.doneWhen === undefined ? '' : `\n\n完成标准：${a.doneWhen}`}`,
+          },
+        ],
+        at: Date.now(),
+      },
+      source: 'coordinate',
+    } as any)
     try {
       /*
        * 派活的开头用 runtime 拼好的信封（`input.envelope`），不是裸的 brief：
@@ -226,14 +253,46 @@ class PersonalTurnRunner implements TurnRunner {
         okToolCalls: turn.blocks.filter((block) => block.type === 'tool').length,
       }
       if (!turn.ok) {
+        /*
+         * 失败也要落一条到子 Bot 的对话流：用户切过去至少要看到「这一轮跑挂了
+         * 以及为什么」，而不是一片空白（排障时最怕的就是静默失败）。
+         */
+        const failureText = turn.error ?? '子 Bot 这一轮失败了'
+        publish(a.assignee.botId, {
+          type: 'message',
+          botId: a.assignee.botId,
+          message: {
+            id: `reply-${a.id}`,
+            kind: 'progress',
+            blocks: [{ type: 'text', text: `这一轮没跑完：${failureText}` }],
+            at: Date.now(),
+          },
+          source: 'coordinate',
+        } as any)
         return {
           kind: 'failed',
           outcome: 'provider_error',
-          text: turn.error ?? '子 Bot 这一轮失败了',
+          text: failureText,
           evidence,
         }
       }
-      return { kind: 'completed', text: lastTextOf(turn), evidence }
+      /*
+       * 这一轮的最终回复同样要落到子 Bot 自己的对话流：主 Bot 那边看到的是
+       * `report()` 发的摘要，子 Bot 这边才是它「完整说了什么」。
+       */
+      const replyText = lastTextOf(turn)
+      publish(a.assignee.botId, {
+        type: 'message',
+        botId: a.assignee.botId,
+        message: {
+          id: `reply-${a.id}`,
+          kind: 'finding',
+          blocks: [{ type: 'text', text: replyText }],
+          at: Date.now(),
+        },
+        source: 'coordinate',
+      } as any)
+      return { kind: 'completed', text: replyText, evidence }
     } finally {
       this.currentAssignment.delete(a.assignee.botId)
     }

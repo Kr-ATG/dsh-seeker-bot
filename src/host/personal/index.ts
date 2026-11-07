@@ -48,7 +48,7 @@ import { buildWorkingMemoryBlock, createWorkingMemoryMessage, injectWorkingMemor
 import { clearRelayBrief, generateRelayBrief, injectRelayIntoAgent, readRelayBrief, resetRelayInjection, writeRelayBrief } from './relay.ts'
 import { injectHistoryIntoAgent, resetHistoryInjection, searchHistory, upsertHistoryMessages } from './history-search.ts'
 import { injectCrossBotHistoryIntoAgent, resetCrossBotHistoryInjection, searchAcrossBots } from './cross-search.ts'
-import { normalizeRelayBrief } from '../../shared/relay.ts'
+import { normalizeRelayBrief, reconcileRelayBrief } from '../../shared/relay.ts'
 import { listPages, readPage, writePage } from './pages.ts'
 import {
   checkJournalTrigger,
@@ -1917,8 +1917,13 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
           const body = await readJsonBody(req) as Record<string, unknown>
           const botId = typeof body.botId === 'string' ? body.botId.trim() : ''
           if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
-          const brief = normalizeRelayBrief(body.brief)
-          if (brief === null) return sendJson(res, 400, { ok: false, error: 'brief required' })
+          const normalizedBrief = normalizeRelayBrief(body.brief)
+          if (normalizedBrief === null) return sendJson(res, 400, { ok: false, error: 'brief required' })
+          /*
+           * 摘要可能来自旧版前端缓存、也可能被用户在预览里手改过——落盘前再清一次
+           * 「下一步 = 已完成」的重复项，保证写进文件的就是新会话读到的那一版。
+           */
+          const brief = reconcileRelayBrief(normalizedBrief)
           try {
             await writeRelayBrief(botId, brief)
           } catch (error: any) {
