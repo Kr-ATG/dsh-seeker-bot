@@ -1216,6 +1216,17 @@ function ImageBlock({ block }: { block: Extract<MessageBlock, { type: 'image' }>
  * 布局跳动把下面的消息顶一下。
  */
 function StickerBlock({ sticker }: { sticker: ChatSticker }): JSX.Element {
+  /*
+   * 加载失败降级成一行灰色文字，而不是一张破图。
+   *
+   * 这不是假设的边角：贴纸清单会随版本增删（2026-11-07 就把 26 张 emoji 贴纸整批
+   * 下线了），历史消息里存的那张图在文件被删后必然 404。破图在聊天流里非常刺眼，
+   * 而"当时发的是『开心』"这件事本身仍然有意义——所以降级成文字比留个空框好。
+   */
+  const [failed, setFailed] = useState(false)
+  if (failed) {
+    return <span className="pa-sticker--missing" title={`贴纸已下线：${sticker.alt}`}>{sticker.alt}</span>
+  }
   return (
     <img
       className="pa-sticker"
@@ -1225,6 +1236,7 @@ function StickerBlock({ sticker }: { sticker: ChatSticker }): JSX.Element {
       loading="lazy"
       decoding="async"
       draggable={false}
+      onError={() => setFailed(true)}
     />
   )
 }

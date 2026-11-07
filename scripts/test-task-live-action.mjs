@@ -13,7 +13,11 @@
  *  2. **泛化兜底消失**：TaskRecordCard 不再有「正在整理回复…」；
  *  3. **历史数据兼容**：旧 TaskRecordStep 没有 action 字段时，前端从
  *     工具名 + detail 回退解析，仍然给出具体动作；
- *  4. **双行 + 交叉淡入**：窄屏（397px）读得全，换动作时不硬闪。
+ *  4. **双行 + 交叉淡入**：窄屏（397px）读得全，换动作时不硬闪；
+ *  5. **耗时在右上角**（2026-11-07 用户口径：「已做去掉，做了多长时间放在
+ *     右上角，完成后也显示做了多长时间」）：行内不再渲染「已做 N/M」，
+ *     mm:ss 挂在标题行右端；运行中实时走格，收工后仍是落盘的总用时，
+ *     没有用时数据的行不显示（不硬凑 00:00）。
  *
  * 断言分三层：
  *  · 纯函数（esbuild 打包后真跑）：plainActionOf / stepActionViewOf /
@@ -54,7 +58,7 @@ let mod
     entry,
     [
       `export { plainActionOf } from '${slash(resolve(ROOT, 'src/host/personal/tool-action.ts'))}'`,
-      `export { actionLabelOf, stepActionViewOf, toolActionOf, briefOf, liveProgressOf } from '${slash(resolve(ROOT, 'src/client/personal/shell/task-action.ts'))}'`,
+      `export { actionLabelOf, stepActionViewOf, toolActionOf, briefOf, liveProgressOf, elapsedTextOf } from '${slash(resolve(ROOT, 'src/client/personal/shell/task-action.ts'))}'`,
       '',
     ].join('\n'),
     'utf8',
@@ -72,7 +76,7 @@ let mod
   mod = await import(pathToFileURL(bundle).href)
 }
 
-const { plainActionOf, actionLabelOf, stepActionViewOf, toolActionOf, briefOf, liveProgressOf } = mod
+const { plainActionOf, actionLabelOf, stepActionViewOf, toolActionOf, briefOf, liveProgressOf, elapsedTextOf } = mod
 
 const toolStep = (over = {}) => ({
   at: 0,
@@ -176,7 +180,8 @@ console.log('[task-live-action] 动态行：此刻在做什么（四档，越具
   check(finishedTask !== null && finishedTask.label === '刚才查看文件 README.md',
     '第三档（用户二次反馈那条）：动作都做完但本轮还在跑 → 显示刚做完的那一步，不是「正在思考」', finishedTask?.label)
   check(finishedTask !== null && finishedTask.done === 2 && finishedTask.total === 2,
-    '同时给对「已做 2/2」', finishedTask === null ? 'null' : String(finishedTask.done) + '/' + String(finishedTask.total))
+    '内部计数仍给对（只供进度条算比例，不再当「已做 2/2」文案渲染）',
+    finishedTask === null ? 'null' : String(finishedTask.done) + '/' + String(finishedTask.total))
 
   const textTask = liveProgressOf(taskOf([
     start,
@@ -199,6 +204,29 @@ console.log('[task-live-action] 动态行：此刻在做什么（四档，越具
   check(liveProgressOf(taskOf([], 'done')) === null, '已收口的任务不再返回活信息')
 }
 
+console.log('[task-live-action] 动态行：右上角耗时（做了多长时间）')
+{
+  const taskOf = (over) => ({
+    id: 't', botId: 'b', title: 't', prompt: 'p', status: 'running', startedAt: 1000, steps: [],
+    ...over,
+  })
+
+  check(elapsedTextOf(taskOf({ status: 'running' }), 1000 + 72_400) === '01:12',
+    '运行中：按当前时刻实时走格（mm:ss）', elapsedTextOf(taskOf({ status: 'running' }), 1000 + 72_400))
+  check(elapsedTextOf(taskOf({ status: 'done', durationMs: 46_000 }), 9_999_999) === '00:46',
+    '收工后：仍显示总用时，不再依赖 now', elapsedTextOf(taskOf({ status: 'done', durationMs: 46_000 }), 9_999_999))
+  check(elapsedTextOf(taskOf({ status: 'done', endedAt: 31_000 }), 0) === '00:30',
+    '老数据没有 durationMs：回退 endedAt - startedAt', elapsedTextOf(taskOf({ status: 'done', endedAt: 31_000 }), 0))
+  check(elapsedTextOf(taskOf({ status: 'failed', endedAt: 9_000 }), 0) === '00:08',
+    '失败的行同样给耗时（与 done 一视同仁）', elapsedTextOf(taskOf({ status: 'failed', endedAt: 9_000 }), 0))
+  check(elapsedTextOf(taskOf({ status: 'done' }), 0) === null,
+    '两样都没有：不硬凑 00:00，行上不显示')
+  check(elapsedTextOf(taskOf({ status: 'done', durationMs: -50 }), 0) === '00:00',
+    '脏数据（负时长）收成 00:00，不出现负号')
+  check(elapsedTextOf(taskOf({ status: 'running', startedAt: 5_000 }), 4_000) === '00:00',
+    '现在早于开始时刻也不出负数')
+}
+
 console.log('[task-live-action] 源码契约')
 {
   const card = read('src/client/personal/shell/TaskRecordCard.tsx')
@@ -207,19 +235,27 @@ console.log('[task-live-action] 源码契约')
   check(card.includes('useCrossfadeText') && card.includes('useMotionAllowed'), '换动作走交叉淡入（motion-utils）')
   check(card.includes('正在思考'), '没有任何动作时给「正在思考」，不是「正在处理」')
   check(card.includes('liveProgressOf'), '动态卡使用 task-action 的 liveProgressOf（纯函数，可被测试真跑）')
+  check(!card.includes("'已做 '"), '行内不再渲染「已做 N/M」（用户口径：已做去掉）')
+  check(card.includes('elapsedTextOf') && card.includes('pa-taskrec__elapsed'),
+    '耗时挂在标题行右上角，值来自 task-action 的 elapsedTextOf')
+  check(!card.includes('pa-taskrec__live-meta'), '动作行尾不再挂 meta（已做 / 耗时都已挪走）')
 
   const action = read('src/client/personal/shell/task-action.ts')
   check(action.includes("from '../../kr-chat/plain-language.ts'"), '动作规则表复用 plain-language（只有一份）')
   check(action.includes('export function stepActionViewOf('), '对外导出 stepActionViewOf')
   check(action.includes('export function liveProgressOf('), '活信息逻辑在纯模块里导出（回归脚本可直接跑）')
+  check(action.includes('export function elapsedTextOf('), '耗时口径在纯模块里导出（运行中 / 收工后 / 老数据三档可测）')
   check(action.includes("label = '刚才'") || action.includes("'刚才' + view.action"), '第四档：动作都完成时显示「刚才 + 动作」')
   check(action.includes('step.action') && action.includes('actionHideVerb'), '优先用 host 算好的 action')
 
   const css = read('src/client/personal/shell/tasks.css.ts')
   check(css.includes('-webkit-line-clamp: 2'), '动作文案最多两行（窄屏读得全）')
   check(css.includes('pa-taskrec-live-in') && css.includes('pa-taskrec-live-out'), '交叉淡入关键帧存在')
-  // 窄容器（手机分栏 / 用户拖窄右栏）下 meta 必须换行，不能把动作压成竖排几字。
-  check(/flex-wrap:\s*wrap/.test(css) && /flex:\s*1 1 120px/.test(css), '窄容器下 meta 换行、动作不被压扁')
+  // 标题行 = 标题 + 右上角耗时；耗时 flex:none 不被挤掉，标题自己出省略号。
+  check(/\.pa-taskrec__top\s*\{[^}]*display:\s*flex/.test(css), '标题行是 flex（标题左、耗时右）')
+  check(/\.pa-taskrec__elapsed\s*\{[^}]*tabular-nums/.test(css),
+    '右上角耗时是等宽数字（每秒走格时宽度不跳）')
+  check(!/已做 N\/M · 耗时/.test(css), '样式注释里的旧「已做 N/M · 耗时」口径已清理')
   check(/prefers-reduced-motion: reduce[\s\S]*pa-taskrec__live-text/.test(css), '减少动态效果时关闭换字动画')
 
   const store = read('src/client/personal/store.tsx')

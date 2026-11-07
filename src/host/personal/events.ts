@@ -36,6 +36,27 @@ export type BotEvent =
   | { type: 'status'; botId: string; status: 'idle' | 'thinking'; seq: number; at: number }
   | { type: 'error'; botId: string; message: string; seq: number; at: number }
   /**
+   * 一轮对话结束（成功或失败）。
+   *
+   * 为什么要走事件总线：`/reply/stream` 是**这一轮**的一次性连接，页面一刷新
+   * 就断了，那条请求上的 `done` / `error` 再也送不到新页面。而宿主里的轮次
+   * 并不会因为前端刷新就停（见 `/turn-status`），新页面只能靠这条广播收口
+   * 「正在输入」气泡与右栏任务卡——否则它会一直挂着，直到用户手动点停止。
+   *
+   * 多窗口 / 多设备同理：任何一处发起的轮次，其他地方也该看到它结束了。
+   */
+  | {
+      type: 'turn-end'
+      botId: string
+      ok: boolean
+      /** 失败原因（用户可读，已中文化）。成功时不带。 */
+      error?: string
+      /** 宿主会话 id：前端据此判断是不是「刷新前那一轮」。 */
+      sessionId?: string
+      seq: number
+      at: number
+    }
+  /**
    * 新的一期期刊生成好了（手动触发或调度器自动触发）。
    *
    * 为什么必须走事件总线：期刊是**宿主异步产出**的——用户点了「生成」之后可以切走，

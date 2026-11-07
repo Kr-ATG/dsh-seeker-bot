@@ -270,10 +270,15 @@ export function planBotCreate(args: BotCreateArgs, options: BotCreateOptions): B
     name,
     role,
     description,
-    // 没给指令就按「名字 + 岗位 + 简介」拼一段最小身份提示，和前端 createBot 的兜底一致
-    instructions: instructions !== ''
-      ? instructions
-      : `你是「${name}」，${role}。${description !== '' ? `${description} ` : ''}说话直接、具体，先给结论再解释。`,
+    /*
+     * 没给指令就**留空**。
+     *
+     * 这里原本会拼一段「你是「X」，Y。说话直接、具体，先给结论再解释」的兜底——
+     * 其中「说话直接、先给结论」是系统替用户定的性格。2026-11-07 起性格归
+     * Bot.persona（可空），没写就不注入，所以兜底也一并去掉。
+     * 身份（名字 / 岗位 / 简介）仍然由 prompt 里的「你是「name」，岗位：role」承担。
+     */
+    instructions,
     ...(groupId !== '' ? { groupId } : {}),
     createdAt: options.now ?? Date.now(),
     createdBy: options.createdBy,

@@ -2759,6 +2759,16 @@ select.pa-int__input { appearance: none; background-image: linear-gradient(45deg
   -webkit-user-drag: none;
 }
 .pa-msg--user .pa-sticker { align-self: flex-end; }
+/* 贴纸文件已下线 / 加载失败时的降级：一行灰色文字，别留破图。 */
+.pa-sticker--missing {
+  align-self: flex-start;
+  font-size: calc(11px + var(--pa-font-delta));
+  line-height: 1.5;
+  color: var(--pa-text-3);
+  padding: 4px 9px;
+  border: 1px dashed var(--pa-line);
+  border-radius: 9px;
+}
 
 /* ---------- 消息里的用户图片 ---------- */
 .pa-image {

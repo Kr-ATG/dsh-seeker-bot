@@ -7,6 +7,10 @@
  *  · 全屏 `TaskDetailModal` —— Work 模式的过程时间线：单栏、每条步骤左侧细线图标 +
  *    灰色小标题 + 正文段落（pa-taskdetail-*）。
  *
+ * 2026-11-07 用户口径：「已做去掉，做了多长时间放在右上角，完成后也显示做了
+ * 多长时间」——任务行内不再出现「已做 N/M」，耗时（mm:ss）成为标题行右端的
+ * 唯一读数：运行中实时走格，收工后显示总用时；没有用时数据的行不显示。
+ *
  * 颜色一律走 base.css.ts 暴露的 --pa-* 变量；深浅主题都能自动跟随。
  * 注意：本文件是模板字符串，正文与注释里都不能出现反引号。
  */
@@ -88,7 +92,7 @@ export const PERSONAL_TASK_CSS = `
 }
 
 /*
- * 每一行：圆角图标块 + 右侧三行（标题 / 摘要 / 时间）。
+ * 每一行：圆角图标块 + 右侧三行（标题行带右上角耗时 / 摘要 / 时间）。
  *
  * 用户口径（2026-11-02）：「布局按照我给的图片来」——图标装在一块圆角方形
  * 底色里，标题加粗、摘要灰色最多两行、时间单独一行左对齐（不是右端对齐）。
@@ -118,7 +122,7 @@ export const PERSONAL_TASK_CSS = `
   color: var(--pa-text-2);
 }
 
-/* 正文列：标题 / 摘要 / 时间。 */
+/* 正文列：标题行（右端是耗时）/ 摘要 / 时间。 */
 .pa-taskrec__main {
   flex: 1;
   min-width: 0;
@@ -127,7 +131,23 @@ export const PERSONAL_TASK_CSS = `
   gap: 2px;
   padding-top: 1px;
 }
+/*
+ * 标题行：标题左、耗时右，行内右上角就是「做了多长时间」。
+ *
+ * 用户口径（2026-11-07）：「做了多长时间放在右上角」——耗时不再是动作行尾的
+ * 附属小字，而是这一行右端唯一的读数。baseline 对齐：标题 12.5px、耗时 9.5px，
+ * 按字底排读起来才像同一行；若用 center，小字会浮在标题的垂直中线上。
+ */
+.pa-taskrec__top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
 .pa-taskrec__name {
+  /* 标题给耗时让位：自己收缩出省略号，耗时 flex: none 永远不被挤掉。 */
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -135,6 +155,20 @@ export const PERSONAL_TASK_CSS = `
   font-weight: 600;
   line-height: 1.35;
   color: var(--pa-text);
+}
+/*
+ * 右上角耗时：mm:ss，等宽数字（每秒走格时宽度不跳）。
+ *
+ * 与相对时间（pa-taskrec__time）同字号同色阶：它是卡片右侧的一个持续读数，
+ * 不能抢标题，但不该小到读不清。
+ */
+.pa-taskrec__elapsed {
+  flex: none;
+  font-size: calc(9.5px + var(--pa-font-delta));
+  line-height: 1.35;
+  color: var(--pa-text-4);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .pa-taskrec__summary {
   display: -webkit-box;
@@ -254,16 +288,12 @@ export const PERSONAL_TASK_CSS = `
 .pa-taskrec__item { display: flex; flex-direction: column; min-width: 0; }
 .pa-taskrec__item + .pa-taskrec__item { margin-top: 1px; }
 
-/* 行：呼吸点 + 动作文案（可折两行）+ 右侧 meta。
- * 顶部对齐而不是居中：文案两行时呼吸点要贴第一行，meta 也不该浮在两行中间。 */
+/* 行：呼吸点 + 动作文案（可折两行）。
+ *
+ * 耗时搬到标题行右上角之后，这一行只剩两样东西，不再需要「让位换行」；
+ * 顶部对齐保留：文案两行时呼吸点贴第一行，不浮在两行中间。 */
 .pa-taskrec__live {
   display: flex;
-  /*
-   * 允许换行：窄容器（手机 397px 左右分栏、或用户把右栏拖窄）下，
-   * 「已做 N/M · 耗时」宁可掉到下一行，也不能把动作文案压成一列竖排的
-   * 四个字 —— 那比截断更难读。宽容器里两者照旧同一行。
-   */
-  flex-wrap: wrap;
   align-items: flex-start;
   gap: 5px;
   min-width: 0;
@@ -287,20 +317,17 @@ export const PERSONAL_TASK_CSS = `
 /*
  * 动作文案：**双行 + 交叉淡入**。
  *
- * 用户口径（2026-11-07）「文字半截，我需要双行显示」——手机 397px 宽时这一行右边
- * 还有「已做 N/M · 耗时」，单行 nowrap 只能读到动作的前半截（「正在启动第二个
- * CodeArts 账号登…」），看不出到底在干什么。折成两行、超过两行才省略。
+ * 用户口径（2026-11-07）「文字半截，我需要双行显示」——单行 nowrap 只能读到
+ * 动作的前半截（「正在启动第二个 CodeArts 账号登…」），看不出到底在干什么。
+ * 折成两行、超过两行才省略。
  *
  * 结构上这一格是 grid：两层文字占**同一格**（grid-area 1/1 叠放），换字时旧层
  * 淡出与新层淡入同时进行，任何一帧都有字可读——没有「先清空再出现」的空白帧。
  * 换字节奏见 motion-utils 的 useCrossfadeText（180ms 进 / 70ms 交叠）。
  */
 .pa-taskrec__live-label {
-  /*
-   * flex-basis 给一个「至少能读」的下限（约 8 个字）：再窄就让 meta 换行，
-   * 而不是继续压缩文案宽度。flex-grow 仍是 1，宽容器里照常吃满剩余空间。
-   */
-  flex: 1 1 120px;
+  /* 动作文案独占这一行剩余宽度（耗时已不在行尾），窄容器下允许收缩到省略。 */
+  flex: 1 1 auto;
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -326,16 +353,6 @@ export const PERSONAL_TASK_CSS = `
 .pa-taskrec__live-text[data-phase='out'] {
   animation: pa-taskrec-live-out 250ms linear both;
   pointer-events: none;
-}
-/* meta 不收缩：动作再长也不许把「已做 N/M · 耗时」挤掉或折行。 */
-.pa-taskrec__live-meta {
-  flex: none;
-  /* 换行后（窄容器）右对齐收口，与动作文案左对齐形成两端对齐的观感。 */
-  margin-left: auto;
-  align-self: flex-start;
-  color: var(--pa-text-4);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
 }
 @keyframes pa-taskrec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 @keyframes pa-taskrec-live-in {

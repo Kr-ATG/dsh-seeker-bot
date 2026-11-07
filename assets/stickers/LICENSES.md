@@ -1,57 +1,39 @@
 # 聊天贴纸素材授权
 
-本目录下的 26 张 SVG 贴纸**全部来自 Twemoji**，画风统一（36×36 圆润风格），
-**不含任何人物形象**——没有真人、没有人形卡通、没有动漫角色，连 emoji 笑脸
-都刻意排除了；只有符号、动物、食物与物件。
+本目录共 **9 张**贴纸，全部是 Q 版角色的成套情绪，透明底 PNG。
 
-## Twemoji — CC BY 4.0
+## Q 版情绪（chibi/）— CC0 1.0
 
-- 源码仓库：https://github.com/jdecked/twemoji （原 twitter/twemoji 的维护分支）
-- 授权原文：https://creativecommons.org/licenses/by/4.0/
-- 作者：Twitter, Inc. and other contributors
-- 署名要求：分发本插件时保留本文件即可（CC BY 4.0 只要求署名，不要求相同方式共享）
+- 作品：**headmugshot packs : chibi emotions**（Aranel 角色套）
+- 作者：eysselia
+- 来源：https://opengameart.org/content/headmugshot-packs-chibi-emotions
+- 授权：**CC0 1.0**（https://creativecommons.org/publicdomain/zero/1.0/）
+- 作者原话：「Credit aren't required... You can do whatever you want with these.」
+  无需署名，这里仍注明出处只是出于礼貌。
+- 原始 384×384 透明底，本目录已缩到 256×256（保留 alpha），供聊天贴纸用。
 
-## 为什么全用一套
+| 文件 | 原始文件 | 情绪 |
+| --- | --- | --- |
+| chibi/chibi-angry.png | Aranel_Angry.png | 气到炸 |
+| chibi/chibi-angry2.png | Aranel_Angry2.png | 气鼓鼓 |
+| chibi/chibi-happy.png | Aranel_Happy.png | 开心 |
+| chibi/chibi-happy2.png | Aranel_Happy2.png | 偷笑 |
+| chibi/chibi-heh.png | Aranel_Heu.png | 呃…（尴尬） |
+| chibi/chibi-neutral.png | Aranel_Neutre.png | 面无表情 |
+| chibi/chibi-oops.png | Aranel_Oups.png | 糟了 |
+| chibi/chibi-sad.png | Aranel_Sad.png | 难过 |
+| chibi/chibi-shock.png | Aranel_Stuppeur.png | 震惊 |
 
-早期候选池混用了 Twemoji（36×36 圆润）与 OpenMoji（72×72 粗描边），同一屏里
-一张贴纸圆润、下一张粗黑描边，立刻显得像两个人拼的。统一到 Twemoji 之后：
-一支配色、一种线宽、一份署名，而且 CC BY 比 CC BY-SA 的约束更少。
+同一作者还有 Awena / Vivianne 两个角色各一套（同样是 CC0），需要更多角色时直接从上面的
+来源页下载 awena.7z / vivianne.7z。
 
-## 逐条来源
+---
 
-| 文件 | 分组 | 码位 | 字符 |
-| --- | --- | --- | --- |
-| zh/ke-ok.svg | zh | U+1F251 | 🉑 |
-| zh/wu-none.svg | zh | U+1F21A | 🈚 |
-| zh/mi-secret.svg | zh | U+3299 | ㊙ |
-| zh/zhu-bless.svg | zh | U+3297 | ㊗ |
-| zh/jin-no.svg | zh | U+1F232 | 🈲 |
-| zh/ying-open.svg | zh | U+1F23A | 🈺 |
-| zh/fish-slack.svg | zh | U+1F41F | 🐟 |
-| zh/lemon-sour.svg | zh | U+1F34B | 🍋 |
-| zh/hongbao.svg | zh | U+1F9E7 | 🧧 |
-| zh/dog-doge.svg | zh | U+1F436 | 🐶 |
-| zh/milktea.svg | zh | U+1F9CB | 🧋 |
-| zh/lotus-chill.svg | zh | U+1FAB7 | 🪷 |
-| zh/panda.svg | zh | U+1F43C | 🐼 |
-| en/fire-hot.svg | en | U+1F525 | 🔥 |
-| en/hundred.svg | en | U+1F4AF | 💯 |
-| en/sparkles.svg | en | U+2728 | ✨ |
-| en/ok.svg | en | U+1F197 | 🆗 |
-| en/cool.svg | en | U+1F192 | 🆒 |
-| en/new.svg | en | U+1F195 | 🆕 |
-| en/sos.svg | en | U+1F198 | 🆘 |
-| en/frog.svg | en | U+1F438 | 🐸 |
-| en/duck.svg | en | U+1F986 | 🦆 |
-| en/rainbow.svg | en | U+1F308 | 🌈 |
-| en/zzz.svg | en | U+1F4A4 | 💤 |
-| en/cat.svg | en | U+1F431 | 🐱 |
-| en/bomb.svg | en | U+1F4A3 | 💣 |
+## 已下线的历史素材（2026-11-07）
 
-## 一句话背景
+此前这里还放过 26 张 Twemoji 符号贴纸（🉑🈚🐟🍋 这类，CC BY 4.0），用户评价
+「太素了」，已连同文件一起移除，不在可用清单里。
 
-中文真正的「梗图」（熊猫头 / 蘑菇头 / 微信表情）**不存在可商用版本**：
-微信表情开放平台只授权在微信内使用，GitHub 上的中文表情包合集（如 ChineseBQB）
-没有 LICENSE 文件 = 版权保留。所以这里的中文组走的是「Unicode CJK 方框字符 +
-中文语义稳定的动物食物」这条路——🉑 可以、🈚 无语、🐟 摸鱼、🍋 酸了、🐶 狗头，
-它们的含义在中文语境里是稳定的，而且授权干净。
+它们的 SVG 源在 https://github.com/jdecked/twemoji（CC BY 4.0），需要时可以重新拉取。
+如果历史消息里出现过这些贴纸，界面会退化成一行灰色文字（见 MessageBlockView 的
+StickerBlock 加载失败分支），不会留一张破图。

@@ -1140,6 +1140,36 @@ function normalizeHero(raw: unknown, bots: Bot[]): HeroSlots {
   return { left, right: right === left ? null : right }
 }
 
+/**
+ * 旧版默认人设的迁移（2026-11-07）。
+ *
+ * 以前系统会往每个 Bot 里塞一句预设性格：主 Bot 是「语气沉稳、简洁，像一个可靠的
+ * 总管」，子 Bot 是「说话直接、具体，先给结论再解释」。现在性格归 Bot.persona、
+ * 空着就不注入，但**已经存进 localStorage 的旧文案不会自己消失**——用户改完代码
+ * 打开一看，Bot 还是那副腔调，会以为「改了没生效」。
+ *
+ * 只做**精确匹配**：一字不差才清，用户自己写过的任何内容都不碰。
+ * @param bot - 归一化过程中的一条 Bot。
+ * @returns 清洗过（或原样返回）的 Bot。
+ */
+function migrateLegacyPersona(bot: Bot): Bot {
+  if (bot.isMain === true) {
+    const legacyMain =
+      '你是「Seeker」，用户的主 Bot。你拥有所有子 Bot 的调度权：理解用户目标，自己处理或派给最合适的子 Bot，并把结果汇总回来。你的语气沉稳、简洁，像一个可靠的总管。'
+    if (bot.instructions.trim() === legacyMain) {
+      return {
+        ...bot,
+        instructions: '你拥有所有子 Bot 的调度权：理解用户目标，自己处理或派给最合适的子 Bot，并把结果汇总回来。',
+      }
+    }
+    return bot
+  }
+  if (/^你是「[^」]+」，.*说话直接、具体，先给结论再解释。$/.test(bot.instructions.trim())) {
+    return { ...bot, instructions: '' }
+  }
+  return bot
+}
+
 function normalizeState(parsed: AppState): AppState {
   const legacyBots = new Set<string>(LEGACY_SEED_BOT_IDS)
   const legacyRooms = new Set<string>(LEGACY_SEED_ROOM_IDS)
@@ -1170,6 +1200,8 @@ function normalizeState(parsed: AppState): AppState {
   bots = bots.map((bot: Bot) => (
     bot.isMain === true && bot.name === '小墨助手' ? { ...bot, name: 'Seeker' } : bot
   ))
+  // 旧版系统塞进去的默认性格一并清掉（精确匹配才动，见 migrateLegacyPersona）
+  bots = bots.map((bot: Bot) => migrateLegacyPersona(bot))
   const groups = (Array.isArray(raw.groups) ? raw.groups : [])
     .filter((group: any) => group && typeof group.id === 'string' && !legacyGroups.has(group.id))
   if (!groups.some((group: any) => group.id === DEFAULT_GROUP_ID)) {
@@ -1184,21 +1216,20 @@ function normalizeState(parsed: AppState): AppState {
       && !legacyRooms.has(message.roomId)
       && !String(message.id ?? '').startsWith('m-'))
     /*
-     * 刷新时的 pending 清理：页面刚加载不可能有正在进行的流，历史里残留的
-     * `pending: true` 只可能是上次异常收口留下的（实测会永远显示「正在输入」）。
-     * 一并把 running 的工具卡标成中断，避免刷新后还在转圈。
+     * 刷新时**不**直接清 pending（2026-11-07 修）。
+     *
+     * 旧逻辑假设「页面刚加载不可能有正在进行的流」，于是把所有 `pending: true`
+     * 就地标成中断，并给宿主补发 /stop——宿主的轮次确实被 cancel 了，用户看到
+     * 的就是「一刷新，Bot 的回复就断了」。
+     *
+     * 现在改成：先保留原样，把有 pending 的 bot 记进 staleReplyBotIds，
+     * 由挂载后的对账 effect 去问宿主到底还在不在跑（/turn-status）。
+     * 在跑就保留气泡等 turn-end；没在跑才按旧行为收口。
      */
     .map((message: any) => {
       if (message?.pending !== true) return message
-      return {
-        ...message,
-        pending: false,
-        blocks: (Array.isArray(message.blocks) ? message.blocks : []).map((block: any) => (
-          block?.type === 'tool' && block.run?.status === 'running'
-            ? { ...block, run: { ...block.run, status: 'error', result: '页面刷新，本轮已中断' } }
-            : block
-        )),
-      }
+      if (typeof message.botId === 'string' && message.botId !== '') staleReplyBotIds.add(message.botId)
+      return message
     })
 
   const rooms = (Array.isArray(raw.rooms) ? raw.rooms : [])
@@ -1269,12 +1300,14 @@ function normalizeState(parsed: AppState): AppState {
       ? { ...task, steps: [task.steps[0], ...task.steps.slice(-(MAX_TASK_STEPS - 1))] }
       : task))
     /*
-     * 僵尸任务收口：与上面消息 `pending` 清理同一口径——页面刚加载不可能有轮次
-     * 在跑，还挂着 running 的一定是上次异常收口留下的。**必须在加载时清掉**：
-     * 右栏任务记录读的是 `TaskRecord.status`，与消息的 pending 是两套数据，
-     * 只清一边会让界面永远转着一个齿轮（见 settleStaleTask 的说明）。
+     * 僵尸任务同样不在加载时收口（与上面 messages 同一口径，2026-11-07）：
+     * 宿主可能还在跑这一轮，先记下 botId，对账后确认没跑再 settle。
+     * 仍挂着 running 的右栏任务卡在确认前保持原样，不能提前变灰。
      */
-    .map((task: TaskRecord) => settleStaleTask(task))
+    .map((task: TaskRecord) => {
+      if (task.status === 'running') staleTaskBotIds.add(task.botId)
+      return task
+    })
 
   /*
    * 历史对话归档：旧 localStorage 没有这个字段 → 空数组；清洗与上限见
@@ -1319,6 +1352,18 @@ function normalizeState(parsed: AppState): AppState {
 const staleTaskBotIds = new Set<string>()
 
 /**
+ * 加载时发现「气泡还挂着 pending」的 bot。
+ *
+ * 与 staleTaskBotIds 是两套数据（消息 pending 与任务 running），但对账时机
+ * 相同：挂载后先问宿主 /turn-status，还在跑就保留原样等 turn-end，
+ * 确认没在跑才本地收口。
+ *
+ * 为什么不能像旧逻辑那样直接清：宿主里的轮次不会因为前端刷新而停，
+ * 提前把 pending 清掉，用户看到的就是「一刷新回复就断了」。
+ */
+const staleReplyBotIds = new Set<string>()
+
+/**
  * 收口一条「僵尸任务」：持久化里还挂着 `status: 'running'`，但页面刚加载，
  * 不可能有任何轮次在跑。
  *
@@ -1337,8 +1382,10 @@ const staleTaskBotIds = new Set<string>()
  */
 function settleStaleTask(task: TaskRecord): TaskRecord {
   if (task.status !== 'running') return task
-  /* 记下 botId：宿主那边这一轮可能还在跑，挂载后要补一发停止（见 staleTaskBotIds）。 */
-  staleTaskBotIds.add(task.botId)
+  /*
+   * 名单由 normalizeState 统一收集、由挂载后的对账 effect 消费：
+   * 这里只在「确认宿主没在跑」之后才被调用，不能自己再填名单。
+   */
   const lastStep = task.steps.length > 0 ? task.steps[task.steps.length - 1] : undefined
   const endedAt = Math.max(task.startedAt, lastStep?.at ?? task.startedAt)
   /* 时间线上还挂着 running 的步骤同样不能留：宿主不会再补结束事件。 */
@@ -1356,6 +1403,128 @@ function settleStaleTask(task: TaskRecord): TaskRecord {
     durationMs: Math.max(0, endedAt - task.startedAt),
     steps,
   }
+}
+
+
+/** 宿主 `/turn-status` 的响应形状（只声明这里用到的字段）。 */
+interface HostTurnStatus {
+  ok?: boolean
+  running?: boolean
+  status?: string
+  sessionId?: string
+  /** 本轮已经产出的消息快照：刷新那一刻流已断，半截正文只存在于这里。 */
+  messages?: BotMessage[]
+  turnId?: string
+}
+
+/**
+ * 问宿主：这个 Bot 现在有没有轮次在跑。
+ *
+ * 失败返回 null（网络抖动 / 宿主没升级），调用方按「不确定」处理——
+ * 宁可保守收口，也不能让界面永远挂着「正在输入」。
+ */
+async function hostTurnStatus(botId: string): Promise<HostTurnStatus | null> {
+  try {
+    const res = await fetch('/api/personal-agent/turn-status?botId=' + encodeURIComponent(botId))
+    if (!res.ok) return null
+    const payload = (await res.json()) as HostTurnStatus
+    return payload !== null && typeof payload === 'object' ? payload : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 确认宿主**没在跑**之后，把本地这一轮的残留收口。
+ *
+ * 与旧行为一致：气泡摘掉 pending、还在转的工具卡标中断、任务记录变
+ * 「任务已中断」。区别只在**时机**——现在要等 /turn-status 说不跑了才做。
+ */
+function settleStaleLocal(prev: AppState, botId: string): AppState {
+  const messages = prev.messages.map((message) => {
+    if (message.role !== 'bot' || message.pending !== true || message.botId !== botId) return message
+    return {
+      ...message,
+      pending: false,
+      blocks: (Array.isArray(message.blocks) ? message.blocks : []).map((block) => (
+        block?.type === 'tool' && block.run?.status === 'running'
+          ? { ...block, run: { ...block.run, status: 'error' as const, result: '页面刷新，本轮已中断' } }
+          : block
+      )),
+    }
+  })
+  const tasks = prev.tasks.map((task) => (task.botId === botId ? settleStaleTask(task) : task))
+  return { ...prev, messages, tasks }
+}
+
+/**
+ * 用宿主给的快照补上「刷新那一刻正在生成的那条回复」。
+ *
+ * 页面刷新会先断开 `/reply/stream`，之后宿主继续生成的部分只走事件总线；
+ * 而总线订阅是在挂载后才建立的，中间那段（通常是一两秒）没有任何人收。
+ * 宿主把本轮消息挂在 /turn-status 里，正是为了补这个缺口。
+ *
+ * 只认该 bot **最后一条 pending 气泡**：它就是这一轮的容器，覆盖它的
+ * blocks 不会凭空多出一个气泡。找不到（比如用户在这期间清空了会话）就
+ * 原样返回，让 SSE 继续推进。
+ */
+function revivePendingWithSnapshot(prev: AppState, botId: string, snapshot: readonly BotMessage[]): AppState {
+  const last = snapshot[snapshot.length - 1]
+  if (last === undefined || !Array.isArray(last.blocks) || last.blocks.length === 0) return prev
+  let index = -1
+  for (let i = prev.messages.length - 1; i >= 0; i -= 1) {
+    const message = prev.messages[i]
+    if (message.botId === botId && message.role === 'bot' && message.pending === true) {
+      index = i
+      break
+    }
+  }
+  if (index < 0) return prev
+  const target = prev.messages[index]
+  const messages = prev.messages.slice()
+  messages[index] = {
+    ...target,
+    blocks: last.blocks as MessageBlock[],
+    ...(last.kind !== undefined ? { kind: last.kind } : {}),
+    ...(last.turnId !== undefined ? { turnId: last.turnId } : {}),
+  }
+  return { ...prev, messages }
+}
+
+/**
+ * 一轮真正结束时收口（事件总线的 `turn-end`，或本窗口自己读到 done）。
+ *
+ * 与 {@link settleStaleLocal} 的区别：这里知道成败，任务记录按 done / failed
+ * 收口，而不是笼统的「已中断」。
+ */
+function settleTurnEnd(prev: AppState, botId: string, ok: boolean, error?: string): AppState {
+  let touched = false
+  const messages = prev.messages.map((message) => {
+    if (message.botId !== botId || message.role !== 'bot' || message.pending !== true) return message
+    touched = true
+    return { ...message, pending: false }
+  })
+  const endedAt = Date.now()
+  const tasks = prev.tasks.map((task) => {
+    if (task.botId !== botId || task.status !== 'running') return task
+    touched = true
+    const steps = task.steps.map((step) => (step.status === 'running' ? { ...step, status: 'error' as const } : step))
+    steps.push({
+      at: endedAt,
+      kind: 'end',
+      title: ok ? '已完成' : '失败',
+      ...(ok ? {} : { detail: error !== undefined && error !== '' ? error : '本轮没有跑完' }),
+    })
+    return {
+      ...task,
+      status: ok ? 'done' as const : 'failed' as const,
+      endedAt,
+      durationMs: Math.max(0, endedAt - task.startedAt),
+      steps,
+    }
+  })
+  if (!touched) return prev
+  return { ...prev, messages, tasks }
 }
 
 /**
@@ -1939,6 +2108,7 @@ function replyRequestBody(
       role: bot.role,
       description: bot.description,
       instructions: bot.instructions,
+      persona: bot.persona ?? '',
       model,
       eli5Mode: bot.eli5Mode !== false,
       stickerMode: bot.stickerMode === true,
@@ -1977,6 +2147,7 @@ function replyRequestBody(
       role: item.role,
       description: item.description,
       instructions: item.instructions,
+      persona: item.persona ?? '',
       model: item.model,
       eli5Mode: item.eli5Mode !== false,
       stickerMode: item.stickerMode === true,
@@ -2805,6 +2976,13 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
    * 所以用 ref 桥接。
    */
   const stopReplyRef = useRef<() => void>(() => {})
+  /**
+   * 刷新后仍在跑的轮次所属的 bot（见启动对账 effect）。
+   *
+   * 收到事件总线的 turn-end 或该 bot 的新消息时从这里出队：前者的
+   * 收口比 /reply/stream 的 done 晚到一步，后者说明宿主还在推内容。
+   */
+  const revivedTurnBotIdsRef = useRef<Set<string>>(new Set())
   /** 已排期、尚未启动的群聊成员回复（见 ScheduledReply）。 */
   const scheduledRepliesRef = useRef<Set<ScheduledReply>>(new Set())
   /**
@@ -2917,25 +3095,68 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
   }, [state.messages])
 
   /*
-   * 启动对账：刷新时被收口的僵尸任务，宿主那边也要停。
+   * 启动对账：刷新前那一轮，宿主到底还在不在跑？
    *
-   * 与 normalizeState 的消息 `pending` 清理同一口径——页面重载后前端已经不在
-   * 监听那一轮了，让它继续跑只会产生「无主消息」（界面显示任务已停止，输出却
-   * 还在往对话流里冒）。409 = 宿主本来就没在跑，不算错误。
+   * 旧逻辑「页面一刷新就补发 /stop」正是「一刷新回复就断」的直接原因——宿主的
+   * 轮次被 cancel 了，用户什么都没做，回复就停在半路。
    *
-   * 名单由 settleStaleTask 在加载时填（normalizeState 是纯函数，不能发请求），
-   * 这里取走即清空，只发一次。
+   * 现在先问 /turn-status：
+   *  · running → 保留 pending 气泡与任务卡，用快照补上断流那几秒已经生成的
+   *              正文，然后等事件总线的 turn-end 收口；
+   *  · 没在跑  → 才按旧行为本地收口（任务标「已中断」），并补发一次 stop
+   *              清掉宿主侧可能残留的排队消息。
+   *
+   * 探测失败（null）按「没在跑」处理：界面不能永远转圈。
    */
   useEffect(() => {
-    if (isDemoMode()) return
-    const botIds = [...staleTaskBotIds]
+    if (isDemoMode()) return undefined
+    const botIds = new Set<string>([...staleTaskBotIds, ...staleReplyBotIds])
     staleTaskBotIds.clear()
-    if (botIds.length === 0) return
-    void Promise.all(botIds.map((botId) => fetch('/api/personal-agent/stop', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ botId }),
-    }).catch(() => null)))
+    staleReplyBotIds.clear()
+    if (botIds.size === 0) return undefined
+    let alive = true
+    /** running 分支的复核定时器（cleanup 里统一清）。 */
+    const recheckTimers: number[] = []
+    void (async () => {
+      const checks = await Promise.all([...botIds].map(async (botId) => ({
+        botId,
+        status: await hostTurnStatus(botId),
+      })))
+      if (!alive) return
+      for (const check of checks) {
+        if (check.status?.running === true) {
+          revivedTurnBotIdsRef.current.add(check.botId)
+          const snapshot = Array.isArray(check.status.messages) ? check.status.messages : []
+          if (snapshot.length > 0) {
+            setState((prev) => revivePendingWithSnapshot(prev, check.botId, snapshot))
+          }
+          /*
+           * 复核一次：SSE 订阅是在这个 effect 之后才建立的（effect 顺序如此），
+           * 这一两秒里宿主若刚好收尾，turn-end 广播就会落空，界面会永远挂着
+           * 「正在输入」。8 秒后再问一次，确认已经停了就按完成收口。
+           */
+          recheckTimers.push(window.setTimeout(() => {
+            void (async () => {
+              const again = await hostTurnStatus(check.botId)
+              if (!alive || again === null || again.running === true) return
+              revivedTurnBotIdsRef.current.delete(check.botId)
+              setState((prev) => settleTurnEnd(prev, check.botId, again.status !== 'error'))
+            })()
+          }, 8000))
+          continue
+        }
+        setState((prev) => settleStaleLocal(prev, check.botId))
+        void fetch('/api/personal-agent/stop', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ botId: check.botId }),
+        }).catch(() => null)
+      }
+    })()
+    return () => {
+      alive = false
+      for (const timer of recheckTimers) window.clearTimeout(timer)
+    }
   }, [])
 
   /*
@@ -3452,6 +3673,38 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
           return
         }
         /*
+         * 一轮结束（成功 / 失败）。
+         *
+         * 正常开着的页面已经通过 /reply/stream 的 done 收口过，这里再来一次是
+         * 幂等的（settleTurnEnd 找不到 pending 就原样返回）；真正需要它的是
+         * **刷新后的页面**与多窗口——它们没有那条一次性连接。
+         */
+        if (payload?.type === 'turn-end') {
+          const endedBotId = String(payload.botId ?? '')
+          if (endedBotId !== '') {
+            revivedTurnBotIdsRef.current.delete(endedBotId)
+            /*
+             * 本窗口自己发起的这一轮不在这里收口：/reply/stream 的 done 会带着
+             * 完整 blocks 走 finishTaskRecord，那才是权威收口。这里再收一次会
+             * 给任务时间线多插一条「结束」（实测会重复）。只有刷新后 / 别的
+             * 窗口（本地没有对应 RunningReplyTurn）才需要它兜底。
+             */
+            let localTurn = false
+            for (const running of runningReplyTurnsRef.current) {
+              if (running.botId === endedBotId) {
+                localTurn = true
+                break
+              }
+            }
+            if (!localTurn) {
+              const endedOk = payload.ok === true
+              const endedError = typeof payload.error === 'string' ? payload.error : undefined
+              setState((prev) => settleTurnEnd(prev, endedBotId, endedOk, endedError))
+            }
+          }
+          return
+        }
+        /*
          * 压缩标记（1.1）：宿主 compaction 结束后推一条 `{ type: 'compaction', at, summary? }`，
          * 前端落成一条 `role: 'system'`、`source: 'compaction'` 的消息。
          *
@@ -3532,6 +3785,26 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
         const botId = String(payload.botId ?? MAIN_BOT_ID)
         // 非 progress 消息落地即断链（重复推送的 update 也算）：它们是独立气泡，后续 progress 不能并进来
         if (kind !== 'progress') sseProgressChains.current.delete(botId)
+        /*
+         * 刷新后仍在跑的那一轮：气泡已经被 normalizeState 保留下来（pending），
+         * 宿主继续推的 progress 消息必须并进这条气泡，否则「刷新前的半截」与
+         * 「刷新后的后半截」会裂成两个气泡。turn-end 到达时再统一收口。
+         */
+        if (revivedTurnBotIdsRef.current.has(botId) && payload.type === 'message') {
+          let revivedId = ''
+          for (let i = stateRef.current.messages.length - 1; i >= 0; i -= 1) {
+            const candidate = stateRef.current.messages[i]
+            if (candidate.botId === botId && candidate.role === 'bot' && candidate.pending === true) {
+              revivedId = candidate.id
+              break
+            }
+          }
+          if (revivedId !== '') {
+            hostMessageIds.current.set(hostId, revivedId)
+            mergeMessageBlocks(revivedId, hostId, blocks, kind)
+            return
+          }
+        }
         // 已经落地过（多半是本窗口的流式请求先到）：原地更新，不再新建气泡
         const known = hostMessageIds.current.get(hostId)
         if (known !== undefined) {
@@ -4784,7 +5057,9 @@ export function PersonalProvider({ children }: { children: ReactNode }): JSX.Ele
       name: (input.name ?? '').trim() || (role.length > 12 ? role.slice(0, 12) : role) || '新助手',
       role,
       description,
-      instructions: input.instructions ?? `你是「${input.name ?? role}」，${description} 说话直接、具体，先给结论再解释。`,
+      // 空就空着：默认给一段「说话直接、先给结论」的措辞，等于系统替用户定了性格
+      instructions: input.instructions ?? '',
+      persona: input.persona ?? '',
       // 完整头像优先（新建弹窗里选了形状 / 颜色 / 本地图片）；否则按 color+shape 或随机外观
       avatar: input.avatar ?? { shape: input.shape ?? appearance.shape, color: input.color ?? appearance.color, tint: appearance.tint },
       groupId: input.groupId ?? DEFAULT_GROUP_ID,

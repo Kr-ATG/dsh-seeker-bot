@@ -37,9 +37,9 @@ import { useEffect, useMemo, useState } from 'react'
 import { useCrossfadeText, useMotionAllowed } from '../../motion-utils.ts'
 import { IconChevronDown, IconListTodo } from '../icons.tsx'
 import { usePersonal } from '../store.tsx'
-import { formatDuration, type TaskRecord, type TaskRecordStep } from '../types.ts'
+import type { TaskRecord, TaskRecordStep } from '../types.ts'
 // 工具名 → 中文动作只有一份规则表（plain-language）；详情弹窗与动态行共用。
-import { actionLabelOf, actionStepsOf, briefOf, doneActionCount, humanizeDetail, liveProgressOf } from './task-action.ts'
+import { actionLabelOf, actionStepsOf, briefOf, doneActionCount, elapsedTextOf, humanizeDetail, liveProgressOf } from './task-action.ts'
 import { TaskStatusGlyph } from './status-glyph.tsx'
 
 /**
@@ -145,7 +145,13 @@ function TaskRow({ task, now, onOpen }: {
 }): JSX.Element {
   const summary = taskSummary(task)
   const live = liveProgressOf(task)
-  const elapsed = formatDuration(Math.max(0, now - task.startedAt))
+  /*
+   * 耗时（右上角唯一的读数）：运行中实时走格，收工后是落盘的总时长。
+   * 用户口径（2026-11-07）：「已做去掉，做了多长时间放在右上角，完成后也
+   * 显示做了多长时间」——所以「已做 N/M」不再出现在行内，收工的行也保留
+   * 这个读数（此前只有运行中的行显示耗时）。
+   */
+  const elapsed = elapsedTextOf(task, now)
   const ratio = live !== null && live.total > 0
     ? Math.min(100, Math.round((live.done / live.total) * 100))
     : 0
@@ -161,16 +167,16 @@ function TaskRow({ task, now, onOpen }: {
   const labelLayers = useCrossfadeText(liveLabel, motion)
   const aria = '查看任务详情：' + (task.title !== '' ? task.title : '未命名任务')
     + '（' + STATUS_LABEL[task.status]
-    + (live !== null
-      ? '，' + live.label + (live.total > 0 ? '，已做 ' + String(live.done) + ' 个动作' : '')
-      : '')
+    + (elapsed !== null ? '，用时 ' + elapsed : '')
+    + (live !== null ? '，' + live.label : '')
     + '）'
   return (
     <div className="pa-taskrec__item" data-running={task.status === 'running' ? 'true' : 'false'}>
       <button
         className="pa-taskrec__row"
         type="button"
-        title={task.title + '\n' + summary + '\n' + STATUS_LABEL[task.status] + ' · ' + fullTimeText(task.startedAt)}
+        title={task.title + '\n' + summary + '\n' + STATUS_LABEL[task.status]
+          + (elapsed !== null ? ' · 用时 ' + elapsed : '') + ' · ' + fullTimeText(task.startedAt)}
         aria-label={aria}
         onClick={() => onOpen(task.id)}
       >
@@ -178,15 +184,32 @@ function TaskRow({ task, now, onOpen }: {
           <TaskStatusGlyph status={task.status} />
         </span>
         <span className="pa-taskrec__main">
-          <span className="pa-taskrec__name">{task.title.trim() !== '' ? task.title : '未命名任务'}</span>
+          {/*
+            * 标题行：标题左、耗时右。耗时放在这里而不是动作行尾——用户口径
+            * 「做了多长时间放在右上角」，而且标题通常只有一行，右上角是整行
+            * 唯一不会被动作文案挤走的位置。
+            */}
+          <span className="pa-taskrec__top">
+            <span className="pa-taskrec__name">{task.title.trim() !== '' ? task.title : '未命名任务'}</span>
+            {elapsed !== null ? (
+              <span
+                className="pa-taskrec__elapsed"
+                data-running={task.status === 'running' ? 'true' : 'false'}
+                title={task.status === 'running' ? '已用时 ' + elapsed : '用时 ' + elapsed}
+              >
+                {elapsed}
+              </span>
+            ) : null}
+          </span>
           {live !== null ? (
             <>
               <span className="pa-taskrec__live">
                 <span className="pa-taskrec__live-dot" aria-hidden="true" />
                 {/*
                  * 动作文案允许折两行：用户口径「文字半截，我需要双行显示」。
-                 * 手机 397px 宽时这一行右边还有「已做 N/M · 耗时」，两行才读得全
-                 * 一个具体动作（如「正在启动第二个 CodeArts 账号登录」）。
+                 * 耗时已挪到标题行右上角，这一行整行归动作文案——不再和任何
+                 * 数字抢宽度，两行读得全一个具体动作（如「正在启动第二个
+                 * CodeArts 账号登录」）。
                  */}
                 <span className="pa-taskrec__live-label">
                   {labelLayers.map((layer) => (
@@ -200,10 +223,6 @@ function TaskRow({ task, now, onOpen }: {
                       {layer.text}
                     </span>
                   ))}
-                </span>
-                <span className="pa-taskrec__live-meta">
-                  {live.total > 0 ? '已做 ' + String(live.done) + '/' + String(live.total) + ' · ' : ''}
-                  {elapsed}
                 </span>
               </span>
               <span className="pa-taskrec__progress" aria-hidden="true">

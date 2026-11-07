@@ -142,13 +142,25 @@ try {
   const tasks = await working.readWorkingTasks('bot-a')
   check('第三句任务仍在（工作记忆）', () => assert.equal(tasks.some(task => task.id === 'task-3'), true))
   check('第二句任务已删（工作记忆）', () => assert.equal(tasks.some(task => task.id === 'task-2'), false))
-  const replace = log.find(event => event.type === 'developer/message')
+  const replace = log.find(event => event.type === 'user/message' && event.surfaceOp !== undefined)
   check('replace 覆盖第二句区间', () => {
     assert.equal(replace.surfaceOp.op, 'replace')
     assert.equal(replace.surfaceOp.startSeq, u2)
     assert.equal(replace.surfaceOp.endSeq, a2)
   })
   check('replace 不碰第三句', () => assert.equal([replace.surfaceOp.startSeq, replace.surfaceOp.endSeq].includes(u3), false))
+  /*
+   * 2026-11-07 回归锁：撤回节点必须是 user/message 且**不带 turn/step**。
+   * 以前写成 developer/message 时，撤回「发完还没被回复」的消息会写出 step: 0，
+   * v4 格式校验随后抛 `developer/message step must be positive`，整轮直接失败。
+   */
+  check('撤回占位是 user/message 且不带 turn/step', () => {
+    assert.equal(replace.type, 'user/message')
+    assert.equal(replace.data.role, 'user')
+    assert.equal(Object.hasOwn(replace.data, 'turn'), false)
+    assert.equal(Object.hasOwn(replace.data, 'step'), false)
+    assert.equal(replace.data.source.kind, 'plugin:dsh-seeker-bot')
+  })
 } finally {
   rmSync(outdir, { recursive: true, force: true })
   rmSync(home, { recursive: true, force: true })

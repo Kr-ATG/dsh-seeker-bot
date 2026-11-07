@@ -71,10 +71,27 @@ try {
     assert.ok(!/provider|configured model/i.test(text), '界面仍出现英文原文：' + text)
   })
 
-  check('未知英文错误：给中文兜底，不贴英文原文', () => {
+  /*
+   * 2026-11-07 改口径：未归类的错误必须把原文带上。
+   *
+   * 用户原话「具体什么问题没有具体表述啊」——旧兜底把一切未知异常都折叠成
+   * 「模型调用失败，请稍后重试或查看宿主日志」，等于什么都没说（实测那次是
+   * 插件写坏会话日志，跟模型毫无关系）。已知错误仍然全中文翻译、不贴原文；
+   * 只有翻不出来的才附原文，供用户/开发者搜索。
+   */
+  check('未知英文错误：中文兜底 + 附上具体原文', () => {
     const text = host.toUserFacingError('Something exploded in listener chain')
-    assert.match(text, /模型调用失败/)
-    assert.ok(!/Something exploded/i.test(text), '界面仍出现英文原文：' + text)
+    assert.match(text, /这一轮没能完成/)
+    assert.match(text, /具体异常/)
+    assert.match(text, /Something exploded/i, '未归类错误必须带上具体异常：' + text)
+  })
+
+  check('撤回占位格式错误：说清是会话日志校验，而不是「模型调用失败」', () => {
+    const text = host.toUserFacingError('developer/message step must be positive')
+    assert.match(text, /会话日志格式校验失败/)
+    assert.match(text, /轮次\/步骤编号/)
+    assert.match(text, /具体异常/)
+    assert.ok(!/模型调用失败/.test(text), '这不是模型错误，不该说模型调用失败：' + text)
   })
 
   check('中文错误保留中文主体，夹带的英文异常翻成中文', () => {

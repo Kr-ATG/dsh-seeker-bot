@@ -32,7 +32,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { extname, isAbsolute, join, resolve, sep } from 'node:path'
-import { botWorkspaceDir, cancelBotTurn, ensureBotAgent, getBotContextPressure, getLastTurnDebug, resetBotConversation, runBotTurn, toUserFacingError, type BotAgentSpec, type PersonalStreamEvent } from './agent.ts'
+import { botWorkspaceDir, cancelBotTurn, ensureBotAgent, getBotContextPressure, getBotTurnStatus, getLastTurnDebug, resetBotConversation, runBotTurn, toUserFacingError, type BotAgentSpec, type PersonalStreamEvent } from './agent.ts'
 import { withQuoteHints } from './quote-hints.ts'
 import { scanBotOutputs } from './outputs.ts'
 import { recallBotTurn } from './recall.ts'
@@ -485,6 +485,8 @@ interface ReplyBody {
     eli5Mode?: boolean
     /** 爱发表情包（贴纸）；显式传 true 才注入贴纸契约与可用清单。 */
     stickerMode?: boolean
+    /** 性格（可空）：空串 / 缺失都不注入任何性格描述。 */
+    persona?: string
   }
   text?: string
   /**
@@ -517,6 +519,7 @@ interface ReplyBody {
     isMain?: boolean
     eli5Mode?: boolean
     stickerMode?: boolean
+    persona?: string
   }>
   /**
    * 本轮用户附带的图片（前端先走 /upload 落盘，这里只带相对路径）。
@@ -565,6 +568,7 @@ function toBotSpec(body: ReplyBody): BotAgentSpec {
     isMain: bot.isMain === true,
     eli5Mode: bot.eli5Mode !== false,
     stickerMode: bot.stickerMode === true,
+    persona: typeof bot.persona === 'string' ? bot.persona : '',
     memories: Array.isArray(body.memories)
       ? body.memories.filter((item): item is string => typeof item === 'string')
       : undefined,
@@ -592,6 +596,7 @@ function rememberRoster(roster: ReplyBody['roster']): void {
       isMain: item?.isMain === true,
       eli5Mode: item?.eli5Mode !== false,
       stickerMode: item?.stickerMode === true,
+      persona: typeof item?.persona === 'string' ? item.persona : '',
     })
   }
 }
@@ -1279,9 +1284,28 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
               'history/index', 'history/search', 'history/cross-search',
               'approval/rules',
               'pages',
+              'turn-status',
               'events', 'routines', 'messages', 'bots/created', 'bots', 'assignments',
             ],
           })
+        }
+
+        /*
+         * 某个 Bot 有没有轮次在跑（只读，不取消任何东西）。
+         *
+         * 页面刷新时前端先问这里，再决定「继续等」还是「本地收口」：
+         * running 为真就保留「正在输入」气泡与右栏任务卡，等事件总线的
+         * turn-end；否则立刻按旧行为标中断，界面不能永远转圈。
+         *
+         * 顺带返回本轮已经产出的消息快照——刷新那一刻 /reply/stream 已经断了，
+         * 已经生成到一半的正文只存在于这条快照里，新页面靠它把半截回复接回去。
+         * 轮次还没产出任何消息时不带 messages，行为与纯布尔查询一致。
+         */
+        if (tail === '/turn-status' && method === 'GET') {
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          const botId = url.searchParams.get('botId') ?? ''
+          if (botId === '') return sendJson(res, 400, { ok: false, error: 'botId required' })
+          return sendJson(res, 200, getBotTurnStatus(webCtx, botId))
         }
 
         /*
@@ -2409,10 +2433,14 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
 
           let turnOk = false
           let turnText = ''
+          /* 本轮所属 botId：收尾广播要用它，不能被后面的局部变量遮住。 */
+          const turnBotId = String(body.bot?.id ?? '').trim()
+          let turnSessionId = ''
           try {
             const turn = await runBotTurn(webCtx, spec, text, write)
             turnOk = turn.ok
             turnText = turn.error ?? ''
+            turnSessionId = String((turn as any).sessionId ?? '')
             /*
              * done 只由 runBotTurn 内部 emit（收口信号），这里**不要**再补一条：
              * 重复的 done 会让前端收口两次。失败路径（agent 建不起来 / 本轮无
@@ -2438,6 +2466,29 @@ export function applyPersonalAgentHost(ctx: any, config?: { personalRealtime?: P
                 runtimeHandle.runtime.end(rootAssignment.id, { ok: turnOk, text: turnText })
               } catch (error: any) {
                 console.warn('[personal-agent] 收尾作业记录失败:', String(error?.message ?? error))
+              }
+            }
+            /*
+             * 广播这一轮的结局（2026-11-07）。
+             *
+             * 上面那次 write 只送给**发起这一轮的连接**；页面一刷新它就断了，
+             * 新页面永远等不到 done/error。轮次本身并不会因为前端刷新而停
+             * （见 /turn-status），所以必须再广播一次：刷新后的页面靠它收口
+             * 「正在输入」气泡与右栏任务卡，多窗口同理。
+             *
+             * 幂等：前端只认自己手上还挂着 pending 的那一次，重复收到不会
+             * 重复建气泡。
+             */
+            if (turnBotId !== '') {
+              try {
+                publish(turnBotId, {
+                  type: 'turn-end',
+                  ok: turnOk,
+                  ...(turnText !== '' ? { error: turnText } : {}),
+                  ...(turnSessionId !== '' ? { sessionId: turnSessionId } : {}),
+                })
+              } catch {
+                /* 广播失败不影响这一轮本身的收尾 */
               }
             }
           }

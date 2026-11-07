@@ -138,9 +138,12 @@ console.log('\n# 默认值')
   const plan = planBotCreate({ name: '调研助手', role: '竞品调研', description: '盯竞品动态' }, base)
   assert(plan.ok === true, '合法参数创建成功')
   if (plan.ok) {
-    assert(plan.record.instructions.includes('调研助手'), '未给 instructions 时自动带上名字')
-    assert(plan.record.instructions.includes('竞品调研'), '自动生成的 instructions 带上岗位')
-    assert(plan.record.instructions.includes('盯竞品动态'), '自动生成的 instructions 带上简介')
+    /*
+     * 2026-11-07 改口径：没给 instructions 时**保持空**，不再拼「你是「X」，Y。
+     * 说话直接、先给结论再解释」——那里面藏着系统替用户定的性格。性格现在归
+     * Bot.persona（可空），空着就不注入（见 host 的 buildBotPrompt）。
+     */
+    assert(plan.record.instructions === '', '未给 instructions 时留空，不再自动生成人设')
     assertEqual(plan.record.id, 'bot-fixed01', 'id 用注入值（便于测试）')
     assertEqual(plan.record.createdAt, base.now, 'createdAt 用注入时间')
     assertEqual(plan.record.createdBy, 'bot-main', 'createdBy 记录创建者')

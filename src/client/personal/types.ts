@@ -81,6 +81,14 @@ export interface Bot {
   role: string
   description: string
   instructions: string
+  /**
+   * 性格（它是个什么样的人：活泼、冷淡、毒舌、温柔……）。
+   *
+   * **默认空**，而且空就**不注入**——系统不再给任何 Bot 塞预设性格。
+   * 与 instructions（行为约定：怎么做事的硬要求）分开，是因为这两件事的
+   * 寿命不一样：行为约定跟着任务变，性格跟着人走。
+   */
+  persona?: string
   avatar: Avatar
   groupId: string
   isMain: boolean
@@ -1265,6 +1273,8 @@ export interface NewBotInput {
   eli5Mode?: boolean
   /** 爱发表情包；默认关闭，只有亲密位（闺蜜 / 搭子）才开。 */
   stickerMode?: boolean
+  /** 性格（可空）：空着就不往系统提示词里注任何性格。 */
+  persona?: string
   /** 主动关心的默认档位；缺省按「每天 09:00–22:00」。护法预设要在这里给不同作息。 */
   proactive?: ProactiveConfig
 }

@@ -124,6 +124,13 @@ export interface BotAgentSpec {
    */
   eli5Mode?: boolean
   /**
+   * 性格：它是个什么样的人（活泼 / 冷淡 / 毒舌 / 温柔……）。
+   *
+   * **默认空、空就不注入**。系统不再给任何 Bot 塞预设性格——没有性格的 Bot
+   * 就只按身份与职责说话，不假装自己有脾气。
+   */
+  persona?: string
+  /**
    * 爱发表情包（贴纸）：打开后模型会在正文里写 `[[sticker:<id>]]` 标记，前端渲染成贴纸。
    * 与 eli5Mode 同一套约定：缺省或 false 为关闭，只有显式打开才注入契约。
    */
@@ -504,7 +511,9 @@ function createUserMessage(text: string): any {
  * `developer/message and developer role must occur together`，整轮变成空轮
  *（用户看到「本轮没有产生任何输出」/「会话状态异常」）。
  *
- * 真正的 `developer/message` 事件只由宿主自己写（工具增删通知 / 撤回占位），
+ * `developer/message` 只留给宿主自己写（工具增删通知）——它额外要求 turn/step
+ * 为正且落在打开的 turn/step 内，插件写它迟早踩格式校验（撤回占位曾因此让整轮
+ * 报 `developer/message step must be positive`，2026-11-07 已改回 user 消息）。
  * 插件注入上下文一律走 user 消息 + producer-owned source（与 dsh-memory、
  * dsh-vault 的做法一致）。source.kind 必须是 `plugin:<name>`：v4 落盘拒绝
  * 旧式 `{ kind: 'plugin' }`。
@@ -761,6 +770,13 @@ function buildBotPrompt(spec: BotAgentSpec): string {
   return [
     `你是「${spec.name}」，岗位：${spec.role}。`,
     spec.description.trim() === '' ? '' : `档案：${spec.description}`,
+    /*
+     * 性格：**空就不出现这一行**。
+     *
+     * 这一段刻意没有任何兜底文案（不像别处会给「语气平稳」之类）：用户没写性格，
+     * 就说明他不想让这个 Bot 有脾气。系统替他补一句「你很温柔」，才是越界。
+     */
+    spec.persona !== undefined && spec.persona.trim() !== '' ? `性格：${spec.persona.trim()}` : '',
     spec.instructions.trim() === '' ? '' : `行为约定：${spec.instructions}`,
     `现在是 ${timeText}（Asia/Shanghai）。`,
     '',
@@ -1719,6 +1735,78 @@ function applyPermission(ctx: any, agent: any, permission: BotPermission | undef
  * 宿主内存里那个会话还带着旧历史，下一次 `agents.get()` 又会把它拿回来。
  */
 const agentCache = new Map<string, { agent: any; handle?: any; modelKey?: string }>()
+
+/**
+ * 正在跑的轮次快照（sessionId → 本轮已产出的消息）。
+ *
+ * ## 为什么需要它（2026-11-07 用户实测）
+ *
+ * 「页面一刷新，Bot 的回复就断了」——恢复页面时前端曾主动给宿主发 `/stop`，
+ * 把还在跑的那一轮直接 cancel 了；即便不发，刷新那一刻流式连接已经断了，
+ * 已经生成到一半的正文只存在于**那条请求的响应体**里，新页面拿不到。
+ *
+ * 所以轮次在跑的时候，把消息数组本身挂在这里：`/turn-status` 读它，
+ * 刷新后的页面就能把「已经生成的部分」原样接回去，再等 SSE 继续推后续消息。
+ *
+ * 存的是引用（消息对象在跑的过程中会被原地改写），读取时再深拷贝。
+ * 轮次结束后由 `runBotTurn` 的收尾处删除——否则「上一轮的历史」会被当成
+ * 「正在跑的这一轮」错误地接回去。
+ */
+const liveTurns = new Map<string, { messages: BotMessage[]; turnId: string; updatedAt: number }>()
+
+/** 记一次快照：轮次内每产出一条消息就刷新一次时间戳（内容靠引用共享）。 */
+function trackLiveTurn(sessionId: string, messages: BotMessage[], turnId: string): void {
+  if (sessionId === '') return
+  liveTurns.set(sessionId, { messages, turnId, updatedAt: Date.now() })
+}
+
+/** 轮次结束：撤掉快照，避免被下一轮的 /turn-status 当成「还在跑」。 */
+function clearLiveTurn(sessionId: string): void {
+  if (sessionId === '') return
+  liveTurns.delete(sessionId)
+}
+
+/**
+ * 查询某个 Bot 当前是否有轮次在跑，并带上「已经生成的部分」。
+ *
+ * 与 {@link cancelBotTurn} 共用同一套探测口径（缓存 → 宿主 agent 注册表），
+ * 区别是**只读**：不发 cancel、不改任何状态。
+ *
+ * 前端在页面加载时用它决定「刷新前那一轮是继续等，还是收口成本地已中断」：
+ * running 为真就保留 pending 气泡与任务卡，等事件总线的 `turn-end`；
+ * 否则按旧行为立刻收口，不能让界面永远转圈。
+ */
+export function getBotTurnStatus(
+  ctx: any,
+  botId: string,
+): { ok: boolean; sessionId: string; status: string; running: boolean; messages?: BotMessage[]; turnId?: string } {
+  const sessionId = botSessionId(botId)
+  let agent: any = agentCache.get(sessionId)?.agent
+  if (agent === undefined || agent === null) {
+    try {
+      const agents = getAgents(ctx)
+      agent = typeof agents?.get === 'function' ? agents.get(sessionId) : undefined
+    } catch {
+      /* 服务不可用：按未找到处理 */
+    }
+  }
+  if (agent === undefined || agent === null) {
+    return { ok: true, sessionId, status: 'missing', running: false }
+  }
+  const status = String(agent.status ?? '')
+  const running = status === 'running'
+  if (!running) return { ok: true, sessionId, status, running: false }
+  const live = liveTurns.get(sessionId)
+  if (live === undefined) return { ok: true, sessionId, status, running: true }
+  /* 深拷贝：调用方拿到的是那一刻的快照，后续轮次内的原地改写不该穿过去。 */
+  let messages: BotMessage[] = []
+  try {
+    messages = JSON.parse(JSON.stringify(live.messages)) as BotMessage[]
+  } catch {
+    messages = []
+  }
+  return { ok: true, sessionId, status, running: true, messages, turnId: live.turnId }
+}
 
 /**
  * 在 setup 阶段把 agent preset 挂到 bot 的 agent 上。
@@ -3697,6 +3785,15 @@ function translateErrorDetail(raw: string): string {
   if (/(fetch failed|econnrefused|enotfound|socket|connect.*refused|network)/i.test(lower)) return '网络连接失败'
   if (/(rate limit|too many requests)/i.test(lower)) return '请求过于频繁'
   // ── 会话状态 ────────────────────────────────────────────────────────
+  /*
+   * 撤回占位的格式校验（2026-11-07）。
+   *
+   * 这类错误以前会被兜底成「模型调用失败」——但根本没走到模型，是插件写进
+   * 会话日志的事件不合法。说清楚是哪一条、缺什么，用户才能判断该重试还是该报 bug。
+   */
+  if (/developer\/message\s+(?:turn|step)\s+must be positive/i.test(message)) {
+    return '会话日志格式校验失败：撤回占位缺少合法的轮次/步骤编号（developer/message step must be positive）'
+  }
   if (/(stored log is corrupt|does not match an open turn|sessionformaterror)/i.test(message)) {
     return '会话历史记录损坏（与当前会话状态不一致）'
   }
@@ -3744,7 +3841,15 @@ export function toUserFacingError(raw: string): string {
   if (/[\u4e00-\u9fa5]/.test(text)) return localizeChineseError(text)
   const lower = text.toLowerCase()
   const detail = translateErrorDetail(text)
-  const withDetail = (summary: string): string => detail === '' ? summary : `${summary}｜具体异常：${detail}`
+  /*
+   * 具体异常：翻译得出来就用中文翻译；翻译不出来（宿主内部异常 / 没见过的错误）
+   * 就附上原文截断——2026-11-07 用户明确要求「具体什么问题要表述出来」，
+   * 再吞成一句「模型调用失败」等于什么都没说。原文本身仍会写进宿主日志。
+   */
+  const withDetail = (summary: string): string => {
+    const shown = detail !== '' ? detail : clip(text, 200)
+    return shown === '' ? summary : `${summary}｜具体异常：${shown}`
+  }
   if (/(usage limit|insufficient balance|quota|balance)/.test(lower) || /\b429\b/.test(text)) {
     return withDetail('模型额度已用尽或请求过于频繁（429），请稍后重试或更换模型')
   }
@@ -3774,7 +3879,7 @@ export function toUserFacingError(raw: string): string {
   }
   const codeMatch = /\b(?:error|code|status)[:：]?\s*(\d{3})\b/i.exec(text)
   if (codeMatch !== null) return withDetail(`模型调用失败（错误码 ${codeMatch[1]}），请稍后重试或查看宿主日志`)
-  return withDetail('模型调用失败，请稍后重试或查看宿主日志')
+  return withDetail('这一轮没能完成（宿主返回了未归类的错误，详见宿主日志）')
 }
 
 /** 会话事件类型 → 中文名（只用于错误提示，不参与任何逻辑判断）。 */
@@ -3980,6 +4085,8 @@ export async function runBotTurn(
     messages.push(message)
     currentMessage = message
     emit({ type: 'message', message })
+    /* 让 /turn-status 能看到「这一轮已经生成了什么」：页面刷新后靠它接回半截回复。 */
+    trackLiveTurn(sessionId, messages, turnId)
     return message
   }
 
@@ -4012,6 +4119,7 @@ export async function runBotTurn(
     message.blocks.push({ type: 'tool', run })
     toolOwner.set(run.id, message)
     emit({ type: 'message-update', message })
+    trackLiveTurn(sessionId, messages, turnId)
   }
 
   const updateTool = (run: ToolRun): void => {
@@ -4036,6 +4144,7 @@ export async function runBotTurn(
     if (at >= 0) message.blocks[at] = { type: 'tool', run }
     else message.blocks.push({ type: 'tool', run })
     emit({ type: 'message-update', message })
+    trackLiveTurn(sessionId, messages, turnId)
   }
 
   /* ── 文档生成进度占位（document_progress 声明 + 文件系统兜底）───────── */
@@ -4191,6 +4300,7 @@ export async function runBotTurn(
     stopDocWatch()
     closeDocumentProgress()
     emit({ type: 'done', durationMs: Date.now() - startedAt })
+    clearLiveTurn(sessionId)
     return { ok: true, blocks, messages, sessionId, ...(steer.messageId !== undefined ? { userMessageId: steer.messageId } : {}) }
   }
 
@@ -4705,6 +4815,7 @@ export async function runBotTurn(
     const userFacingMessage = toUserFacingError(message)
     finalizeMessages()
     emit({ type: 'error', message: userFacingMessage })
+    clearLiveTurn(sessionId)
     return { ok: false, blocks, messages, error: message, sessionId }
   }
 
@@ -4781,134 +4892,11 @@ export async function runBotTurn(
         : '本轮没有产生任何输出'
     finalizeMessages()
     emit({ type: 'error', message })
+    clearLiveTurn(sessionId)
     return { ok: false, blocks, messages, error: message, sessionId }
   }
   finalizeMessages()
   emit({ type: 'done', durationMs })
+  clearLiveTurn(sessionId)
   return { ok: true, blocks, messages, sessionId, userMessageId: String(userMessage.id) }
-}
-
-/** 撤回一轮对话的结果。 */
-export interface RecallResult {
-  ok: boolean
-  /** 被遮蔽的 surface 节点数（用户消息 + 该轮 bot 回复 + 工具结果）。 */
-  removed?: number
-  error?: string
-}
-
-/** 撤回占位消息的文本：模型看到它就知道这一段被用户撤掉了。 */
-const RECALL_PLACEHOLDER = '[用户撤回了这一段对话，请忽略此前这些内容]'
-
-/**
- * 撤回一轮对话：把「这条用户消息 + 它之后的 bot 回复」从模型可见 surface 上遮蔽掉。
- *
- * ## 为什么是 replace 而不是删除
- *
- * Session 日志是 append-only 的事实记录（崩溃恢复、审计都靠它），没有删除 API。
- * 但 surface（模型可见消息序列）支持 `replace`——compaction 用的同一机制：
- * 追加一条新节点，把指定区间整体替换掉，之后 `deriveMessages()` 重建历史时
- * 这些内容就不在了。于是「撤回」= 日志保留 + 上下文消失。
- *
- * ## 语义边界
- *
- * 撤回只影响**之后的模型上下文**：模型在产生那条回复的那一步已经看过原文，
- * 这里保证的是「后续对话不再带着它」。
- *
- * ## 定位方式
- *
- * 前端只有本地消息（localStorage），没有 session seq，所以按「user/message +
- * 文本完全相等 + 时间最接近」反查。撤回范围 = 该节点到下一个 user/message
- * 节点之前（含 assistant / tool 节点）。
- */
-export async function recallBotTurn(
-  ctx: any,
-  spec: BotAgentSpec,
-  text: string,
-  at: number,
-): Promise<RecallResult> {
-  const wanted = String(text ?? '').trim()
-  if (wanted === '') return { ok: false, error: '空消息无法撤回' }
-
-  let agent: any
-  try {
-    agent = await ensureBotAgent(ctx, spec)
-  } catch (error: any) {
-    return { ok: false, error: `无法连接该 Bot 的会话：${String(error?.message ?? error)}` }
-  }
-
-  const session = agent?.session
-  const nodes: number[] = Array.isArray(session?.surface?.nodes) ? [...session.surface.nodes] : []
-  if (nodes.length === 0) return { ok: false, error: '会话里还没有可撤回的消息' }
-
-  const textOf = (event: any): string => {
-    const content = event?.data?.content
-    if (!Array.isArray(content)) return ''
-    return content
-      .filter((block: any) => block?.type === 'text' && typeof block.text === 'string')
-      .map((block: any) => String(block.text))
-      .join('')
-      .trim()
-  }
-
-  // 目标节点：文本相等、且时间最接近前端那条消息的 user/message
-  let targetIndex = -1
-  let bestDelta = Number.POSITIVE_INFINITY
-  for (let index = 0; index < nodes.length; index += 1) {
-    const event = session.eventAt(nodes[index])
-    if (event?.type !== 'user/message') continue
-    if (textOf(event) !== wanted) continue
-    const delta = Math.abs((typeof event.time === 'number' ? event.time : 0) - at)
-    if (delta < bestDelta) {
-      bestDelta = delta
-      targetIndex = index
-    }
-  }
-  if (targetIndex < 0) return { ok: false, error: '会话里找不到这条消息（可能已被撤回或清空）' }
-
-  // 区间终点：下一个 user/message 节点之前的最后一个节点（没有下一个就到最后）
-  let endIndex = nodes.length - 1
-  for (let index = targetIndex + 1; index < nodes.length; index += 1) {
-    if (session.eventAt(nodes[index])?.type === 'user/message') {
-      endIndex = index - 1
-      break
-    }
-  }
-  if (endIndex < targetIndex) return { ok: false, error: '撤回范围为空' }
-
-  const startSeq = nodes[targetIndex]
-  const endSeq = nodes[endIndex]
-  const range = nodes.slice(targetIndex, endIndex + 1)
-
-  // turn/step 沿用区间里最后一个带它们的节点（assistant/message），缺省 0
-  let turn = 0
-  let step = 0
-  for (const seq of range) {
-    const data: any = session.eventAt(seq)?.data
-    if (typeof data?.turn === 'number') turn = data.turn
-    if (typeof data?.step === 'number') step = data.step
-  }
-
-  try {
-    session.append(
-      'developer/message',
-      {
-        turn,
-        step,
-        message: {
-          id: `pa-recall-${randomUUID()}`,
-          role: 'developer',
-          content: [{ type: 'text', text: RECALL_PLACEHOLDER }],
-          source: { kind: 'plugin' },
-        },
-      },
-      {
-        surfaceOp: { op: 'replace', startSeq, endSeq },
-        // 必须覆盖被遮蔽区间里的**每一个** surface 节点，宿主会逐项校验
-        sourceEventSeqs: range,
-      },
-    )
-    return { ok: true, removed: range.length }
-  } catch (error: any) {
-    return { ok: false, error: `撤回失败：${String(error?.message ?? error)}` }
-  }
 }

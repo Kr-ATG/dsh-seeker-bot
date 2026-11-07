@@ -216,6 +216,23 @@ export const SETTINGS_CSS = `
   color: var(--pa-text-3);
 }
 .pa-sheet__body textarea.pa-field { resize: vertical; min-height: 74px; line-height: 1.55; }
+/* 性格预设芯片：一行快捷入口，选中态用主色描边（不填充色块，避免看起来像"已保存"）。 */
+.pa-bset-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.pa-bset-chip {
+  font-size: calc(11px + var(--pa-font-delta));
+  line-height: 1.4;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--pa-line);
+  background: transparent;
+  color: var(--pa-text-2);
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+}
+.pa-bset-chip:hover { border-color: var(--pa-line-2); color: var(--pa-text); }
+.pa-bset-chip[data-on='true'] {
+  border-color: var(--pa-accent);
+  color: var(--pa-accent);
+}
 .pa-sheet-hint {
   margin: 6px 0 0;
   font-size: calc(10px + var(--pa-font-delta));

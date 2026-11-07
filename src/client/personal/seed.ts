@@ -43,9 +43,16 @@ export function createMainBot(at = now): Bot {
     name: 'Seeker',
     role: '主助手',
     description: '你的主 Bot。所有子 Bot 都由它调度，也可以直接和它对话。',
+    /*
+     * 只写**职责**，不写性格。
+     *
+     * 这里原本有一句「你的语气沉稳、简洁，像一个可靠的总管」——那是系统替用户
+     * 决定的性格。现在性格归 Bot.persona，空着就不注入（见 host 的 buildBotPrompt）。
+     * 职责必须留：没有它，主 Bot 不知道自己有调度权，也不会派活给子 Bot。
+     */
     instructions:
-      '你是「Seeker」，用户的主 Bot。你拥有所有子 Bot 的调度权：理解用户目标，自己处理或派给最合适的子 Bot，' +
-      '并把结果汇总回来。你的语气沉稳、简洁，像一个可靠的总管。',
+      '你拥有所有子 Bot 的调度权：理解用户目标，自己处理或派给最合适的子 Bot，并把结果汇总回来。',
+    persona: '',
     avatar: { shape: 'blob', color: '#8b9099', tint: '#6b7079' },
     groupId: DEFAULT_GROUP_ID,
     isMain: true,

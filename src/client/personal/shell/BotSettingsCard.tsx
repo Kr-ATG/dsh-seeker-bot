@@ -10,8 +10,8 @@
  * 上下文接力 / 子 Bot 管理（仅主 Bot）/ 记忆 / 产出物文件夹。
  *
  * 保存口径：
- *  · 基本资料（名称、角色、简介、行为约定）走「保存资料」按钮——一次提交四个字段，
- *    避免每敲一个字就写一次 localStorage；
+ *  · 基本资料（名称、角色、简介、性格、行为约定）走底部那颗「保存」按钮——点它一次
+ *    提交这几个字段并关闭卡片，没有第二颗保存按钮；每敲一个字不写 localStorage；
  *  · 其余开关 / 下拉 / 权限档位都是即改即存（`actions.updateBot`），下一轮对话生效；
  *  · 记忆与产出物是宿主侧数据，直接走 HTTP 接口，不写本地 state。
  *    「记忆」分区顶部那一行「记忆检索刷新间隔」也是宿主配置：它是记忆引擎的
@@ -31,6 +31,7 @@ import {
   type ReactNode,
 } from 'react'
 import { BotAvatar } from '../Avatar.tsx'
+import { PERSONA_PRESETS } from '../persona-presets.ts'
 import {
   IconClock,
   IconCpu,
@@ -421,7 +422,7 @@ export function BotSettingsCard(): JSX.Element | null {
   }, [])
 
   /* ── 表单草稿（只有基本资料需要显式保存） ── */
-  const [draft, setDraft] = useState({ name: '', role: '', description: '', instructions: '' })
+  const [draft, setDraft] = useState({ name: '', role: '', description: '', persona: '', instructions: '' })
   /* ── 例行任务新建表单（内联展开） ── */
   const [routineOpen, setRoutineOpen] = useState(false)
   const [routineName, setRoutineName] = useState('')
@@ -491,6 +492,7 @@ export function BotSettingsCard(): JSX.Element | null {
       name: target.name,
       role: target.role,
       description: target.description,
+      persona: target.persona ?? '',
       instructions: target.instructions,
     })
     setRoutineOpen(false)
@@ -696,9 +698,11 @@ export function BotSettingsCard(): JSX.Element | null {
       name: draft.name.trim() || bot.name,
       role: draft.role.trim() || bot.role,
       description: draft.description.trim(),
+      // 空串就存空串：不注入任何性格（见 host 的 buildBotPrompt）。
+      persona: draft.persona.trim(),
       instructions: draft.instructions.trim(),
     })
-    actions.toast('Bot 资料已保存')
+    actions.toast('已保存')
   }
 
   /** 当前模型（provider/model）的选择键。 */
@@ -1015,6 +1019,35 @@ export function BotSettingsCard(): JSX.Element | null {
               />
             </div>
             <div className="pa-sheet-field-row">
+              <label className="pa-sheet-label" htmlFor="pa-bset-persona">性格</label>
+              <textarea
+                id="pa-bset-persona"
+                className="pa-field"
+                value={draft.persona}
+                onChange={(event) => updateDraft({ persona: event.target.value })}
+                placeholder="留空 = 不设定性格，它只按身份和职责说话。要设定就写：话少、直来直去、有点毒舌。"
+                rows={2}
+              />
+              {/*
+                * 预设只是打字太慢时的捷径，不是默认值：点一下填进去、再点一下清空，
+                * 填进去的仍然是普通文本，可以随手改。默认永远为空。
+                */}
+              <div className="pa-bset-chips">
+                {PERSONA_PRESETS.map((preset) => (
+                  <button
+                    key={preset.id}
+                    className="pa-bset-chip"
+                    type="button"
+                    data-on={draft.persona === preset.text ? 'true' : 'false'}
+                    title={preset.text}
+                    onClick={() => updateDraft({ persona: draft.persona === preset.text ? '' : preset.text })}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="pa-sheet-field-row">
               <label className="pa-sheet-label" htmlFor="pa-bset-inst">行为约定</label>
               <textarea
                 id="pa-bset-inst"
@@ -1061,11 +1094,6 @@ export function BotSettingsCard(): JSX.Element | null {
                 }}
               >
                 <i />
-              </button>
-            </div>
-            <div className="pa-sheet-inline-actions">
-              <button className="pa-btn pa-btn--primary pa-btn--sm" type="button" onClick={saveProfile}>
-                保存资料
               </button>
             </div>
           </SheetSection>
@@ -1594,7 +1622,23 @@ export function BotSettingsCard(): JSX.Element | null {
         </div>
 
         <div className="pa-sheet__foot">
-          <button className="pa-btn pa-btn--primary" type="button" onClick={requestClose}>完成</button>
+          {/*
+            * 底部这颗按钮是设置卡**唯一**的保存入口（2026-11-07）。
+            *
+            * 原来这里叫「完成」，语义是「关掉」；资料页里另外还有一颗「保存资料」，
+            * 于是「改完该点哪个」变成一道题——用户实测点了芯片、点了保存资料，
+            * 仍然怀疑没存上。现在只留一颗：点它就是保存并关闭，没有第二种理解。
+            */}
+          <button
+            className="pa-btn pa-btn--primary"
+            type="button"
+            onClick={() => {
+              saveProfile()
+              requestClose()
+            }}
+          >
+            保存
+          </button>
         </div>
       </aside>
     </div>

@@ -16,7 +16,7 @@
  * 「动态里说查看文件、操作面板说读取文件」。
  */
 import { toPlainStep, type PlainStatus } from '../../kr-chat/plain-language.ts'
-import type { TaskRecord, TaskRecordStep } from '../types.ts'
+import { formatDuration, type TaskRecord, type TaskRecordStep } from '../types.ts'
 
 /** 压平空白并截断。 */
 function clip(text: string, max: number): string {
@@ -342,13 +342,36 @@ export function liveProgressOf(task: TaskRecord): LiveProgress | null {
  * 「刚做完的那一步」怎么读。
  *
  * 用「刚才 + 动作短语（无时态）」而不是「已 + 动作」：这一行整行的语境是
- * 「这轮还在跑」，再叠一个「已」会和右侧「已做 2/2」重复，也容易让人误以为
- * 整轮已经结束。产出物单独说「刚才产出 xxx」（它的 title 是文件名，套工具规则
- * 会被翻成「执行 xxx」）。
+ * 「这轮还在跑」，再叠一个「已」会让人误以为整轮已经结束。产出物单独说
+ * 「刚才产出 xxx」（它的 title 是文件名，套工具规则会被翻成「执行 xxx」）。
  */
 function justFinishedLabelOf(step: TaskRecordStep): string {
   if (step.kind === 'output') return '刚才产出 ' + clip(step.title, 20)
   const view = stepActionViewOf(step)
   const suffix = step.status === 'error' ? '，没做成' : ''
   return '刚才' + view.action + suffix
+}
+
+/**
+ * 任务行右上角的「做了多长时间」（mm:ss）。
+ *
+ * 用户口径（2026-11-07）：「已做去掉，做了多长时间放在右上角，完成后也显示
+ * 做了多长时间」。于是耗时从原来 live 行尾的
+ * 「已做 N/M · 耗时」里独立出来，成为标题行右端唯一的一个读数：
+ *
+ *  · 运行中：按 now 实时走格（调用方有任务在跑时每秒重渲染一次）；
+ *  · 收工后：读 store 收口时落盘的 durationMs（store 的 settleTurnEnd /
+ *    settleStaleTask 都会写它），老数据回退 endedAt - startedAt；
+ *  · 两样都没有（很早以前的中断记录）→ null，行上不显示。
+ *    宁可不给，也不要挂一个假的 00:00 让人以为这一轮是一瞬间跑完的。
+ */
+export function elapsedTextOf(task: TaskRecord, now: number): string | null {
+  if (task.status === 'running') return formatDuration(Math.max(0, now - task.startedAt))
+  if (typeof task.durationMs === 'number' && Number.isFinite(task.durationMs)) {
+    return formatDuration(Math.max(0, task.durationMs))
+  }
+  if (typeof task.endedAt === 'number' && Number.isFinite(task.endedAt) && task.endedAt >= task.startedAt) {
+    return formatDuration(task.endedAt - task.startedAt)
+  }
+  return null
 }

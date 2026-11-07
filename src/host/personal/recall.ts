@@ -212,15 +212,26 @@ export async function recallBotTurn(
   const endSeq = nodes[endIndex]
   const range = nodes.slice(targetIndex, endIndex + 1)
 
-  // turn/step 沿用区间里最后一个带它们的节点（assistant/message），缺省 0
+  /*
+   * 撤回区间所属的 turn：assistant/message 自带 turn，但「刚发完还没回复就撤回」
+   * 时区间里只有 user 节点，得从日志里向前找最近的 turn/start。
+   *
+   * 为什么不再算 step（2026-11-07 修）：撤回占位以前写成 developer/message，而
+   * v4 会话格式要求它的 turn/step **都是正整数**、且必须落在「当前打开的
+   * turn/step」上。用户撤回一条还没被回复的消息时区间里根本没有 step，写进去的
+   * 就是 step: 0 —— 之后任何一次日志解码（flush、pre-step 读快照）都会抛
+   * `developer/message step must be positive`，整轮直接失败，界面只显示
+   * 「模型调用失败」。历史上还出现过四次 `does not match an open turn and step`
+   * 的会话损坏，同一个根因。
+   *
+   * 现在占位改用 user 角色（见下），v4 对 user/message 没有 turn/step 约束；
+   * 这里算 turn 只为记忆 / 工作记忆的精确回收。
+   */
   let turn = 0
-  let step = 0
   for (const seq of range) {
     const data: any = session.eventAt(seq)?.data
     if (typeof data?.turn === 'number') turn = data.turn
-    if (typeof data?.step === 'number') step = data.step
   }
-  // 只有 user 节点（还没回复）时区间里没有 turn，从日志里补；同时拿到该轮开始时间。
   const turnStart = turnStartForSeq(session, startSeq)
   if (turn === 0 && turnStart.turn > 0) turn = turnStart.turn
 
@@ -248,21 +259,27 @@ export async function recallBotTurn(
 
   try {
     session.append(
-      'developer/message',
+      /*
+       * 撤回节点用 user 角色，**不是** developer/message（2026-11-07 修）。
+       *
+       *  1. v4 对 developer/message 有硬约束：turn/step 必须为正、且必须落在打开的
+       *     turn/step 内。撤回「发完还没被回复」的消息时这两个条件天然不满足，
+       *     写进去就是一条非法事件——之后每次解码都抛错（整轮失败 / 会话被判损坏）。
+       *  2. 占位的语义本来就是「用户说：这一段我撤回了」，user 角色反而更贴切。
+       *  3. v4 对 user/message 只校验 role / content / producer-owned source，
+       *     surfaceOp replace 同样支持，上下文遮蔽效果不变。
+       */
+      'user/message',
       {
-        turn,
-        step,
-        message: {
-          id: `pa-recall-${randomUUID()}`,
-          role: 'developer',
-          content: [{ type: 'text', text: RECALL_PLACEHOLDER }],
-          /*
-           * source.kind 必须是「producer 自己的 kind」。`plugin` 是 v3 的旧包装，
-           * v4 格式在落盘时会拒绝（实测报 `format v4 developer message requires
-           * ... a producer-owned source`），导致 flush 失败、撤回重启即丢。
-           */
-          source: { kind: 'plugin:dsh-seeker-bot' },
-        },
+        id: `pa-recall-${randomUUID()}`,
+        role: 'user',
+        content: [{ type: 'text', text: RECALL_PLACEHOLDER }],
+        /*
+         * source.kind 必须是「producer 自己的 kind」。`plugin` 是 v3 的旧包装，
+         * v4 格式在落盘时会拒绝（实测报 `format v4 message requires a
+         * producer-owned source kind`），导致 flush 失败、撤回重启即丢。
+         */
+        source: { kind: 'plugin:dsh-seeker-bot' },
       },
       {
         surfaceOp: { op: 'replace', startSeq, endSeq },

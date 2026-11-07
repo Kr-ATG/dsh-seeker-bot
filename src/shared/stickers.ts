@@ -17,8 +17,15 @@
 /** 贴纸路由前缀（host 注册 / client 拼 URL 共用）。 */
 export const STICKER_ROUTE = '/api/chat-flow/stickers'
 
-/** 贴纸的语言分组：中文语境梗 / 通用英文反应贴纸。 */
-export type StickerGroup = 'zh' | 'en'
+/**
+ * 贴纸分组。
+ *
+ *  · `chibi` —— Q 版角色的成套情绪（透明底 PNG），有表情、有角色、有画面，
+ *    聊天里最先被选中的一组；
+ *  · `zh`   —— 中文语境梗（CJK 方框字符与中文语义稳定的动物食物）；
+ *  · `en`   —— 通用英文反应。
+ */
+export type StickerGroup = 'chibi' | 'zh' | 'en'
 
 /** 一条贴纸的口径：id 是模型唯一要记住的东西，其余都是宿主与前端的事。 */
 export interface StickerEntry {
@@ -46,34 +53,17 @@ export interface StickerEntry {
  * 授权原文与出处逐条记录在 assets/stickers/LICENSES.md。
  */
 export const STICKERS: readonly StickerEntry[] = [
-  // ── 中文梗（符号 + 动物 + 食物，没有人物形象）─────────────────────────
-  { id: 'ke-ok', file: 'ke-ok.svg', mime: 'image/svg+xml', group: 'zh', alt: '「可以」/ 行', tags: ['同意', '行', '好'], license: 'CC-BY-4.0' },
-  { id: 'wu-none', file: 'wu-none.svg', mime: 'image/svg+xml', group: 'zh', alt: '「无」→ 无语', tags: ['无语', '没有', '拒绝'], license: 'CC-BY-4.0' },
-  { id: 'mi-secret', file: 'mi-secret.svg', mime: 'image/svg+xml', group: 'zh', alt: '嘘 · 说悄悄话', tags: ['秘密', '悄悄话', '八卦'], license: 'CC-BY-4.0' },
-  { id: 'zhu-bless', file: 'zhu-bless.svg', mime: 'image/svg+xml', group: 'zh', alt: '祝福 / 恭喜', tags: ['恭喜', '祝福', '生日'], license: 'CC-BY-4.0' },
-  { id: 'jin-no', file: 'jin-no.svg', mime: 'image/svg+xml', group: 'zh', alt: '「禁止」→ 达咩', tags: ['不行', '拒绝', '打住'], license: 'CC-BY-4.0' },
-  { id: 'ying-open', file: 'ying-open.svg', mime: 'image/svg+xml', group: 'zh', alt: '营业中', tags: ['开工', '在线', '营业'], license: 'CC-BY-4.0' },
-  { id: 'fish-slack', file: 'fish-slack.svg', mime: 'image/svg+xml', group: 'zh', alt: '鱼 · 摸鱼', tags: ['摸鱼', '偷懒', '下班'], license: 'CC-BY-4.0' },
-  { id: 'lemon-sour', file: 'lemon-sour.svg', mime: 'image/svg+xml', group: 'zh', alt: '柠檬 · 酸了', tags: ['羡慕', '酸', '嫉妒'], license: 'CC-BY-4.0' },
-  { id: 'hongbao', file: 'hongbao.svg', mime: 'image/svg+xml', group: 'zh', alt: '红包', tags: ['红包', '打钱', '恭喜发财'], license: 'CC-BY-4.0' },
-  { id: 'dog-doge', file: 'dog-doge.svg', mime: 'image/svg+xml', group: 'zh', alt: '狗头保命', tags: ['开玩笑', '狗头', '调侃'], license: 'CC-BY-4.0' },
-  { id: 'milktea', file: 'milktea.svg', mime: 'image/svg+xml', group: 'zh', alt: '奶茶续命', tags: ['奶茶', '续命', '休息'], license: 'CC-BY-4.0' },
-  { id: 'lotus-chill', file: 'lotus-chill.svg', mime: 'image/svg+xml', group: 'zh', alt: '莲花 · 佛系', tags: ['佛系', '躺平', '淡定'], license: 'CC-BY-4.0' },
-  { id: 'panda', file: 'panda.svg', mime: 'image/svg+xml', group: 'zh', alt: '熊猫', tags: ['国宝', '可爱', '憨'], license: 'CC-BY-4.0' },
-  // ── 英文反应（通用表情，跨语言可读）──────────────────────────────────
-  { id: 'fire-hot', file: 'fire-hot.svg', mime: 'image/svg+xml', group: 'en', alt: '火 · 燃', tags: ['赞', '燃', '厉害'], license: 'CC-BY-4.0' },
-  { id: 'hundred', file: 'hundred.svg', mime: 'image/svg+xml', group: 'en', alt: '💯 满分', tags: ['满分', '服气', '赞'], license: 'CC-BY-4.0' },
-  { id: 'sparkles', file: 'sparkles.svg', mime: 'image/svg+xml', group: 'en', alt: '闪闪发亮', tags: ['好看', '惊喜', '亮'], license: 'CC-BY-4.0' },
-  { id: 'ok', file: 'ok.svg', mime: 'image/svg+xml', group: 'en', alt: 'OK', tags: ['收到', '同意', '行'], license: 'CC-BY-4.0' },
-  { id: 'cool', file: 'cool.svg', mime: 'image/svg+xml', group: 'en', alt: 'COOL', tags: ['酷', '帅', '赞'], license: 'CC-BY-4.0' },
-  { id: 'new', file: 'new.svg', mime: 'image/svg+xml', group: 'en', alt: 'NEW', tags: ['新', '新品'], license: 'CC-BY-4.0' },
-  { id: 'sos', file: 'sos.svg', mime: 'image/svg+xml', group: 'en', alt: 'SOS · 求救', tags: ['救命', '求救', '急'], license: 'CC-BY-4.0' },
-  { id: 'frog', file: 'frog.svg', mime: 'image/svg+xml', group: 'en', alt: '蛙 · 尴尬', tags: ['尴尬', '静默', '无语'], license: 'CC-BY-4.0' },
-  { id: 'duck', file: 'duck.svg', mime: 'image/svg+xml', group: 'en', alt: '鸭 · 无所谓', tags: ['无所谓', '算了', '呵呵'], license: 'CC-BY-4.0' },
-  { id: 'rainbow', file: 'rainbow.svg', mime: 'image/svg+xml', group: 'en', alt: '彩虹', tags: ['好心情', '彩虹', '治愈'], license: 'CC-BY-4.0' },
-  { id: 'zzz', file: 'zzz.svg', mime: 'image/svg+xml', group: 'en', alt: '困 · 晚安', tags: ['困', '睡觉', '晚安'], license: 'CC-BY-4.0' },
-  { id: 'cat', file: 'cat.svg', mime: 'image/svg+xml', group: 'en', alt: '猫', tags: ['猫', '可爱', '卖萌'], license: 'CC-BY-4.0' },
-  { id: 'bomb', file: 'bomb.svg', mime: 'image/svg+xml', group: 'en', alt: '爆炸', tags: ['爆炸', '崩了', '完蛋'], license: 'CC-BY-4.0' },
+  // ── Q 版情绪（OpenGameArt · eysselia「chibi emotions」· CC0 · 透明底 PNG）──
+  // 同一角色 Aranel 的九种情绪，成套出现才有「这个人」的感觉，别拆散。
+  { id: 'chibi-angry', file: 'chibi-angry.png', mime: 'image/png', group: 'chibi', alt: '气到炸', tags: ['生气', '炸毛', '恼'], license: 'CC0-1.0' },
+  { id: 'chibi-angry2', file: 'chibi-angry2.png', mime: 'image/png', group: 'chibi', alt: '气鼓鼓', tags: ['生气', '不服', '嘟嘴'], license: 'CC0-1.0' },
+  { id: 'chibi-happy', file: 'chibi-happy.png', mime: 'image/png', group: 'chibi', alt: '开心', tags: ['开心', '笑', '好耶'], license: 'CC0-1.0' },
+  { id: 'chibi-happy2', file: 'chibi-happy2.png', mime: 'image/png', group: 'chibi', alt: '偷笑', tags: ['开心', '偷笑', '得意'], license: 'CC0-1.0' },
+  { id: 'chibi-heh', file: 'chibi-heh.png', mime: 'image/png', group: 'chibi', alt: '呃…', tags: ['尴尬', '犹豫', '试探'], license: 'CC0-1.0' },
+  { id: 'chibi-neutral', file: 'chibi-neutral.png', mime: 'image/png', group: 'chibi', alt: '面无表情', tags: ['平静', '无语', '看戏'], license: 'CC0-1.0' },
+  { id: 'chibi-oops', file: 'chibi-oops.png', mime: 'image/png', group: 'chibi', alt: '糟了', tags: ['糟糕', '心虚', '失误'], license: 'CC0-1.0' },
+  { id: 'chibi-sad', file: 'chibi-sad.png', mime: 'image/png', group: 'chibi', alt: '难过', tags: ['难过', '委屈', '求安慰'], license: 'CC0-1.0' },
+  { id: 'chibi-shock', file: 'chibi-shock.png', mime: 'image/png', group: 'chibi', alt: '震惊', tags: ['震惊', '懵', '不敢信'], license: 'CC0-1.0' },
 ]
 
 /** id → 条目（O(1) 解析；清单很小但每条消息都要查）。 */
@@ -152,9 +142,9 @@ export function splitStickerMarks(text: string): StickerSegment[] {
  */
 export function buildStickerCatalogPrompt(): string {
   if (STICKERS.length === 0) return ''
+  // 顺序就是推荐优先级：Q 版情绪排第一，模型会先在这组里挑。
   const groups: Array<{ label: string; group: StickerGroup }> = [
-    { label: '中文梗', group: 'zh' },
-    { label: '英文反应', group: 'en' },
+    { label: 'Q 版情绪（有角色、有表情，优先用这组）', group: 'chibi' },
   ]
   const lines: string[] = []
   for (const { label, group } of groups) {
